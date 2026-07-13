@@ -97,6 +97,7 @@ def register_agent_runtime_planning_tools(
     actor_import_provider: ResourceProvider | None = None,
     review_provider: ResourceProvider | None = None,
     vlm_review_provider: ResourceProvider | None = None,
+    require_engine_environment_import: bool = False,
     require_engine_actor_import: bool = False,
 ) -> None:
     """Register no-side-effect planning/classification tools."""
@@ -370,7 +371,10 @@ def register_agent_runtime_planning_tools(
     if not registry.has("runtime.environment.import_components"):
         registry.register(
             "runtime.environment.import_components",
-            _make_environment_import_components_tool(environment_import_provider),
+            _make_environment_import_components_tool(
+                environment_import_provider,
+                require_engine_environment_import=bool(require_engine_environment_import),
+            ),
             category=ToolCategory.IMPORT,
             default_risk_level=RiskLevel.LOW,
             requires_write=True,
@@ -739,7 +743,10 @@ def extract_candidate_items(text: str) -> list[str]:
         return list(_MARKET_ITEMS)
     explicit_mentions = _explicit_item_candidates_from_text(clean)
     if explicit_mentions:
-        merged_mentions = list(dict.fromkeys([*explicit_mentions, *aliased_objects]))
+        # Keep the user's concrete noun phrase. A broad alias such as "statue"
+        # must not expand a specific Cupid statue into a second, different item.
+        exact_aliases = [canonical for canonical in aliased_objects if canonical in clean]
+        merged_mentions = list(dict.fromkeys([*explicit_mentions, *exact_aliases]))
         if len(merged_mentions) > 1 or not any(_looks_like_mojibake_name(name) for name in merged_mentions):
             return merged_mentions
     if aliased_objects:
@@ -762,7 +769,7 @@ def _explicit_item_candidates_from_text(text: str) -> list[str]:
         value,
     )
     value = re.sub(
-        r"(?:生成|创建|做一个|做个|有|包含|包括|以及|和|还有|再加|加入|添加|新增)",
+        r"(?:生成|创建|做一个|做个|有|包含|包括|以及|和|还有|再加入|再添加|再新增|再加|加入|添加|新增)",
         "，",
         value,
     )
@@ -775,6 +782,11 @@ def _explicit_item_candidates_from_text(text: str) -> list[str]:
     candidates: list[str] = []
     for chunk in chunks:
         item = re.sub(r"\s+", " ", str(chunk or "").strip())
+        item = re.sub(
+            r"^(?:请|后面再|后续再|再)?(?:加入|添加|新增|放入|生成添加)\s*(?:一个|一只|一座)?\s*",
+            "",
+            item,
+        )
         item = item.strip(" -:：")
         if not item:
             continue
@@ -946,6 +958,14 @@ def _scene_extract_objects_tool(call: ToolCall) -> ToolResult:
 def _infer_scene_type(text: str) -> dict[str, str]:
     clean = str(text or "")
     lowered = clean.lower()
+    if any(term in clean for term in ("室内外", "内外混合", "混合场景", "室内与室外")) or any(
+        term in lowered for term in ("indoor outdoor", "indoor-outdoor", "mixed scene", "hybrid scene")
+    ):
+        return {
+            "scene_type": "mixed",
+            "environment_type": "mixed_foundation",
+            "reason": "mixed indoor/outdoor keywords",
+        }
     if any(term in clean for term in ("藏宝室", "宝库", "密室", "卧室", "房间", "室内")) or any(
         term in lowered for term in ("treasure room", "vault", "chamber", "bedroom", "indoor")
     ):
@@ -1974,6 +1994,12 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
                 if isinstance(call.args.get("room_bounds"), Mapping)
                 else {}
             ),
+            "environment_type": str(call.args.get("environment_type") or ""),
+            "required_environment_components": [
+                str(item)
+                for item in (call.args.get("required_environment_components") or [])
+                if str(item or "").strip()
+            ],
         }
         try:
             components = dict(effective_provider(payload) or {})
@@ -2034,7 +2060,11 @@ def _make_environment_components_tool(provider: ResourceProvider | None) -> Call
     return _tool
 
 
-def _make_environment_import_components_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
+def _make_environment_import_components_tool(
+    provider: ResourceProvider | None,
+    *,
+    require_engine_environment_import: bool = False,
+) -> Callable[[ToolCall], ToolResult]:
     def _failed_component_patch_result(
         *,
         call: ToolCall,
@@ -2108,6 +2138,29 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
             for component_id, component in dict(call.args.get("environment_components") or {}).items()
             if str(component_id or "").strip() and isinstance(component, dict)
         }
+        if require_engine_environment_import and provider is None and components:
+            import_results = [
+                {
+                    "component_id": component_id,
+                    "name": str(component.get("name") or component_id),
+                    "component_type": str(component.get("component_type") or "environment"),
+                    "status": "failed",
+                    "failure_code": "engine_environment_import_unavailable",
+                    "reason": "engine environment import provider unavailable",
+                }
+                for component_id, component in components.items()
+            ]
+            return _failed_component_patch_result(
+                call=call,
+                room_id=room_id,
+                batch_id=batch_id,
+                components=components,
+                message="engine environment import provider unavailable",
+                error_code="engine_environment_import_unavailable",
+                source="engine_environment_import_required",
+                user_visible_message="场景基础环境写入能力不可用，本批不会继续导入普通物体。",
+                import_results=import_results,
+            )
         if provider is None:
             imported_components: dict[str, dict[str, Any]] = {}
             for component_id, component_raw in components.items():
@@ -2280,6 +2333,64 @@ def _make_environment_import_components_tool(provider: ResourceProvider | None) 
                 user_visible_message="环境组件导入没有返回可用结果，系统不会伪装为已写入地形或边界。",
                 import_results=list(result.get("environment_import_results") or []),
                 provider_result=result,
+            )
+        if requested_count and len(imported_components) < requested_count:
+            missing_components = {
+                component_id: component
+                for component_id, component in components.items()
+                if component_id not in imported_components
+            }
+            failed_components = _failed_environment_import_components(
+                batch_id=batch_id,
+                components=missing_components,
+                source="runtime_environment_import_partial",
+            )
+            combined_components = {**imported_components, **failed_components}
+            ready_count = sum(
+                1
+                for component in imported_components.values()
+                if bool(component.get("bounds_ready"))
+                and str(component.get("engine_lifecycle_status") or "") == "bounds_ready"
+            )
+            return ToolResult(
+                False,
+                "environment import returned only part of the required components",
+                retryable=True,
+                error_code="environment_import_partial",
+                user_visible_message="场景基础环境仅部分写入，普通物体导入已停止，避免生成不完整场景。",
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "environment_components": {batch_id: combined_components},
+                        "custom_import_facts": {
+                            f"{batch_id}:environment_import_result": _environment_import_result_fact(
+                                payload,
+                                requested_count=requested_count,
+                                imported_count=len(imported_components),
+                                failed_count=requested_count - len(imported_components),
+                                status="partial",
+                                ready_count=ready_count,
+                                import_results=import_results,
+                                engine_write_boundary=_environment_import_boundary_fact(
+                                    result,
+                                    requested_count=requested_count,
+                                    imported_count=len(imported_components),
+                                    import_results=import_results,
+                                    imported_component_ids=list(imported_components),
+                                ),
+                            ),
+                        },
+                    },
+                    source_tool_call_id=call.tool_call_id,
+                ),
+                payload={
+                    "environment_components": combined_components,
+                    "environment_import_results": import_results,
+                    "engine_write_result": dict(result.get("engine_write_result") or {}),
+                    "requested_count": requested_count,
+                    "ready_count": ready_count,
+                    "failed_count": requested_count - len(imported_components),
+                },
             )
         try:
             EnvironmentComponentValidator.validate_component_batches({batch_id: imported_components})
@@ -2592,6 +2703,7 @@ def _failed_environment_import_components(
 
 def _default_environment_component_provider(payload: dict[str, Any]) -> dict[str, Any]:
     batch_id = str(payload.get("batch_id") or "")
+    identity_scope = str(payload.get("plan_id") or batch_id or "runtime")
     components: dict[str, Any] = {}
     for index, item in enumerate(payload.get("substrate_resolutions") or [], start=1):
         if not isinstance(item, dict):
@@ -2600,7 +2712,7 @@ def _default_environment_component_provider(payload: dict[str, Any]) -> dict[str
         component_type = str(item.get("component_type") or "environment").strip() or "environment"
         if not name:
             continue
-        component_id = f"{batch_id}-env-{index:02d}" if batch_id else f"runtime-env-{index:02d}"
+        component_id = f"{identity_scope}-env-{index:02d}"
         components[component_id] = {
             "component_id": component_id,
             "name": name,
@@ -2688,6 +2800,8 @@ def _default_environment_component_scale(component_type: str) -> list[float]:
         return [20.0, 10.0, 20.0]
     if normalized in {"boundary", "terrain_boundary"}:
         return [12.0, 1.0, 12.0]
+    if normalized == "transition_zone":
+        return [4.0, 0.05, 4.0]
     return [1.0, 1.0, 1.0]
 
 
@@ -2706,7 +2820,7 @@ def _default_environment_interaction_capability(component: Mapping[str, Any]) ->
     text = _environment_component_text(component)
     component_type = str(component.get("component_type") or "").strip().lower()
     surface = str(component.get("surface") or "").strip().lower()
-    if component_type == "room_floor" or "walkable" in surface or any(term in text for term in ("grass", "草地", "floor", "地面")):
+    if component_type in {"room_floor", "transition_zone"} or "walkable" in surface or any(term in text for term in ("grass", "草地", "floor", "地面")):
         return ["walk_on"]
     return ["inspect"]
 
@@ -2736,7 +2850,7 @@ def _default_environment_component_tags(component: Mapping[str, Any]) -> list[st
     tags = ["environment", "runtime_generated"]
     if normalized:
         tags.append(normalized)
-    if normalized in {"terrain", "room_floor", "room_box", "boundary", "terrain_boundary"}:
+    if normalized in {"terrain", "room_floor", "room_box", "boundary", "terrain_boundary", "transition_zone"}:
         tags.append("scene_substrate")
     text = _environment_component_text(component)
     if "walk_on" in _default_environment_interaction_capability(component):
@@ -2761,37 +2875,70 @@ def _add_default_framework_components(payload: dict[str, Any], components: dict[
         " ".join(str(item) for item in (payload.get("requested_items") or [])),
     ]
     text = " ".join(part for part in text_parts if part).lower()
-    if not text:
-        return
-    if _is_outdoor_environment_text(text) and not _is_indoor_environment_text(text):
-        return
-    if not _is_indoor_environment_text(text):
-        return
+    required = {
+        str(item or "").strip().lower()
+        for item in (payload.get("required_environment_components") or [])
+        if str(item or "").strip()
+    }
+    environment_type = str(payload.get("environment_type") or "").strip().lower()
+    if not required:
+        if not text:
+            return
+        if _is_outdoor_environment_text(text) and not _is_indoor_environment_text(text):
+            required = {"terrain"}
+        elif _is_indoor_environment_text(text):
+            required = {"room_box", "room_floor"}
+    if environment_type == "mixed":
+        required.update({"terrain", "room_box", "room_floor", "transition_zone"})
     room_bounds = payload.get("room_bounds") if isinstance(payload.get("room_bounds"), Mapping) else {}
     width = min(8.5, max(5.5, float(room_bounds.get("width") or 6.0)))
     depth = min(8.5, max(5.5, float(room_bounds.get("depth") or 6.0)))
     height = min(3.8, max(2.6, float(room_bounds.get("height") or 3.0)))
     identity_scope = str(payload.get("plan_id") or payload.get("batch_id") or "runtime")
-    _ensure_environment_component(
-        components,
-        identity_scope=identity_scope,
-        suffix="framework-room-box",
-        name="room_box",
-        component_type="room_box",
-        handler="runtime_room_box",
-        scale=[width, height, depth],
-        position=[0.0, height / 2.0, 0.0],
-    )
-    _ensure_environment_component(
-        components,
-        identity_scope=identity_scope,
-        suffix="framework-room-floor",
-        name="room_floor",
-        component_type="room_floor",
-        handler="runtime_room_floor",
-        scale=[width, 0.05, depth],
-        position=[0.0, 0.025, 0.0],
-    )
+    if "room_box" in required:
+        _ensure_environment_component(
+            components,
+            identity_scope=identity_scope,
+            suffix="framework-room-box",
+            name="room_box",
+            component_type="room_box",
+            handler="runtime_room_box",
+            scale=[width, height, depth],
+            position=[0.0, height / 2.0, 0.0],
+        )
+    if "room_floor" in required:
+        _ensure_environment_component(
+            components,
+            identity_scope=identity_scope,
+            suffix="framework-room-floor",
+            name="room_floor",
+            component_type="room_floor",
+            handler="runtime_room_floor",
+            scale=[width, 0.05, depth],
+            position=[0.0, 0.025, 0.0],
+        )
+    if "terrain" in required:
+        _ensure_environment_component(
+            components,
+            identity_scope=identity_scope,
+            suffix="framework-terrain",
+            name="terrain",
+            component_type="terrain",
+            handler="runtime_terrain",
+            scale=[12.0, 0.05, 12.0],
+            position=[0.0, 0.025, 0.0],
+        )
+    if "transition_zone" in required:
+        _ensure_environment_component(
+            components,
+            identity_scope=identity_scope,
+            suffix="framework-transition-zone",
+            name="transition_zone",
+            component_type="transition_zone",
+            handler="runtime_transition_zone",
+            scale=[4.0, 0.05, 4.0],
+            position=[0.0, 0.03, depth / 2.0],
+        )
 
 
 def _ensure_environment_component(
@@ -5391,6 +5538,20 @@ def _make_scene_snapshot_tool(provider: Callable[[Any], dict[str, Any]]) -> Call
             plan_id = str(call.args.get("plan_id") or "")
             batch_id = str(call.args.get("batch_id") or "")
             normalized_actors = _normalize_snapshot_actors(snapshot)
+            known_actors = {
+                str(actor_id): dict(actor)
+                for actor_id, actor in dict(call.args.get("known_actors") or {}).items()
+                if str(actor_id or "") and isinstance(actor, Mapping)
+            }
+            for actor_id, observed in list(normalized_actors.items()):
+                known = known_actors.get(str(actor_id))
+                if not known or not isinstance(observed, dict):
+                    continue
+                # Native observations own geometry/lifecycle fields, while the
+                # Runtime row remains authoritative for plan, batch, asset and
+                # semantic identity.  StatePatch merges actor maps by key, so
+                # preserve the existing row before replacing that key.
+                normalized_actors[actor_id] = {**known, **observed}
             for actor in normalized_actors.values():
                 if not isinstance(actor, dict):
                     continue
@@ -5537,6 +5698,14 @@ def _normalize_snapshot_actors(snapshot: dict[str, Any]) -> dict[str, dict[str, 
         aabb = item.get("aabb") or item.get("world_aabb") or item.get("bounds")
         if isinstance(aabb, dict):
             actor["aabb"] = dict(aabb or {})
+        elif isinstance(aabb, (list, tuple)) and len(aabb) >= 6:
+            actor["aabb"] = list(aabb[:6])
+        if "bounds_ready" in item:
+            bounds_ready = bool(item.get("bounds_ready"))
+            actor["bounds_ready"] = bounds_ready
+            actor["bounds_source"] = "engine_actual" if bounds_ready else "estimated"
+            actor["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
+            actor["status"] = "ready" if bounds_ready else "engine_loading"
         actors[actor_id] = actor
     return actors
 

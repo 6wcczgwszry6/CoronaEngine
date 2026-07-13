@@ -12,6 +12,7 @@ from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import threading
 import time
 from typing import Any, Callable
 
@@ -471,6 +472,7 @@ def make_environment_component_provider(
 
     def _provider(payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
         batch_id = str(payload.get("batch_id") or "")
+        identity_scope = str(payload.get("plan_id") or batch_id or "runtime")
         components: dict[str, dict[str, Any]] = {}
         for index, item in enumerate(payload.get("substrate_resolutions") or [], start=1):
             if not isinstance(item, dict):
@@ -487,7 +489,7 @@ def make_environment_component_provider(
                 "name": name,
                 "component_type": component_type,
                 "handler": str(item.get("handler") or ""),
-                "object_id": f"{batch_id}-env-{index:02d}" if batch_id else f"runtime-env-{index:02d}",
+                "object_id": f"{identity_scope}-env-{index:02d}",
                 "requires_engine_write": _coerce_adapter_bool(item.get("requires_engine_write"), default=False),
             }
             raw = _invoke_tool_safely(environment_tool, tool_payload, fallback="environment component failed")
@@ -525,6 +527,8 @@ def make_engine_environment_component_import_provider(
     if engine_gate is None:
         raise ValueError("engine_gate is required")
     bridge = RuntimeCppBridge(engine_gate=engine_gate, parse_result=parse_result)
+    imported_component_cache: dict[tuple[str, str], dict[str, Any]] = {}
+    imported_component_cache_lock = threading.Lock()
 
     def _provider(payload: dict[str, Any]) -> dict[str, Any]:
         batch_id = str(payload.get("batch_id") or "")
@@ -544,6 +548,26 @@ def make_engine_environment_component_import_provider(
                 component.get("component_type"),
                 fallback="environment",
             )
+            cache_key = (plan_id, component_id)
+            with imported_component_cache_lock:
+                cached_component = dict(imported_component_cache.get(cache_key) or {})
+            if cached_component and str(cached_component.get("actor_id") or "").strip():
+                component_updates[component_id] = cached_component
+                import_results.append({
+                    "component_id": component_id,
+                    "name": str(cached_component.get("name") or name),
+                    "component_type": str(cached_component.get("component_type") or component_type),
+                    "status": "reused",
+                    "actor_id": str(cached_component.get("actor_id") or ""),
+                    "asset_id": str(cached_component.get("asset_id") or component_id),
+                    "model_ref": str(cached_component.get("model_ref") or component_id),
+                    "bounds_ready": bool(cached_component.get("bounds_ready")),
+                    "bounds_source": str(cached_component.get("bounds_source") or "estimated"),
+                    "engine_lifecycle_status": str(
+                        cached_component.get("engine_lifecycle_status") or "engine_accepted"
+                    ),
+                })
+                continue
             import_payload = {
                 "component_id": component_id,
                 "name": name,
@@ -608,7 +632,19 @@ def make_engine_environment_component_import_provider(
                 bridge_result.payload,
                 fallback=import_payload,
             )
+            if not str(update.get("actor_id") or "").strip():
+                import_results.append({
+                    "component_id": update["component_id"],
+                    "name": update["name"],
+                    "component_type": update["component_type"],
+                    "status": "failed",
+                    "failure_code": "environment_import_missing_actor_identity",
+                    "reason": "engine environment import returned no actor identity",
+                })
+                continue
             component_updates[update["component_id"]] = update
+            with imported_component_cache_lock:
+                imported_component_cache[cache_key] = dict(update)
             result_row = {
                 "component_id": update["component_id"],
                 "name": update["name"],
@@ -671,7 +707,11 @@ def make_engine_environment_component_import_provider(
                     1
                     for item in import_results
                     if str(item.get("status") or "").strip().lower() == "failed"
-                    and "component id" in str(item.get("reason") or "").lower()
+                    and (
+                        str(item.get("failure_code") or "")
+                        == "environment_import_missing_actor_identity"
+                        or "actor identity" in str(item.get("reason") or "").lower()
+                    )
                 ),
                 "status_counts": status_counts,
                 **_merge_bridge_boundary_facts(bridge_results),
@@ -1245,6 +1285,8 @@ def _normalize_snapshot_actor(actor: Any, *, scene_name: str, index: int = 0) ->
     )
     if aabb is not None:
         safe["aabb"] = aabb
+    if "bounds_ready" in actor:
+        safe["bounds_ready"] = _coerce_adapter_bool(actor.get("bounds_ready"), default=False)
     if "version" in actor and isinstance(actor.get("version"), int):
         safe["version"] = actor.get("version")
     return safe
@@ -1394,6 +1436,7 @@ def make_engine_actor_import_provider(
     engine_gate: Any,
     scene_name: str = "",
     scene_snapshot_provider: Callable[[Any], dict[str, Any]] | None = None,
+    transform_tool: Any | None = None,
     parse_result: Callable[[Any], dict[str, Any]] | None = None,
 ) -> ResourceProvider:
     """Create a Runtime actor-import provider backed by EngineWriteGate.
@@ -1446,6 +1489,13 @@ def make_engine_actor_import_provider(
                 ),
                 fallback=asset_id,
             )
+            actor_guid = _stable_runtime_actor_guid(
+                plan_id=plan_id,
+                batch_id=batch_id,
+                asset_id=asset_id,
+                requested_name=name,
+                source_index=index,
+            )
             import_payload = {
                 "model_path": model_path,
                 "actor_name": name,
@@ -1454,6 +1504,9 @@ def make_engine_actor_import_provider(
                 "model_ref": model_ref,
                 "object_id": f"{batch_id}-{index:02d}" if batch_id else f"runtime-{index:02d}",
                 "target": name,
+                "actor_guid": actor_guid,
+                "skip_if_exists": True,
+                "update_if_exists": False,
                 "position": list(placement.get("position") or [0.0, 0.0, 0.0]),
                 "rotation": list(placement.get("rotation") or [0.0, 0.0, 0.0]),
                 "scale": list(placement.get("scale") or [1.0, 1.0, 1.0]),
@@ -1527,6 +1580,70 @@ def make_engine_actor_import_provider(
                 row["engine_lifecycle_status"] = str(
                     actor.get("engine_lifecycle_status") or "engine_loading"
                 )
+        if transform_tool is not None and actors:
+            for actor_id, actor in list(actors.items()):
+                support_type = _runtime_actor_support_type(actor)
+                actor["support_type"] = support_type
+                if support_type != "floor_supported" or not bool(actor.get("bounds_ready")):
+                    actor.setdefault(
+                        "grounding_status",
+                        "needs_review" if support_type == "unknown" else "not_applicable",
+                    )
+                    continue
+                engine_actor_name = _engine_actor_name_for_transform(actor, {}, actor_id)
+                position = _vector3(actor.get("position"))
+                if not engine_actor_name or not position:
+                    actor["grounding_status"] = "needs_review"
+                    continue
+                transform_payload = {
+                    "actor_id": actor_id,
+                    "actor_name": engine_actor_name,
+                    "position": tuple(float(value) for value in position[:3]),
+                    "snap_to_ground": True,
+                    "ground_y": 0.0,
+                    "ground_clearance": 0.02,
+                }
+                if plan_id:
+                    transform_payload["plan_id"] = plan_id
+                if batch_id:
+                    transform_payload["batch_id"] = batch_id
+                effective_scene_name = str(actor.get("scene_name") or payload.get("scene_name") or scene_name or "")
+                if effective_scene_name:
+                    transform_payload["scene_name"] = effective_scene_name
+                transform_result = bridge.set_transform(
+                    transform_tool,
+                    transform_payload,
+                    error_code="cpp_actor_initial_grounding_failed",
+                )
+                bridge_results.append(transform_result)
+                if not transform_result.success:
+                    actor["grounding_status"] = "needs_review"
+                    continue
+                update = _normalize_transform_result(
+                    transform_result.payload,
+                    actor_id=actor_id,
+                    fallback_name=str(actor.get("name") or actor_id),
+                    fallback_position=position,
+                    scene_name=effective_scene_name,
+                )
+                engine_result = dict(update.pop("engine_transform_result", None) or {})
+                actor.update(update)
+                actor["support_type"] = support_type
+                actor["grounding_status"] = (
+                    "grounded"
+                    if bool(engine_result.get("ground_snapped"))
+                    or _actor_bottom_is_grounded(actor, ground_y=0.0, clearance=0.02)
+                    else "needs_review"
+                )
+                for row in import_results:
+                    if str(row.get("actor_id") or "") != actor_id:
+                        continue
+                    row["grounding_status"] = actor["grounding_status"]
+                    row["ground_snapped"] = bool(engine_result.get("ground_snapped"))
+                    row["position"] = list(actor.get("position") or position)
+                    if actor.get("aabb"):
+                        row["aabb"] = dict(actor.get("aabb") or {})
+                    break
         status_counts: dict[str, int] = {}
         for item in import_results:
             status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
@@ -1569,6 +1686,67 @@ def _stable_runtime_asset_id(resource: dict[str, Any], *, model_path: str) -> st
         fingerprint_parts.append("unobserved")
     digest = hashlib.sha256("|".join(fingerprint_parts).encode("utf-8")).hexdigest()[:24]
     return f"asset-{digest}"
+
+
+def _stable_runtime_actor_guid(
+    *,
+    plan_id: str,
+    batch_id: str,
+    asset_id: str,
+    requested_name: str,
+    source_index: int,
+) -> str:
+    identity = "|".join(
+        (
+            str(plan_id or "runtime"),
+            str(batch_id or "batch"),
+            str(asset_id or "asset"),
+            str(requested_name or "actor"),
+            str(max(0, int(source_index))),
+        )
+    )
+    digest = hashlib.sha256(identity.encode("utf-8")).hexdigest()[:32]
+    return f"runtime-actor-{digest}"
+
+
+def _runtime_actor_support_type(actor: dict[str, Any]) -> str:
+    name = " ".join(
+        str(actor.get(key) or "")
+        for key in ("requested_name", "name", "display_name", "semantic_role")
+    ).strip()
+    lowered = name.lower()
+    if any(term in lowered or term in name for term in (
+        "吊灯", "吊旗", "悬挂", "铁链", "天花", "ceiling", "chandelier", "hanging",
+    )):
+        return "ceiling_hung"
+    if any(term in lowered or term in name for term in (
+        "火把", "壁灯", "墙灯", "墙饰", "地图", "旗帜", "窗", "门", "招牌", "武器架",
+        "torch", "sconce", "wall", "map", "flag", "window", "door", "sign", "weapon rack",
+    )):
+        return "wall_mounted"
+    if any(term in lowered or term in name for term in (
+        "桌", "椅", "箱", "宝箱", "金币", "桶", "麻袋", "床", "柜", "地毯", "雕像", "动物", "长椅", "沙发", "帐篷",
+        "table", "chair", "box", "chest", "coin", "barrel", "sack", "bed", "cabinet",
+        "rug", "carpet", "statue", "animal", "bench", "sofa", "tent",
+    )):
+        return "floor_supported"
+    return "unknown"
+
+
+def _actor_bottom_is_grounded(
+    actor: dict[str, Any],
+    *,
+    ground_y: float,
+    clearance: float,
+) -> bool:
+    bounds = _normalized_bounds_from(actor.get("aabb"), actor.get("bounds"), actor)
+    if not bounds:
+        return False
+    try:
+        bottom_y = float(bounds["min"][1])
+    except (KeyError, IndexError, TypeError, ValueError):
+        return False
+    return abs(bottom_y - (float(ground_y) + float(clearance))) <= 0.05
 
 
 def _reconcile_engine_ready_facts(
@@ -1623,7 +1801,8 @@ def _reconcile_engine_ready_facts(
                     if observed is not None:
                         break
             bounds = _normalized_bounds_from(observed or {}) if observed else None
-            if observed and bounds:
+            observed_bounds_ready = bool(observed and observed.get("bounds_ready"))
+            if observed_bounds_ready and bounds:
                 entity["aabb"] = bounds
                 entity["bounds_ready"] = True
                 entity["bounds_source"] = "engine_actual"
@@ -2324,15 +2503,17 @@ def _normalize_import_result(
         "requested_name": requested_name,
         "asset_id": _safe_component_text(
             _first_present(
+                asset_id,
                 parsed.get("asset_id"),
                 actor_data.get("asset_id") if isinstance(actor_data, dict) else None,
                 actor.get("asset_id") if isinstance(actor, dict) else None,
-                asset_id,
             ),
             fallback=asset_id or actor_name,
         ),
         "model_ref": _safe_component_text(
             _first_present(
+                model_ref,
+                asset_id,
                 parsed.get("model_ref"),
                 parsed.get("model_id"),
                 parsed.get("resource_id"),
@@ -2342,8 +2523,6 @@ def _normalize_import_result(
                 actor.get("model_ref") if isinstance(actor, dict) else None,
                 actor.get("model_id") if isinstance(actor, dict) else None,
                 actor.get("resource_id") if isinstance(actor, dict) else None,
-                model_ref,
-                asset_id,
             ),
             fallback=model_ref or asset_id or actor_name,
         ),

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
+import hashlib
 import re
 import time
 import uuid
@@ -293,6 +294,11 @@ class OperationLog:
             "engine_write_runtime_state_only_count",
             "scene_entity_engine_write_pending_f5_count",
             "scene_entity_engine_write_verification_status_counts",
+            "scene_entity_count",
+            "game_ready_entity_count",
+            "environment_entity_count",
+            "planned_substrate_count",
+            "materialization_status_counts",
             "event",
             "event_type",
             "execution",
@@ -428,6 +434,7 @@ class OperationLog:
                     "environment_import_failure_code_counts",
                     "import_failure_code_counts",
                     "layout_transform_failure_code_counts",
+                    "materialization_status_counts",
                     "resource_phase_failure_code_counts",
                     "runtime_fact_injection_field_counts",
                     "sync_failure_code_counts",
@@ -589,6 +596,11 @@ class RuntimeEventValidator:
         "engine_write_runtime_state_only_count",
         "scene_entity_engine_write_pending_f5_count",
         "scene_entity_engine_write_verification_status_counts",
+        "scene_entity_count",
+        "game_ready_entity_count",
+        "environment_entity_count",
+        "planned_substrate_count",
+        "materialization_status_counts",
         "entity_type_counts",
         "environment_failed_count",
         "environment_import_failed_count",
@@ -824,6 +836,7 @@ class RuntimeEventValidator:
                 "environment_import_failure_code_counts",
                 "grounding_status_counts",
                 "layout_transform_failure_code_counts",
+                "materialization_status_counts",
                 "review_status_counts",
                 "resource_phase_failure_code_counts",
                 "import_failure_code_counts",
@@ -3284,6 +3297,9 @@ class ReportRecordValidator:
         "runtime_guard_replay_summary",
         "runtime_scene_flow_summary",
         "scene_entity_registry",
+        "scene_world_snapshot",
+        "completion_status",
+        "tool_graph_domain_summary",
         "scene_snapshot_summary",
         "scene_design_contract_summary",
         "semantic_arbitration_summary",
@@ -3393,6 +3409,9 @@ class RuntimeState:
             str(room_id),
             {
                 "active_plan_id": "",
+                "active_discussion_plan_id": "",
+                "active_execution_plan_id": "",
+                "latest_completed_plan_id": "",
                 "external_plan_links": {},
                 "scene_plans": {},
                 "batch_plans": {},
@@ -3587,6 +3606,7 @@ class PlanPatch:
     items: list[str] = field(default_factory=list)
     source_user: str = ""
     target_agent: str = ""
+    idempotency_key: str = ""
     risk_level: RiskLevel = RiskLevel.LOW
     status: PlanPatchStatus = PlanPatchStatus.PENDING
     deferred_reason: str = ""
@@ -3603,6 +3623,7 @@ class PlanPatch:
             "items": list(self.items),
             "source_user": self.source_user,
             "target_agent": self.target_agent,
+            "idempotency_key": self.idempotency_key,
             "risk_level": self.risk_level.value,
             "status": self.status.value,
             "deferred_reason": self.deferred_reason,
@@ -3695,6 +3716,7 @@ class ToolCallGraph:
     edges: list[tuple[str, str]] = field(default_factory=list)
     status: str = "planned"
     generation: int = 0
+    graph_role: str = "internal_state"
 
     def add(self, call: ToolCall) -> ToolCall:
         self.nodes[call.tool_call_id] = call
@@ -3723,8 +3745,33 @@ class ToolCallGraph:
             "batch_id": self.batch_id,
             "status": self.status,
             "generation": self.generation,
+            "graph_role": self.graph_role,
             "edges": [list(edge) for edge in self.edges],
             "nodes": {key: call.as_dict() for key, call in self.nodes.items()},
+        }
+
+
+@dataclass(frozen=True)
+class SceneWorldSnapshot:
+    room_id: str
+    plan_id: str
+    scene_version: int
+    world_readiness: str
+    environment_entities: list[dict[str, Any]]
+    actor_entities: list[dict[str, Any]]
+    readiness_summary: dict[str, Any]
+    operation_cursor: str
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "room_id": self.room_id,
+            "plan_id": self.plan_id,
+            "scene_version": self.scene_version,
+            "world_readiness": self.world_readiness,
+            "environment_entities": [dict(item) for item in self.environment_entities],
+            "actor_entities": [dict(item) for item in self.actor_entities],
+            "readiness_summary": dict(self.readiness_summary),
+            "operation_cursor": self.operation_cursor,
         }
 
 
@@ -4552,6 +4599,7 @@ class PlanPatchValidator:
         "created_at",
         "deferred_reason",
         "items",
+        "idempotency_key",
         "patch_id",
         "patch_type",
         "plan_id",
@@ -4593,6 +4641,7 @@ class PlanPatchValidator:
             ("text", patch.text),
             ("source_user", patch.source_user),
             ("target_agent", patch.target_agent),
+            ("idempotency_key", patch.idempotency_key),
             ("deferred_reason", patch.deferred_reason),
         ):
             PlanPatchValidator._validate_safe_text(value, field_name)
@@ -4630,7 +4679,7 @@ class PlanPatchValidator:
             raise ValueError("plan patch requires patch_id and room_id")
         if not isinstance(patch.get("text"), str) or not str(patch.get("text") or "").strip():
             raise ValueError("plan patch requires non-empty text")
-        for field in ("patch_id", "room_id", "plan_id", "text", "source_user", "target_agent", "deferred_reason"):
+        for field in ("patch_id", "room_id", "plan_id", "text", "source_user", "target_agent", "idempotency_key", "deferred_reason"):
             value = patch_id if field == "patch_id" else patch.get(field)
             if value is not None:
                 PlanPatchValidator._validate_safe_text(value, field)
@@ -4648,7 +4697,7 @@ class PlanPatchValidator:
         )
         if str(patch.get("status") or "") == PlanPatchStatus.DEFERRED.value and not str(patch.get("deferred_reason") or "").strip():
             raise ValueError("deferred plan patch requires deferred_reason")
-        for field in ("plan_id", "source_user", "target_agent", "deferred_reason"):
+        for field in ("plan_id", "source_user", "target_agent", "idempotency_key", "deferred_reason"):
             if field in patch and not isinstance(patch.get(field), str):
                 raise ValueError(f"plan patch {field} must be a string")
         for field in ("created_at", "updated_at"):
@@ -4677,6 +4726,8 @@ class PlanPatchValidator:
 class StatePatchValidator:
     _ALLOWED_CHANGE_KEYS = {
         "accepted_interventions",
+        "active_discussion_plan_id",
+        "active_execution_plan_id",
         "active_plan_id",
         "actors",
         "asset_request_plans",
@@ -4692,6 +4743,7 @@ class StatePatchValidator:
         "geometry_reviews",
         "image_resource_plans",
         "layout_adjustment_proposals",
+        "latest_completed_plan_id",
         "model_item_lists",
         "model_resource_plans",
         "observed_actors",
@@ -4769,8 +4821,13 @@ class StatePatchValidator:
                         "dismissed",
                     }:
                         raise ValueError("state_patch_conflicts entries require a valid status")
-            if str(key) == "active_plan_id" and not isinstance(value, str):
-                raise ValueError("state patch change for active_plan_id must be a string")
+            if str(key) in {
+                "active_plan_id",
+                "active_discussion_plan_id",
+                "active_execution_plan_id",
+                "latest_completed_plan_id",
+            } and not isinstance(value, str):
+                raise ValueError(f"state patch change for {key} must be a string")
             if str(key) == "external_plan_links":
                 if not isinstance(value, dict):
                     raise ValueError("state patch change for external_plan_links must be a dict")
@@ -5381,7 +5438,8 @@ class ReviewAdvisoryProposalValidator:
 
 
 class ToolCallGraphValidator:
-    _ALLOWED_GRAPH_FIELDS = {"batch_id", "edges", "generation", "graph_id", "nodes", "plan_id", "status"}
+    _ALLOWED_GRAPH_FIELDS = {"batch_id", "edges", "generation", "graph_id", "graph_role", "nodes", "plan_id", "status"}
+    _ALLOWED_GRAPH_ROLES = {"business_batch", "internal_state", "query_snapshot", "review", "finalizer"}
     _ALLOWED_NODE_FIELDS = {
         "args",
         "confirmed",
@@ -5661,6 +5719,8 @@ class ToolCallGraphValidator:
     def validate(graph: ToolCallGraph, registry: ToolRegistry) -> None:
         if not graph.graph_id or not graph.plan_id:
             raise ValueError("tool call graph requires graph_id and plan_id")
+        if graph.graph_role not in ToolCallGraphValidator._ALLOWED_GRAPH_ROLES:
+            raise ValueError(f"unsupported tool graph role: {graph.graph_role}")
         if not graph.nodes:
             raise ValueError("tool call graph requires at least one node")
         definitions_by_call_id: dict[str, ToolDefinition] = {}
@@ -5723,6 +5783,9 @@ class ToolCallGraphValidator:
                 raise ValueError(f"tool graph fact {field} must be a string")
         if "generation" in graph and not isinstance(graph.get("generation"), int):
             raise ValueError("tool graph fact generation must be int")
+        graph_role = str(graph.get("graph_role") or "internal_state")
+        if graph_role not in ToolCallGraphValidator._ALLOWED_GRAPH_ROLES:
+            raise ValueError(f"tool graph fact has unsupported graph_role: {graph_role}")
         nodes = graph.get("nodes")
         if not isinstance(nodes, Mapping) or not nodes:
             raise ValueError("tool graph fact requires non-empty nodes")
@@ -6992,6 +7055,10 @@ class ToolCallGraphExecutor:
             return "场景导入中", "正在把本批次内容写入场景。"
         if category == ToolCategory.SYNC:
             return "同步状态读取中", "正在读取当前场景和多人同步状态。"
+        if category == ToolCategory.REPORT:
+            return "正在汇总最终报告", "正在根据场景状态和执行记录生成最终报告。"
+        if category == ToolCategory.PLAN:
+            return "方案状态更新中", "正在更新当前方案和批次状态。"
         if call.requires_write:
             return "场景调整中", "正在执行已确认的低风险场景调整。"
         return "执行步骤处理中", "正在处理当前步骤。"
@@ -7352,6 +7419,7 @@ class AgentRuntime:
         "state_query",
         "query_runtime_state",
     })
+    _ENTITY_STATUS_ACTIONS = frozenset({"runtime.entity_status", "entity_status", "runtime_entity_status"})
     _RUNTIME_EVENT_ACTIONS = frozenset({"runtime_events", "user_visible_events", "runtime_event_feed"})
     _AUDIT_EVENT_ACTIONS = frozenset({"runtime_audit_event", "audit_event", "operation_audit_event"})
     _WORKER_DRAIN_ACTIONS = frozenset({"worker_drain", "drain_queue", "runtime_worker_drain", "tool_graph_drain"})
@@ -7451,6 +7519,7 @@ class AgentRuntime:
         | _OPERATION_REPLAY_ACTIONS
         | _GM_SUMMARY_ACTIONS
         | _STATUS_QUERY_ACTIONS
+        | _ENTITY_STATUS_ACTIONS
         | _RUNTIME_EVENT_ACTIONS
         | _SYNC_STATUS_ACTIONS
         | _ENGINE_WRITE_STATUS_ACTIONS
@@ -7469,6 +7538,7 @@ class AgentRuntime:
         | _SCENE_SNAPSHOT_STATUS_ACTIONS
         | _GM_SUMMARY_ACTIONS
         | _STATUS_QUERY_ACTIONS
+        | _ENTITY_STATUS_ACTIONS
         | _AUDIT_EVENT_ACTIONS
         | _WORKER_DRAIN_ACTIONS
         | _RUNTIME_COMMAND_ACTIONS
@@ -7548,6 +7618,7 @@ class AgentRuntime:
         vlm_review_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         layout_transform_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         provider_diagnostics: Mapping[str, Any] | None = None,
+        require_engine_environment_import: bool = False,
         require_engine_actor_import: bool = False,
         max_queued_tool_graphs: int = 32,
     ) -> None:
@@ -7566,12 +7637,14 @@ class AgentRuntime:
         self._vlm_review_provider = vlm_review_provider
         self._layout_transform_provider = layout_transform_provider
         self._provider_diagnostics = self._normalize_provider_diagnostics(provider_diagnostics)
+        self._require_engine_environment_import = bool(require_engine_environment_import)
         self._require_engine_actor_import = bool(require_engine_actor_import)
         self._provider_summary = self._build_provider_summary()
         self._provider_readiness_event_rooms: set[str] = set()
         self._max_queued_tool_graphs = max(1, int(max_queued_tool_graphs))
         self._queued_tool_graphs: dict[str, ToolCallGraph] = {}
         self._pending_sync_event_patches: dict[str, dict[str, Any]] = {}
+        self._pending_engine_readiness_patches: dict[str, dict[str, Any]] = {}
         self._report_persist_tokens: set[str] = set()
         self.scene_plans: dict[str, ScenePlan] = {}
         self.batch_plans: dict[str, BatchPlan] = {}
@@ -7624,6 +7697,11 @@ class AgentRuntime:
         "engine_write_runtime_state_only_count",
         "scene_entity_engine_write_pending_f5_count",
         "scene_entity_engine_write_verification_status_counts",
+        "scene_entity_count",
+        "game_ready_entity_count",
+        "environment_entity_count",
+        "planned_substrate_count",
+        "materialization_status_counts",
         "entity_type_counts",
         "graph_status",
         "grounding_status_counts",
@@ -7689,7 +7767,14 @@ class AgentRuntime:
             "image_resource": self._provider_mode(self._image_resource_provider, "mock_planned"),
             "model_resource": self._provider_mode(self._model_resource_provider, "mock_provider_model"),
             "environment_component": self._provider_mode(self._environment_component_provider, "runtime_component_facts"),
-            "environment_import": self._provider_mode(self._environment_import_provider, "runtime_state_only"),
+            "environment_import": (
+                self._provider_mode(
+                    self._environment_import_provider,
+                    "engine_environment_import_required_unavailable",
+                )
+                if self._require_engine_environment_import
+                else self._provider_mode(self._environment_import_provider, "runtime_state_only")
+            ),
             "actor_import": (
                 self._provider_mode(self._actor_import_provider, "engine_actor_import_required_unavailable")
                 if self._require_engine_actor_import
@@ -8014,6 +8099,74 @@ class AgentRuntime:
             "readiness_mismatch_count": mismatch_count,
             "channels": channels,
         }
+
+    @staticmethod
+    def _reconcile_engine_write_adapter_summary(
+        summary: Mapping[str, Any],
+        *,
+        scene_entity_registry: Mapping[str, Any],
+        import_summary: Mapping[str, Any],
+        environment_component_summary: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Resolve transient import mismatches only from terminal Engine facts."""
+
+        reconciled = dict(summary or {})
+        channels = {
+            str(channel): dict(row)
+            for channel, row in dict(reconciled.get("channels") or {}).items()
+            if isinstance(row, Mapping)
+        }
+        entities = [
+            dict(entity)
+            for entity in list(scene_entity_registry.get("entities") or [])
+            if isinstance(entity, Mapping)
+        ]
+        verified_actor_count = sum(
+            1
+            for entity in entities
+            if str(entity.get("entity_type") or "") == "actor"
+            and str(entity.get("engine_write_verification_status") or "") == "engine_verified"
+        )
+        verified_environment_count = sum(
+            1
+            for entity in entities
+            if str(entity.get("entity_type") or "") == "environment"
+            and str(entity.get("engine_write_verification_status") or "") == "engine_verified"
+        )
+        imported_actor_count = int(import_summary.get("imported_count") or 0)
+        imported_environment_count = int(
+            environment_component_summary.get("imported_count") or 0
+        )
+        resolved: list[str] = []
+        for channel, imported_count, verified_count in (
+            ("actor_import", imported_actor_count, verified_actor_count),
+            ("environment_import", imported_environment_count, verified_environment_count),
+        ):
+            row = channels.get(channel)
+            if (
+                row is not None
+                and bool(row.get("readiness_mismatch"))
+                and imported_count > 0
+                and verified_count >= imported_count
+            ):
+                row["readiness_mismatch"] = False
+                row["verification_status"] = "resolved_by_engine_snapshot"
+                resolved.append(channel)
+        mismatch_count = sum(
+            1 for row in channels.values() if bool(row.get("readiness_mismatch"))
+        )
+        reconciled["channels"] = channels
+        reconciled["readiness_mismatch_count"] = mismatch_count
+        reconciled["resolved_readiness_mismatch_channels"] = resolved
+        if int(reconciled.get("bridge_failed_count") or 0) > 0 or mismatch_count > 0:
+            reconciled["status"] = "needs_attention"
+        elif (
+            int(reconciled.get("write_attempt_count") or 0) > 0
+            and int(reconciled.get("bridge_success_count") or 0)
+            >= int(reconciled.get("write_attempt_count") or 0)
+        ):
+            reconciled["status"] = "native_write_observed"
+        return reconciled
 
     @staticmethod
     def _provider_mode(provider: Callable[..., Any] | None, fallback: str) -> dict[str, str]:
@@ -9259,6 +9412,42 @@ class AgentRuntime:
                 "actor_count": len(dict(changes.get("actors") or {})),
                 "asset_count": len(dict(changes.get("assets") or {})),
                 "room_status": str(sync_state.get("room_status") or ""),
+            },
+        )
+
+    def _reconcile_engine_readiness_tool(self, call: ToolCall) -> ToolResult:
+        room = str(call.args.get("room_id") or "default")
+        patch_ref = str(call.args.get("patch_ref") or "").strip()
+        changes = dict(self._pending_engine_readiness_patches.get(patch_ref) or {})
+        if not patch_ref or not changes:
+            return ToolResult(
+                False,
+                "invalid engine readiness reconcile request",
+                error_code="invalid_engine_readiness_reconcile_request",
+                user_visible_message="引擎就绪状态缺少可核验事实，本轮不会提前完成。",
+            )
+        state_patch = StatePatch(
+            room_id=room,
+            changes=changes,
+            expected_version=self.state.version,
+            source_tool_call_id=call.tool_call_id,
+        )
+        try:
+            StatePatchValidator.validate(state_patch, self.state.room(room))
+        except ValueError:
+            return ToolResult(
+                False,
+                "invalid engine readiness reconcile state",
+                error_code="invalid_engine_readiness_reconcile_state",
+                user_visible_message="引擎就绪状态未通过 RuntimeState 校验，本轮仍保持等待。",
+            )
+        return ToolResult(
+            True,
+            "engine readiness reconciled",
+            state_patch=state_patch,
+            payload={
+                "import_fact_count": len(dict(changes.get("custom_import_facts") or {})),
+                "environment_batch_count": len(dict(changes.get("environment_components") or {})),
             },
         )
 
@@ -10822,6 +11011,7 @@ class AgentRuntime:
         if scene_plan_update:
             changes["scene_plans"] = scene_plan_update
             changes["active_plan_id"] = plan_id
+            changes["active_discussion_plan_id"] = plan_id
         self._persist_planning_context_changes(
             room_id=room,
             plan_id=plan_id,
@@ -11321,6 +11511,7 @@ class AgentRuntime:
             "graph_id": str(raw.get("graph_id") or ""),
             "plan_id": str(raw.get("plan_id") or ""),
             "batch_id": str(raw.get("batch_id") or ""),
+            "graph_role": str(raw.get("graph_role") or "internal_state"),
             "status": str(raw.get("status") or ""),
             "node_count": node_count,
         }
@@ -11375,6 +11566,64 @@ class AgentRuntime:
             safe_result["reason"] = reason[:240]
         return safe_result
 
+    def _latest_persisted_report_for_plan(
+        self,
+        room_id: str,
+        plan_id: str,
+        *,
+        terminal_only: bool = False,
+    ) -> dict[str, Any]:
+        """Read the latest report already committed to RuntimeState for one plan."""
+
+        safe_plan_id = str(plan_id or "").strip()
+        reports = self.state.room(str(room_id or "default")).get("reports") or []
+        for raw_report in reversed(reports if isinstance(reports, list) else []):
+            if not isinstance(raw_report, Mapping):
+                continue
+            report = dict(raw_report)
+            if safe_plan_id and str(report.get("plan_id") or "") != safe_plan_id:
+                continue
+            if terminal_only:
+                report_status = str(
+                    dict(report.get("plan_summary") or {}).get("status") or ""
+                ).strip().lower()
+                if report_status not in {
+                    ScenePlanStatus.COMPLETED.value,
+                    ScenePlanStatus.FAILED.value,
+                    ScenePlanStatus.CANCELLED.value,
+                }:
+                    continue
+            return dict(self._sanitize_report_record(report))
+        return {}
+
+    @staticmethod
+    def _report_covers_current_plan_state(
+        report: Mapping[str, Any] | None,
+        *,
+        plan: ScenePlan,
+        batches: Iterable[BatchPlan],
+    ) -> bool:
+        """Return true only when a terminal report covers the current plan revision."""
+
+        safe_report = dict(report or {})
+        if not safe_report:
+            return False
+        plan_summary = dict(safe_report.get("plan_summary") or {})
+        if int(plan_summary.get("version") or 0) != int(plan.version or 0):
+            return False
+        expected_batch_ids = {
+            str(batch.batch_id or "")
+            for batch in batches
+            if str(batch.batch_id or "")
+        }
+        report_batch_rows = list(dict(safe_report.get("batch_summary") or {}).get("batches") or [])
+        report_batch_ids = {
+            str(row.get("batch_id") or "")
+            for row in report_batch_rows
+            if isinstance(row, Mapping) and str(row.get("batch_id") or "")
+        }
+        return expected_batch_ids == report_batch_ids
+
     def handle_message(
         self,
         *,
@@ -11386,6 +11635,7 @@ class AgentRuntime:
         source_context_agents: Iterable[str] | None = None,
         action: str = "plan",
         external_plan_id: str = "",
+        plan_id: str = "",
         max_items_per_batch: int = 3,
         max_graphs: int | None = None,
         scene_name: str = "",
@@ -12544,6 +12794,55 @@ class AgentRuntime:
                 "gm_summary": summary,
                 "message": str(summary.get("message") or ""),
             }
+        if normalized_action in self._ENTITY_STATUS_ACTIONS:
+            raw_payload = dict(sync_event or {})
+            target_plan_id = self._resolve_runtime_plan_id_from_state(
+                room,
+                plan_id=plan_id,
+                external_plan_id=external_plan_id,
+                allow_active=True,
+                allow_completed=True,
+            )
+            entity_names = [
+                str(item or "").strip()
+                for item in list(raw_payload.get("entity_names") or [])
+                if str(item or "").strip()
+            ]
+            registry = self._scene_entity_registry_for_plan(self.state.room(room), target_plan_id)
+            matches: dict[str, list[dict[str, Any]]] = {name: [] for name in entity_names}
+            for entity in list(registry.get("entities") or []):
+                if not isinstance(entity, Mapping):
+                    continue
+                aliases = {
+                    str(entity.get("name") or ""),
+                    str(entity.get("display_name") or ""),
+                    str(entity.get("requested_name") or ""),
+                    str(entity.get("semantic_role") or ""),
+                    *[str(item or "") for item in list(entity.get("aliases") or [])],
+                }
+                for name in entity_names:
+                    if any(name == alias or name in alias or alias in name for alias in aliases if alias):
+                        matches[name].append(dict(entity))
+            result = {
+                "handled": True,
+                "action": normalized_action,
+                "recorded": False,
+                "plan_id": target_plan_id,
+                "entity_status": {
+                    name: rows for name, rows in matches.items()
+                },
+                "message": "AgentRuntime entity status has been queried without scene writes.",
+            }
+            self.operation_log.append(
+                "runtime_entity_status_queried",
+                room_id=room,
+                plan_id=target_plan_id,
+                payload={
+                    "entity_names": entity_names,
+                    "matched_entity_count": sum(len(rows) for rows in matches.values()),
+                },
+            )
+            return result
         if normalized_action in self._STATUS_QUERY_ACTIONS:
             try:
                 summary = self.status_summary(
@@ -12588,8 +12887,9 @@ class AgentRuntime:
             try:
                 drain_plan_id = self._resolve_runtime_plan_id_from_state(
                     room,
+                    plan_id=plan_id,
                     external_plan_id=external_plan_id,
-                    allow_active=not bool(external_plan_id),
+                    allow_active=not bool(plan_id or external_plan_id),
                 )
                 drain_plan = self._runtime_plan_from_state(room, drain_plan_id)
             except Exception as exc:  # noqa: BLE001
@@ -12706,9 +13006,11 @@ class AgentRuntime:
                 },
             )
             safe_drain = self._safe_drain_result_for_user(drain_result)
+            status_available = True
             try:
                 status = self.status_summary(room_id=room, plan_id=drain_plan.plan_id)
             except Exception as status_exc:  # noqa: BLE001
+                status_available = False
                 self.operation_log.append(
                     "runtime_worker_drain_status_failed",
                     room_id=room,
@@ -12725,14 +13027,22 @@ class AgentRuntime:
                     "active_plan_id": drain_plan.plan_id,
                     "message": "AgentRuntime worker drain 已完成；状态摘要暂不可用。",
                 }
-            return {
+            refreshed_plan = self._runtime_plan_by_id_from_state(drain_plan.plan_id) or drain_plan
+            self.scene_plans[refreshed_plan.plan_id] = refreshed_plan
+            response = {
                 "handled": True,
                 "action": normalized_action,
-                "plan": drain_plan.as_dict(),
+                "plan": refreshed_plan.as_dict(),
                 "drain": safe_drain,
                 "status": status,
                 "message": f"AgentRuntime worker 已 drain {safe_drain.get('drained_count', 0)} 个执行图。",
             }
+            if status_available:
+                response["report"] = self._latest_persisted_report_for_plan(
+                    room,
+                    drain_plan.plan_id,
+                )
+            return response
         if normalized_action in self._RUNTIME_COMMAND_ACTIONS:
             command = (
                 "pause"
@@ -12907,8 +13217,9 @@ class AgentRuntime:
         if normalized_action in confirm_layout_actions:
             runtime_plan_id = self._resolve_runtime_plan_id_from_state(
                 room,
+                plan_id=plan_id,
                 external_plan_id=external_plan_id,
-                allow_active=not bool(external_plan_id),
+                allow_active=not bool(plan_id or external_plan_id),
             )
             runtime_plan = self._runtime_plan_from_state(room, runtime_plan_id)
             if runtime_plan is None:
@@ -12985,6 +13296,7 @@ class AgentRuntime:
                 room,
                 external_plan_id=external_plan_id,
                 allow_active=not bool(external_plan_id),
+                allow_completed=True,
             )
             runtime_plan = self._runtime_plan_from_state(room, runtime_plan_id)
             if runtime_plan is None:
@@ -13057,8 +13369,28 @@ class AgentRuntime:
         }
         active_runtime_plan_id = self._resolve_runtime_plan_id_from_state(
             room,
+            plan_id=plan_id,
             external_plan_id=external_plan_id,
-            allow_active=not bool(external_plan_id),
+            allow_active=not bool(plan_id or external_plan_id),
+            allow_completed=normalized_action in {
+                "intervention_add",
+                "add_object",
+                "object_add",
+                "add_asset",
+                "post_generation_add",
+                "post_generation_add_object",
+                "append_object",
+                "intervention_modify",
+                "modify_object",
+                "object_modify",
+                "adjust_object",
+                "intervention_delete",
+                "delete_object",
+                "object_delete",
+                "remove_object",
+                "final_adjustment_request",
+                "layout_adjustment",
+            },
         )
         active_runtime_plan = self._runtime_plan_from_state(room, active_runtime_plan_id)
         if active_runtime_plan is not None:
@@ -13207,14 +13539,53 @@ class AgentRuntime:
         if normalized_action in intervention_action_map:
             patch_type = intervention_action_map[normalized_action]
             patch_risk = RiskLevel.MEDIUM if patch_type == "intervention_delete" else RiskLevel.LOW
+            intervention_items: list[str] = []
+            if patch_type in {"intervention_add", "post_generation_add"}:
+                from ..runtime_action_intent import EntityNameValidator
+
+                validation_error = ""
+                for item in self._derive_mock_model_items(text):
+                    canonical, error = EntityNameValidator.validate(str(item or ""), source_text=text)
+                    if error:
+                        validation_error = validation_error or error
+                        continue
+                    if canonical and canonical not in intervention_items:
+                        intervention_items.append(canonical)
+                if not intervention_items:
+                    self.operation_log.append(
+                        "plan_patch_entity_validation_rejected",
+                        room_id=room,
+                        plan_id=active_runtime_plan.plan_id,
+                        payload={"patch_type": patch_type, "reason": validation_error or "missing concrete entity name"},
+                    )
+                    return {
+                        "handled": True,
+                        "action": normalized_action,
+                        "recorded": False,
+                        "plan": active_runtime_plan.as_dict(),
+                        "patch": {},
+                        "message": validation_error or "请明确需要新增的具体物体名称。",
+                    }
             try:
                 patch = self.record_intervention(
                     room_id=room,
                     text=text,
                     plan_id=active_runtime_plan.plan_id,
                     patch_type=patch_type,
+                    items=intervention_items or None,
                     source_user=sender_name or sender_id,
                     target_agent=owner_agent,
+                    idempotency_key=self._intervention_idempotency_key(
+                        room_id=room,
+                        plan_id=active_runtime_plan.plan_id,
+                        message_identity=str(reply_to or raw_payload.get("message_id") or ""),
+                        patch_type=patch_type,
+                        items=intervention_items
+                        if patch_type in {"intervention_add", "post_generation_add"}
+                        else self._derive_delete_intervention_items(text)
+                        if patch_type == "intervention_delete"
+                        else [],
+                    ),
                     risk_level=patch_risk,
                 )
             except Exception:  # noqa: BLE001
@@ -13618,16 +13989,74 @@ class AgentRuntime:
         items: Iterable[str] | None = None,
         source_user: str = "",
         target_agent: str = "",
+        idempotency_key: str = "",
         risk_level: RiskLevel = RiskLevel.LOW,
     ) -> PlanPatch:
         room = str(room_id)
         room_state = self.state.room(room)
-        effective_plan_id = str(plan_id or room_state.get("active_plan_id") or "")
+        effective_plan_id = str(
+            plan_id
+            or room_state.get("active_execution_plan_id")
+            or room_state.get("latest_completed_plan_id")
+            or room_state.get("active_plan_id")
+            or ""
+        )
         derived_items = list(items or [])
         if not derived_items and patch_type == "intervention_delete":
             derived_items = self._derive_delete_intervention_items(text)
         if not derived_items and patch_type in {"intervention_add", "post_generation_add"}:
             derived_items = self._derive_mock_model_items(text)
+        if patch_type in {"intervention_add", "post_generation_add"}:
+            from ..runtime_action_intent import EntityNameValidator
+
+            validated_items: list[str] = []
+            validation_errors: list[str] = []
+            for item in derived_items:
+                canonical, error = EntityNameValidator.validate(str(item or ""), source_text=text)
+                if error:
+                    validation_errors.append(error)
+                    continue
+                if canonical and canonical not in validated_items:
+                    validated_items.append(canonical)
+            if not validated_items:
+                reason = validation_errors[0] if validation_errors else "missing concrete entity name"
+                self.operation_log.append(
+                    "plan_patch_entity_validation_rejected",
+                    room_id=room,
+                    plan_id=effective_plan_id,
+                    payload={"patch_type": patch_type, "reason": reason},
+                )
+                raise ValueError(f"invalid entity intent: {reason}")
+            derived_items = validated_items
+        safe_idempotency_key = str(idempotency_key or "").strip()
+        if safe_idempotency_key:
+            for bucket_name in (
+                "pending_interventions",
+                "accepted_interventions",
+                "deferred_interventions",
+                "rejected_interventions",
+            ):
+                for patch_id, row in dict(room_state.get(bucket_name) or {}).items():
+                    if not isinstance(row, Mapping):
+                        continue
+                    if str(row.get("plan_id") or "") != effective_plan_id:
+                        continue
+                    if str(row.get("idempotency_key") or "") != safe_idempotency_key:
+                        continue
+                    replayed = self._plan_patch_from_state_row(str(patch_id), row)
+                    self.plan_patches[replayed.patch_id] = replayed
+                    self.operation_log.append(
+                        "plan_patch_idempotent_replay",
+                        room_id=room,
+                        plan_id=effective_plan_id,
+                        message=replayed.text,
+                        payload={
+                            "patch_id": replayed.patch_id,
+                            "patch_type": replayed.patch_type,
+                            "status": replayed.status.value,
+                        },
+                    )
+                    return replayed
         patch = PlanPatch(
             patch_id=_id("patch"),
             room_id=room,
@@ -13637,6 +14066,7 @@ class AgentRuntime:
             items=derived_items,
             source_user=str(source_user or ""),
             target_agent=str(target_agent or ""),
+            idempotency_key=safe_idempotency_key,
             risk_level=risk_level,
         )
         PlanPatchValidator.validate(patch)
@@ -13678,6 +14108,46 @@ class AgentRuntime:
         )
         return patch
 
+    @staticmethod
+    def _intervention_idempotency_key(
+        *,
+        room_id: str,
+        plan_id: str,
+        message_identity: str,
+        patch_type: str,
+        items: Iterable[str],
+    ) -> str:
+        identity = str(message_identity or "").strip()
+        if not identity:
+            return ""
+        normalized_items = sorted({
+            re.sub(r"\s+", " ", str(item or "").strip().lower())
+            for item in items
+            if str(item or "").strip()
+        })
+        canonical = "|".join((
+            str(room_id or "").strip(),
+            str(plan_id or "").strip(),
+            identity,
+            str(patch_type or "").strip().lower(),
+            "\x1f".join(normalized_items),
+        ))
+        return f"idem-{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:32]}"
+
+    def _assert_execution_slot_available(self, room_id: str, plan_id: str) -> None:
+        room = self.state.room(str(room_id))
+        active_execution_plan_id = str(room.get("active_execution_plan_id") or "")
+        if not active_execution_plan_id or active_execution_plan_id == str(plan_id):
+            return
+        active_plan = dict(room.get("scene_plans", {}).get(active_execution_plan_id, {}) or {})
+        active_status = str(active_plan.get("status") or "")
+        if active_status not in {
+            ScenePlanStatus.COMPLETED.value,
+            ScenePlanStatus.FAILED.value,
+            ScenePlanStatus.CANCELLED.value,
+        }:
+            raise RuntimeError(f"room already has active execution plan: {active_execution_plan_id}")
+
     def enqueue_scene_plan(self, plan_id: str) -> dict[str, Any]:
         # `plan_id` is Runtime-owned; locate it through RuntimeState rather than
         # trusting the migration-period in-memory mirror.
@@ -13689,6 +14159,7 @@ class AgentRuntime:
         self._raise_if_plan_not_executable(plan)
         if plan.status != ScenePlanStatus.CONFIRMED:
             raise ValueError("scene plan must be confirmed before execution")
+        self._assert_execution_slot_available(plan.room_id, plan.plan_id)
 
         now = _now()
         accepted_states, deferred_states, absorb_changes = self._pending_intervention_absorb_state(
@@ -13752,6 +14223,7 @@ class AgentRuntime:
             "updated_at": now,
         }
         changes = dict(absorb_changes)
+        changes["active_execution_plan_id"] = plan.plan_id
         scene_plan_states = dict(changes.get("scene_plans") or {})
         scene_plan_states[plan.plan_id] = plan_state
         changes["scene_plans"] = scene_plan_states
@@ -14303,6 +14775,7 @@ class AgentRuntime:
         if plan is None:
             raise KeyError(f"scene plan not found: {plan_id}")
         self.scene_plans[plan.plan_id] = plan
+        self._assert_execution_slot_available(plan.room_id, plan.plan_id)
         self._refresh_plan_status(plan)
         self._raise_if_plan_not_executable(plan)
         if plan.status not in {ScenePlanStatus.CONFIRMED, ScenePlanStatus.EXECUTING}:
@@ -14486,6 +14959,7 @@ class AgentRuntime:
                 fallback_queue_states=fallback_queue_states,
             )
             combined_changes = dict(absorb_changes)
+            combined_changes["active_execution_plan_id"] = plan.plan_id
             scene_plan_states = dict(combined_changes.get("scene_plans") or {})
             scene_plan_states[plan.plan_id] = plan_state
             combined_changes["scene_plans"] = scene_plan_states
@@ -14685,8 +15159,14 @@ class AgentRuntime:
         self.scene_plans[plan.plan_id] = plan
         self._refresh_plan_status(plan)
         self._raise_if_plan_not_executable(plan)
-        if plan.status not in {ScenePlanStatus.CONFIRMED, ScenePlanStatus.EXECUTING}:
-            raise ValueError("scene plan must be confirmed or executing before intervention batch enqueue")
+        if plan.status not in {
+            ScenePlanStatus.CONFIRMED,
+            ScenePlanStatus.EXECUTING,
+            ScenePlanStatus.COMPLETED,
+        }:
+            raise ValueError(
+                "scene plan must be confirmed, executing, or completed before intervention batch enqueue"
+            )
         route_fact = self._route_pending_interventions_via_tool_graph(plan)
         route_items = set(route_fact.get("requested_items") or []) if route_fact else set()
         route_absorbable_types = set(route_fact.get("absorbable_patch_types") or []) if route_fact else set()
@@ -14823,6 +15303,7 @@ class AgentRuntime:
         }
         batch_states[batch.batch_id] = batch.as_dict()
         changes: dict[str, Any] = {
+            "active_execution_plan_id": plan.plan_id,
             "scene_plans": {plan.plan_id: plan_state},
             "batch_plans": batch_states,
             "pending_interventions": {
@@ -15529,6 +16010,7 @@ class AgentRuntime:
                 batch_id=str(graph_fact.get("batch_id") or batch_id or ""),
                 status=str(graph_fact.get("status") or "queued"),
                 generation=int(graph_fact.get("generation") or 0),
+                graph_role=str(graph_fact.get("graph_role") or "internal_state"),
             )
             for call_id, call_fact_raw in dict(graph_fact.get("nodes") or {}).items():
                 call_fact = dict(call_fact_raw or {})
@@ -15833,6 +16315,14 @@ class AgentRuntime:
                     "plan_id": graph.plan_id,
                     "batch_id": graph.batch_id,
                     "status": graph.status,
+                    "node_count": len(
+                        dict(
+                            dict(self.state.room(str(room_id)).get("tool_graphs") or {}).get(graph.graph_id)
+                            or {}
+                        ).get("nodes")
+                        or graph.nodes
+                        or {}
+                    ),
                 }
                 for graph in drained
             ],
@@ -15860,6 +16350,19 @@ class AgentRuntime:
                 "reason": "tool_graphs_active",
                 "active_graph_count": len(active_queue_rows),
             }
+        self.operation_log.append(
+            "finalizer_started",
+            room_id=str(room_id),
+            plan_id=plan_id,
+            payload={"active_graph_count": 0},
+        )
+        self.operation_log.append(
+            "tool_graph_queue_empty",
+            room_id=str(room_id),
+            plan_id=plan_id,
+            payload={"active_graph_count": 0},
+        )
+        self._reconcile_partial_engine_readiness(room_id=str(room_id), plan_id=plan_id)
         batches = self._planned_batches_for_plan(plan_id)
         if not batches:
             return {}
@@ -15905,9 +16408,342 @@ class AgentRuntime:
             message=reason,
             payload=result,
         )
-        if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED} and previous_status != next_status:
-            self.generate_report(str(room_id), plan_id=plan_id)
+        if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED}:
+            finalizer_room = self.state.room(str(room_id))
+            registry = self._scene_entity_registry_for_plan(finalizer_room, plan_id)
+            if not self.operation_log.query(
+                event="scene_entity_registry_ready",
+                room_id=str(room_id),
+                plan_id=plan_id,
+                limit=1,
+            ):
+                self.operation_log.append(
+                    "scene_entity_registry_ready",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    payload={
+                        "entity_count": int(registry.get("entity_count") or len(registry.get("entities") or [])),
+                        "game_ready_entity_count": int(registry.get("game_ready_entity_count") or 0),
+                    },
+                )
+            world_snapshot = self._scene_world_snapshot_for_plan(
+                finalizer_room,
+                plan_id,
+                room_id=str(room_id),
+                scene_entity_registry=registry,
+                operation_cursor=f"op:{len(self.operation_log.entries())}",
+            )
+            if not self.operation_log.query(
+                event="scene_world_snapshot_ready",
+                room_id=str(room_id),
+                plan_id=plan_id,
+                limit=1,
+            ):
+                self.operation_log.append(
+                    "scene_world_snapshot_ready",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    payload={
+                        "scene_version": int(world_snapshot.get("scene_version") or 0),
+                        "world_readiness": str(world_snapshot.get("world_readiness") or "blocked"),
+                        "environment_entity_count": len(world_snapshot.get("environment_entities") or []),
+                        "actor_entity_count": len(world_snapshot.get("actor_entities") or []),
+                        "operation_cursor": str(world_snapshot.get("operation_cursor") or ""),
+                    },
+                )
+            persisted_report = self._latest_persisted_report_for_plan(
+                str(room_id),
+                plan_id,
+                terminal_only=True,
+            )
+            if not self._report_covers_current_plan_state(
+                persisted_report,
+                plan=plan,
+                batches=batches,
+            ):
+                report_error_type = ""
+                try:
+                    self.generate_report(str(room_id), plan_id=plan_id)
+                    persisted_report = self._latest_persisted_report_for_plan(
+                        str(room_id),
+                        plan_id,
+                        terminal_only=True,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    report_error_type = type(exc).__name__
+                if not persisted_report:
+                    # A terminal plan without a persisted report is not a closed
+                    # Runtime loop. Keep it routable so the worker can retry on
+                    # the next drain tick instead of forgetting the room.
+                    plan.status = ScenePlanStatus.EXECUTING
+                    plan.updated_at = _now()
+                    self._persist_scene_plan_status(
+                        plan,
+                        reason="plan_finalizer:final_report_persist_pending",
+                    )
+                    self.scene_plans[plan.plan_id] = plan
+                    result.update({
+                        "status": ScenePlanStatus.EXECUTING.value,
+                        "reason": "final_report_persist_pending",
+                        "report_ready": False,
+                    })
+                    self.operation_log.append(
+                        "scene_plan_final_report_persist_pending",
+                        room_id=str(room_id),
+                        plan_id=plan_id,
+                        message="final report not persisted",
+                        payload={
+                            "error_type": report_error_type,
+                            "terminal_status": next_status.value,
+                        },
+                    )
+                    self.emit_runtime_event(
+                        room_id=str(room_id),
+                        plan_id=plan_id,
+                        event_type="report_pending",
+                        phase="report",
+                        title="正在汇总最终场景",
+                        message="场景实体已完成收口，最终报告仍在写入，将自动继续重试。",
+                        level="warning",
+                        progress=96,
+                        payload={"status": ScenePlanStatus.EXECUTING.value},
+                    )
+                    return result
+            result["report_ready"] = True
+            identity_changes = {"latest_completed_plan_id": plan_id}
+            if str(self.state.room(str(room_id)).get("active_execution_plan_id") or "") == plan_id:
+                identity_changes["active_execution_plan_id"] = ""
+            self._persist_plan_identity_changes(
+                room_id=str(room_id),
+                plan_id=plan_id,
+                changes=identity_changes,
+                reason="plan_finalizer:terminal_report_ready",
+            )
+            self.operation_log.append(
+                "latest_completed_plan_set",
+                room_id=str(room_id),
+                plan_id=plan_id,
+                payload={"latest_completed_plan_id": plan_id},
+            )
+            if "active_execution_plan_id" in identity_changes:
+                self.operation_log.append(
+                    "active_execution_plan_cleared",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    payload={"previous_active_execution_plan_id": plan_id},
+                )
         return result
+
+    def _reconcile_partial_engine_readiness(self, *, room_id: str, plan_id: str) -> dict[str, Any]:
+        """Refresh authoritative native bounds for partial batches via ToolCallGraph."""
+
+        if self._scene_snapshot_provider is None:
+            return {}
+        room_key = str(room_id)
+        batches = [
+            batch
+            for batch in self._planned_batches_for_plan(plan_id)
+            if batch.status == BatchPlanStatus.PARTIAL
+        ]
+        if not batches:
+            return {}
+        room_before = self.state.room(room_key)
+        plan_row = dict(dict(room_before.get("scene_plans") or {}).get(plan_id) or {})
+        scene_name = str(plan_row.get("scene_name") or "")
+        known_actors = self._safe_snapshot_known_actor_projection(
+            room_before.get("actors")
+        )
+        snapshot_graph = ToolCallGraph(
+            graph_id=_id("graph-engine-readiness-snapshot"),
+            plan_id=plan_id,
+            batch_id="",
+        )
+        snapshot_graph.add(ToolCall(
+            tool_call_id=_id("tool-engine-readiness-snapshot"),
+            tool_name="runtime.scene.snapshot",
+            args={
+                "room_id": room_key,
+                "scene_name": scene_name,
+                "plan_id": plan_id,
+                "known_actors": known_actors,
+            },
+            risk_level=RiskLevel.LOW,
+        ))
+        executor = ToolCallGraphExecutor(
+            registry=self.registry,
+            guard=self.guard,
+            state=self.state,
+            operation_log=self.operation_log,
+        )
+        executor.execute(snapshot_graph, room_id=room_key)
+        if snapshot_graph.status != "completed":
+            self.operation_log.append(
+                "engine_readiness_snapshot_failed",
+                room_id=room_key,
+                plan_id=plan_id,
+                payload={"graph_id": snapshot_graph.graph_id, "status": snapshot_graph.status},
+            )
+            return {"recorded": False, "reason": "snapshot_failed"}
+
+        room_after_snapshot = self.state.room(room_key)
+        actors = dict(room_after_snapshot.get("actors") or {})
+        environment_components = {
+            str(batch_key): {
+                str(component_id): dict(component)
+                for component_id, component in dict(components or {}).items()
+                if isinstance(component, Mapping)
+            }
+            for batch_key, components in dict(room_after_snapshot.get("environment_components") or {}).items()
+            if isinstance(components, Mapping)
+        }
+        import_facts = {
+            str(key): dict(value)
+            for key, value in dict(room_after_snapshot.get("custom_import_facts") or {}).items()
+            if isinstance(value, Mapping)
+        }
+        changed_batch_ids: list[str] = []
+        for batch in batches:
+            batch_id = batch.batch_id
+            batch_changed = False
+            for suffix in ("actor_import_plan", "actor_import_result"):
+                fact_key = f"{batch_id}:{suffix}"
+                fact = dict(import_facts.get(fact_key) or {})
+                if not fact:
+                    continue
+                imported_count = int(
+                    fact.get("imported_count")
+                    or fact.get("actor_count")
+                    or fact.get("requested_count")
+                    or 0
+                )
+                ready_count = sum(
+                    1
+                    for actor in actors.values()
+                    if isinstance(actor, Mapping)
+                    and str(actor.get("batch_id") or "") == batch_id
+                    and bool(actor.get("bounds_ready"))
+                    and str(actor.get("engine_lifecycle_status") or "") in {"bounds_ready", "engine_ready", "ready"}
+                )
+                fact["ready_count"] = min(imported_count, ready_count)
+                if imported_count > 0 and ready_count >= imported_count:
+                    fact["status"] = "imported"
+                import_facts[fact_key] = fact
+                batch_changed = batch_changed or ready_count > 0
+
+            components = environment_components.get(batch_id, {})
+            for component in components.values():
+                actor = dict(actors.get(str(component.get("actor_id") or "")) or {})
+                if not actor or not bool(actor.get("bounds_ready")):
+                    continue
+                component.update({
+                    "aabb": dict(actor.get("aabb") or {}),
+                    "bounds_ready": True,
+                    "bounds_source": "engine_actual",
+                    "engine_lifecycle_status": "bounds_ready",
+                    "status": "ready",
+                })
+                batch_changed = True
+            environment_fact_key = f"{batch_id}:environment_import_result"
+            environment_fact = dict(import_facts.get(environment_fact_key) or {})
+            if environment_fact:
+                imported_count = int(environment_fact.get("imported_count") or 0)
+                ready_count = sum(
+                    1
+                    for component in components.values()
+                    if bool(component.get("bounds_ready"))
+                    and str(component.get("engine_lifecycle_status") or "") in {"bounds_ready", "engine_ready", "ready"}
+                )
+                environment_fact["ready_count"] = min(imported_count, ready_count)
+                if imported_count > 0 and ready_count >= imported_count:
+                    environment_fact["status"] = "imported"
+                import_facts[environment_fact_key] = environment_fact
+                batch_changed = batch_changed or ready_count > 0
+            if batch_changed:
+                changed_batch_ids.append(batch_id)
+
+        if not changed_batch_ids:
+            return {"recorded": False, "reason": "bounds_not_ready"}
+        changes = {
+            "custom_import_facts": import_facts,
+            "environment_components": environment_components,
+        }
+        patch_ref = _id("engine-readiness-patch")
+        self._pending_engine_readiness_patches[patch_ref] = changes
+        reconcile_graph = ToolCallGraph(
+            graph_id=_id("graph-engine-readiness-reconcile"),
+            plan_id=plan_id,
+            batch_id="",
+        )
+        reconcile_graph.add(ToolCall(
+            tool_call_id=_id("tool-engine-readiness-reconcile"),
+            tool_name="runtime.engine_readiness.reconcile",
+            args={"room_id": room_key, "plan_id": plan_id, "patch_ref": patch_ref},
+            risk_level=RiskLevel.LOW,
+            requires_write=True,
+            confirmed=True,
+        ))
+        try:
+            executor.execute(reconcile_graph, room_id=room_key)
+        finally:
+            self._pending_engine_readiness_patches.pop(patch_ref, None)
+        if reconcile_graph.status != "completed":
+            return {"recorded": False, "reason": "state_patch_failed"}
+        recovered: list[str] = []
+        for batch_id in changed_batch_ids:
+            recovery_graph = ToolCallGraph(
+                graph_id=_id("graph-engine-ready-recovery"),
+                plan_id=plan_id,
+                batch_id=batch_id,
+            )
+            recovery_graph.status = "completed"
+            self._finalize_batch_after_drained_graph(recovery_graph, room_id=room_key)
+            if self.batch_plans.get(batch_id) is not None and self.batch_plans[batch_id].status == BatchPlanStatus.COMPLETED:
+                recovered.append(batch_id)
+        self.operation_log.append(
+            "engine_readiness_reconciled_from_snapshot",
+            room_id=room_key,
+            plan_id=plan_id,
+            payload={
+                "changed_batch_count": len(changed_batch_ids),
+                "recovered_batch_count": len(recovered),
+            },
+        )
+        return {"recorded": True, "changed_batches": changed_batch_ids, "recovered_batches": recovered}
+
+    @staticmethod
+    def _safe_snapshot_known_actor_projection(value: Any) -> dict[str, dict[str, Any]]:
+        """Project Runtime identity into ToolCall-safe snapshot matching facts."""
+
+        allowed_fields = (
+            "actor_id",
+            "entity_id",
+            "name",
+            "display_name",
+            "native_name",
+            "requested_name",
+            "aliases",
+            "asset_id",
+            "semantic_role",
+            "entity_type",
+            "plan_id",
+            "batch_id",
+            "grounding_status",
+            "interaction_capability",
+            "gameplay_tags",
+        )
+        projected: dict[str, dict[str, Any]] = {}
+        for actor_id, raw_actor in dict(value or {}).items():
+            safe_actor_id = str(actor_id or "").strip()
+            if not safe_actor_id or not isinstance(raw_actor, Mapping):
+                continue
+            actor = {
+                field: raw_actor.get(field)
+                for field in allowed_fields
+                if raw_actor.get(field) not in (None, "", [], {})
+            }
+            actor["actor_id"] = str(actor.get("actor_id") or safe_actor_id)
+            projected[safe_actor_id] = actor
+        return projected
 
     def _drain_queued_tool_graph(
         self,
@@ -16147,7 +16983,28 @@ class AgentRuntime:
             room_id=str(room_id),
             batch_id=graph.batch_id,
         )
-        if import_fact_status is not None:
+        if graph.status == ScenePlanStatus.CANCELLED.value:
+            next_status = BatchPlanStatus.CANCELLED
+        elif graph.status in {"failed", "blocked", "incomplete"}:
+            # A mandatory tool failure is authoritative. Partial import facts may
+            # preserve successful entities, but must not keep the plan executing.
+            next_status = BatchPlanStatus.FAILED
+            self.operation_log.append(
+                "batch_terminal_status_from_tool_graph",
+                room_id=str(room_id),
+                plan_id=graph.plan_id,
+                batch_id=graph.batch_id,
+                payload={
+                    "graph_id": graph.graph_id,
+                    "graph_status": graph.status,
+                    "batch_status": next_status.value,
+                    "import_fact_status": (
+                        import_fact_status.value if import_fact_status is not None else ""
+                    ),
+                    "source": "tool_graph_failure",
+                },
+            )
+        elif import_fact_status is not None:
             next_status = import_fact_status
             self.operation_log.append(
                 "batch_terminal_status_from_runtime_facts",
@@ -16163,10 +17020,6 @@ class AgentRuntime:
             )
         elif graph.status == "completed":
             next_status = BatchPlanStatus.COMPLETED
-        elif graph.status == ScenePlanStatus.CANCELLED.value:
-            next_status = BatchPlanStatus.CANCELLED
-        elif graph.status in {"failed", "blocked", "incomplete"}:
-            next_status = BatchPlanStatus.FAILED
         else:
             return
         batch = self._mark_batch_terminal_status_via_tool_graph(
@@ -16194,20 +17047,32 @@ class AgentRuntime:
             batch_id=graph.batch_id,
             payload={**batch.as_dict(), "graph_status": graph.status},
         )
+        terminal_title = f"第 {batch.batch_index}/{batch.total_batches} 批完成"
+        terminal_message = f"本批状态：{batch.status.value}。"
+        terminal_level = "success"
+        if batch.status == BatchPlanStatus.PARTIAL:
+            terminal_title = f"第 {batch.batch_index}/{batch.total_batches} 批部分完成"
+            terminal_message = "本批仍有实体等待引擎就绪或存在未完成项，系统会继续收口。"
+            terminal_level = "warning"
+        elif batch.status in {BatchPlanStatus.FAILED, BatchPlanStatus.CANCELLED}:
+            terminal_title = f"第 {batch.batch_index}/{batch.total_batches} 批未完成"
+            terminal_level = "warning"
         self.emit_runtime_event(
             room_id=str(room_id),
             plan_id=graph.plan_id,
             batch_id=graph.batch_id,
             event_type="batch_completed",
             phase="batch_execution",
-            title=f"第 {batch.batch_index}/{batch.total_batches} 批完成",
-            message=f"本批状态：{batch.status.value}。",
+            title=terminal_title,
+            message=terminal_message,
+            level=terminal_level,
             progress=min(96, max(20, int(batch.batch_index / max(1, batch.total_batches) * 80) + 10)),
             payload={
                 "status": batch.status.value,
                 "batch_index": batch.batch_index,
                 "total_batches": batch.total_batches,
                 "item_count": len(batch.requested_items),
+                "graph_status": graph.status,
             },
         )
 
@@ -17198,12 +18063,18 @@ class AgentRuntime:
             and (not active_batch_id or str(batch.get("batch_id") or "") == active_batch_id)
         }
         components_by_batch = dict(room.get("environment_components") or {})
-        candidate_keys = batch_ids if batch_ids else list(components_by_batch)
+        if batch_ids:
+            candidate_keys = batch_ids
+        elif active_plan_id:
+            candidate_keys = []
+        else:
+            candidate_keys = list(components_by_batch)
         type_counts: dict[str, int] = {}
         component_status_counts: dict[str, int] = {}
         latest_components: list[dict[str, Any]] = []
         component_count = 0
         imported_component_count = 0
+        seen_component_ids: set[str] = set()
         for key in candidate_keys:
             components = components_by_batch.get(key, {})
             if not isinstance(components, Mapping):
@@ -17211,6 +18082,11 @@ class AgentRuntime:
             for component in components.values():
                 if not isinstance(component, Mapping):
                     continue
+                component_id = str(component.get("component_id") or "").strip()
+                if component_id and component_id in seen_component_ids:
+                    continue
+                if component_id:
+                    seen_component_ids.add(component_id)
                 component_type = str(component.get("component_type") or "environment").strip() or "environment"
                 component_status = str(component.get("status") or "unknown").strip() or "unknown"
                 type_counts[component_type] = type_counts.get(component_type, 0) + 1
@@ -17222,7 +18098,7 @@ class AgentRuntime:
                 latest_components.append({
                     "batch_id": str(key),
                     "batch_index": int(batch_info.get("batch_index") or 0),
-                    "component_id": str(component.get("component_id") or ""),
+                    "component_id": component_id,
                     "name": str(component.get("name") or ""),
                     "component_type": component_type,
                     "status": component_status,
@@ -17270,8 +18146,9 @@ class AgentRuntime:
             if active_plan_id:
                 if fact_plan_id and fact_plan_id != active_plan_id:
                     continue
-                if not fact_plan_id and batch_ids and fact_batch_id not in batch_ids:
-                    continue
+                if not fact_plan_id:
+                    if not batch_ids or fact_batch_id not in batch_ids:
+                        continue
             environment_import_fact_rows.append(dict(fact))
         status_counts: dict[str, int] = {}
         requested_count = 0
@@ -18329,6 +19206,53 @@ class AgentRuntime:
             ).items()
             if str(key or "").strip()
         }
+        materialization_status_counts = {
+            str(key): int(value or 0)
+            for key, value in dict(registry_state.get("materialization_status_counts") or {}).items()
+            if str(key or "").strip()
+        }
+        game_ready_needs_review_count = int(
+            materialization_status_counts.get("engine_ready_needs_review") or 0
+        )
+        registry_entities = [
+            dict(entity)
+            for entity in list(registry_state.get("entities") or [])
+            if isinstance(entity, Mapping)
+        ]
+        verified_actor_count = sum(
+            1
+            for entity in registry_entities
+            if str(entity.get("entity_type") or "") == "actor"
+            and str(entity.get("engine_write_verification_status") or "") == "engine_verified"
+        )
+        verified_environment_count = sum(
+            1
+            for entity in registry_entities
+            if str(entity.get("entity_type") or "") == "environment"
+            and str(entity.get("engine_write_verification_status") or "") == "engine_verified"
+        )
+        resolved_mismatch_channels: set[str] = set()
+        if import_imported_count > 0 and verified_actor_count >= import_imported_count:
+            resolved_mismatch_channels.add("actor-import")
+        if (
+            environment_imported_count > 0
+            and verified_environment_count >= environment_imported_count
+        ):
+            resolved_mismatch_channels.add("environment-import")
+        if resolved_mismatch_channels:
+            original_mismatch_channel_count = len(engine_write_readiness_mismatch_channels)
+            engine_write_readiness_mismatch_channels = [
+                channel
+                for channel in engine_write_readiness_mismatch_channels
+                if channel not in resolved_mismatch_channels
+            ]
+            resolved_count = original_mismatch_channel_count - len(
+                engine_write_readiness_mismatch_channels
+            )
+            engine_write_readiness_mismatch_count = max(
+                len(engine_write_readiness_mismatch_channels),
+                engine_write_readiness_mismatch_count - resolved_count,
+            )
         worker_drain_failed_count = int(worker_drain_state.get("failed_count") or 0)
         worker_drain_exception_count = int(worker_drain_state.get("exception_count") or 0)
         worker_drain_status_failed_count = int(worker_drain_state.get("status_failed_count") or 0)
@@ -18456,6 +19380,8 @@ class AgentRuntime:
             reasons.append("actor_registry_incomplete")
         if actor_registry_failed_request_count:
             reasons.append("actor_registry_failed_request")
+        if game_ready_needs_review_count:
+            reasons.append("game_ready_entities_need_review")
         if worker_drain_failed_count:
             reasons.append("worker_drain_failed")
         if worker_drain_exception_count:
@@ -18520,6 +19446,7 @@ class AgentRuntime:
             or engine_write_runtime_state_only_count
             or engine_write_bridge_failed_count
             or engine_write_bridge_error_code_counts
+            or game_ready_needs_review_count
             or worker_drain_failed_count
             or worker_drain_exception_count
             or worker_drain_status_failed_count
@@ -18575,6 +19502,7 @@ class AgentRuntime:
             "scene_entity_engine_write_verification_status_counts": dict(
                 sorted(scene_entity_engine_write_verification_status_counts.items())
             ),
+            "game_ready_needs_review_count": game_ready_needs_review_count,
             "engine_write_bridge_failed_count": engine_write_bridge_failed_count,
             "engine_write_bridge_error_code_counts": dict(sorted(engine_write_bridge_error_code_counts.items())),
             "actor_registry_readiness_status": actor_registry_readiness_status,
@@ -18858,6 +19786,8 @@ class AgentRuntime:
             candidate_batch_ids = [active_batch_id]
         elif batch_ids:
             candidate_batch_ids = sorted(batch_ids)
+        elif active_plan_id:
+            candidate_batch_ids = []
         else:
             candidate_batch_ids = sorted(str(key) for key in environment_components)
 
@@ -18978,6 +19908,22 @@ class AgentRuntime:
             identity = "|".join(str(part or "").strip() for part in parts)
             return f"entity-{uuid.uuid5(uuid.NAMESPACE_URL, 'corona-runtime:' + identity).hex}"
 
+        def stable_environment_asset_id(row: Mapping[str, Any], component_type: str) -> str:
+            existing = str(row.get("asset_id") or "").strip()
+            if existing:
+                return existing
+            model_identity = str(
+                row.get("model_ref")
+                or row.get("handler")
+                or component_type
+                or "environment"
+            ).strip()
+            digest = uuid.uuid5(
+                uuid.NAMESPACE_URL,
+                f"corona-runtime-environment-asset:{model_identity}",
+            ).hex[:24]
+            return f"asset-{digest}"
+
         def environment_profile_from(row: Mapping[str, Any]) -> dict[str, Any]:
             profile = mapping_field(row, "environment_profile")
             for key in ("terrain_profile", "surface", "sky_mode", "boundary_style"):
@@ -19074,6 +20020,52 @@ class AgentRuntime:
                 except (TypeError, ValueError):
                     return "unknown"
             return "unknown"
+
+        def entity_is_game_ready(entity: Mapping[str, Any]) -> bool:
+            grounding = str(entity.get("grounding_status") or "").strip().lower()
+            bounds_source = str(entity.get("bounds_source") or "").strip().lower()
+            entity_type = str(entity.get("entity_type") or "").strip().lower()
+            stable_resource = bool(entity.get("asset_id")) and bool(entity.get("model_ref"))
+            grounding_known = grounding in {
+                "grounded",
+                "wall_mounted",
+                "suspended",
+                "ceiling_hung",
+                "not_applicable",
+            }
+            if entity_type == "environment" and grounding == "not_applicable":
+                grounding_known = True
+            return (
+                str(entity.get("engine_write_verification_status") or "") == "engine_verified"
+                and bool(entity.get("actor_id"))
+                and bool(entity.get("transform"))
+                and bool(entity.get("aabb"))
+                and bounds_source == "engine_actual"
+                and stable_resource
+                and grounding_known
+            )
+
+        def readiness_missing_fields(entity: Mapping[str, Any]) -> list[str]:
+            missing: list[str] = []
+            if not str(entity.get("actor_id") or "").strip():
+                missing.append("actor_id")
+            if not str(entity.get("asset_id") or "").strip():
+                missing.append("asset_id")
+            if not str(entity.get("model_ref") or "").strip():
+                missing.append("model_ref")
+            if not isinstance(entity.get("transform"), Mapping) or not entity.get("transform"):
+                missing.append("transform")
+            if not isinstance(entity.get("world_aabb"), Mapping) or not entity.get("world_aabb"):
+                missing.append("world_aabb")
+            if str(entity.get("bounds_source") or "").strip().lower() != "engine_actual":
+                missing.append("engine_actual_aabb")
+            if str(entity.get("engine_write_verification_status") or "") != "engine_verified":
+                missing.append("engine_ready")
+            if str(entity.get("grounding_status") or "").strip().lower() not in {
+                "grounded", "wall_mounted", "suspended", "ceiling_hung", "not_applicable"
+            }:
+                missing.append("grounding_status")
+            return missing
 
         def reviewed_ok_targets() -> set[str]:
             targets: set[str] = set()
@@ -19235,10 +20227,12 @@ class AgentRuntime:
             actor_sync = actor_sync_status(merged, asset_id)
             bounds = bounds_from(merged)
             actor_source = str(merged.get("source") or "").strip()
-            geometry_source = str(merged.get("bounds_source") or "") or (
+            raw_bounds_source = str(merged.get("bounds_source") or "").strip()
+            geometry_source = (
                 "runtime_estimated_bounds"
-                if actor_source == "engine_import_runtime_estimated_bounds"
-                else "runtime_state"
+                if raw_bounds_source == "estimated"
+                or actor_source == "engine_import_runtime_estimated_bounds"
+                else raw_bounds_source or "runtime_state"
             )
             entity_id = str(merged.get("entity_id") or "").strip() or stable_entity_id(
                 active_plan_id,
@@ -19268,7 +20262,9 @@ class AgentRuntime:
                 "transform": transform_from(merged),
                 "bounds": bounds,
                 "aabb": dict(bounds),
+                "world_aabb": dict(bounds),
                 "bounds_ready": bool(merged.get("bounds_ready")) if "bounds_ready" in merged else bool(bounds),
+                "bounds_source": raw_bounds_source or "runtime_state",
                 "size": vector3(merged.get("size")),
                 "geometry_source": geometry_source,
                 "grounding_status": actor_grounding_status(merged),
@@ -19286,6 +20282,22 @@ class AgentRuntime:
                 "plan_id": str(merged.get("plan_id") or active_plan_id),
                 "batch_id": str(merged.get("batch_id") or ""),
             }
+            game_ready = entity_is_game_ready(entity)
+            entity["readiness_missing_fields"] = readiness_missing_fields(entity)
+            entity["materialization_status"] = (
+                "engine_ready"
+                if game_ready
+                else "engine_ready_needs_review"
+                if entity["engine_write_verification_status"] == "engine_verified"
+                else "engine_loading"
+                if entity["engine_write_verification_status"] == "engine_loading"
+                else "planned"
+                if entity["engine_write_verification_status"] == "planned"
+                else "runtime_ready_pending_f5"
+                if bool(entity["actor_id"]) and bool(entity["transform"]) and bool(entity["aabb"])
+                else "runtime_only"
+            )
+            entity["game_ready"] = game_ready
             seen_entity_ids.add(entity["entity_id"])
             if entity["semantic_role"]:
                 seen_semantic_roles.add(entity["semantic_role"])
@@ -19299,6 +20311,19 @@ class AgentRuntime:
                 if not isinstance(component, Mapping):
                     continue
                 component_type = str(component.get("component_type") or "environment").strip() or "environment"
+                # Environment is the stable entity domain.  Terrain, skybox,
+                # room shells, floors, and transitions remain queryable through
+                # component_type instead of fragmenting the Game-ready schema.
+                component_entity_type = "environment"
+                component_asset_id = stable_environment_asset_id(component, component_type)
+                component_semantic_role = str(component.get("semantic_role") or "").strip()
+                if not component_semantic_role:
+                    if component_type == "room_box":
+                        component_semantic_role = "indoor_enclosure"
+                    elif component_type == "room_floor":
+                        component_semantic_role = "walkable_floor"
+                    else:
+                        component_semantic_role = str(component.get("name") or component_id or component_type)
                 entity_id = str(component.get("entity_id") or "").strip() or stable_entity_id(
                     active_plan_id,
                     "environment",
@@ -19318,21 +20343,18 @@ class AgentRuntime:
                     "native_name": str(component.get("native_name") or component.get("name") or component_id),
                     "requested_name": str(component.get("requested_name") or ""),
                     "aliases": list_field(component, "aliases"),
-                    "asset_id": str(component.get("asset_id") or ""),
+                    "asset_id": component_asset_id,
                     "model_ref": str(component.get("model_ref") or component.get("handler") or component_type),
-                    "semantic_role": str(
-                        component.get("semantic_role")
-                        or "indoor_enclosure" if component_type == "room_box"
-                        else "walkable_floor" if component_type == "room_floor"
-                        else "environment_component"
-                    ),
-                    "entity_type": "environment",
+                    "semantic_role": component_semantic_role,
+                    "entity_type": component_entity_type,
                     "component_type": component_type,
                     "environment_component_type": component_type,
                     "transform": transform_from(component),
                     "bounds": bounds,
                     "aabb": dict(bounds),
+                    "world_aabb": dict(bounds),
                     "bounds_ready": bool(component.get("bounds_ready")) if "bounds_ready" in component else bool(bounds),
+                    "bounds_source": str(component.get("bounds_source") or "runtime_state"),
                     "size": vector3(component.get("size")),
                     "grounding_status": "not_applicable",
                     "interaction_capability": list_field(component, "interaction_capability"),
@@ -19345,11 +20367,27 @@ class AgentRuntime:
                     "sync_status": component_sync,
                     "sync_lifecycle_status": sync_lifecycle_status(component, component_sync),
                     "engine_write_verification_status": engine_write_verification_status(component),
-                    "asset_transfer_status": asset_transfer_status(str(component.get("asset_id") or "")),
+                    "asset_transfer_status": asset_transfer_status(component_asset_id),
                     "review_status": review_status_for(component, str(component.get("name") or component_id)),
                     "plan_id": active_plan_id,
                     "batch_id": str(current_batch_id),
                 }
+                game_ready = entity_is_game_ready(entity)
+                entity["readiness_missing_fields"] = readiness_missing_fields(entity)
+                entity["materialization_status"] = (
+                    "engine_ready"
+                    if game_ready
+                    else "engine_ready_needs_review"
+                    if entity["engine_write_verification_status"] == "engine_verified"
+                    else "engine_loading"
+                    if entity["engine_write_verification_status"] == "engine_loading"
+                    else "planned"
+                    if entity["engine_write_verification_status"] == "planned"
+                    else "runtime_ready_pending_f5"
+                    if bool(entity["actor_id"]) and bool(entity["transform"]) and bool(entity["aabb"])
+                    else "runtime_only"
+                )
+                entity["game_ready"] = game_ready
                 seen_entity_ids.add(entity_id)
                 if entity["semantic_role"]:
                     seen_semantic_roles.add(entity["semantic_role"])
@@ -19382,6 +20420,12 @@ class AgentRuntime:
                 "sync_status": "planned",
                 "sync_lifecycle_status": "planned",
                 "engine_write_verification_status": "planned",
+                "materialization_status": "planned",
+                "game_ready": False,
+                "readiness_missing_fields": [
+                    "actor_id", "asset_id", "model_ref", "transform", "world_aabb",
+                    "engine_actual_aabb", "engine_ready",
+                ],
                 "asset_transfer_status": asset_transfer_status(""),
                 "review_status": "pending_review",
                 "plan_id": active_plan_id,
@@ -19396,6 +20440,7 @@ class AgentRuntime:
         review_status_counts: dict[str, int] = {}
         geometry_source_counts: dict[str, int] = {}
         engine_write_verification_status_counts: dict[str, int] = {}
+        materialization_status_counts: dict[str, int] = {}
         transform_available_count = 0
         aabb_available_count = 0
         actor_transform_available_count = 0
@@ -19431,6 +20476,10 @@ class AgentRuntime:
                 engine_write_verification_status_counts,
                 str(entity.get("engine_write_verification_status") or "unknown"),
             )
+            add_count(
+                materialization_status_counts,
+                str(entity.get("materialization_status") or "unknown"),
+            )
             if is_actor_entity:
                 add_count(geometry_source_counts, str(entity.get("geometry_source") or "unknown"))
         actor_count = sum(
@@ -19443,6 +20492,17 @@ class AgentRuntime:
         estimated_actor_bounds_count = int(geometry_source_counts.get("runtime_estimated_bounds") or 0)
         engine_write_pending_f5_count = int(engine_write_verification_status_counts.get("pending_f5") or 0)
         engine_write_verified_count = int(engine_write_verification_status_counts.get("engine_verified") or 0)
+        game_ready_entity_count = sum(1 for entity in entities if bool(entity.get("game_ready")))
+        readiness_missing_field_counts: dict[str, int] = {}
+        for entity in entities:
+            for field_name in list(entity.get("readiness_missing_fields") or []):
+                add_count(readiness_missing_field_counts, str(field_name or "unknown"))
+        planned_substrate_count = sum(
+            1
+            for entity in entities
+            if str(entity.get("entity_type") or "") == "substrate"
+            and str(entity.get("materialization_status") or "") == "planned"
+        )
         failed_actor_requests = failed_actor_requests_for_plan()
         failed_actor_request_count = len(failed_actor_requests)
         failed_environment_requests = failed_environment_requests_for_plan()
@@ -19464,7 +20524,13 @@ class AgentRuntime:
             "batch_id": active_batch_id,
             "entity_count": len(entities),
             "actor_count": actor_count,
-            "environment_count": sum(1 for entity in entities if entity.get("entity_type") != "actor"),
+            "environment_count": sum(
+                1 for entity in entities if entity.get("entity_type") == "environment"
+            ),
+            "game_ready_entity_count": game_ready_entity_count,
+            "needs_review_entity_count": max(0, len(entities) - game_ready_entity_count),
+            "readiness_missing_field_counts": dict(sorted(readiness_missing_field_counts.items())),
+            "planned_substrate_count": planned_substrate_count,
             "readiness_status": readiness_status,
             "transform_available_count": transform_available_count,
             "aabb_available_count": aabb_available_count,
@@ -19484,12 +20550,65 @@ class AgentRuntime:
             ),
             "engine_write_pending_f5_count": engine_write_pending_f5_count,
             "engine_write_verified_count": engine_write_verified_count,
+            "materialization_status_counts": dict(sorted(materialization_status_counts.items())),
             "failed_actor_request_count": failed_actor_request_count,
             "failed_actor_requests": failed_actor_requests[-10:],
             "failed_environment_request_count": failed_environment_request_count,
             "failed_environment_requests": failed_environment_requests[-10:],
             "entities": entities,
         }
+
+    @staticmethod
+    def _scene_world_snapshot_for_plan(
+        room: Mapping[str, Any],
+        plan_id: str,
+        *,
+        room_id: str,
+        scene_entity_registry: Mapping[str, Any],
+        operation_cursor: str,
+    ) -> dict[str, Any]:
+        entities = [
+            dict(item)
+            for item in list(scene_entity_registry.get("entities") or [])
+            if isinstance(item, Mapping)
+        ]
+        environment_entities = [
+            item for item in entities if str(item.get("entity_type") or "") == "environment"
+        ]
+        actor_entities = [
+            item for item in entities if str(item.get("entity_type") or "") not in {"environment", "substrate"}
+        ]
+        entity_count = len(entities)
+        game_ready_count = int(scene_entity_registry.get("game_ready_entity_count") or 0)
+        failed_count = int(scene_entity_registry.get("failed_actor_request_count") or 0) + int(
+            scene_entity_registry.get("failed_environment_request_count") or 0
+        )
+        if entity_count > 0 and game_ready_count == entity_count and failed_count == 0:
+            world_readiness = "game_ready"
+        elif entity_count > 0:
+            world_readiness = "needs_review"
+        else:
+            world_readiness = "blocked"
+        plan = dict(dict(room.get("scene_plans") or {}).get(str(plan_id or "")) or {})
+        snapshot = SceneWorldSnapshot(
+            room_id=str(room_id or ""),
+            plan_id=str(plan_id or ""),
+            scene_version=max(1, int(plan.get("version") or 1)),
+            world_readiness=world_readiness,
+            environment_entities=environment_entities,
+            actor_entities=actor_entities,
+            readiness_summary={
+                "entity_count": entity_count,
+                "game_ready_entity_count": game_ready_count,
+                "needs_review_entity_count": max(0, entity_count - game_ready_count),
+                "failed_request_count": failed_count,
+                "missing_field_counts": dict(
+                    scene_entity_registry.get("readiness_missing_field_counts") or {}
+                ),
+            },
+            operation_cursor=str(operation_cursor or ""),
+        )
+        return snapshot.as_dict()
 
     @staticmethod
     def _sync_readiness_summary(
@@ -19511,7 +20630,7 @@ class AgentRuntime:
         environment_entities = [
             entity
             for entity in entities
-            if str(entity.get("entity_type") or "") != "actor"
+            if str(entity.get("entity_type") or "") not in {"actor", "substrate"}
         ]
         actor_count = len(actor_entities)
         actor_ready_for_sync_count = 0
@@ -20577,13 +21696,26 @@ class AgentRuntime:
             for item in graph_queue_items
             if str(item.get("graph_id") or "")
         }
+        business_graph_ids = {
+            str(item.get("tool_graph_id") or "")
+            for item in room.get("batch_plans", {}).values()
+            if isinstance(item, Mapping)
+            and (not active_plan_id or str(item.get("plan_id") or "") == active_plan_id)
+            and str(item.get("tool_graph_id") or "")
+        }
         user_visible_graphs = [
             item
             for item in graphs
-            if str(item.get("graph_id") or "") in queued_graph_ids
+            if str(item.get("graph_role") or "") == "business_batch"
+            or str(item.get("graph_id") or "") in business_graph_ids
         ]
-        if not user_visible_graphs:
-            user_visible_graphs = list(graphs)
+        internal_graphs = [
+            item
+            for item in graphs
+            if str(item.get("graph_id") or "") not in {
+                str(graph.get("graph_id") or "") for graph in user_visible_graphs
+            }
+        ]
         batches = [
             dict(item)
             for item in room.get("batch_plans", {}).values()
@@ -20673,6 +21805,12 @@ class AgentRuntime:
             active_plan_id,
             batch_id=batch_id,
         )
+        engine_write_adapter_summary = self._reconcile_engine_write_adapter_summary(
+            engine_write_adapter_summary,
+            scene_entity_registry=scene_entity_registry,
+            import_summary=import_summary,
+            environment_component_summary=environment_component_summary,
+        )
         sync_readiness_summary = self._sync_readiness_summary(
             scene_entity_registry=scene_entity_registry,
             sync_summary=sync_summary,
@@ -20755,6 +21893,50 @@ class AgentRuntime:
                 "report_generated": True,
             },
         )
+        terminal_batch_statuses = {"completed", "failed", "cancelled", "abandoned", "partial"}
+        pipeline_status = (
+            "completed"
+            if batches and all(str(item.get("status") or "") in terminal_batch_statuses for item in batches)
+            else "running"
+        )
+        entity_count = int(scene_entity_registry.get("entity_count") or 0)
+        game_ready_count = int(scene_entity_registry.get("game_ready_entity_count") or 0)
+        engine_verified_count = int(scene_entity_registry.get("engine_write_verified_count") or 0)
+        failed_request_count = int(scene_entity_registry.get("failed_actor_request_count") or 0) + int(
+            scene_entity_registry.get("failed_environment_request_count") or 0
+        )
+        if failed_request_count and engine_verified_count <= 0:
+            engine_materialization_status = "failed"
+        elif entity_count > 0 and engine_verified_count >= entity_count:
+            engine_materialization_status = "ready"
+        else:
+            engine_materialization_status = "partial"
+        world_readiness = (
+            "game_ready"
+            if entity_count > 0 and game_ready_count == entity_count and failed_request_count == 0
+            else "needs_review"
+            if entity_count > 0
+            else "blocked"
+        )
+        completion_status = {
+            "pipeline_status": pipeline_status,
+            "engine_materialization_status": engine_materialization_status,
+            "world_readiness": world_readiness,
+        }
+        tool_graph_domain_summary = {
+            "business_batch_count": len(user_visible_graphs),
+            "internal_graph_count": len(internal_graphs),
+            "total_graph_count": len(graphs),
+            "business_node_count": sum(len(dict(item.get("nodes") or {})) for item in user_visible_graphs),
+            "internal_node_count": sum(len(dict(item.get("nodes") or {})) for item in internal_graphs),
+        }
+        scene_world_snapshot = self._scene_world_snapshot_for_plan(
+            room,
+            active_plan_id,
+            room_id=str(room_id),
+            scene_entity_registry=scene_entity_registry,
+            operation_cursor=f"op:{len(self.operation_log.entries())}",
+        )
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -20781,6 +21963,7 @@ class AgentRuntime:
             "plan_summary": {
                 "title": str(plan.get("title") or ""),
                 "status": str(plan.get("status") or ""),
+                "version": int(plan.get("version") or 0),
                 "owner_agent": str(plan.get("owner_agent") or ""),
                 "design_brief_preview": str(plan.get("design_brief") or "")[:240],
                 "concrete_object_items": list(plan.get("concrete_object_items") or []),
@@ -20790,6 +21973,9 @@ class AgentRuntime:
             "scene_design_contract_summary": scene_design_contract_summary,
             "semantic_arbitration_summary": semantic_arbitration_summary,
             "scene_entity_registry": scene_entity_registry,
+            "scene_world_snapshot": scene_world_snapshot,
+            "completion_status": completion_status,
+            "tool_graph_domain_summary": tool_graph_domain_summary,
             "sync_readiness_summary": sync_readiness_summary,
             "scene_snapshot_summary": scene_snapshot_summary,
             "environment_component_summary": environment_component_summary,
@@ -21053,6 +22239,13 @@ class AgentRuntime:
             report_event_title = "场景仍在等待引擎就绪"
             report_event_message = "模型或环境组件仍在进入场景，当前仅提供阶段性状态。"
             report_event_level = "info"
+        elif completion_status["world_readiness"] != "game_ready" and report_event_level == "info":
+            report_event_level = "warning"
+            report_event_title = "生成流程已完成（实体世界仍需检查）"
+            report_event_message = (
+                f"流程已完成，但仅 {game_ready_count}/{entity_count} 个实体达到 Game-ready；"
+                "缺失的引擎几何、AABB、贴地或同步事实已列入最终报告。"
+            )
         self.emit_runtime_event(
             room_id=str(room_id),
             plan_id=active_plan_id,
@@ -21065,8 +22258,13 @@ class AgentRuntime:
             progress=100 if report_terminal else 96,
             payload={
                 "status": str(plan.get("status") or ""),
+                "pipeline_status": completion_status["pipeline_status"],
+                "engine_materialization_status": completion_status["engine_materialization_status"],
+                "world_readiness": completion_status["world_readiness"],
                 "actor_count": len(scoped_actor_facts),
                 "batch_count": len(batches),
+                "business_graph_count": int(tool_graph_domain_summary["business_batch_count"]),
+                "internal_graph_count": int(tool_graph_domain_summary["internal_graph_count"]),
                 "model_item_count": len(list(classification_summary.get("model_items") or [])),
                 "substrate_item_count": len(list(classification_summary.get("substrate_items") or [])),
                 "layout_item_count": len(list(classification_summary.get("layout_items") or [])),
@@ -21142,6 +22340,22 @@ class AgentRuntime:
                 ),
                 "actor_registry_actor_count": int(
                     report_health_summary.get("actor_registry_actor_count") or 0
+                ),
+                "scene_entity_count": int(scene_entity_registry.get("entity_count") or 0),
+                "game_ready_entity_count": int(
+                    scene_entity_registry.get("game_ready_entity_count") or 0
+                ),
+                "needs_review_entity_count": int(
+                    scene_entity_registry.get("needs_review_entity_count") or 0
+                ),
+                "environment_entity_count": int(
+                    scene_entity_registry.get("environment_count") or 0
+                ),
+                "planned_substrate_count": int(
+                    scene_entity_registry.get("planned_substrate_count") or 0
+                ),
+                "materialization_status_counts": AgentRuntime._safe_status_count_map(
+                    scene_entity_registry.get("materialization_status_counts")
                 ),
                 "actor_registry_missing_transform_count": int(
                     report_health_summary.get("actor_registry_missing_transform_count") or 0
@@ -22221,6 +23435,11 @@ class AgentRuntime:
             environment_type = "outdoor"
             terrain_type = "outdoor_ground"
             boundary_type = "low_open_boundary"
+        elif classified_environment == "mixed_foundation":
+            scene_type = "mixed_scene"
+            environment_type = "mixed"
+            terrain_type = "mixed_transition_surface"
+            boundary_type = "transition_boundary"
 
         mood: list[str] = []
         style_keywords: list[str] = []
@@ -22268,7 +23487,7 @@ class AgentRuntime:
             if environment_type == "indoor"
             else ["terrain"]
             if environment_type == "outdoor"
-            else []
+            else ["terrain", "room_box", "room_floor", "transition_zone"]
         )
         return {
             "contract_id": f"contract-{plan.plan_id}",
@@ -22359,6 +23578,8 @@ class AgentRuntime:
         room_key = str(room_id)
         snapshot = self.state.snapshot(room_key)
         room = snapshot["room"]
+        requested_batch = self._batch_plan_for_batch_id(room, batch_id)
+        batch_plan_id = str(requested_batch.get("plan_id") or "")
         runtime_plan_id = (
             self._resolve_runtime_plan_id_from_state(
                 room_key,
@@ -22372,11 +23593,38 @@ class AgentRuntime:
         active_plan_id = str(
             plan_id
             or runtime_plan_id
-            or ("__missing_external_plan__" if missing_external_plan else room.get("active_plan_id"))
+            or batch_plan_id
+            or (
+                "__missing_external_plan__"
+                if missing_external_plan
+                else room.get("active_execution_plan_id")
+                or room.get("latest_completed_plan_id")
+                or room.get("active_discussion_plan_id")
+                or room.get("active_plan_id")
+            )
             or ""
         )
         active_batch_id = str(batch_id or "")
         plan = dict(room.get("scene_plans", {}).get(active_plan_id, {}) or {})
+        plan_status = str(plan.get("status") or "").strip().lower()
+        routable_plan_id = (
+            active_plan_id
+            if plan and plan_status not in {
+                ScenePlanStatus.COMPLETED.value,
+                ScenePlanStatus.FAILED.value,
+                ScenePlanStatus.CANCELLED.value,
+            }
+            else ""
+        )
+        routable_external_plan_id = ""
+        if routable_plan_id:
+            for candidate_external_id, candidate_runtime_id in dict(
+                room.get("external_plan_links") or {}
+            ).items():
+                if str(candidate_runtime_id or "") == routable_plan_id:
+                    routable_external_plan_id = str(candidate_external_id or "").strip()
+                    if routable_external_plan_id:
+                        break
         batches = [
             dict(item)
             for item in room.get("batch_plans", {}).values()
@@ -22643,6 +23891,12 @@ class AgentRuntime:
             replay_summary=engine_write_summary,
             layout_adjustment_summary=layout_adjustment_summary,
         )
+        engine_write_adapter_summary = self._reconcile_engine_write_adapter_summary(
+            engine_write_adapter_summary,
+            scene_entity_registry=scene_entity_registry,
+            import_summary=import_summary,
+            environment_component_summary=environment_component_summary,
+        )
         resource_summary = self._resource_summary_for_plan(room, active_plan_id, batch_id=active_batch_id)
         batch_resource_flow_summary = self._batch_resource_flow_summary_for_plan(
             room,
@@ -22771,6 +24025,11 @@ class AgentRuntime:
             "room_id": room_key,
             "available": available,
             "plan_id": active_plan_id if available else "",
+            "active_plan_id": routable_plan_id,
+            "active_discussion_plan_id": str(room.get("active_discussion_plan_id") or ""),
+            "active_execution_plan_id": str(room.get("active_execution_plan_id") or ""),
+            "latest_completed_plan_id": str(room.get("latest_completed_plan_id") or ""),
+            "active_external_plan_id": routable_external_plan_id,
             "batch_id": active_batch_id,
             "state_version": snapshot["version"],
             "operation_count": int(operation_scope.get("entry_count") or 0),
@@ -26588,7 +27847,13 @@ class AgentRuntime:
 
         room_key = str(room_id or normalized.get("room_id") or "default")
         room_state = self.state.room(room_key)
-        active_plan_id = str(room_state.get("active_plan_id") or "")
+        active_plan_id = str(
+            room_state.get("active_execution_plan_id")
+            or room_state.get("latest_completed_plan_id")
+            or room_state.get("active_discussion_plan_id")
+            or room_state.get("active_plan_id")
+            or ""
+        )
         explicit_batch_id = str(normalized.get("batch_id") or "")
         explicit_plan_id = str(normalized.get("plan_id") or "")
         explicit_external_plan_id = str(normalized.pop("external_plan_id", "") or "")
@@ -28483,7 +29748,13 @@ class AgentRuntime:
         self.operation_log.append("runtime_state_queried", room_id=str(room_id))
         snapshot = self.state.snapshot(room_id)
         room = dict(snapshot.get("room") or {})
-        active_plan_id = str(room.get("active_plan_id") or "")
+        active_plan_id = str(
+            room.get("active_execution_plan_id")
+            or room.get("latest_completed_plan_id")
+            or room.get("active_discussion_plan_id")
+            or room.get("active_plan_id")
+            or ""
+        )
         active_batch_id = str(room.get("active_batch_id") or "")
         if not active_batch_id and active_plan_id:
             batch_ids = self._batch_ids_for_plan(room, active_plan_id)
@@ -28590,6 +29861,12 @@ class AgentRuntime:
             replay_summary=engine_write_summary,
             layout_adjustment_summary=layout_adjustment_summary,
         )
+        engine_write_adapter_summary = self._reconcile_engine_write_adapter_summary(
+            engine_write_adapter_summary,
+            scene_entity_registry=scene_entity_registry,
+            import_summary=import_summary,
+            environment_component_summary=environment_component_summary,
+        )
         fact_source_boundary_summary = self._fact_source_boundary_summary(
             plan_summary={
                 "title": str(plan.get("title") or ""),
@@ -28676,12 +29953,21 @@ class AgentRuntime:
         active_plan = self._active_scene_plan_for_room(room)
         if active_plan is not None:
             scene_name = str(active_plan.scene_name or "")
+        room_before_snapshot = self.state.room(room)
+        known_actors = self._safe_snapshot_known_actor_projection(
+            room_before_snapshot.get("actors")
+        )
         graph = ToolCallGraph(graph_id=_id("graph"), plan_id=f"scene-snapshot:{room}", batch_id="")
         graph.add(
             ToolCall(
                 tool_call_id=_id("tool"),
                 tool_name="runtime.scene.snapshot",
-                args={"room_id": room, "scene_name": scene_name},
+                args={
+                    "room_id": room,
+                    "scene_name": scene_name,
+                    "plan_id": str(active_plan.plan_id if active_plan is not None else ""),
+                    "known_actors": known_actors,
+                },
                 risk_level=RiskLevel.LOW,
             )
         )
@@ -30045,7 +31331,12 @@ class AgentRuntime:
 
     def _active_scene_plan_id_for_room_state(self, room_id: str) -> str:
         room = self.state.room(room_id)
-        active_plan_id = str(room.get("active_plan_id") or "")
+        active_plan_id = str(
+            room.get("active_execution_plan_id")
+            or room.get("active_discussion_plan_id")
+            or room.get("active_plan_id")
+            or ""
+        )
         scene_plans = room.get("scene_plans", {})
         if not active_plan_id or not isinstance(scene_plans, dict) or active_plan_id not in scene_plans:
             return ""
@@ -30058,6 +31349,7 @@ class AgentRuntime:
         plan_id: str = "",
         external_plan_id: str = "",
         allow_active: bool = True,
+        allow_completed: bool = False,
     ) -> str:
         room = self.state.room(room_id)
         scene_plans = room.get("scene_plans", {})
@@ -30071,9 +31363,15 @@ class AgentRuntime:
             return linked
         if external and external in scene_plan_ids:
             return external
-        active = str(room.get("active_plan_id") or "")
-        if allow_active and active and active in scene_plan_ids:
-            return active
+        if allow_active:
+            active_keys = ["active_execution_plan_id"]
+            if allow_completed:
+                active_keys.append("latest_completed_plan_id")
+            active_keys.extend(("active_discussion_plan_id", "active_plan_id"))
+            for active_key in active_keys:
+                active = str(room.get(active_key) or "")
+                if active and active in scene_plan_ids:
+                    return active
         return ""
 
     def _runtime_plan_id_for_external_plan_state(self, room_id: str, external_plan_id: str) -> str:
@@ -30400,6 +31698,7 @@ class AgentRuntime:
         patch.items = [str(item) for item in (state.get("items") or []) if str(item)]
         patch.source_user = str(state.get("source_user") or "")
         patch.target_agent = str(state.get("target_agent") or "")
+        patch.idempotency_key = str(state.get("idempotency_key") or "")
         patch.risk_level = RiskLevel(str(state.get("risk_level") or RiskLevel.LOW.value))
         patch.status = PlanPatchStatus(str(state.get("status") or PlanPatchStatus.PENDING.value))
         patch.deferred_reason = str(state.get("deferred_reason") or "")
@@ -30497,6 +31796,7 @@ class AgentRuntime:
             items=[str(item) for item in (row.get("items") or []) if str(item)],
             source_user=str(row.get("source_user") or ""),
             target_agent=str(row.get("target_agent") or ""),
+            idempotency_key=str(row.get("idempotency_key") or ""),
             risk_level=RiskLevel(str(row.get("risk_level") or RiskLevel.LOW.value)),
             status=PlanPatchStatus(str(row.get("status") or PlanPatchStatus.PENDING.value)),
             deferred_reason=str(row.get("deferred_reason") or ""),
@@ -30621,6 +31921,51 @@ class AgentRuntime:
         if not applied:
             raise RuntimeError(f"failed to persist scene plan status: {apply_reason}")
 
+    def _persist_plan_identity_changes(
+        self,
+        *,
+        room_id: str,
+        plan_id: str,
+        changes: Mapping[str, Any],
+        reason: str,
+    ) -> None:
+        graph = ToolCallGraph(
+            graph_id=_id("graph-plan-identity-persist"),
+            plan_id=str(plan_id),
+        )
+        graph.add(
+            ToolCall(
+                tool_call_id=_id("tool-plan-identity-persist"),
+                tool_name="runtime.scene_plan.persist",
+                args={
+                    "room_id": str(room_id),
+                    "plan_id": str(plan_id),
+                    "changes": dict(changes),
+                    "reason": str(reason or ""),
+                },
+                risk_level=RiskLevel.LOW,
+                requires_write=True,
+                confirmed=True,
+            )
+        )
+        executor = ToolCallGraphExecutor(
+            registry=self.registry,
+            guard=self.guard,
+            state=self.state,
+            operation_log=self.operation_log,
+        )
+        executor.execute(graph, room_id=str(room_id))
+        call = next(iter(graph.nodes.values()))
+        if graph.status != "completed" or call.status != ToolCallStatus.SUCCEEDED:
+            raise RuntimeError(f"failed to persist plan identity: {call.error or graph.status}")
+        self.operation_log.append(
+            "runtime_plan_identity_persisted",
+            room_id=str(room_id),
+            plan_id=str(plan_id),
+            message=str(reason or ""),
+            payload={"changed_fields": sorted(str(key) for key in changes)},
+        )
+
     def _persist_new_scene_plan(
         self,
         plan: ScenePlan,
@@ -30633,6 +31978,7 @@ class AgentRuntime:
         scene_design_contract = self._derive_scene_design_contract_fact(plan)
         changes: dict[str, Any] = {
             "active_plan_id": plan.plan_id,
+            "active_discussion_plan_id": plan.plan_id,
             "scene_plans": {plan.plan_id: plan.as_dict()},
             "custom_scene_design_contract_facts": {plan.plan_id: scene_design_contract},
         }
@@ -30851,6 +32197,7 @@ class AgentRuntime:
             context_event=context_event,
             changes={
                 "active_plan_id": plan.plan_id,
+                "active_discussion_plan_id": plan.plan_id,
                 "scene_plans": {plan.plan_id: plan.as_dict()},
                 "planning_context_events": [dict(context_event or {})],
             },
@@ -31088,6 +32435,7 @@ class AgentRuntime:
             actor_import_provider=self._actor_import_provider,
             review_provider=self._review_provider,
             vlm_review_provider=self._vlm_review_provider,
+            require_engine_environment_import=self._require_engine_environment_import,
             require_engine_actor_import=self._require_engine_actor_import,
         )
         register_agent_runtime_scene_read_tools(self.registry, self._scene_snapshot_provider)
@@ -31169,6 +32517,23 @@ class AgentRuntime:
                 requires_user_visible_failure=True,
                 description="Record a safe reconcile decision for a RuntimeState StatePatch conflict.",
             )
+        if not self.registry.has("runtime.engine_readiness.reconcile"):
+            self.registry.register(
+                "runtime.engine_readiness.reconcile",
+                self._reconcile_engine_readiness_tool,
+                category=ToolCategory.SYNC,
+                default_risk_level=RiskLevel.LOW,
+                requires_write=True,
+                required_args=("room_id", "plan_id", "patch_ref"),
+                consumes_state={
+                    "actors": {"state_key": "actors", "scope": "room"},
+                    "environment_components": {"state_key": "environment_components", "scope": "plan"},
+                    "custom_import_facts": {"state_key": "custom_import_facts", "scope": "plan"},
+                },
+                produces_state=("environment_components", "custom_import_facts"),
+                requires_user_visible_failure=True,
+                description="Reconcile authoritative native bounds into pending Runtime import facts.",
+            )
         if not self.registry.has("runtime.command.record"):
             self.registry.register(
                 "runtime.command.record",
@@ -31178,7 +32543,10 @@ class AgentRuntime:
                 requires_write=True,
                 required_args=("room_id", "plan_id", "changes", "command", "old_status", "new_status"),
                 produces_state=(
+                    "active_discussion_plan_id",
+                    "active_execution_plan_id",
                     "active_plan_id",
+                    "latest_completed_plan_id",
                     "scene_plans",
                     "runtime_commands",
                     "batch_plans",
@@ -31197,7 +32565,10 @@ class AgentRuntime:
                 requires_write=True,
                 required_args=("room_id", "plan_id", "changes"),
                 produces_state=(
+                    "active_discussion_plan_id",
+                    "active_execution_plan_id",
                     "active_plan_id",
+                    "latest_completed_plan_id",
                     "scene_plans",
                     "external_plan_links",
                     "planning_context_events",
@@ -31238,7 +32609,12 @@ class AgentRuntime:
                 default_risk_level=RiskLevel.LOW,
                 requires_write=True,
                 required_args=("room_id", "changes", "context_event"),
-                produces_state=("active_plan_id", "scene_plans", "planning_context_events"),
+                produces_state=(
+                    "active_plan_id",
+                    "active_discussion_plan_id",
+                    "scene_plans",
+                    "planning_context_events",
+                ),
                 requires_user_visible_failure=True,
                 description="Persist planning context events and optional ScenePlan brief updates through RuntimeState.",
             )
@@ -31251,6 +32627,7 @@ class AgentRuntime:
                 requires_write=True,
                 required_args=("room_id", "plan_id", "batch_id", "graph_id", "changes"),
                 produces_state=(
+                    "active_execution_plan_id",
                     "scene_plans",
                     "batch_plans",
                     "tool_graphs",
@@ -31272,6 +32649,7 @@ class AgentRuntime:
                 requires_write=True,
                 required_args=("room_id", "plan_id", "changes"),
                 produces_state=(
+                    "active_execution_plan_id",
                     "scene_plans",
                     "batch_plans",
                     "tool_graphs",
@@ -31293,6 +32671,7 @@ class AgentRuntime:
                 requires_write=True,
                 required_args=("room_id", "plan_id", "batch_id", "graph_id", "changes"),
                 produces_state=(
+                    "active_execution_plan_id",
                     "scene_plans",
                     "batch_plans",
                     "tool_graphs",
@@ -31921,7 +33300,13 @@ class AgentRuntime:
         }
 
     def _build_batch_execution_graph(self, plan: ScenePlan, batch: BatchPlan, *, scene_name: str = "") -> ToolCallGraph:
-        graph = ToolCallGraph(graph_id=_id("graph"), plan_id=plan.plan_id, batch_id=batch.batch_id)
+        graph = ToolCallGraph(
+            graph_id=_id("graph"),
+            plan_id=plan.plan_id,
+            batch_id=batch.batch_id,
+            graph_role="business_batch",
+        )
+        scene_contract = self._derive_scene_design_contract_fact(plan)
         snapshot_id = _id("tool")
         extract_id = _id("tool")
         classify_id = _id("tool")
@@ -32036,6 +33421,10 @@ class AgentRuntime:
                     "design_brief": plan.design_brief,
                     "layout_items": list(plan.layout_items),
                     "bounds_fact_id": f"{plan.plan_id}:bounds",
+                    "environment_type": str(scene_contract.get("environment_type") or "mixed"),
+                    "required_environment_components": list(
+                        scene_contract.get("required_environment_components") or []
+                    ),
                 },
                 risk_level=RiskLevel.LOW,
                 depends_on=[substrate_resolve_id],

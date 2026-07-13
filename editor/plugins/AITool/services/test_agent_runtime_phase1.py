@@ -2280,6 +2280,60 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(health["engine_write_runtime_state_only_channels"], ["actor-import"])
         self.assertIn("engine_write_runtime_state_only", health["reasons"])
 
+    def test_report_health_resolves_only_mismatches_covered_by_engine_verified_entities(self) -> None:
+        common = {
+            "batch_resource_flow_summary": {"batch_count": 1},
+            "import_summary": {"requested_count": 1, "imported_count": 1, "failed_count": 0},
+            "sync_health_digest": {"status": "healthy"},
+            "resource_summary": {},
+            "environment_component_summary": {
+                "import_requested_count": 1,
+                "imported_count": 1,
+                "import_failed_count": 0,
+            },
+            "engine_write_summary": {
+                "readiness_mismatch_count": 2,
+                "readiness_mismatch_channels": ["actor_import", "environment_import"],
+            },
+            "worker_drain_replay_summary": {},
+        }
+        verified_registry = {
+            "readiness_status": "ready",
+            "actor_count": 1,
+            "missing_transform_count": 0,
+            "missing_aabb_count": 0,
+            "entities": [
+                {"entity_type": "actor", "engine_write_verification_status": "engine_verified"},
+                {"entity_type": "environment", "engine_write_verification_status": "engine_verified"},
+            ],
+        }
+        loading_registry = {
+            **verified_registry,
+            "entities": [
+                {"entity_type": "actor", "engine_write_verification_status": "engine_loading"},
+                {"entity_type": "environment", "engine_write_verification_status": "engine_loading"},
+            ],
+        }
+
+        verified = AgentRuntime._report_health_summary(
+            **common,
+            scene_entity_registry=verified_registry,
+        )
+        loading = AgentRuntime._report_health_summary(
+            **common,
+            scene_entity_registry=loading_registry,
+        )
+
+        self.assertEqual(verified["engine_write_readiness_mismatch_count"], 0)
+        self.assertEqual(verified["engine_write_readiness_mismatch_channels"], [])
+        self.assertEqual(verified["status"], "ok")
+        self.assertEqual(loading["engine_write_readiness_mismatch_count"], 2)
+        self.assertEqual(
+            loading["engine_write_readiness_mismatch_channels"],
+            ["actor-import", "environment-import"],
+        )
+        self.assertEqual(loading["status"], "needs_attention")
+
     def test_report_health_marks_worker_drain_failed_from_operation_log(self) -> None:
         runtime = AgentRuntime()
         runtime.operation_log.append(
@@ -3031,6 +3085,136 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         state = runtime.query_state("room-drain-env-partial")["room"]
         self.assertEqual(state["batch_plans"][batch.batch_id]["status"], BatchPlanStatus.PARTIAL.value)
         self.assertIn("batch_terminal_status_from_runtime_facts", runtime.operation_log.events())
+        batch_event = next(
+            event
+            for event in runtime.user_visible_events("room-drain-env-partial", plan_id=plan.plan_id)
+            if event["event_type"] == "batch_completed"
+        )
+        self.assertIn("部分完成", batch_event["title"])
+        self.assertEqual(batch_event["level"], "warning")
+        self.assertEqual(batch_event["payload"]["status"], BatchPlanStatus.PARTIAL.value)
+        self.assertEqual(batch_event["payload"]["graph_status"], "completed")
+
+    def test_started_event_copy_uses_report_and_plan_specific_messages(self) -> None:
+        report_title, report_message = ToolCallGraphExecutor._started_event_copy(
+            ToolCategory.REPORT,
+            ToolCall(tool_call_id="tool-report", tool_name="report.generate", requires_write=True),
+        )
+        plan_title, plan_message = ToolCallGraphExecutor._started_event_copy(
+            ToolCategory.PLAN,
+            ToolCall(tool_call_id="tool-plan", tool_name="batch.mark_completed", requires_write=True),
+        )
+
+        self.assertIn("最终报告", report_title)
+        self.assertIn("最终报告", report_message)
+        self.assertIn("方案状态", plan_title)
+        self.assertNotIn("场景调整", plan_message)
+
+    def test_worker_drain_returns_final_report_already_persisted_in_runtime_state(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-worker-drain-report",
+            text="create a bedroom with a bed",
+            owner_agent="planner",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        queued = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=8)
+        self.assertEqual(len(queued["graphs"]), 1)
+
+        result = runtime.handle_message(
+            room_id="room-worker-drain-report",
+            text="runtime worker drain",
+            action="worker_drain",
+            external_plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+
+        self.assertEqual(result["drain"]["drained_count"], 1)
+        self.assertEqual(result["report"]["plan_id"], plan.plan_id)
+        self.assertIn("scene_entity_registry", result["report"])
+        persisted_reports = runtime.query_state("room-worker-drain-report")["room"]["reports"]
+        self.assertEqual(result["report"], persisted_reports[-1])
+
+    def test_plan_finalizer_retries_terminal_report_persistence_on_next_worker_drain(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-worker-drain-report-retry",
+            text="create a bedroom with a bed",
+            owner_agent="planner",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=8)
+        original_persist = runtime._persist_user_report
+        attempts = 0
+
+        def fail_first_persist(*args: object, **kwargs: object) -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("simulated report state patch failure")
+            original_persist(*args, **kwargs)
+
+        runtime._persist_user_report = fail_first_persist  # type: ignore[method-assign]
+        first = runtime.handle_message(
+            room_id="room-worker-drain-report-retry",
+            text="runtime worker drain",
+            action="worker_drain",
+            external_plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+
+        first_state = runtime.query_state("room-worker-drain-report-retry")["room"]
+        self.assertEqual(first["plan"]["status"], ScenePlanStatus.EXECUTING.value)
+        self.assertFalse(first.get("report"))
+        self.assertFalse(first_state["reports"])
+        self.assertIn("scene_plan_final_report_persist_pending", runtime.operation_log.events())
+
+        second = runtime.handle_message(
+            room_id="room-worker-drain-report-retry",
+            text="runtime worker drain",
+            action="worker_drain",
+            external_plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+
+        self.assertEqual(second["drain"]["drained_count"], 0)
+        self.assertEqual(second["plan"]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertEqual(second["report"]["plan_id"], plan.plan_id)
+        self.assertEqual(attempts, 2)
+
+    def test_plan_finalizer_does_not_treat_pending_report_as_terminal_report(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-worker-drain-pending-report",
+            text="create a bedroom with a bed",
+            owner_agent="planner",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=8)
+        pending_report = runtime.generate_report(
+            "room-worker-drain-pending-report",
+            plan_id=plan.plan_id,
+        )
+        self.assertEqual(
+            pending_report["plan_summary"]["status"],
+            ScenePlanStatus.EXECUTING.value,
+        )
+
+        result = runtime.handle_message(
+            room_id="room-worker-drain-pending-report",
+            text="runtime worker drain",
+            action="worker_drain",
+            external_plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+
+        self.assertEqual(result["plan"]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertEqual(
+            result["report"]["plan_summary"]["status"],
+            ScenePlanStatus.COMPLETED.value,
+        )
+        reports = runtime.query_state("room-worker-drain-pending-report")["room"]["reports"]
+        self.assertEqual(len(reports), 2)
 
     def test_drain_tool_graph_queue_restores_missing_in_memory_graph_from_state(self) -> None:
         runtime = AgentRuntime()
@@ -5991,7 +6175,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         self.assertTrue(result["status"]["available"])
         self.assertEqual(result["status"]["plan_id"], executed["plan"]["plan_id"])
-        self.assertNotIn("external_plan_id", result["status"])
+        self.assertEqual(result["status"]["active_plan_id"], "")
+        self.assertEqual(result["status"]["active_external_plan_id"], "")
         self.assertEqual(result["status"]["plan_summary"]["status"], "completed")
         self.assertGreaterEqual(result["status"]["batch_summary"]["batch_count"], 1)
         self.assertGreaterEqual(result["status"]["tool_graph_summary"]["graph_count"], 1)
@@ -9942,7 +10127,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         room = runtime.query_state("room-sync-registry")["room"]
         registry = AgentRuntime._scene_entity_registry_for_plan(room, plan.plan_id)
-        entity = next(item for item in registry["entities"] if item["entity_id"] == "actor-tent-sync")
+        entity = next(item for item in registry["entities"] if item["actor_id"] == "actor-tent-sync")
         sync_health = runtime.status_summary("room-sync-registry")["sync_health_digest"]
 
         self.assertEqual(entity["aabb"]["min"], [-1.0, 0.0, -1.0])
@@ -12786,7 +12971,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 event="runtime_event_emitted",
                 room_id="room-report-log-order",
             )
-            if str(entry.payload.get("event_type") or "") == "report_ready"
+            if str(entry.payload.get("event_type") or "") == "report_pending"
         ]
         self.assertTrue(report_ready_events)
         self.assertLess(
@@ -15158,8 +15343,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_import_summary["latest_events"][-1]["status"], "failed")
         report_registry = result["report"]["scene_entity_registry"]
         self.assertTrue(report_registry["available"])
-        self.assertEqual(report_registry["entity_count"], 0)
         self.assertEqual(report_registry["actor_count"], 0)
+        self.assertGreater(report_registry["environment_count"], 0)
+        self.assertEqual(
+            report_registry["entity_count"],
+            report_registry["environment_count"],
+        )
         self.assertGreaterEqual(report_registry["failed_actor_request_count"], import_result["actor_count"])
         self.assertEqual(
             report_registry["failed_actor_requests"][0]["failure_code"],
@@ -17936,7 +18125,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "runtime.asset.plan": ("model_items",),
             "runtime.substrate.plan": ("routes",),
             "runtime.substrate.resolve": ("substrate_plan",),
-            "runtime.environment.create_components": ("substrate_resolutions",),
+            "runtime.environment.create_components": ("substrate_resolutions", "room_bounds"),
             "runtime.environment.import_components": ("environment_components",),
             "runtime.asset.image.prepare": ("asset_requests", "model_items"),
             "runtime.asset.model.prepare": ("asset_requests", "model_items", "image_resources"),
@@ -18175,8 +18364,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             plan_id=plan.plan_id,
         )["scene_entity_registry"]
         registry_roles = {entity["semantic_role"]: entity for entity in registry["entities"]}
-        room_box_entity = registry_roles["__room_box"]
-        self.assertEqual(room_box_entity["entity_type"], "terrain")
+        room_box_entity = registry_roles["indoor_enclosure"]
+        self.assertEqual(room_box_entity["entity_type"], "environment")
         self.assertEqual(room_box_entity["component_type"], "room_box")
         self.assertEqual(room_box_entity["environment_component_type"], "room_box")
         self.assertEqual(room_box_entity["component_id"], "component-room-box")
@@ -19387,6 +19576,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                             "actor_id": "actor-table",
                             "name": "鏈ㄦ",
                             "source": "provider=internal.actor source",
+                            "bounds_ready": False,
+                            "world_aabb": [-0.5, 0.0, -0.5, 0.5, 1.0, 0.5],
                             "position": [0.0, 0.0, 0.0],
                         },
                         {},
@@ -19403,6 +19594,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(adapter_snapshot["actor_count"], 1)
         self.assertEqual(adapter_snapshot["source"], "scene_snapshot_tool")
         self.assertEqual(adapter_snapshot["actors"][0]["source"], "scene_snapshot")
+        self.assertFalse(adapter_snapshot["actors"][0]["bounds_ready"])
+        self.assertIn("aabb", adapter_snapshot["actors"][0])
         self.assertNotIn("scene_aabb", adapter_snapshot)
         self.assertNotIn("bounds_ready", adapter_snapshot)
         self.assertNotIn("scene", adapter_snapshot)
@@ -21220,7 +21413,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         component = next(iter(components.values()))
         EnvironmentComponentValidator.validate(component)
-        self.assertEqual(component["component_id"], "batch-env-safe-env-01")
+        self.assertEqual(component["component_id"], "plan-env-safe-env-01")
         self.assertEqual(component["name"], "鐭虫澘璺?")
         self.assertEqual(component["component_type"], "terrain")
         self.assertEqual(component["handler"], "terrain_component")
@@ -21274,6 +21467,46 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("api_key", str(result).lower())
         self.assertNotIn("internal.example", str(result).lower())
 
+    def test_engine_environment_import_rejects_success_without_native_actor_identity(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool: Any, payload: dict[str, Any]) -> dict[str, Any]:
+                return tool.invoke(payload)
+
+        class MissingIdentityEnvironmentTool:
+            def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "status": "success",
+                    "component_id": payload["component_id"],
+                    "component_type": payload["component_type"],
+                    "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                }
+
+        provider = make_engine_environment_component_import_provider(
+            environment_import_tool=MissingIdentityEnvironmentTool(),
+            engine_gate=FakeGate(),
+        )
+        result = provider({
+            "room_id": "room-env-missing-identity",
+            "plan_id": "plan-env-missing-identity",
+            "batch_id": "batch-env-missing-identity",
+            "environment_components": {
+                "component-floor": {
+                    "component_id": "component-floor",
+                    "name": "__room_floor",
+                    "component_type": "room_floor",
+                },
+            },
+        })
+
+        self.assertEqual(result["environment_components"], {})
+        self.assertEqual(result["environment_import_results"][0]["status"], "failed")
+        self.assertEqual(
+            result["environment_import_results"][0]["failure_code"],
+            "environment_import_missing_actor_identity",
+        )
+        self.assertEqual(result["engine_write_result"]["identity_result_count"], 0)
+        self.assertEqual(result["engine_write_result"]["missing_identity_count"], 1)
+
     def test_runtime_environment_import_failure_preserves_provider_failure_code_fact(self) -> None:
         def environment_component_provider(payload: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -21316,6 +21549,151 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(failure_events[-1]["payload"]["failed_count"], 1)
         self.assertNotIn("provider raw", str(failure_events))
         self.assertNotIn("https://internal.example", str(failure_events))
+
+    def test_required_engine_environment_import_blocks_actor_import_when_provider_is_missing(self) -> None:
+        actor_import_calls: list[dict[str, Any]] = []
+
+        def ready_model_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                    "local_path": f"E:/models/{name}.glb",
+                }
+                for name in payload["model_items"]
+            }
+
+        def actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            actor_import_calls.append(dict(payload))
+            raise AssertionError("actor import must not run before required environment import succeeds")
+
+        runtime = AgentRuntime(
+            model_resource_provider=ready_model_provider,
+            actor_import_provider=actor_import_provider,
+            require_engine_environment_import=True,
+            require_engine_actor_import=True,
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-env-provider-required",
+            text="Create an indoor bedroom with a bed",
+            owner_agent="designer",
+        )
+        plan.concrete_object_items = ["bed"]
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=1)
+
+        self.assertEqual(result["graphs"][0]["status"], "failed")
+        self.assertEqual(actor_import_calls, [])
+        room = runtime.query_state("room-env-provider-required")["room"]
+        environment_fact = room["custom_import_facts"][
+            f"{result['batches'][0]['batch_id']}:environment_import_result"
+        ]
+        self.assertEqual(environment_fact["status"], "failed")
+        self.assertEqual(environment_fact["failed_count"], 2)
+        failed_calls = runtime.operation_log.query(event="tool_call_failed", plan_id=plan.plan_id)
+        self.assertTrue(failed_calls)
+        self.assertEqual(failed_calls[-1].payload["error_code"], "engine_environment_import_unavailable")
+
+    def test_partial_required_environment_import_blocks_actor_import_and_preserves_success_fact(self) -> None:
+        actor_import_calls: list[dict[str, Any]] = []
+
+        def partial_environment_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            requested = dict(payload["environment_components"])
+            component_id, component = next(iter(requested.items()))
+            imported = {
+                **dict(component),
+                "component_id": component_id,
+                "actor_id": f"actor-{component_id}",
+                "asset_id": component_id,
+                "model_ref": component_id,
+                "entity_type": "environment",
+                "status": "ready",
+                "bounds_ready": True,
+                "bounds_source": "engine_actual",
+                "engine_lifecycle_status": "bounds_ready",
+                "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 3.0, 3.0]},
+            }
+            return {
+                "environment_components": {component_id: imported},
+                "environment_import_results": [{
+                    "component_id": component_id,
+                    "status": "success",
+                    "actor_id": imported["actor_id"],
+                    "bounds_ready": True,
+                }],
+                "engine_write_result": {
+                    "provider_source": "engine_environment_import_provider",
+                    "bridge_call_count": 1,
+                    "bridge_success_count": 1,
+                    "bridge_failed_count": 0,
+                },
+            }
+
+        def ready_model_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            return {
+                name: {"name": name, "status": "ready", "local_path": f"E:/models/{name}.glb"}
+                for name in payload["model_items"]
+            }
+
+        def actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
+            actor_import_calls.append(dict(payload))
+            raise AssertionError("actor import must not run after partial environment import")
+
+        runtime = AgentRuntime(
+            model_resource_provider=ready_model_provider,
+            environment_import_provider=partial_environment_import_provider,
+            actor_import_provider=actor_import_provider,
+            require_engine_environment_import=True,
+            require_engine_actor_import=True,
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-env-partial-required",
+            text="Create an indoor bedroom with a bed",
+            owner_agent="designer",
+        )
+        plan.concrete_object_items = ["bed"]
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=1)
+
+        self.assertEqual(result["graphs"][0]["status"], "failed")
+        self.assertEqual(actor_import_calls, [])
+        room = runtime.query_state("room-env-partial-required")["room"]
+        batch_id = result["batches"][0]["batch_id"]
+        environment_fact = room["custom_import_facts"][f"{batch_id}:environment_import_result"]
+        self.assertEqual(environment_fact["status"], "partial")
+        self.assertEqual(environment_fact["imported_count"], 1)
+        self.assertEqual(environment_fact["failed_count"], 1)
+        components = room["environment_components"][batch_id]
+        self.assertEqual(sum(1 for component in components.values() if component.get("actor_id")), 1)
+        self.assertEqual(sum(1 for component in components.values() if component.get("status") == "failed"), 1)
+        failed_calls = runtime.operation_log.query(event="tool_call_failed", plan_id=plan.plan_id)
+        self.assertEqual(failed_calls[-1].payload["error_code"], "environment_import_partial")
+        events = runtime.user_visible_events("room-env-partial-required", plan_id=plan.plan_id)
+        self.assertFalse(any(event["event_type"] == "actors_imported" for event in events))
+        report_ready_events = [event for event in events if event["event_type"] == "report_ready"]
+        self.assertTrue(report_ready_events, events)
+        self.assertEqual(report_ready_events[-1]["level"], "warning")
+        self.assertGreaterEqual(
+            report_ready_events[-1]["payload"]["environment_import_failed_count"],
+            1,
+        )
+        self.assertIn(
+            "environment_import_failed",
+            report_ready_events[-1]["payload"]["report_health_reasons"],
+        )
+        report = result["report"]
+        self.assertNotEqual(report["report_health_summary"]["status"], "ready")
+        self.assertEqual(report["scene_entity_registry"]["actor_count"], 0)
+        replay = runtime.operation_replay(
+            room_id="room-env-partial-required",
+            plan_id=plan.plan_id,
+        )
+        self.assertGreaterEqual(
+            replay["environment_component_summary"]["import_failed_event_count"],
+            1,
+        )
 
     def test_engine_environment_component_import_provider_uses_gate_and_returns_component_updates(self) -> None:
         class FakeGate:
@@ -21425,6 +21803,26 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(result["environment_import_results"][0]["status"], "success")
         self.assertTrue(result["environment_import_results"][0]["bounds_ready"])
         self.assertEqual(result["environment_import_results"][0]["size"], [6.0, 0.1, 6.0])
+        reused = provider({
+            "room_id": "room-env-import",
+            "plan_id": "plan-env-import",
+            "batch_id": "batch-env-import-2",
+            "environment_components": {
+                "component-terrain": {
+                    "component_id": "component-terrain",
+                    "name": "石板地面",
+                    "component_type": "terrain",
+                    "asset_id": "asset-terrain-stone",
+                    "model_ref": "terrain-stone-runtime",
+                }
+            },
+        })
+        self.assertEqual(len(gate.calls), 1)
+        self.assertEqual(reused["environment_import_results"][0]["status"], "reused")
+        self.assertEqual(
+            reused["environment_components"]["component-terrain"]["actor_id"],
+            "actor-component-terrain",
+        )
         serialized = str(result).lower()
         self.assertNotIn("provider raw", serialized)
         self.assertNotIn("secret", serialized)
@@ -21513,7 +21911,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         component = result["environment_components"]["component-terrain"]
         EnvironmentComponentValidator.validate(component)
-        self.assertEqual(component["status"], "imported")
+        self.assertEqual(component["status"], "ready")
+        self.assertEqual(component["engine_lifecycle_status"], "bounds_ready")
+        self.assertTrue(component["bounds_ready"])
         self.assertEqual(component["source"], "engine_environment_import")
         self.assertEqual(component["actor_id"], "native-env-component-1")
         self.assertEqual(component["position"], [1.0, 0.0, 2.0])
@@ -21590,8 +21990,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(len(native_calls), 1)
         call = native_calls[0]
         self.assertEqual(call["scene_name"], "Scene/runtime-env.scene")
-        self.assertEqual(call["source_path"], "terrain-stone-runtime")
-        self.assertEqual(call["actor_type"], "audio")
+        self.assertEqual(Path(call["source_path"]).name, "terrain.obj")
+        self.assertEqual(call["actor_type"], "model")
         actor_data = call["actor_data"]
         self.assertEqual(actor_data["component_id"], "component-terrain")
         self.assertEqual(actor_data["component_type"], "terrain")
@@ -21612,7 +22012,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(payload["actor_data"]["sync_status"], "engine_imported")
         self.assertEqual(payload["actor_data"]["sync_lifecycle_status"], "engine_imported")
         self.assertEqual(payload["sync_lifecycle_status"], "engine_imported")
-        self.assertTrue(payload["bounds_ready"])
+        self.assertFalse(payload["bounds_ready"])
+        self.assertEqual(payload["bounds_source"], "estimated")
+        self.assertEqual(payload["engine_lifecycle_status"], "engine_loading")
         self.assertEqual(payload["actor_data"]["geometry"]["aabb"]["min"], [-3.0, 0.0, -3.0])
         self.assertEqual(payload["surface"], "stone_floor")
         self.assertEqual(payload["terrain_profile"], "indoor_floor")
@@ -21884,7 +22286,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             operation_log=runtime.operation_log,
         ).execute(graph, room_id="room-env-import-partial")
 
-        self.assertEqual(executed.status, "completed")
+        self.assertEqual(executed.status, "failed")
         room = runtime.query_state("room-env-import-partial")["room"]
         import_fact = room["custom_import_facts"]["batch-env-import-partial:environment_import_result"]
         self.assertEqual(import_fact["status"], "partial")
@@ -21977,6 +22379,31 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             }
 
         runtime = AgentRuntime(environment_import_provider=provider)
+        plan = ScenePlan(
+            plan_id="plan-env-import",
+            room_id="room-env-import-identity",
+            title="environment import identity",
+            design_brief="stone floor",
+            status=ScenePlanStatus.EXECUTING,
+        )
+        batch = BatchPlan(
+            batch_id="batch-env-import",
+            plan_id=plan.plan_id,
+            room_id=plan.room_id,
+            requested_items=["stone floor"],
+            status=BatchPlanStatus.EXECUTING,
+        )
+        runtime.scene_plans[plan.plan_id] = plan
+        runtime.batch_plans[batch.batch_id] = batch
+        applied, reason = runtime.state.apply_patch(StatePatch(
+            room_id=plan.room_id,
+            changes={
+                "active_plan_id": plan.plan_id,
+                "scene_plans": {plan.plan_id: plan.as_dict()},
+                "batch_plans": {batch.batch_id: batch.as_dict()},
+            },
+        ))
+        self.assertTrue(applied, reason)
         graph = ToolCallGraph(graph_id="graph-env-import-identity", plan_id="plan-env-import", batch_id="batch-env-import")
         graph.add(
             ToolCall(
@@ -22837,6 +23264,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             def invoke(self, payload: dict) -> dict:
                 return {
                     "status": "success",
+                    "asset_id": "temporary-object-id",
+                    "model_ref": "temporary-model-ref",
                     "actor_name": "native-safe-but-wrong-name",
                     "model_path": payload["model_path"],
                     "scene": "Scene/native-old.scene",
@@ -22880,6 +23309,26 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(gate.calls[0]["asset_id"], "model-request-chest")
         self.assertEqual(gate.calls[0]["model_ref"], "model-request-chest")
         self.assertEqual(gate.calls[0]["object_id"], "batch-1-01")
+        self.assertTrue(str(gate.calls[0]["actor_guid"]).startswith("runtime-actor-"))
+        self.assertTrue(gate.calls[0]["skip_if_exists"])
+        self.assertFalse(gate.calls[0]["update_if_exists"])
+        replay_result = provider(
+            {
+                "batch_id": "batch-1",
+                "plan_id": "plan-1",
+                "model_items": ["钘忓疂绠?"],
+                "model_resources": {
+                    "钘忓疂绠?": {
+                        "status": "ready",
+                        "local_path": "E:/models/chest.glb",
+                        "model_request_id": "model-request-chest",
+                    }
+                },
+                "placements": {"钘忓疂绠?": {"position": [1, 0, 2]}},
+            }
+        )
+        self.assertEqual(gate.calls[1]["actor_guid"], gate.calls[0]["actor_guid"])
+        self.assertEqual(set(replay_result["actors"]), set(actors))
         self.assertIn("guid-钘忓疂绠?", actors)
         self.assertEqual(actors["guid-钘忓疂绠?"]["source"], "engine_import")
         self.assertEqual(actors["guid-钘忓疂绠?"]["name"], "native-safe-but-wrong-name")
@@ -22925,6 +23374,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "actors": [{
                     "actor_id": "actor-ready",
                     "name": "bed",
+                    "bounds_ready": True,
                     "position": [1.0, 0.5, 2.0],
                     "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
@@ -22951,6 +23401,227 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actor["bounds_source"], "engine_actual")
         self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
         self.assertEqual(actor["aabb"]["max"], [2.0, 1.0, 3.0])
+
+    def test_engine_actor_import_provider_selectively_grounds_ready_floor_actor(self) -> None:
+        guid_holder = {"value": ""}
+        self.assertEqual(
+            runtime_adapters._runtime_actor_support_type({"name": "wall torch"}),
+            "wall_mounted",
+        )
+        self.assertEqual(
+            runtime_adapters._runtime_actor_support_type({"name": "吊灯"}),
+            "ceiling_hung",
+        )
+
+        class FakeGate:
+            def __init__(self) -> None:
+                self.transform_calls: list[dict[str, Any]] = []
+
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+            def set_transform(self, tool, payload: dict) -> dict:
+                self.transform_calls.append(dict(payload))
+                return tool.invoke(payload)
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                guid_holder["value"] = str(payload["actor_guid"])
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": payload["actor_guid"],
+                        "name": payload["actor_name"],
+                        "geometry": {
+                            "position": payload["position"],
+                            "rotation": payload["rotation"],
+                            "scale": payload["scale"],
+                        },
+                    },
+                }
+
+        class TransformTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor": payload["actor_name"],
+                    "position": [1.0, 0.22, 2.0],
+                    "aabb": [-0.5, 0.02, -0.5, 0.5, 1.02, 0.5],
+                    "ground_snapped": True,
+                    "sync_status": "engine_transformed",
+                }
+
+        def snapshot_provider(_request: dict) -> dict:
+            return {
+                "actors": [{
+                    "actor_id": guid_holder["value"],
+                    "name": "bed",
+                    "bounds_ready": True,
+                    "position": [1.0, 0.5, 2.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [0.5, 0.3, 1.5], "max": [1.5, 1.3, 2.5]},
+                }],
+            }
+
+        gate = FakeGate()
+        provider = make_engine_actor_import_provider(
+            import_tool=ImportTool(),
+            transform_tool=TransformTool(),
+            engine_gate=gate,
+            scene_snapshot_provider=snapshot_provider,
+        )
+        expected_guid = "runtime-actor-"
+        result = provider({
+            "room_id": "room-ground-ready",
+            "batch_id": "batch-ground-ready",
+            "plan_id": "plan-ground-ready",
+            "model_items": ["bed"],
+            "model_resources": {
+                "bed": {
+                    "status": "ready",
+                    "local_path": "E:/models/bed.glb",
+                    "asset_id": "asset-bed",
+                }
+            },
+            "placements": {"bed": {"position": [1.0, 0.5, 2.0]}},
+        })
+
+        self.assertEqual(len(result["actors"]), 1)
+        actor_guid = next(iter(result["actors"]))
+        self.assertTrue(actor_guid.startswith(expected_guid))
+        self.assertEqual(len(gate.transform_calls), 1)
+        self.assertTrue(gate.transform_calls[0]["snap_to_ground"])
+        actor = result["actors"][actor_guid]
+        self.assertEqual(actor["grounding_status"], "grounded")
+        self.assertEqual(actor["support_type"], "floor_supported")
+        self.assertEqual(actor["position"], [1.0, 0.22, 2.0])
+        self.assertTrue(result["import_results"][0]["ground_snapped"])
+
+    def test_initial_grounding_reaches_runtime_state_operation_log_and_report_registry(self) -> None:
+        guid_holder = {"value": ""}
+
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+            def set_transform(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                guid_holder["value"] = str(payload["actor_guid"])
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": guid_holder["value"],
+                        "name": payload["actor_name"],
+                        "geometry": {"position": payload["position"]},
+                    },
+                }
+
+        class TransformTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor_id": payload["actor_id"],
+                    "actor_name": payload["actor_name"],
+                    "position": [0.0, 0.22, 0.0],
+                    "aabb": [-0.5, 0.02, -0.5, 0.5, 1.02, 0.5],
+                    "ground_snapped": True,
+                }
+
+        def snapshot_provider(_request: dict) -> dict:
+            return {
+                "actors": [{
+                    "actor_id": guid_holder["value"],
+                    "name": "bed",
+                    "bounds_ready": True,
+                    "position": [0.0, 0.5, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [-0.5, 0.3, -0.5], "max": [0.5, 1.3, 0.5]},
+                }],
+            }
+
+        def model_resource_provider(payload: dict) -> dict:
+            return {
+                name: {
+                    "name": name,
+                    "status": "ready",
+                    "local_path": f"E:/models/{name}.glb",
+                    "asset_id": f"asset-{name}",
+                }
+                for name in payload["model_items"]
+            }
+
+        runtime = AgentRuntime(
+            model_resource_provider=model_resource_provider,
+            actor_import_provider=make_engine_actor_import_provider(
+                import_tool=ImportTool(),
+                transform_tool=TransformTool(),
+                engine_gate=FakeGate(),
+                scene_snapshot_provider=snapshot_provider,
+            ),
+        )
+        plan = runtime.propose_scene_plan(
+            room_id="room-grounding-fact-flow",
+            text="Create a bedroom with a bed",
+            owner_agent="designer",
+        )
+        plan.concrete_object_items = ["bed"]
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=1)
+
+        actor = runtime.query_state("room-grounding-fact-flow")["room"]["actors"][guid_holder["value"]]
+        self.assertEqual(actor["grounding_status"], "grounded")
+        self.assertEqual(actor["support_type"], "floor_supported")
+        self.assertEqual(actor["aabb"]["min"][1], 0.02)
+        self.assertIn("runtime_state_patch_applied", runtime.operation_log.events())
+        registry_entities = result["report"]["scene_entity_registry"]["entities"]
+        registry_actor = next(entity for entity in registry_entities if entity.get("actor_id") == guid_holder["value"])
+        self.assertEqual(registry_actor["grounding_status"], "grounded")
+        self.assertEqual(registry_actor["aabb"]["min"][1], 0.02)
+
+    def test_engine_actor_import_provider_does_not_accept_aabb_before_native_bounds_ready(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                return {
+                    "status": "success",
+                    "actor": {"actor_guid": "actor-loading-aabb", "name": payload["actor_name"]},
+                }
+
+        provider = make_engine_actor_import_provider(
+            import_tool=ImportTool(),
+            engine_gate=FakeGate(),
+            scene_snapshot_provider=lambda _request: {
+                "actors": [{
+                    "actor_id": "actor-loading-aabb",
+                    "name": "bed",
+                    "bounds_ready": False,
+                    "aabb": {"min": [-0.5, 0.0, -1.0], "max": [0.5, 1.0, 1.0]},
+                }],
+            },
+        )
+        with patch.dict(os.environ, {"AGENT_RUNTIME_ENGINE_READY_TIMEOUT_S": "0"}):
+            result = provider({
+                "room_id": "room-loading-aabb",
+                "batch_id": "batch-loading-aabb",
+                "plan_id": "plan-loading-aabb",
+                "model_items": ["bed"],
+                "model_resources": {"bed": {"status": "ready", "local_path": "E:/models/bed.glb"}},
+                "placements": {"bed": {"position": [0.0, 0.0, 0.0]}},
+            })
+
+        actor = result["actors"]["actor-loading-aabb"]
+        self.assertFalse(actor["bounds_ready"])
+        self.assertEqual(actor["bounds_source"], "estimated")
+        self.assertEqual(actor["engine_lifecycle_status"], "engine_loading")
 
     def test_engine_actor_import_provider_keeps_loading_without_native_bounds(self) -> None:
         class FakeGate:
@@ -24233,12 +24904,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             "actor_registry_failed_request",
             result["report"]["report_health_summary"]["reasons"],
         )
-        report_ready_events = [event for event in events if event["event_type"] == "report_ready"]
-        self.assertTrue(report_ready_events)
-        self.assertEqual(report_ready_events[-1]["payload"]["requested_count"], 2)
-        self.assertEqual(report_ready_events[-1]["payload"]["imported_count"], 1)
-        self.assertEqual(report_ready_events[-1]["payload"]["failed_count"], 1)
-        self.assertEqual(report_ready_events[-1]["payload"]["actor_registry_failed_request_count"], 1)
+        report_pending_events = [event for event in events if event["event_type"] == "report_pending"]
+        self.assertTrue(report_pending_events)
+        self.assertEqual(report_pending_events[-1]["payload"]["requested_count"], 2)
+        self.assertEqual(report_pending_events[-1]["payload"]["imported_count"], 1)
+        self.assertEqual(report_pending_events[-1]["payload"]["failed_count"], 1)
+        self.assertEqual(report_pending_events[-1]["payload"]["actor_registry_failed_request_count"], 1)
 
     def test_engine_actor_import_result_prefers_native_identity_transform_and_bounds(self) -> None:
         class FakeGate:
@@ -24305,8 +24976,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actor["requested_name"], "长桌")
         self.assertIn("长桌", actor["aliases"])
         self.assertIn("Engine Table 01", actor["aliases"])
-        self.assertEqual(actor["asset_id"], "engine-asset-table")
-        self.assertEqual(actor["model_ref"], "engine-model-table")
+        self.assertTrue(actor["asset_id"].startswith("asset-"), actor)
+        self.assertEqual(actor["model_ref"], actor["asset_id"])
         self.assertEqual(actor["position"], [1.25, 0.0, -2.5])
         self.assertEqual(actor["rotation"], [0.0, 45.0, 0.0])
         self.assertEqual(actor["scale"], [1.2, 1.0, 1.2])
@@ -24337,8 +25008,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(latest_import["display_name"], "Engine Table 01")
         self.assertEqual(latest_import["requested_name"], "长桌")
         self.assertIn("长桌", latest_import["aliases"])
-        self.assertEqual(latest_import["asset_id"], "engine-asset-table")
-        self.assertEqual(latest_import["model_ref"], "engine-model-table")
+        self.assertEqual(latest_import["asset_id"], actor["asset_id"])
+        self.assertEqual(latest_import["model_ref"], actor["model_ref"])
         self.assertEqual(latest_import["position"], [1.25, 0.0, -2.5])
         self.assertEqual(latest_import["rotation"], [0.0, 45.0, 0.0])
         self.assertEqual(latest_import["scale"], [1.2, 1.0, 1.2])
@@ -24408,7 +25079,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             for entity in result["report"]["scene_entity_registry"]["entities"]
             if entity.get("actor_id") == "4242"
         )
-        self.assertEqual(registry_entity["entity_id"], "4242")
+        self.assertEqual(registry_entity["actor_id"], "4242")
+        self.assertTrue(str(registry_entity["entity_id"]).startswith("entity-"))
+        self.assertNotEqual(registry_entity["entity_id"], registry_entity["actor_id"])
         replay = runtime.operation_replay(room_id="room-import-native-handle", plan_id=plan.plan_id)
         latest_import = replay["engine_write_summary"]["latest_import_results"][-1]
         self.assertEqual(latest_import["actor_id"], "4242")
@@ -25456,6 +26129,38 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertEqual(room_floor["position"][1], 0.025)
             component_sets.append(set(components))
         self.assertTrue(all(ids == component_sets[0] for ids in component_sets[1:]))
+        summary = result["report"]["environment_component_summary"]
+        self.assertEqual(summary["type_counts"]["room_box"], 1)
+        self.assertEqual(summary["type_counts"]["room_floor"], 1)
+        self.assertEqual(summary["component_count"], 2)
+
+    def test_mixed_scene_requires_indoor_outdoor_and_transition_foundations(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-runtime-mixed-foundation",
+            text="创建一个室内外混合咖啡馆，室内有桌椅，室外有草地露台和过渡入口",
+            owner_agent="designer",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+
+        result = runtime.execute_planned_batches(plan.plan_id, max_items_per_batch=99)
+
+        batch_id = result["batches"][0]["batch_id"]
+        room = runtime.query_state("room-runtime-mixed-foundation")["room"]
+        component_types = {
+            str(item.get("component_type") or "")
+            for item in room["environment_components"][batch_id].values()
+        }
+        self.assertTrue(
+            {"terrain", "room_box", "room_floor", "transition_zone"}.issubset(component_types),
+            component_types,
+        )
+        contract = result["report"]["scene_design_contract_summary"]
+        self.assertEqual(contract["environment_type"], "mixed")
+        self.assertEqual(
+            contract["required_environment_components"],
+            ["terrain", "room_box", "room_floor", "transition_zone"],
+        )
 
     def test_plan_finalizer_waits_for_all_queued_batches_before_report_ready(self) -> None:
         def actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
@@ -26174,8 +26879,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertFalse(query_summary["sync_readiness_summary"]["real_sync_verified"])
         self.assertEqual(query_summary["sync_readiness_summary"]["native_sync_verification"], "pending_f5")
         self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["actor"], 2)
-        self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["terrain"], 2)
-        self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["skybox"], 1)
+        self.assertEqual(query_summary["scene_entity_registry"]["entity_type_counts"]["environment"], 3)
         query_flow = query_summary["runtime_scene_flow_summary"]
         self.assertEqual(query_flow["status"], "ok")
         self.assertEqual(
@@ -26241,8 +26945,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         status_roles = {entity["semantic_role"]: entity for entity in status_entities}
         self.assertTrue({"forest", "sky", "grass", "wooden table", "tent"}.issubset(status_roles))
         self.assertEqual(status_registry["entity_type_counts"]["actor"], 2)
-        self.assertEqual(status_registry["entity_type_counts"]["terrain"], 2)
-        self.assertEqual(status_registry["entity_type_counts"]["skybox"], 1)
+        self.assertEqual(status_registry["entity_type_counts"]["environment"], 3)
         self.assertIn("asset_transfer_status_counts", status_registry)
         self.assertEqual(status_registry["readiness_status"], "ready")
         self.assertGreaterEqual(status_registry["transform_available_count"], 2)
@@ -26633,9 +27336,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         roles = {entity["semantic_role"]: entity for entity in registry["entities"]}
         self.assertTrue({"草地", "天空", "森林", "帐篷", "小木桌"}.issubset(roles))
         self.assertEqual(registry["asset_transfer_status_counts"], {"runtime_state_only": 5})
-        self.assertEqual(roles["草地"]["entity_type"], "terrain")
-        self.assertEqual(roles["天空"]["entity_type"], "skybox")
-        self.assertEqual(roles["森林"]["entity_type"], "terrain")
+        self.assertEqual(roles["草地"]["entity_type"], "environment")
+        self.assertEqual(roles["天空"]["entity_type"], "environment")
+        self.assertEqual(roles["森林"]["entity_type"], "environment")
         self.assertTrue(
             all(
                 entity["sync_status"] == "runtime_state"
@@ -26705,9 +27408,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             for entity in report_registry["entities"]
         }
         self.assertTrue({"草地", "天空", "森林", "帐篷", "小木桌"}.issubset(report_roles))
-        self.assertEqual(report_roles["草地"]["entity_type"], "terrain")
-        self.assertEqual(report_roles["天空"]["entity_type"], "skybox")
-        self.assertEqual(report_roles["森林"]["entity_type"], "terrain")
+        self.assertEqual(report_roles["草地"]["entity_type"], "environment")
+        self.assertEqual(report_roles["天空"]["entity_type"], "environment")
+        self.assertEqual(report_roles["森林"]["entity_type"], "environment")
         for role in ("帐篷", "小木桌"):
             entity = report_roles[role]
             self.assertEqual(entity["entity_type"], "actor")
@@ -26857,11 +27560,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report["environment_component_summary"]["type_counts"]["terrain"], 3)
         registry = report["scene_entity_registry"]
         self.assertEqual(registry["entity_type_counts"]["actor"], 2)
-        self.assertEqual(registry["entity_type_counts"]["terrain"], 3)
+        self.assertEqual(registry["entity_type_counts"]["environment"], 3)
         terrain_roles = {
             entity["semantic_role"]
             for entity in registry["entities"]
-            if entity.get("entity_type") == "terrain"
+            if entity.get("component_type") == "terrain"
         }
         self.assertTrue({"小河", "湖面"}.issubset(terrain_roles))
         self.assertEqual(report["runtime_scene_flow_summary"]["status"], "ok")
@@ -26897,7 +27600,22 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         }
         self.assertTrue({"entrance", "main street", "boundary"}.issubset(layout_names))
         self.assertEqual(state["substrate_plans"].get(batch_id, []), [])
-        self.assertEqual(state["environment_components"].get(batch_id, {}), {})
+        environment_components = state["environment_components"].get(batch_id, {})
+        self.assertTrue(environment_components)
+        self.assertTrue(
+            all(
+                component.get("component_type") in {
+                    "terrain",
+                    "boundary",
+                    "room_box",
+                    "room_floor",
+                    "transition_zone",
+                    "skybox",
+                }
+                for component in environment_components.values()
+            ),
+            environment_components,
+        )
         status = runtime.status_summary("room-layout-terms", plan_id=plan.plan_id)
         self.assertTrue(
             {"entrance", "main street", "boundary"}.issubset(
@@ -32653,6 +33371,178 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(room["actors"]["engine-actor-1"]["version"], 7)
         snapshot = next(iter(room["engine_scene_snapshots"].values()))
         self.assertEqual(snapshot["actor_count"], 1)
+
+    def test_scene_snapshot_refresh_preserves_runtime_actor_identity_fields(self) -> None:
+        def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "room_id": request.get("room_id"),
+                "source": "fake_engine",
+                "actors": [
+                    {
+                        "actor_id": "engine-actor-preserved",
+                        "name": "native-chair",
+                        "position": [2.0, 0.0, 1.0],
+                        "aabb": {"min": [1.5, 0.0, 0.5], "max": [2.5, 1.0, 1.5]},
+                        "bounds_ready": True,
+                        "engine_lifecycle_status": "bounds_ready",
+                        "status": "ready",
+                    }
+                ],
+            }
+
+        runtime = AgentRuntime(scene_snapshot_provider=fake_provider)
+        plan = runtime.propose_scene_plan(
+            room_id="room-snapshot-preserve",
+            text="create a room with a chair",
+            owner_agent="designer",
+        )
+        runtime.state.apply_patch(StatePatch(
+            room_id="room-snapshot-preserve",
+            changes={
+                "actors": {
+                    "engine-actor-preserved": {
+                        "actor_id": "engine-actor-preserved",
+                        "name": "chair",
+                        "plan_id": plan.plan_id,
+                        "batch_id": "batch-preserved",
+                        "asset_id": "asset-chair",
+                        "model_ref": "chair.glb",
+                        "entity_type": "furniture",
+                        "semantic_role": "chair",
+                        "status": "engine_loading",
+                    }
+                }
+            },
+        ))
+
+        runtime.refresh_scene_snapshot("room-snapshot-preserve")
+        actor = runtime.query_state("room-snapshot-preserve")["room"]["actors"]["engine-actor-preserved"]
+
+        self.assertEqual(actor["plan_id"], plan.plan_id)
+        self.assertEqual(actor["batch_id"], "batch-preserved")
+        self.assertEqual(actor["asset_id"], "asset-chair")
+        self.assertEqual(actor["semantic_role"], "chair")
+        self.assertEqual(actor["position"], [2.0, 0.0, 1.0])
+        self.assertTrue(actor["bounds_ready"])
+        self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
+
+    def test_plan_finalizer_recovers_partial_batch_from_native_snapshot(self) -> None:
+        def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "room_id": request.get("room_id"),
+                "source": "engine_scene_snapshot",
+                "actors": [
+                    {
+                        "actor_id": "engine-chair-ready",
+                        "name": "chair",
+                        "position": [0.0, 0.0, 0.0],
+                        "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+                        "bounds_ready": True,
+                    },
+                    {
+                        "actor_id": "engine-room-floor-ready",
+                        "name": "room_floor",
+                        "position": [0.0, 0.0, 0.0],
+                        "aabb": {"min": [-3.0, -0.1, -3.0], "max": [3.0, 0.0, 3.0]},
+                        "bounds_ready": True,
+                    },
+                ],
+            }
+
+        runtime = AgentRuntime(scene_snapshot_provider=fake_provider)
+        plan = runtime.propose_scene_plan(
+            room_id="room-late-ready-snapshot",
+            text="create a room with a chair",
+            owner_agent="designer",
+        )
+        plan.status = ScenePlanStatus.EXECUTING
+        batch = BatchPlan(
+            batch_id="batch-late-ready-snapshot",
+            plan_id=plan.plan_id,
+            room_id="room-late-ready-snapshot",
+            requested_items=["chair"],
+            status=BatchPlanStatus.PARTIAL,
+        )
+        runtime.scene_plans[plan.plan_id] = plan
+        runtime.batch_plans[batch.batch_id] = batch
+        applied, reason = runtime.state.apply_patch(StatePatch(
+            room_id="room-late-ready-snapshot",
+            changes={
+                "active_plan_id": plan.plan_id,
+                "scene_plans": {plan.plan_id: plan.as_dict()},
+                "batch_plans": {batch.batch_id: batch.as_dict()},
+                "actors": {
+                    "engine-chair-ready": {
+                        "actor_id": "engine-chair-ready",
+                        "name": "chair",
+                        "plan_id": plan.plan_id,
+                        "batch_id": batch.batch_id,
+                        "asset_id": "asset-chair",
+                        "model_ref": "chair.glb",
+                        "status": "engine_loading",
+                        "bounds_ready": False,
+                        "bounds_source": "estimated",
+                        "engine_lifecycle_status": "engine_loading",
+                    }
+                },
+                "custom_import_facts": {
+                    f"{batch.batch_id}:actor_import_result": {
+                        "status": "engine_loading",
+                        "requested_count": 1,
+                        "imported_count": 1,
+                        "ready_count": 0,
+                        "failed_count": 0,
+                    },
+                    f"{batch.batch_id}:environment_import_result": {
+                        "status": "engine_loading",
+                        "component_count": 1,
+                        "imported_count": 1,
+                        "ready_count": 0,
+                        "failed_count": 0,
+                    },
+                },
+                "environment_components": {
+                    batch.batch_id: {
+                        "room_floor": {
+                            "component_id": "room_floor",
+                            "name": "room_floor",
+                            "component_type": "room_floor",
+                            "actor_id": "engine-room-floor-ready",
+                            "status": "engine_loading",
+                            "bounds_ready": False,
+                            "bounds_source": "estimated",
+                            "engine_lifecycle_status": "engine_loading",
+                            "entity_type": "environment",
+                            "semantic_role": "walkable_floor",
+                        }
+                    }
+                },
+            },
+        ))
+        self.assertTrue(applied, reason)
+
+        drain_result = runtime.handle_message(
+            room_id="room-late-ready-snapshot",
+            text="runtime worker drain",
+            action="worker_drain",
+        )
+        room = runtime.query_state("room-late-ready-snapshot")["room"]
+
+        self.assertEqual(drain_result["drain"]["drained_count"], 0)
+        self.assertEqual(room["batch_plans"][batch.batch_id]["status"], BatchPlanStatus.COMPLETED.value)
+        self.assertEqual(room["scene_plans"][plan.plan_id]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertEqual(
+            room["custom_import_facts"][f"{batch.batch_id}:actor_import_result"]["ready_count"],
+            1,
+        )
+        self.assertTrue(room["actors"]["engine-chair-ready"]["bounds_ready"])
+        self.assertTrue(room["environment_components"][batch.batch_id]["room_floor"]["bounds_ready"])
+        self.assertEqual(
+            room["custom_import_facts"][f"{batch.batch_id}:environment_import_result"]["ready_count"],
+            1,
+        )
+        self.assertIn("engine_readiness_reconciled_from_snapshot", runtime.operation_log.events())
+        self.assertTrue(room["reports"])
 
     def test_scene_snapshot_provider_failure_does_not_patch_runtime_state(self) -> None:
         def failing_provider(room_id: str) -> dict:

@@ -114,7 +114,8 @@ class CabbageWorkflowPlugin:
     name = "cabbage.workflows"
     enabled = True
 
-    flow_modules = (
+    flow_modules: tuple[str, ...] = ()
+    legacy_flow_modules = (
         ".agent",
         ".flows.scene_composition_workflow",
         ".flows.model_retrieval_workflow",

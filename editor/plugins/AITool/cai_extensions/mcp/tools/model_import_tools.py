@@ -198,6 +198,26 @@ class ImportModelInput(BaseModel):
         default=None,
         description="兼容字段：规划物体 ID，可作为导入后的场景别名",
     )
+    asset_id: Optional[str] = Field(
+        default=None,
+        description="Stable Runtime content identity for the imported model asset",
+    )
+    model_ref: Optional[str] = Field(
+        default=None,
+        description="Stable Runtime model reference retained in scene entity facts",
+    )
+    actor_guid: Optional[str] = Field(
+        default=None,
+        description="Stable Runtime actor identity used for idempotent native creation",
+    )
+    skip_if_exists: bool = Field(
+        default=False,
+        description="Return an existing native actor with the same guid/name instead of duplicating it",
+    )
+    update_if_exists: bool = Field(
+        default=False,
+        description="Apply the requested transform when an idempotent actor already exists",
+    )
     target: Optional[str] = Field(
         default=None,
         description="兼容字段：AI 规划目标名称，可作为导入后的场景别名",
@@ -268,6 +288,11 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
         actor_name: str | None = None,
         model_name: str | None = None,
         object_id: str | None = None,
+        asset_id: str | None = None,
+        model_ref: str | None = None,
+        actor_guid: str | None = None,
+        skip_if_exists: bool = False,
+        update_if_exists: bool = False,
         target: str | None = None,
         position: List[float] | None = None,
         rotation: List[float] | None = None,
@@ -315,6 +340,11 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "actor_name": preferred_name,
                 "model_name": model_name or preferred_name,
                 "object_id": object_id or preferred_name,
+                "asset_id": asset_id or object_id or model_name or preferred_name,
+                "model_ref": model_ref or asset_id or model_name or object_id or preferred_name,
+                "actor_guid": actor_guid or "",
+                "skip_if_exists": bool(skip_if_exists),
+                "update_if_exists": bool(update_if_exists),
                 "target": target or preferred_name,
                 "geometry": {},
                 "mechanics": {"physics_enabled": False},
@@ -356,8 +386,8 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "status": "success",
                 "actor_id": actor_id,
                 "actor_name": actor.get("name", preferred_name),
-                "asset_id": object_id or model_name or preferred_name,
-                "model_ref": model_name or object_id or preferred_name,
+                "asset_id": asset_id or object_id or model_name or preferred_name,
+                "model_ref": model_ref or asset_id or model_name or object_id or preferred_name,
                 "model_path": final_path,
                 "position": geometry.get("position", position or [0, 0, 0]),
                 "rotation": geometry.get("rotation", rotation or [0, 0, 0]),
@@ -370,8 +400,8 @@ def _build_import_model_tool(scene_manager) -> StructuredTool:
                 "actor_data": {
                     "actor_id": actor_id,
                     "name": actor.get("name") or preferred_name,
-                    "asset_id": object_id or model_name or preferred_name,
-                    "model_ref": model_name or object_id or preferred_name,
+                    "asset_id": asset_id or object_id or model_name or preferred_name,
+                    "model_ref": model_ref or asset_id or model_name or object_id or preferred_name,
                     "sync_status": "engine_imported",
                     "sync_lifecycle_status": "engine_imported",
                     "geometry": {
@@ -465,10 +495,16 @@ def _build_import_environment_component_tool(scene_manager) -> StructuredTool:
                 "terrain_boundary",
                 "sky",
                 "skybox",
+                "transition_zone",
             }:
-                from editor.plugins.AITool.services.agent_runtime.environment_primitives import (
-                    build_environment_primitive,
-                )
+                try:
+                    from plugins.AITool.services.agent_runtime.environment_primitives import (
+                        build_environment_primitive,
+                    )
+                except ModuleNotFoundError:
+                    from editor.plugins.AITool.services.agent_runtime.environment_primitives import (
+                        build_environment_primitive,
+                    )
 
                 primitive = build_environment_primitive(
                     component_type=component_type_value,

@@ -17,6 +17,11 @@ from .lanchat_agent_orchestrator import LanChatAgentOrchestrator
 from .lanchat_host_action_executor import LanChatHostActionExecutor
 from .agent_runtime import AgentRuntime, AgentRuntimeFlags
 from .intent_understanding import get_intent_understanding_service
+from .runtime_action_intent import (
+    MessageDispatchLedger,
+    RuntimeActionIntent,
+    get_runtime_action_intent_service,
+)
 
 
 MAX_COORDINATOR_SYNC_MESSAGES_PER_TICK = 4
@@ -89,6 +94,11 @@ class LANChatAgentWorker:
         self._agent_call_lock = threading.RLock()
         self._coordinator_seen_message_ids: set[str] = set()
         self._coordinator_seen_message_order: deque[str] = deque()
+        self._runtime_increment_message_ids: set[str] = set()
+        self._runtime_increment_message_order: deque[str] = deque()
+        self._gm_control_message_ids: set[str] = set()
+        self._gm_control_message_order: deque[str] = deque()
+        self._message_dispatch_ledger = MessageDispatchLedger()
         self._active_room_ids: set[str] = set()
         self._active_room_order: deque[str] = deque()
         self._progress_disclosure_lock = threading.RLock()
@@ -432,6 +442,9 @@ class LANChatAgentWorker:
             self._corona_engine is not None
             and self._agent_runtime_flags.can_use_engine_environment_import_provider()
         )
+        kwargs["require_engine_environment_import"] = bool(
+            self._agent_runtime_flags.can_use_engine_environment_import_provider()
+        )
         if use_engine_environment_import_provider:
             try:
                 from .agent_runtime import make_engine_environment_component_import_provider
@@ -531,10 +544,12 @@ class LANChatAgentWorker:
 
                 import_tool = self._get_runtime_tool("import_model")
                 if import_tool is not None:
+                    initial_grounding_tool = self._get_runtime_tool("set_actor_transform")
                     kwargs["actor_import_provider"] = make_engine_actor_import_provider(
                         import_tool=import_tool,
                         engine_gate=get_engine_write_gate(),
                         scene_snapshot_provider=kwargs.get("scene_snapshot_provider"),
+                        transform_tool=initial_grounding_tool,
                     )
                     note_provider("actor_import", requested=True, status="enabled", reason="import_model")
                 else:
@@ -890,13 +905,73 @@ class LANChatAgentWorker:
             return False
         room_id = str(message.get("room_id") or "default")
         self._remember_room_id(room_id)
+        # GM control traffic is authoritative protocol, not planning context.
+        # Resolve it before status/intervention/SeedPlan routing so the native
+        # sync copy cannot pollute a discussion plan before the agent-trigger
+        # copy observes the same message.
+        deterministic_control = self._get_orchestrator().handle_control_trigger(message)
+        if deterministic_control is not None:
+            action_payload = self._prepare_confirmed_action_payload(
+                getattr(deterministic_control, "action_payload", None),
+                message,
+            )
+            action_payload = self._filter_confirmed_action_payload_for_runtime(action_payload)
+            self._broadcast_confirmed_action(action_payload)
+            self._remember_gm_control_message_id(str(message.get("message_id") or ""))
+            self._send_coordinator_sync_system_reply(message, deterministic_control.text)
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
+        pace_control_reply = self._handle_coordinator_gm_control(message)
+        if pace_control_reply is not None:
+            self._remember_gm_control_message_id(str(message.get("message_id") or ""))
+            self._send_coordinator_sync_system_reply(message, pace_control_reply)
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
+        entity_status_reply = self._handle_runtime_entity_status_query(message)
+        if entity_status_reply is not None:
+            message_id = str(message.get("message_id") or "")
+            if self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="native_queue",
+                route="runtime_read",
+            ):
+                self._message_dispatch_ledger.transition(room_id, message_id, "routed")
+                self._send_coordinator_sync_system_reply(message, entity_status_reply)
+                self._message_dispatch_ledger.transition(
+                    room_id,
+                    message_id,
+                    "replied",
+                    reply=entity_status_reply,
+                )
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
+        runtime_clarification = self._handle_runtime_action_clarification(message)
+        if runtime_clarification is not None:
+            message_id = str(message.get("message_id") or "")
+            if self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="native_queue",
+                route="runtime_read",
+            ):
+                self._message_dispatch_ledger.transition(room_id, message_id, "routed")
+                self._send_coordinator_sync_system_reply(message, runtime_clarification)
+                self._message_dispatch_ledger.transition(
+                    room_id,
+                    message_id,
+                    "replied",
+                    reply=runtime_clarification,
+                )
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
         # Generation confirmation is authoritative control traffic. Resolve
         # the Coordinator plan below before enqueueing Runtime graphs; running
         # Runtime first races the parallel agent-trigger queue.
         if self._is_runtime_status_query_text(text):
             runtime_external_plan_id = self._active_runtime_external_plan_id(room_id)
-            if runtime_external_plan_id:
-                runtime_batch_id = self._runtime_batch_id_from_message(message)
+            runtime_batch_id = self._runtime_batch_id_from_message(message)
+            if runtime_external_plan_id or runtime_batch_id:
                 runtime_status_reply = self._agent_runtime_status_reply(
                     room_id=room_id,
                     external_plan_id=runtime_external_plan_id,
@@ -915,6 +990,67 @@ class LANChatAgentWorker:
                     )
                     self._remember_coordinator_seen_message_id(dedupe_key)
                     return True
+        execution_plan_id = self._active_runtime_execution_plan_id(room_id)
+        if execution_plan_id:
+            action_intent = self._runtime_action_intent_for_trigger(
+                message,
+                target_plan_id=execution_plan_id,
+                generation_active=True,
+            )
+            if (
+                action_intent.route == "runtime_write"
+                and action_intent.operation in {"add", "modify"}
+                and not action_intent.requires_confirmation
+            ):
+                note_kind = "add" if action_intent.operation == "add" else "edit_existing"
+                message_id = str(message.get("message_id") or "")
+                claimed = self._message_dispatch_ledger.claim(
+                    room_id,
+                    message_id,
+                    owner="native_queue",
+                    route="runtime_write",
+                )
+                if claimed and self._record_active_runtime_busy_intervention(message, note_kind=note_kind):
+                    self._message_dispatch_ledger.transition(room_id, message_id, "executed")
+                    self._send_coordinator_sync_system_reply(
+                        message,
+                        "已记录本次调整，并已绑定当前执行方案；系统会在后续真实批次中吸收。",
+                    )
+                    self._message_dispatch_ledger.transition(room_id, message_id, "replied")
+                    self._remember_runtime_increment_message_id(message_id)
+                    self._remember_coordinator_seen_message_id(dedupe_key)
+                    return True
+        completed_plan_id = self._latest_runtime_completed_plan_id(room_id)
+        completed_intent = self._runtime_action_intent_for_trigger(
+            message,
+            target_plan_id=completed_plan_id,
+            generation_active=False,
+        ) if completed_plan_id else None
+        if not execution_plan_id and completed_intent is not None and (
+            completed_intent.route == "runtime_write" or completed_intent.clarification
+        ):
+            message_id = str(message.get("message_id") or "")
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="native_queue",
+                route=completed_intent.route,
+            ):
+                self._remember_coordinator_seen_message_id(dedupe_key)
+                return True
+            completed_increment_reply = self._handle_runtime_completed_increment(message)
+            if completed_increment_reply is not None:
+                self._message_dispatch_ledger.transition(room_id, message_id, "executed")
+                self._send_coordinator_sync_system_reply(message, completed_increment_reply)
+                self._message_dispatch_ledger.transition(
+                    room_id,
+                    message_id,
+                    "replied",
+                    reply=completed_increment_reply,
+                )
+                self._remember_runtime_increment_message_id(message_id)
+                self._remember_coordinator_seen_message_id(dedupe_key)
+                return True
         runtime_plan_update_reply = self._handle_active_runtime_plan_context_update(message, text)
         if runtime_plan_update_reply:
             self._send_coordinator_sync_system_reply(message, runtime_plan_update_reply)
@@ -929,6 +1065,21 @@ class LANChatAgentWorker:
             )
             self._remember_coordinator_seen_message_id(dedupe_key)
             return True
+        if self._is_generation_start_text(text) and self._active_runtime_external_plan_id(room_id):
+            runtime_generation_reply = self._handle_coordinator_generation_start(message)
+            if runtime_generation_reply is not None:
+                self._send_coordinator_sync_system_reply(message, runtime_generation_reply)
+                self._log_scene_route(
+                    room_id=room_id,
+                    sender=str(message.get("sender_name") or message.get("sender_id") or ""),
+                    target_agent=str(message.get("target_agent_name") or message.get("agent_name") or ""),
+                    room_state="runtime",
+                    intent="generation_start",
+                    action="confirm_and_enqueue",
+                    reason=f"runtime_active_plan source={source}",
+                )
+                self._remember_coordinator_seen_message_id(dedupe_key)
+                return True
         try:
             coordinator = self._get_interaction_coordinator()
             disclosure_start = len(coordinator.disclosure_events)
@@ -1600,6 +1751,15 @@ class LANChatAgentWorker:
             return "blocked_non_host_agent"
         if draft_action == "chat" and self._structured_chat_should_defer_to_runtime_route(text):
             return ""
+        if draft_action == "gm_control" or target_scope == "gm" or target_agent_name.upper() == "GM":
+            trigger = self._structured_trigger(
+                message,
+                metadata,
+                agent_id=target_agent_id or "gm",
+                agent_name=target_agent_name or "GM",
+            )
+            self._process_trigger(trigger)
+            return "gm_control"
         if draft_action == "chat" and target_scope == "group":
             group_agents = self._structured_group_agents(metadata)
             if not group_agents:
@@ -1627,15 +1787,6 @@ class LANChatAgentWorker:
             return "agent_chat"
         if draft_action in {"plan", "supplement", "generate"} or target_scope == "plan" or target_plan_id:
             return self._handle_structured_planning_gate(message, text, metadata)
-        if draft_action == "gm_control" or target_scope == "gm":
-            trigger = self._structured_trigger(
-                message,
-                metadata,
-                agent_id=target_agent_id or "gm",
-                agent_name=target_agent_name or "GM",
-            )
-            self._process_trigger(trigger)
-            return "gm_control"
         return ""
 
     def _structured_chat_should_defer_to_runtime_route(self, text: str) -> bool:
@@ -1891,7 +2042,12 @@ class LANChatAgentWorker:
             self._logger.debug("AgentRuntime planning reply mirror failed: %s", type(exc).__name__)
             return {"recorded": False, "reason": "internal_exception", "error_type": type(exc).__name__}
 
-    def _seed_agent_trigger_planning_context_in_runtime(self, trigger: dict[str, Any]) -> dict[str, Any]:
+    def _seed_agent_trigger_planning_context_in_runtime(
+        self,
+        trigger: dict[str, Any],
+        *,
+        allow_generation_start: bool = False,
+    ) -> dict[str, Any]:
         if not self._agent_runtime_flags.agent_runtime_enabled:
             return {"recorded": False, "reason": "agent runtime disabled"}
         text = str(trigger.get("text") or "").strip()
@@ -1913,7 +2069,10 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime planning seed intent skipped: %s", type(exc).__name__)
             return {"recorded": False, "reason": "intent unavailable"}
-        if decision.intent not in {"plan_drafting", "plan_revision"}:
+        accepted_intents = {"plan_drafting", "plan_revision"}
+        if allow_generation_start and not self._is_pure_generation_confirmation_text(text):
+            accepted_intents.add("generation_start")
+        if decision.intent not in accepted_intents:
             return {"recorded": False, "reason": f"intent:{decision.intent}"}
         room_id = str(trigger.get("room_id") or "default")
         agent_name = str(trigger.get("agent_name") or trigger.get("target_agent_name") or decision.target_agent or "")
@@ -2121,6 +2280,19 @@ class LANChatAgentWorker:
             return False
         return bool(self._send_final_reply("gm-system", "绯荤粺", reply, trigger))
 
+    def _runtime_status_snapshot(self, room_id: str) -> dict[str, Any]:
+        try:
+            result = self._agent_runtime.handle_message(
+                room_id=str(room_id or "default"),
+                text="",
+                action="runtime_status",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("AgentRuntime status lookup skipped: %s", type(exc).__name__)
+            return {}
+        status = result.get("status") if isinstance(result, dict) else {}
+        return dict(status) if isinstance(status, dict) else {}
+
     def _runtime_planning_external_id(self, trigger: dict[str, Any], agent_name: str) -> str:
         for value in (
             trigger.get("target_plan_id"),
@@ -2130,18 +2302,10 @@ class LANChatAgentWorker:
             if text:
                 return f"planning:{text}"
         room_id = str(trigger.get("room_id") or "default").strip() or "default"
-        try:
-            room_state = self._agent_runtime.query_state(room_id).get("room", {})
-        except Exception:  # noqa: BLE001
-            room_state = {}
-        if isinstance(room_state, dict):
-            active_plan_id = str(room_state.get("active_plan_id") or "").strip()
-            active_plan = dict(room_state.get("scene_plans", {}).get(active_plan_id) or {})
-            active_status = str(active_plan.get("status") or "").strip().lower()
-            if active_plan_id and active_status not in {"completed", "failed", "cancelled"}:
-                for external_id, runtime_plan_id in dict(room_state.get("external_plan_links") or {}).items():
-                    if str(runtime_plan_id or "") == active_plan_id and str(external_id or "").strip():
-                        return str(external_id)
+        runtime_status = self._runtime_status_snapshot(room_id)
+        active_external_plan_id = str(runtime_status.get("active_external_plan_id") or "").strip()
+        if active_external_plan_id:
+            return active_external_plan_id
         for value in (trigger.get("correlation_id"), trigger.get("message_id")):
             text = str(value or "").strip()
             if text:
@@ -2151,20 +2315,16 @@ class LANChatAgentWorker:
 
     def _active_runtime_external_plan_id(self, room_id: str) -> str:
         room = str(room_id or "default")
-        try:
-            result = self._agent_runtime.handle_message(
-                room_id=room,
-                text="",
-                action="runtime_status",
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug("AgentRuntime active external plan lookup skipped: %s", type(exc).__name__)
-            result = {}
-        status = result.get("status", {}) if isinstance(result, dict) else {}
-        if isinstance(status, dict):
-            active_runtime_plan_id = str(status.get("active_plan_id") or status.get("plan_id") or "")
-            if active_runtime_plan_id:
-                return active_runtime_plan_id
+        runtime_status = self._runtime_status_snapshot(room)
+        active_execution_plan_id = str(runtime_status.get("active_execution_plan_id") or "").strip()
+        if active_execution_plan_id:
+            return active_execution_plan_id
+        active_external_plan_id = str(runtime_status.get("active_external_plan_id") or "").strip()
+        if active_external_plan_id:
+            return active_external_plan_id
+        active_runtime_plan_id = str(runtime_status.get("active_plan_id") or "").strip()
+        if active_runtime_plan_id:
+            return active_runtime_plan_id
         if not self._agent_runtime_flags.can_call_legacy_main_workflow():
             return ""
         try:
@@ -2173,6 +2333,194 @@ class LANChatAgentWorker:
             return str(getattr(active, "plan_id", "") or "")
         except Exception:  # noqa: BLE001
             return ""
+
+    def _active_runtime_execution_plan_id(self, room_id: str) -> str:
+        room = str(room_id or "default")
+        try:
+            snapshot = self._agent_runtime.query_state(room)
+        except Exception:  # noqa: BLE001
+            snapshot = {}
+        room_state = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        execution_plan_id = str(room_state.get("active_execution_plan_id") or "").strip()
+        if execution_plan_id:
+            return execution_plan_id
+        if room_state:
+            return ""
+        # Compatibility fallback for runtimes that have not persisted the
+        # split plan identity yet. Normal reads avoid status-summary graphs.
+        runtime_status = self._runtime_status_snapshot(room)
+        return str(runtime_status.get("active_execution_plan_id") or "").strip()
+
+    def _latest_runtime_completed_plan_id(self, room_id: str) -> str:
+        try:
+            snapshot = self._agent_runtime.query_state(str(room_id or "default"))
+        except Exception:  # noqa: BLE001
+            return ""
+        room_state = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        plan_id = str(room_state.get("latest_completed_plan_id") or "").strip()
+        plan = dict(dict(room_state.get("scene_plans") or {}).get(plan_id) or {})
+        if plan_id and str(plan.get("status") or "") == "completed":
+            return plan_id
+        return ""
+
+    def _remember_runtime_increment_message_id(self, message_id: str) -> None:
+        key = str(message_id or "").strip()
+        if not key or key in self._runtime_increment_message_ids:
+            return
+        self._runtime_increment_message_ids.add(key)
+        self._runtime_increment_message_order.append(key)
+        while len(self._runtime_increment_message_order) > 512:
+            old = self._runtime_increment_message_order.popleft()
+            self._runtime_increment_message_ids.discard(old)
+
+    def _remember_gm_control_message_id(self, message_id: str) -> None:
+        key = str(message_id or "").strip()
+        if not key or key in self._gm_control_message_ids:
+            return
+        self._gm_control_message_ids.add(key)
+        self._gm_control_message_order.append(key)
+        while len(self._gm_control_message_order) > 512:
+            old = self._gm_control_message_order.popleft()
+            self._gm_control_message_ids.discard(old)
+
+    def _handle_runtime_completed_increment(self, trigger: dict[str, Any]) -> str | None:
+        if not self._agent_runtime_flags.agent_runtime_enabled:
+            return None
+        text = str(trigger.get("text") or "").strip()
+        if not text or self._is_generation_start_text(text) or self._is_runtime_status_query_text(text):
+            return None
+        message_id = str(trigger.get("message_id") or "").strip()
+        if message_id and message_id in self._runtime_increment_message_ids:
+            return "该场景追加请求已经处理，不会重复创建物体。"
+        room_id = str(trigger.get("room_id") or "default")
+        if self._active_runtime_execution_plan_id(room_id):
+            return None
+        completed_plan_id = self._latest_runtime_completed_plan_id(room_id)
+        if not completed_plan_id:
+            return None
+        action_intent = self._runtime_action_intent_for_trigger(
+            trigger,
+            target_plan_id=completed_plan_id,
+            generation_active=False,
+        )
+        if action_intent.route == "runtime_read" and action_intent.clarification:
+            return action_intent.clarification
+        if (
+            action_intent.route != "runtime_write"
+            or action_intent.operation != "add"
+            or action_intent.requires_confirmation
+        ):
+            if action_intent.requires_confirmation:
+                return action_intent.clarification or "这项场景修改需要先确认，系统尚未创建追加批。"
+            return None
+        if not action_intent.entities:
+            return "我还不能确定要新增的具体物体，请明确物体名称后再试。"
+        normalized_items = [item.canonical_name for item in action_intent.entities]
+        normalized_text = "再加入" + "、".join(normalized_items)
+
+        recorded = self._agent_runtime.handle_message(
+            room_id=room_id,
+            plan_id=completed_plan_id,
+            text=normalized_text,
+            sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
+            sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
+            owner_agent=str(trigger.get("agent_name") or trigger.get("agent_id") or ""),
+            action="post_generation_add_object",
+            reply_to=message_id,
+        )
+        if not bool(recorded.get("recorded")):
+            return "追加要求未能写入当前已完成场景；系统没有创建新方案，也没有声称已经入队。"
+        queued = self._agent_runtime.handle_message(
+            room_id=room_id,
+            plan_id=completed_plan_id,
+            text=normalized_text,
+            sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
+            sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
+            owner_agent=str(trigger.get("agent_name") or trigger.get("agent_id") or ""),
+            action="enqueue_pending_interventions",
+            scene_name=self._runtime_scene_name_from_trigger(trigger),
+        )
+        self._remember_runtime_increment_message_id(message_id)
+        if not bool(queued.get("recorded")):
+            return "已记录场景追加要求，但追加批尚未入队；系统会保留该要求供后续重试。"
+        self._remember_room_id(room_id)
+        batch = queued.get("batch", {}) if isinstance(queued.get("batch"), dict) else {}
+        items = [str(item) for item in list(batch.get("requested_items") or []) if str(item)]
+        preview = "、".join(items[:4]) or "新增物体"
+        return f"已将 {preview} 加入当前场景的追加批；完成后会重新汇总场景状态。"
+
+    def _runtime_action_intent_for_trigger(
+        self,
+        trigger: dict[str, Any],
+        *,
+        target_plan_id: str = "",
+        generation_active: bool = False,
+    ) -> RuntimeActionIntent:
+        return get_runtime_action_intent_service().classify(
+            str((trigger or {}).get("text") or ""),
+            message_id=str((trigger or {}).get("message_id") or ""),
+            room_id=str((trigger or {}).get("room_id") or "default"),
+            target_plan_id=str(target_plan_id or ""),
+            generation_active=generation_active,
+            allow_llm=True,
+        )
+
+    def _handle_runtime_entity_status_query(self, trigger: dict[str, Any]) -> str | None:
+        room_id = str((trigger or {}).get("room_id") or "default")
+        plan_id = self._active_runtime_execution_plan_id(room_id) or self._latest_runtime_completed_plan_id(room_id)
+        if not plan_id:
+            return None
+        intent = self._runtime_action_intent_for_trigger(trigger, target_plan_id=plan_id)
+        if intent.route != "runtime_read" or intent.operation != "entity_status":
+            return None
+        if not intent.entities:
+            return "请告诉我需要查询的具体物体名称。"
+        result = self._agent_runtime.handle_message(
+            room_id=room_id,
+            plan_id=plan_id,
+            text="",
+            action="runtime.entity_status",
+            sync_event={"entity_names": [item.canonical_name for item in intent.entities]},
+        )
+        status_map = result.get("entity_status") if isinstance(result, dict) else {}
+        if not isinstance(status_map, dict):
+            status_map = {}
+        replies: list[str] = []
+        for requested in intent.entities:
+            canonical = requested.canonical_name
+            matches = [item for item in list(status_map.get(canonical) or []) if isinstance(item, dict)]
+            if not matches:
+                replies.append(f"{canonical}：未在当前 Runtime 场景事实中找到")
+                continue
+            statuses: list[str] = []
+            for row in matches:
+                materialization = str(row.get("materialization_status") or "").strip()
+                if bool(row.get("game_ready")):
+                    status = "已进入场景并达到 Game-ready"
+                elif materialization == "engine_loading":
+                    status = "引擎加载中"
+                elif materialization in {"engine_ready_needs_review", "runtime_ready_pending_f5"}:
+                    status = "已进入场景，但仍需检查"
+                elif materialization == "planned":
+                    status = "已规划，尚未完成导入"
+                else:
+                    status = "已记录，但当前状态仍不完整"
+                if status not in statuses:
+                    statuses.append(status)
+            replies.append(f"{canonical}：{'；'.join(statuses)}")
+        return "【实体状态】" + "；".join(replies)
+
+    def _handle_runtime_action_clarification(self, trigger: dict[str, Any]) -> str | None:
+        room_id = str((trigger or {}).get("room_id") or "default")
+        plan_id = self._active_runtime_execution_plan_id(room_id) or self._latest_runtime_completed_plan_id(room_id)
+        if not plan_id:
+            return None
+        intent = self._runtime_action_intent_for_trigger(
+            trigger,
+            target_plan_id=plan_id,
+            generation_active=bool(self._active_runtime_execution_plan_id(room_id)),
+        )
+        return intent.clarification or None
 
     @staticmethod
     def _runtime_scene_name_from_trigger(trigger: dict[str, Any]) -> str:
@@ -2235,6 +2583,51 @@ class LANChatAgentWorker:
             if isinstance(queued_batch, dict) and queued_batch:
                 return [dict(queued_batch)]
         return []
+
+    def _runtime_evidence_result(
+        self,
+        result: dict[str, Any],
+        *,
+        room_id: str,
+        plan_id: str,
+    ) -> dict[str, Any]:
+        enriched = dict(result or {})
+        try:
+            snapshot = self._agent_runtime.query_state(str(room_id or "default"))
+        except Exception:  # noqa: BLE001
+            return enriched
+        room = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        target_plan_id = str(
+            plan_id
+            or room.get("active_execution_plan_id")
+            or room.get("latest_completed_plan_id")
+            or ""
+        )
+        if not enriched.get("batches"):
+            enriched["batches"] = [
+                dict(item)
+                for item in dict(room.get("batch_plans") or {}).values()
+                if isinstance(item, dict) and str(item.get("plan_id") or "") == target_plan_id
+            ]
+        if not enriched.get("graphs"):
+            business_graph_ids = {
+                str(item.get("tool_graph_id") or "")
+                for item in dict(room.get("batch_plans") or {}).values()
+                if isinstance(item, dict)
+                and str(item.get("plan_id") or "") == target_plan_id
+                and str(item.get("tool_graph_id") or "")
+            }
+            enriched["graphs"] = [
+                dict(item)
+                for item in dict(room.get("tool_graphs") or {}).values()
+                if isinstance(item, dict)
+                and str(item.get("plan_id") or "") == target_plan_id
+                and (
+                    str(item.get("graph_role") or "") == "business_batch"
+                    or str(item.get("graph_id") or "") in business_graph_ids
+                )
+            ]
+        return enriched
 
     @staticmethod
     def _format_agent_runtime_execution_reply(result: dict[str, Any]) -> str:
@@ -2442,9 +2835,23 @@ class LANChatAgentWorker:
         sync_summary = dict(replay.get("sync_replay_summary") or {})
         asset_transfer_summary = dict(replay.get("asset_transfer_replay_summary") or {})
         batch_execution_summary = dict(replay.get("batch_execution_summary") or {})
+        graph_domain = dict(report.get("tool_graph_domain_summary") or {})
         drain_result = result.get("drain") if isinstance(result.get("drain"), dict) else {}
+        batches = LANChatAgentWorker._agent_runtime_batches_from_result(result)
         graphs = LANChatAgentWorker._agent_runtime_graphs_from_result(result)
+        batch_terminal_statuses = {"completed", "failed", "cancelled", "abandoned", "partial"}
+        graph_terminal_statuses = {"completed", "failed", "cancelled", "abandoned", "blocked"}
+        node_terminal_statuses = {"succeeded", "failed", "cancelled", "abandoned", "blocked", "skipped"}
+        batch_statuses = [str(batch.get("status") or "") for batch in batches]
         graph_statuses = [str(graph.get("status") or "") for graph in graphs if isinstance(graph, dict)]
+        graph_nodes = []
+        for graph in graphs:
+            nodes = graph.get("nodes") if isinstance(graph, dict) else None
+            if isinstance(nodes, dict):
+                graph_nodes.extend(node for node in nodes.values() if isinstance(node, dict))
+            elif isinstance(nodes, list):
+                graph_nodes.extend(node for node in nodes if isinstance(node, dict))
+        node_statuses = [str(node.get("status") or "") for node in graph_nodes]
         entity_type_counts = dict(registry.get("entity_type_counts") or {})
         steps = []
         for step in flow.get("steps") or []:
@@ -2455,13 +2862,34 @@ class LANChatAgentWorker:
             elif str(step or "").strip():
                 steps.append(str(step).strip())
         return {
-            "batch_count": len(LANChatAgentWorker._agent_runtime_batches_from_result(result)),
+            "batch_count": len(batches),
+            "business_graph_count": int(graph_domain.get("business_batch_count") or len(graphs)),
+            "internal_graph_count": int(graph_domain.get("internal_graph_count") or 0),
+            "batch_active_count": sum(status not in batch_terminal_statuses for status in batch_statuses),
+            "batch_terminal_count": sum(status in batch_terminal_statuses for status in batch_statuses),
             "graph_count": len(graphs),
+            "graph_active_count": sum(status not in graph_terminal_statuses for status in graph_statuses),
+            "graph_terminal_count": sum(status in graph_terminal_statuses for status in graph_statuses),
             "graph_statuses": ",".join(graph_statuses),
+            "node_count": len(graph_nodes),
+            "node_succeeded_count": sum(status == "succeeded" for status in node_statuses),
+            "node_failed_count": sum(status == "failed" for status in node_statuses),
+            "node_terminal_count": sum(status in node_terminal_statuses for status in node_statuses),
             "flow_steps": ">".join(steps),
             "flow_status": str(flow.get("status") or ""),
             "entity_count": int(registry.get("entity_count") or 0),
+            "game_ready_entity_count": int(registry.get("game_ready_entity_count") or 0),
             "actor_count": int(registry.get("actor_count") or entity_type_counts.get("actor") or 0),
+            "environment_count": int(
+                registry.get("environment_count") or entity_type_counts.get("environment") or 0
+            ),
+            "planned_substrate_count": int(registry.get("planned_substrate_count") or 0),
+            "engine_write_verified_entity_count": int(
+                dict(registry.get("materialization_status_counts") or {}).get("engine_ready") or 0
+            ),
+            "engine_loading_entity_count": int(
+                dict(registry.get("materialization_status_counts") or {}).get("engine_loading") or 0
+            ),
             "terrain_count": int(registry.get("terrain_count") or entity_type_counts.get("terrain") or 0),
             "skybox_count": int(registry.get("skybox_count") or entity_type_counts.get("skybox") or 0),
             "model_items": len(classification.get("model_items") or []),
@@ -2553,8 +2981,13 @@ class LANChatAgentWorker:
         if not summary:
             return
         self._logger.info(
-            "[LANChatRuntimeEvidence] phase=%s room=%s runtime_plan=%s batches=%s graphs=%s graph_statuses=%s "
-            "flow=%s flow_status=%s entities=%s actors=%s terrain=%s skybox=%s model_items=%s substrate_items=%s "
+            "[LANChatRuntimeEvidence] phase=%s room=%s runtime_plan=%s "
+            "batches=total:%s,active:%s,terminal:%s "
+            "graphs=total:%s,active:%s,terminal:%s graph_statuses=%s "
+            "nodes=total:%s,succeeded:%s,failed:%s,terminal:%s "
+            "flow=%s flow_status=%s entities=%s game_ready=%s actors=%s environment=%s "
+            "planned_substrates=%s engine_verified=%s engine_loading=%s terrain=%s skybox=%s "
+            "model_items=%s substrate_items=%s "
             "operations=%s operation_total=%s state_source=%s engine_boundary=%s engine_imports=%s "
             "guard=block:%s,write:%s,system:%s,confirm_high:%s,confirm_write:%s "
             "queue=total:%s,queued:%s,running:%s,active:%s,block:%s,pressure:%s "
@@ -2569,12 +3002,25 @@ class LANChatAgentWorker:
             room_id or "default",
             runtime_plan_id or "",
             summary.get("batch_count", 0),
+            summary.get("batch_active_count", 0),
+            summary.get("batch_terminal_count", 0),
             summary.get("graph_count", 0),
+            summary.get("graph_active_count", 0),
+            summary.get("graph_terminal_count", 0),
             summary.get("graph_statuses", ""),
+            summary.get("node_count", 0),
+            summary.get("node_succeeded_count", 0),
+            summary.get("node_failed_count", 0),
+            summary.get("node_terminal_count", 0),
             summary.get("flow_steps", ""),
             summary.get("flow_status", ""),
             summary.get("entity_count", 0),
+            summary.get("game_ready_entity_count", 0),
             summary.get("actor_count", 0),
+            summary.get("environment_count", 0),
+            summary.get("planned_substrate_count", 0),
+            summary.get("engine_write_verified_entity_count", 0),
+            summary.get("engine_loading_entity_count", 0),
             summary.get("terrain_count", 0),
             summary.get("skybox_count", 0),
             summary.get("model_items", 0),
@@ -2833,8 +3279,9 @@ class LANChatAgentWorker:
         room_limit = max(1, int(max_rooms or 1))
         graph_limit = max(1, int(max_graphs_per_room or 1))
         for room_id in room_snapshot[:room_limit]:
+            active_plan_id = self._active_runtime_execution_plan_id(str(room_id))
+            runtime_state_readable = callable(getattr(self._agent_runtime, "query_state", None))
             before_timestamp = self._latest_agent_runtime_event_timestamp(str(room_id))
-            active_plan_id = self._active_runtime_external_plan_id(str(room_id))
             heartbeat_stop = threading.Event()
             heartbeat_thread = self._start_runtime_drain_heartbeat(
                 room_id=str(room_id),
@@ -2846,6 +3293,7 @@ class LANChatAgentWorker:
                     room_id=str(room_id),
                     text="runtime worker drain",
                     action="worker_drain",
+                    plan_id=active_plan_id,
                     max_graphs=graph_limit,
                 )
                 result = dict(runtime_result.get("drain") or {})
@@ -2889,7 +3337,44 @@ class LANChatAgentWorker:
                         "drained_count": drained_count,
                     },
                 )
+            runtime_plan_id = str(
+                dict(runtime_result.get("report") or {}).get("plan_id")
+                or dict(runtime_result.get("status") or {}).get("plan_id")
+                or dict(runtime_result.get("plan") or {}).get("plan_id")
+                or ""
+            )
+            runtime_plan_id = runtime_plan_id or active_plan_id
+            runtime_result = self._runtime_evidence_result(
+                runtime_result,
+                room_id=str(room_id),
+                plan_id=runtime_plan_id,
+            )
+            emitted_event_count = self._emit_agent_runtime_events_since(
+                str(room_id),
+                after_timestamp=before_timestamp,
+            )
             if drained_count <= 0:
+                remaining_execution_plan_id = self._active_runtime_execution_plan_id(str(room_id))
+                if remaining_execution_plan_id and not list(result.get("finalized_plans") or []):
+                    self._record_runtime_audit_event(
+                        event="execution_plan_queue_missing",
+                        room_id=str(room_id),
+                        message="Active execution plan has no queued graph and did not finalize.",
+                        payload={
+                            "runtime_plan_id": remaining_execution_plan_id,
+                            "phase": "agent_runtime_worker_drain",
+                        },
+                    )
+                if runtime_state_readable and not remaining_execution_plan_id:
+                    self._forget_room_id(str(room_id))
+                if emitted_event_count > 0 or bool(runtime_result.get("report")):
+                    self._log_agent_runtime_evidence(
+                        phase="runtime_queue_drain_result",
+                        room_id=str(room_id),
+                        runtime_plan_id=runtime_plan_id,
+                        result=runtime_result,
+                    )
+                    return True
                 continue
             self._remember_room_id(str(room_id))
             self._logger.info(
@@ -2898,9 +3383,11 @@ class LANChatAgentWorker:
                 drained_count,
                 _trace_preview(result.get("graphs"), limit=160),
             )
-            self._emit_agent_runtime_events_since(
-                str(room_id),
-                after_timestamp=before_timestamp,
+            self._log_agent_runtime_evidence(
+                phase="runtime_queue_drain_result",
+                room_id=str(room_id),
+                runtime_plan_id=runtime_plan_id,
+                result=runtime_result,
             )
             return True
         return False
@@ -2912,7 +3399,7 @@ class LANChatAgentWorker:
         plan_id: str,
         stop_event: threading.Event,
     ) -> threading.Thread | None:
-        if self._corona_engine is None:
+        if self._corona_engine is None or not str(plan_id or "").strip():
             return None
         try:
             interval_s = max(5.0, min(60.0, float(os.getenv("AGENT_RUNTIME_HEARTBEAT_SECONDS", "30"))))
@@ -2925,6 +3412,7 @@ class LANChatAgentWorker:
                     "模型和环境组件仍在进入场景，你可以继续补充要求。",
                     room_id=room_id,
                     plan_id=plan_id,
+                    include_progress=False,
                 )
 
         thread = threading.Thread(
@@ -3199,6 +3687,32 @@ class LANChatAgentWorker:
 
     def _process_trigger(self, trigger: dict[str, Any]) -> bool:
         self._apply_generation_options_from_message(trigger)
+        message_id = str(trigger.get("message_id") or "").strip()
+        room_id = str(trigger.get("room_id") or "default")
+        dispatch_entry = self._message_dispatch_ledger.entry(room_id, message_id)
+        if str(dispatch_entry.get("state") or "") in {"executed", "replied"}:
+            self._logger.info(
+                "[LANChatAgentTrace] phase=message_dispatch_deduped message_id=%s room=%s owner=%s route=%s",
+                message_id,
+                room_id,
+                dispatch_entry.get("owner") or "",
+                dispatch_entry.get("route") or "",
+            )
+            return True
+        if message_id and message_id in self._gm_control_message_ids:
+            self._logger.info(
+                "[LANChatAgentTrace] phase=gm_control_trigger_deduped message_id=%s room=%s",
+                message_id,
+                trigger.get("room_id") or "",
+            )
+            return True
+        if message_id and message_id in self._runtime_increment_message_ids:
+            self._logger.info(
+                "[LANChatAgentTrace] phase=runtime_increment_trigger_deduped message_id=%s room=%s",
+                message_id,
+                trigger.get("room_id") or "",
+            )
+            return True
         agent_id = str(trigger.get("agent_id") or "agent")
         agent_name = str(trigger.get("agent_name") or "Agent")
         action_payload = None
@@ -3229,6 +3743,22 @@ class LANChatAgentWorker:
             trigger.get("message_kind") or "",
             _trace_preview(trigger.get("text")),
         )
+        deterministic_control = self._get_orchestrator().handle_control_trigger(trigger)
+        if deterministic_control is not None:
+            action_payload = self._prepare_confirmed_action_payload(
+                getattr(deterministic_control, "action_payload", None),
+                trigger,
+            )
+            action_payload = self._filter_confirmed_action_payload_for_runtime(action_payload)
+            self._broadcast_confirmed_action(action_payload)
+            self._remember_gm_control_message_id(message_id)
+            return bool(self._send_final_reply(
+                deterministic_control.sender_id,
+                deterministic_control.sender_name,
+                deterministic_control.text,
+                trigger,
+                action_payload,
+            ))
         if (
             self._interaction_coordinator is not None
             and str(trigger.get("message_id") or "").strip()
@@ -3269,6 +3799,70 @@ class LANChatAgentWorker:
         control_reply = self._handle_coordinator_gm_control(trigger)
         if control_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", control_reply, trigger))
+        entity_status_reply = self._handle_runtime_entity_status_query(trigger)
+        if entity_status_reply is not None:
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="agent_trigger",
+                route="runtime_read",
+            ):
+                return True
+            self._message_dispatch_ledger.transition(room_id, message_id, "routed")
+            sent = bool(self._send_final_reply("gm-system", "GM", entity_status_reply, trigger))
+            self._message_dispatch_ledger.transition(
+                room_id,
+                message_id,
+                "replied" if sent else "executed",
+                reply=entity_status_reply if sent else "",
+            )
+            return sent
+        runtime_clarification = self._handle_runtime_action_clarification(trigger)
+        if runtime_clarification is not None:
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="agent_trigger",
+                route="runtime_read",
+            ):
+                return True
+            self._message_dispatch_ledger.transition(room_id, message_id, "routed")
+            sent = bool(self._send_final_reply("gm-system", "GM", runtime_clarification, trigger))
+            self._message_dispatch_ledger.transition(
+                room_id,
+                message_id,
+                "replied" if sent else "executed",
+                reply=runtime_clarification if sent else "",
+            )
+            return sent
+        execution_plan_id = self._active_runtime_execution_plan_id(room_id)
+        completed_plan_id = self._latest_runtime_completed_plan_id(room_id)
+        completed_intent = self._runtime_action_intent_for_trigger(
+            trigger,
+            target_plan_id=completed_plan_id,
+            generation_active=False,
+        ) if completed_plan_id else None
+        if not execution_plan_id and completed_intent is not None and (
+            completed_intent.route == "runtime_write" or completed_intent.clarification
+        ):
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="agent_trigger",
+                route=completed_intent.route,
+            ):
+                return True
+            completed_increment_reply = self._handle_runtime_completed_increment(trigger)
+            if completed_increment_reply is not None:
+                self._message_dispatch_ledger.transition(room_id, message_id, "executed")
+                sent = bool(self._send_final_reply(agent_id, agent_name, completed_increment_reply, trigger))
+                self._message_dispatch_ledger.transition(
+                    room_id,
+                    message_id,
+                    "replied" if sent else "executed",
+                    reply=completed_increment_reply if sent else "",
+                )
+                return sent
         clarification_reply = self._handle_coordinator_gm_clarification(trigger)
         if clarification_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", clarification_reply, trigger))
@@ -3313,10 +3907,67 @@ class LANChatAgentWorker:
             return bool(self._send_final_reply("gm-system", "GM", generation_start_reply, trigger))
         completed_intervention_reply = self._handle_coordinator_completed_intervention(trigger)
         if completed_intervention_reply is not None:
-            return bool(self._send_final_reply(agent_id, agent_name, completed_intervention_reply, trigger))
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="agent_trigger",
+                route="runtime_write",
+            ):
+                return True
+            self._message_dispatch_ledger.transition(room_id, message_id, "executed")
+            sent = bool(self._send_final_reply(agent_id, agent_name, completed_intervention_reply, trigger))
+            self._message_dispatch_ledger.transition(
+                room_id,
+                message_id,
+                "replied" if sent else "executed",
+                reply=completed_intervention_reply if sent else "",
+            )
+            return sent
+        executing_intent = self._runtime_action_intent_for_trigger(
+            trigger,
+            target_plan_id=execution_plan_id,
+            generation_active=True,
+        ) if execution_plan_id else None
+        if (
+            executing_intent is not None
+            and executing_intent.route == "runtime_write"
+            and not executing_intent.requires_confirmation
+        ):
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="agent_trigger",
+                route="runtime_write",
+            ):
+                return True
         executing_intervention_reply = self._handle_coordinator_executing_intervention(trigger)
         if executing_intervention_reply is not None:
-            return bool(self._send_final_reply(agent_id, agent_name, executing_intervention_reply, trigger))
+            if (
+                executing_intent is not None
+                and executing_intent.route == "runtime_write"
+                and not executing_intent.requires_confirmation
+            ):
+                self._message_dispatch_ledger.transition(room_id, message_id, "executed")
+            sent = bool(self._send_final_reply(agent_id, agent_name, executing_intervention_reply, trigger))
+            if (
+                executing_intent is not None
+                and executing_intent.route == "runtime_write"
+                and not executing_intent.requires_confirmation
+            ):
+                self._message_dispatch_ledger.transition(
+                    room_id,
+                    message_id,
+                    "replied" if sent else "executed",
+                    reply=executing_intervention_reply if sent else "",
+                )
+            return sent
+        if (
+            executing_intent is not None
+            and executing_intent.route == "runtime_write"
+            and not executing_intent.requires_confirmation
+        ):
+            self._message_dispatch_ledger.transition(room_id, message_id, "failed")
+            return True
         planning_seed = self._seed_agent_trigger_planning_context_in_runtime(trigger)
         if self._handle_agent_trigger_planning_gate(trigger):
             return True
@@ -3346,7 +3997,13 @@ class LANChatAgentWorker:
                     self._logger.debug("LANChat busy note classification skipped: %s", type(exc).__name__)
                     note_kind = ""
                 if note_kind and note_kind != "chat":
-                    self._record_active_runtime_busy_intervention(trigger, note_kind=note_kind)
+                    if self._record_active_runtime_busy_intervention(trigger, note_kind=note_kind):
+                        return bool(self._send_final_reply(
+                            agent_id,
+                            agent_name,
+                            "已记录本次调整，并已绑定当前执行方案；系统会在后续真实批次中吸收。",
+                            trigger,
+                        ))
                 quick_reply = scene_runtime.record_busy_message(
                     agent_name=agent_name,
                     text=note_text,
@@ -7328,14 +7985,25 @@ class LANChatAgentWorker:
         if not value:
             return False
         room_id = str((trigger or {}).get("room_id") or "default")
-        external_plan_id = self._active_runtime_external_plan_id(room_id)
-        if not external_plan_id:
+        execution_plan_id = self._active_runtime_execution_plan_id(room_id)
+        if not execution_plan_id:
             return False
+        action_intent = self._runtime_action_intent_for_trigger(
+            trigger,
+            target_plan_id=execution_plan_id,
+            generation_active=True,
+        )
+        if action_intent.route != "runtime_write" or action_intent.operation not in {"add", "modify"}:
+            return False
+        if action_intent.operation == "add":
+            if not action_intent.entities:
+                return False
+            value = "再加入" + "、".join(item.canonical_name for item in action_intent.entities)
         patch_action = "intervention_modify" if str(note_kind or "") in {"edit_existing", "layout_constraint"} else "intervention_add"
         try:
             result = self._agent_runtime.handle_message(
                 room_id=room_id,
-                external_plan_id=external_plan_id,
+                plan_id=execution_plan_id,
                 text=value,
                 sender_id=str((trigger or {}).get("sender_id") or (trigger or {}).get("from") or ""),
                 sender_name=str((trigger or {}).get("sender_name") or (trigger or {}).get("from") or ""),
@@ -7346,7 +8014,23 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime busy intervention mirror failed: %s", type(exc).__name__)
             return False
-        return bool(isinstance(result, dict) and result.get("recorded"))
+        if not (isinstance(result, dict) and result.get("recorded")):
+            return False
+        try:
+            queued = self._agent_runtime.handle_message(
+                room_id=room_id,
+                plan_id=execution_plan_id,
+                text=value,
+                action="enqueue_pending_interventions",
+                scene_name=self._runtime_scene_name_from_trigger(trigger),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("AgentRuntime intervention batch enqueue deferred: %s", type(exc).__name__)
+            self._remember_room_id(room_id)
+            return True
+        if isinstance(queued, dict) and queued.get("recorded"):
+            self._remember_room_id(room_id)
+        return True
 
     @staticmethod
     def _is_runtime_sync_status_query(text: str) -> bool:
@@ -8394,6 +9078,32 @@ class LANChatAgentWorker:
             return None
         room_id = str(trigger.get("room_id") or "default")
         host_id = str(trigger.get("sender_id") or trigger.get("from") or "")
+        active_external_plan_id = self._active_runtime_external_plan_id(room_id)
+        if not active_external_plan_id:
+            if self._is_pure_generation_confirmation_text(text):
+                self._logger.info(
+                    "[LANChatGenerationTrace] phase=runtime_confirmation_without_plan room=%s sender=%s/%s text=%s",
+                    room_id,
+                    trigger.get("sender_id") or trigger.get("from") or "",
+                    trigger.get("sender_name") or trigger.get("from") or "",
+                    _trace_preview(text),
+                )
+                return "当前没有可确认的 AgentRuntime 方案。请先讨论或提交完整场景需求，再确认生成。"
+            planning_seed = self._seed_agent_trigger_planning_context_in_runtime(
+                trigger,
+                allow_generation_start=True,
+            )
+            if bool(planning_seed.get("recorded")):
+                runtime_result = planning_seed.get("runtime")
+                runtime_result = runtime_result if isinstance(runtime_result, dict) else {}
+                runtime_plan = runtime_result.get("plan")
+                runtime_plan = runtime_plan if isinstance(runtime_plan, dict) else {}
+                runtime_plan_id = str(runtime_plan.get("plan_id") or "").strip()
+                plan_ref = f" {runtime_plan_id}" if runtime_plan_id else ""
+                return (
+                    f"AgentRuntime 方案草案{plan_ref}已记录，尚未执行生成。"
+                    "请房主回复“确认生成”，确认后进入 Runtime 生成队列。"
+                )
         runtime_reply = self._execute_active_runtime_plan_generation(
             trigger,
             room_id=room_id,
@@ -8610,6 +9320,7 @@ class LANChatAgentWorker:
                 "[LANChatGenerationTrace] phase=runtime_active_plan_execute_no_active_plan room=%s",
                 room_id,
             )
+            return None
         try:
             result = self._agent_runtime.handle_message(
                 room_id=room_id,
@@ -8885,10 +9596,34 @@ class LANChatAgentWorker:
         raw = str(text or "")
         return any(word in raw for word in (
             "运行时",
-            "确认生成", "确认开始", "开始生成", "直接生成", "执行生成",
+            "确认方案", "方案确认", "确认生成", "确认开始", "开始生成", "直接生成", "执行生成",
             "按照方案执行生成", "按方案执行生成", "就按方案生成", "按这个方案生成",
+            "按照这个方案生成", "按照当前方案生成", "按当前方案生成",
             "按照方案生成", "就按照这个方案生成", "就按照方案生成", "开始搭建", "开始布置",
         ))
+
+    @staticmethod
+    def _is_pure_generation_confirmation_text(text: str) -> bool:
+        raw = str(text or "").strip().lower()
+        normalized = re.sub(r"^\s*@?gm\s*", "", raw, flags=re.IGNORECASE)
+        normalized = re.sub(r"[\s，。！？、,.!?:：；;‘’“”\"'（）()]+", "", normalized)
+        return normalized in {
+            "确认方案",
+            "确认生成",
+            "确认开始",
+            "开始生成",
+            "直接生成",
+            "执行生成",
+            "按方案生成",
+            "按照方案生成",
+            "按当前方案生成",
+            "按照当前方案生成",
+            "按这个方案生成",
+            "按照这个方案生成",
+            "方案确认",
+            "方案确认进入生成",
+            "方案确认开始生成",
+        }
 
     def _handle_coordinator_completed_intervention(self, trigger: dict[str, Any]) -> str | None:
         text = str(trigger.get("text") or "").strip()
@@ -9069,23 +9804,26 @@ class LANChatAgentWorker:
         if plan_status != "executing":
             return None
 
-        decision = get_intent_understanding_service().classify(
-            text,
-            allow_llm=False,
+        action_intent = self._runtime_action_intent_for_trigger(
+            trigger,
+            target_plan_id=self._active_runtime_execution_plan_id(room_id),
             generation_active=True,
         )
         action_map = {
-            "intervention_add": "intervention_add",
-            "post_generation_add": "intervention_add",
-            "intervention_modify": "intervention_modify",
-            "intervention_delete": "intervention_delete",
+            "add": "intervention_add",
+            "modify": "intervention_modify",
+            "delete": "intervention_delete",
         }
-        action = action_map.get(decision.intent)
-        if action is None:
+        action = action_map.get(action_intent.operation)
+        if action is None or action_intent.route != "runtime_write" or action_intent.requires_confirmation:
             return None
+        normalized_items = [item.canonical_name for item in action_intent.entities]
+        normalized_text = text
+        if action_intent.operation == "add" and normalized_items:
+            normalized_text = "再加入" + "、".join(normalized_items)
         result = self._agent_runtime.handle_message(
             room_id=room_id,
-            text=text,
+            text=normalized_text,
             sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
             sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
             owner_agent=str(trigger.get("agent_name") or trigger.get("agent_id") or plan_summary.get("owner_agent") or ""),
@@ -9094,7 +9832,7 @@ class LANChatAgentWorker:
         )
         queued = self._agent_runtime.handle_message(
             room_id=room_id,
-            text=text,
+            text=normalized_text,
             sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
             sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
             owner_agent=str(trigger.get("agent_name") or trigger.get("agent_id") or plan_summary.get("owner_agent") or ""),
@@ -10925,7 +11663,14 @@ class LANChatAgentWorker:
             return {}
         return provider
 
-    def _emit_generation_progress_disclosure(self, message: str, *, room_id: str, plan_id: str) -> None:
+    def _emit_generation_progress_disclosure(
+        self,
+        message: str,
+        *,
+        room_id: str,
+        plan_id: str,
+        include_progress: bool = True,
+    ) -> None:
         text = self._safe_control_text(str(message or "").strip())
         if not text or self._corona_engine is None:
             return
@@ -10943,7 +11688,6 @@ class LANChatAgentWorker:
             "room_id": room,
             "audience": "participant",
             "stage": stage,
-            "progress": progress,
             "public_message": text,
             "available_actions": ["add_note", "pause_after_batch"],
             "requires_confirmation": False,
@@ -10952,6 +11696,8 @@ class LANChatAgentWorker:
                 "source": "generation_progress_sink",
             },
         }
+        if include_progress:
+            disclosure["progress"] = progress
         metadata = json.dumps({"disclosure": disclosure}, ensure_ascii=False)
         try:
             if hasattr(self._corona_engine, "network_send_system_message_ex"):

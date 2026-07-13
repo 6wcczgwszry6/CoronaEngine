@@ -40,6 +40,7 @@ def build_environment_primitive(
         "terrain_boundary",
         "sky",
         "skybox",
+        "transition_zone",
     }:
         raise ValueError(f"unsupported environment primitive: {component_type}")
 
@@ -66,11 +67,17 @@ def build_environment_primitive(
         mtl_text = _room_shell_mtl()
         position = [0.0, dimensions[1] / 2.0, 0.0]
         semantic_role = "indoor_enclosure"
-    elif normalized in {"room_floor", "terrain", "ground"}:
+    elif normalized in {"room_floor", "terrain", "ground", "transition_zone"}:
         obj_text = _floor_slab_obj(mtl_path.name)
-        mtl_text = _terrain_mtl() if normalized in {"terrain", "ground"} else _floor_mtl()
+        mtl_text = _terrain_mtl() if normalized in {"terrain", "ground", "transition_zone"} else _floor_mtl()
         position = [0.0, dimensions[1] / 2.0, 0.0]
-        semantic_role = "walkable_floor" if normalized == "room_floor" else "walkable_terrain"
+        semantic_role = (
+            "walkable_floor"
+            if normalized == "room_floor"
+            else "indoor_outdoor_transition"
+            if normalized == "transition_zone"
+            else "walkable_terrain"
+        )
     elif normalized in {"boundary", "terrain_boundary"}:
         obj_text = _boundary_obj(mtl_path.name)
         mtl_text = _boundary_mtl()
@@ -102,6 +109,7 @@ def _dimensions(component_type: str, scale: Sequence[float] | None) -> list[floa
         "terrain_boundary": [12.0, 0.8, 12.0],
         "sky": [24.0, 12.0, 24.0],
         "skybox": [24.0, 12.0, 24.0],
+        "transition_zone": [4.0, 0.05, 4.0],
     }
     defaults = defaults_by_type[component_type]
     values = list(scale or defaults)
