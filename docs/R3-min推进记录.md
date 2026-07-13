@@ -1195,3 +1195,63 @@ W4.4 Artifact 综合闭环：等待 W4.3
 - PlanningReasoner/ArtReasoner 的生产模型适配和 CollaborationCoordinator 入口；Red 状态下继续不注册 LANChat。
 - 真实/Mock Snapshot 输入、EntityBindingPlan、ProjectGate、ActionProposal 和 Runtime 写入仍由 Gate 阻断。
 - 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。
+
+## 40. W4.3 ProgramAgent 非执行型 GameplayLogicPlan 输出
+
+在 W4.1/W4.2 强类型策划与美术契约基础上，实现第三个职能 Agent。该 Agent 是规则设计器而非代码执行器，只消费任务显式绑定的当前有效 Artifact，并产出非执行 `GameplayLogicPlan`；不读取 RuntimeState、Engine、聊天历史或任何真实/Mock Snapshot。
+
+当前改动：
+
+- 新增 `services/agent_collaboration/agents/program_agent.py`，并从独立 agents 包导出。
+- 定义 `ProgramRequest`、`ProgramContext`、`ProgramInputArtifactContext`、`ProgramAgentDraft`、`ProgramAgentResult` 与 `ProgramReasoner` Protocol。
+- ProgramRequest 只包含 project/graph/task identity、明确逻辑目标、约束、验收条件和请求来源，不接受脚本、聊天流水或场景对象。
+- ProgramAgent 要求责任任务属于 `program` 且只声明 `GameplayLogicPlan` 输出。
+- 必需输入为当前有效且由 planning 角色产生的 GameDesignBrief 与 LevelPlan；可选输入仅允许当前有效且由 art 角色产生的 ArtDirection。
+- SceneCompositionPlan、重复类型、错误 producer、缺失或 stale Artifact 在 Reasoner 前拒绝。
+- Red Gate 下，任何 `snapshot_source=mock/runtime` 输入均以 `ProgramIsolationError` 拒绝；输入必须保持 `non_executable=true`。
+- Program 任务能力集只允许 `artifact.read/artifact.write` 且必须声明 `artifact.write`；shell、Engine、脚本执行或 Actor 修改能力在 Reasoner 前拒绝。
+- Reasoner 必须返回强类型 `ProgramAgentDraft`；states、triggers、rules、win_conditions 和 lose_conditions 继续经过 Artifact schema Validator。
+- 输出使用稳定 lineage `program.gameplay-logic-plan` 并自动计算下一版本；依赖精确记录所有显式输入版本。
+- ArtifactRegistry 登记成功且 AgentTaskGraph 校验 source_task、声明类型和当前可用性后，程序任务才进入 completed。
+- 推理期间 ProjectState 版本变化会抛出 `ProgramContextStaleError`，任务记录失败且不登记过期产物。
+- 同 project/request ID 的相同请求幂等返回；相同 ID 携带不同内容明确拒绝。
+- 策划版本更新会精确 stale GameplayLogicPlan；当程序逻辑显式引用 ArtDirection 时，美术版本更新同样精确触发 stale，并可重建 v2。
+- 本轮 reasoner 仅依赖注入测试，没有注册生产 LLM/LANChat 入口，也没有 EntityBindingPlan、ScriptBundle、ActionProposal 或 Runtime 写入能力。
+
+聚焦自动验证：
+
+```text
+ProgramAgent 专项：17 tests passed
+contracts + ProjectState + ArtifactRegistry + TaskGraph + 三职能 Agents：72 tests passed
+GameDesignBrief/LevelPlan -> GameplayLogicPlan：passed
+可选 ArtDirection 显式依赖：passed
+缺失/stale/错误类型/错误 producer 输入在 Reasoner 前拒绝：passed
+禁止 capability 和缺少 artifact.write：passed
+schema invalid / reasoner 非结构化输出失败且零 Artifact 发布：passed
+项目版本并发变化拒绝过期输出：passed
+Mock/Runtime source 在 Reasoner 前隔离：passed
+请求幂等与同 ID 异内容冲突：passed
+策划/美术版本更新精确 stale 程序产物并允许 v2 重建：passed
+非执行 Artifact assert_executable 拒绝：passed
+Runtime/LANChat/Snapshot/SceneTools/ActionProposal/EntityBinding 静态隔离：passed
+Python syntax compile：passed
+```
+
+当前任务状态：
+
+```text
+W3.1-W3.6 三职能强类型契约底座：code_complete
+W4.1 PlanningAgent：code_complete（可注入 reasoner，无生产入口）
+W4.2 ArtAgent：code_complete（可注入 reasoner，无生产入口）
+W4.3 ProgramAgent：code_complete（可注入 reasoner，无生产入口）
+W4.4 五 Artifact 红灯阶段综合闭环：ready
+EntityBindingPlan：schema_only / Green 后 W5.2 解锁
+当前 Gate：red / pending_reevaluation
+```
+
+以下仍未实现或未解锁：
+
+- W4.4 五 Artifact 端到端业务任务图、版本返工和综合验收。
+- 三个 Reasoner 的生产模型适配和 CollaborationCoordinator 入口；Red 状态下继续不注册 LANChat。
+- 真实/Mock Snapshot 输入、EntityBindingPlan、ProjectGate、ActionProposal 和 Runtime 写入仍由 Gate 阻断。
+- 本轮不改变轨道 A Gate；所有 Engine/Sync 效果仍为 **[待 F5/实机验证]**。

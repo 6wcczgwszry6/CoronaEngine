@@ -675,7 +675,7 @@ R3GateReport
 #### W4.4 Artifact 综合闭环
 
 - 前置依赖：W4.1-W4.3。
-- 实施：用 AgentTaskGraph 驱动六种首批 Artifact 的生产、校验、返工和 stale 传播。
+- 实施：用 AgentTaskGraph 驱动 Red 阶段五种可产出 Artifact 的生产、校验、返工和 stale 传播；`EntityBindingPlan` 仅保留已定义 schema，待 Green 后由 W5.2 生产。
 - 交付物：一个不依赖 Runtime 写入的完整项目方案版本。
 - 完成标准：每个 Artifact 都有 producer/task/dependencies/hash/validation，任何上游变更可精确定位需返工任务。
 - 验证：端到端纯契约测试，不运行 F5。
@@ -806,7 +806,7 @@ R3GateReport
 | 第 2 天 | W1.1-W1.3 | W3.3-W3.4 | 环境/身份聚焦测试、stale 测试 |
 | 第 3 天 | W1.4-W1.5 | W3.5-W3.6 | Finalizer/图对账证据、任务图测试 |
 | 第 4 天 | W2.1-W2.3 | W4.1 | 三类场景 F5 证据包、策划 Artifact |
-| 第 5 天 | W1.6、W2.4-W2.6 | W4.2-W4.4 | 多人/追加证据、Gate 决策、六 Artifact 闭环 |
+| 第 5 天 | W1.6、W2.4-W2.6 | W4.2-W4.4 | 多人/追加证据、Gate 决策、五 Artifact 红灯闭环 |
 | 第 6 天 | Red/Yellow：继续 W1/W2；Green：W5.1-W5.4 | W4.5 或 W5 协作接入 | Snapshot v1 或明确阻断项 |
 | 第 7 天 | Green：W5.5-W5.6、W6.1 | 协作验收 | 首个真实写入版本链与验收包 |
 
