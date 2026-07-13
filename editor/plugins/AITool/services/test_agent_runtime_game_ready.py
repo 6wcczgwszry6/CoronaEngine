@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import unittest
 from unittest.mock import patch
 
@@ -19,6 +20,7 @@ from editor.plugins.AITool.services.agent_runtime.scene_world_consistency import
     audit_scene_world_consistency,
     constrain_scene_world_snapshot_readiness,
     latest_engine_snapshot,
+    scene_world_fingerprint,
 )
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
 from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
@@ -373,20 +375,19 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(result["scene_version"], 2)
         self.assertEqual(result["reason"], "minimum_scene_version_not_available")
 
-    def test_immutable_snapshot_preserves_persisted_consistency_downgrade(self) -> None:
+    def test_legacy_report_snapshot_preserves_persisted_consistency_downgrade(self) -> None:
         runtime = AgentRuntime()
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
         self.assertTrue(applied)
-        persisted_snapshot = {
-            "room_id": "room-1",
-            "plan_id": "plan-1",
-            "scene_version": 2,
-            "world_readiness": "game_ready",
-            "readiness_summary": {"entity_count": 1, "game_ready_entity_count": 1},
-            "environment_entities": [],
-            "actor_entities": [],
-            "operation_cursor": "op:1",
-        }
+        room = runtime.state.room("room-1")
+        registry = runtime._scene_entity_registry_for_plan(room, "plan-1")
+        persisted_snapshot = runtime._scene_world_snapshot_for_plan(
+            room,
+            "plan-1",
+            room_id="room-1",
+            scene_entity_registry=registry,
+            operation_cursor="op:1",
+        )
         persisted_report = {
             "scene_world_snapshot": persisted_snapshot,
             "scene_world_consistency_audit": {
@@ -399,12 +400,125 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         with patch.object(runtime, "_latest_persisted_report_for_plan", return_value=persisted_report):
             result = runtime.get_scene_world_snapshot(room_id="room-1")
 
-        self.assertEqual(result["snapshot_stability"], "immutable")
+        self.assertEqual(result["snapshot_stability"], "legacy_report")
         self.assertEqual(result["world_readiness"], "needs_review")
         self.assertEqual(
             result["snapshot"]["readiness_summary"]["consistency_status"],
             "needs_review",
         )
+
+    def test_world_fingerprint_is_order_independent_and_covers_agent_contract(self) -> None:
+        first = {
+            "entity_id": "entity-1",
+            "actor_id": "actor-1",
+            "asset_id": "asset-1",
+            "model_ref": "desk.obj",
+            "entity_type": "furniture",
+            "semantic_role": "desk",
+            "version": 2,
+            "transform": {"position": [0, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1]},
+            "world_aabb": {"min": [-1, 0, -1], "max": [1, 1, 1]},
+            "bounds_source": "engine_actual",
+            "grounding_status": "grounded",
+            "interaction_capability": ["inspect", "use"],
+            "gameplay_tags": ["workspace", "furniture"],
+            "sync_status": "synced",
+            "game_ready": True,
+            "readiness_missing_fields": [],
+        }
+        second = {
+            "entity_id": "entity-2",
+            "actor_id": "actor-2",
+            "asset_id": "asset-2",
+            "model_ref": "chair.obj",
+            "entity_type": "furniture",
+            "semantic_role": "chair",
+            "version": 1,
+            "transform": {"position": [2, 0, 0], "rotation": [0, 0, 0], "scale": [1, 1, 1]},
+            "world_aabb": {"min": [1.5, 0, -0.5], "max": [2.5, 1, 0.5]},
+            "bounds_source": "engine_actual",
+            "grounding_status": "grounded",
+            "sync_status": "synced",
+            "game_ready": True,
+            "readiness_missing_fields": [],
+        }
+
+        baseline = scene_world_fingerprint(
+            [first, second],
+            plan_id="plan-1",
+            scene_version=2,
+        )
+        reordered = scene_world_fingerprint(
+            [second, {**first, "interaction_capability": ["use", "inspect"]}],
+            plan_id="plan-1",
+            scene_version=2,
+        )
+        changed = deepcopy(first)
+        changed["grounding_status"] = "needs_review"
+
+        self.assertEqual(baseline, reordered)
+        self.assertNotEqual(
+            baseline,
+            scene_world_fingerprint([changed, second], plan_id="plan-1", scene_version=2),
+        )
+
+    def test_terminal_snapshot_is_frozen_and_returned_by_deep_copy(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(
+            StatePatch(room_id="room-1", changes=_room_fact(game_ready=True))
+        )
+        self.assertTrue(applied)
+
+        first_report = runtime.generate_report("room-1", plan_id="plan-1")
+        first_result = runtime.get_scene_world_snapshot(room_id="room-1")
+        report_count = len(runtime.state.room("room-1").get("reports") or [])
+        snapshot_key = "plan-1@v2"
+        frozen_before = deepcopy(
+            runtime.state.room("room-1")["scene_world_snapshots"][snapshot_key]
+        )
+
+        first_result["snapshot"]["actor_entities"][0]["semantic_role"] = "tampered"
+        second_report = runtime.generate_report("room-1", plan_id="plan-1")
+        second_result = runtime.get_scene_world_snapshot(room_id="room-1")
+
+        self.assertEqual(first_result["snapshot_stability"], "immutable")
+        self.assertEqual(second_result["snapshot_stability"], "immutable")
+        self.assertEqual(second_result["snapshot"], frozen_before)
+        self.assertEqual(len(runtime.state.room("room-1").get("reports") or []), report_count)
+        self.assertEqual(
+            first_report["scene_world_snapshot"]["world_fingerprint"],
+            second_report["scene_world_snapshot"]["world_fingerprint"],
+        )
+
+    def test_same_version_terminal_snapshot_conflict_is_rejected(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(
+            StatePatch(room_id="room-1", changes=_room_fact(game_ready=True))
+        )
+        self.assertTrue(applied)
+        original_report = runtime.generate_report("room-1", plan_id="plan-1")
+        frozen_before = deepcopy(runtime.state.room("room-1")["scene_world_snapshots"])
+        report_count = len(runtime.state.room("room-1").get("reports") or [])
+
+        conflicting_report = deepcopy(original_report)
+        conflicting_snapshot = conflicting_report["scene_world_snapshot"]
+        conflicting_registry = conflicting_report["scene_entity_registry"]
+        conflicting_snapshot["actor_entities"][0]["semantic_role"] = "conflicting-role"
+        conflicting_registry["entities"][0]["semantic_role"] = "conflicting-role"
+        conflicting_snapshot["world_fingerprint"] = scene_world_fingerprint(
+            [
+                *conflicting_snapshot["environment_entities"],
+                *conflicting_snapshot["actor_entities"],
+            ],
+            plan_id="plan-1",
+            scene_version=2,
+        )
+
+        with self.assertRaises(RuntimeError):
+            runtime._persist_user_report("room-1", "plan-1", "", conflicting_report)
+
+        self.assertEqual(runtime.state.room("room-1")["scene_world_snapshots"], frozen_before)
+        self.assertEqual(len(runtime.state.room("room-1").get("reports") or []), report_count)
 
     def test_report_downgrades_game_ready_registry_without_engine_snapshot(self) -> None:
         runtime = AgentRuntime()

@@ -104,6 +104,72 @@ def scene_world_fingerprint(
             "actor_id": _text(row.get("actor_id")),
             "asset_id": _text(row.get("asset_id")),
             "model_ref": _text(row.get("model_ref")),
+            "entity_type": _text(row.get("entity_type")),
+            "semantic_role": _text(row.get("semantic_role")),
+            "component_type": _text(
+                row.get("component_type") or row.get("environment_component_type")
+            ),
+            "version": _version(row),
+            "transform": _transform(row),
+            "world_aabb": _world_aabb(row),
+            "bounds_source": _text(row.get("bounds_source")),
+            "grounding_status": _text(row.get("grounding_status")),
+            "interaction_capability": sorted(
+                _text(item)
+                for item in list(row.get("interaction_capability") or [])
+                if _text(item)
+            ),
+            "gameplay_tags": sorted(
+                _text(item)
+                for item in list(row.get("gameplay_tags") or [])
+                if _text(item)
+            ),
+            "physics_profile": _canonical_value(row.get("physics_profile") or {}),
+            "audio_profile": _canonical_value(row.get("audio_profile") or {}),
+            "lighting_profile": _canonical_value(row.get("lighting_profile") or {}),
+            "environment_profile": _canonical_value(row.get("environment_profile") or {}),
+            "script_bindings": _canonical_value(row.get("script_bindings") or []),
+            "sync_status": _text(row.get("sync_status")),
+            "sync_lifecycle_status": _text(row.get("sync_lifecycle_status")),
+            "materialization_status": _text(row.get("materialization_status")),
+            "engine_write_verification_status": _text(
+                row.get("engine_write_verification_status")
+            ),
+            "review_status": _text(row.get("review_status")),
+            "game_ready": bool(row.get("game_ready")),
+            "readiness_missing_fields": sorted(
+                _text(item)
+                for item in list(row.get("readiness_missing_fields") or [])
+                if _text(item)
+            ),
+            "source_plan_id": _text(row.get("source_plan_id") or row.get("plan_id")),
+            "source_batch_id": _text(row.get("source_batch_id") or row.get("batch_id")),
+        })
+    facts.sort(key=lambda item: (item["entity_id"], item["actor_id"], item["asset_id"]))
+    payload = {
+        "plan_id": _text(plan_id),
+        "scene_version": int(scene_version or 0),
+        "entities": facts,
+    }
+    encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def scene_materialization_fingerprint(
+    entities: list[Mapping[str, Any]],
+    *,
+    plan_id: str,
+    scene_version: int,
+) -> str:
+    """Digest only facts that Runtime and Engine snapshots can both observe."""
+
+    facts: list[dict[str, Any]] = []
+    for row in entities:
+        facts.append({
+            "entity_id": _text(row.get("entity_id")),
+            "actor_id": _text(row.get("actor_id")),
+            "asset_id": _text(row.get("asset_id")),
+            "model_ref": _text(row.get("model_ref")),
             "version": _version(row),
             "transform": _transform(row),
             "world_aabb": _world_aabb(row),
@@ -271,12 +337,12 @@ def audit_scene_world_consistency(
     # including entities that have not materialized into Engine actors yet.
     # Otherwise a partial world could compare equal after silently dropping
     # exactly the entities the audit is meant to expose.
-    world_fingerprint = scene_world_fingerprint(
+    world_fingerprint = scene_materialization_fingerprint(
         world_entities,
         plan_id=plan_id,
         scene_version=scene_version,
     )
-    engine_fingerprint = scene_world_fingerprint(
+    engine_fingerprint = scene_materialization_fingerprint(
         engine_actors,
         plan_id=plan_id,
         scene_version=scene_version,
@@ -348,5 +414,6 @@ __all__ = [
     "audit_scene_world_consistency",
     "constrain_scene_world_snapshot_readiness",
     "latest_engine_snapshot",
+    "scene_materialization_fingerprint",
     "scene_world_fingerprint",
 ]

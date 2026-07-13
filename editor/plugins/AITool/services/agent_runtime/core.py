@@ -8,6 +8,7 @@ owners are decomposed into tools.
 
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
@@ -3285,6 +3286,83 @@ class EnvironmentComponentValidator:
             raise ValueError(f"environment component fact {field} exposes unsafe internal text")
 
 
+class SceneWorldSnapshotRecordValidator:
+    """Validate immutable, version-addressed world snapshot records."""
+
+    _ALLOWED_READINESS = {"game_ready", "needs_review", "blocked"}
+    _ALLOWED_AUTHORITIES = {"local_runtime", "peer_mirror"}
+
+    @staticmethod
+    def storage_key(plan_id: Any, scene_version: Any) -> str:
+        safe_plan_id = str(plan_id or "").strip()
+        try:
+            safe_version = int(scene_version or 0)
+        except (TypeError, ValueError):
+            safe_version = 0
+        if not safe_plan_id or safe_version <= 0:
+            raise ValueError("scene world snapshot requires plan_id and positive scene_version")
+        return f"{safe_plan_id}@v{safe_version}"
+
+    @staticmethod
+    def immutable_payload(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+        payload = deepcopy(dict(snapshot or {}))
+        payload.pop("operation_cursor", None)
+        return payload
+
+    @staticmethod
+    def validate_snapshots(snapshots: Any) -> None:
+        if not isinstance(snapshots, Mapping):
+            raise ValueError("scene_world_snapshots must be a mapping")
+        for snapshot_key, snapshot in snapshots.items():
+            SceneWorldSnapshotRecordValidator.validate(snapshot)
+            expected_key = SceneWorldSnapshotRecordValidator.storage_key(
+                snapshot.get("plan_id"), snapshot.get("scene_version")
+            )
+            if str(snapshot_key or "") != expected_key:
+                raise ValueError("scene world snapshot storage key does not match plan/version")
+
+    @staticmethod
+    def validate(snapshot: Any) -> None:
+        if not isinstance(snapshot, Mapping):
+            raise ValueError("scene world snapshot must be a mapping")
+        plan_id = str(snapshot.get("plan_id") or "").strip()
+        try:
+            scene_version = int(snapshot.get("scene_version") or 0)
+        except (TypeError, ValueError):
+            scene_version = 0
+        SceneWorldSnapshotRecordValidator.storage_key(plan_id, scene_version)
+        if str(snapshot.get("world_readiness") or "") not in SceneWorldSnapshotRecordValidator._ALLOWED_READINESS:
+            raise ValueError("scene world snapshot has invalid world_readiness")
+        authority = str(snapshot.get("snapshot_authority") or "").strip()
+        if authority not in SceneWorldSnapshotRecordValidator._ALLOWED_AUTHORITIES:
+            raise ValueError("scene world snapshot has invalid snapshot_authority")
+        environment_entities = snapshot.get("environment_entities")
+        actor_entities = snapshot.get("actor_entities")
+        if not isinstance(environment_entities, list) or not isinstance(actor_entities, list):
+            raise ValueError("scene world snapshot entity collections must be lists")
+        entities = list(environment_entities) + list(actor_entities)
+        if any(not isinstance(entity, Mapping) for entity in entities):
+            raise ValueError("scene world snapshot entities must be mappings")
+        entity_ids = [str(entity.get("entity_id") or "").strip() for entity in entities]
+        non_empty_entity_ids = [entity_id for entity_id in entity_ids if entity_id]
+        if len(non_empty_entity_ids) != len(set(non_empty_entity_ids)):
+            raise ValueError("scene world snapshot contains duplicate entity_id")
+        fingerprint = str(snapshot.get("world_fingerprint") or "").strip().lower()
+        if len(fingerprint) != 64 or any(ch not in "0123456789abcdef" for ch in fingerprint):
+            raise ValueError("scene world snapshot requires a sha256 world_fingerprint")
+        computed = scene_world_fingerprint(
+            [dict(entity) for entity in entities],
+            plan_id=plan_id,
+            scene_version=scene_version,
+        )
+        if fingerprint != computed:
+            raise ValueError("scene world snapshot fingerprint does not match payload")
+        if not isinstance(snapshot.get("readiness_summary"), Mapping):
+            raise ValueError("scene world snapshot requires readiness_summary")
+        if not isinstance(snapshot.get("operation_cursor"), str):
+            raise ValueError("scene world snapshot operation_cursor must be a string")
+
+
 class ReportRecordValidator:
     """Schema guard for Runtime report records persisted in RuntimeState."""
 
@@ -3393,7 +3471,36 @@ class ReportRecordValidator:
         for field in ("room_id", "state_version", "plan_summary", "provider_summary"):
             if field not in report:
                 raise ValueError(f"report record requires {field}")
+        ReportRecordValidator._validate_scene_world_contract(report)
         ReportRecordValidator._validate_safe_tree(report)
+
+    @staticmethod
+    def _validate_scene_world_contract(report: Mapping[str, Any]) -> None:
+        snapshot = report.get("scene_world_snapshot")
+        if snapshot is None:
+            return
+        SceneWorldSnapshotRecordValidator.validate(snapshot)
+        snapshot_map = dict(snapshot)
+        plan_id = str(report.get("plan_id") or "").strip()
+        snapshot_plan_id = str(snapshot_map.get("plan_id") or "").strip()
+        if plan_id and plan_id != snapshot_plan_id:
+            raise ValueError("report plan_id does not match scene world snapshot")
+        scene_version = int(snapshot_map.get("scene_version") or 0)
+        plan_summary = dict(report.get("plan_summary") or {})
+        if int(plan_summary.get("version") or 0) != scene_version:
+            raise ValueError("report plan version does not match scene world snapshot")
+        registry = report.get("scene_entity_registry")
+        if not isinstance(registry, Mapping):
+            raise ValueError("report with scene world snapshot requires scene_entity_registry")
+        if str(registry.get("plan_id") or "") != snapshot_plan_id:
+            raise ValueError("scene entity registry plan_id does not match snapshot")
+        if int(registry.get("scene_version") or 0) != scene_version:
+            raise ValueError("scene entity registry version does not match snapshot")
+        audit = report.get("scene_world_consistency_audit")
+        if isinstance(audit, Mapping):
+            audit_version = int(audit.get("scene_version") or 0)
+            if audit_version and audit_version != scene_version:
+                raise ValueError("scene world consistency audit version does not match snapshot")
 
     @staticmethod
     def _validate_safe_tree(value: Any, *, path: str = "report") -> None:
@@ -3461,6 +3568,7 @@ class RuntimeState:
                 "assets": {},
                 "observed_actors": {},
                 "engine_scene_snapshots": {},
+                "scene_world_snapshots": {},
                 "plan_extractions": {},
                 "element_routes": {},
                 "model_item_lists": {},
@@ -3801,18 +3909,18 @@ class SceneWorldSnapshot:
     operation_cursor: str
 
     def as_dict(self) -> dict[str, Any]:
-        return {
+        return deepcopy({
             "room_id": self.room_id,
             "plan_id": self.plan_id,
             "scene_version": self.scene_version,
             "world_readiness": self.world_readiness,
             "snapshot_authority": self.snapshot_authority,
-            "environment_entities": [dict(item) for item in self.environment_entities],
-            "actor_entities": [dict(item) for item in self.actor_entities],
-            "readiness_summary": dict(self.readiness_summary),
+            "environment_entities": self.environment_entities,
+            "actor_entities": self.actor_entities,
+            "readiness_summary": self.readiness_summary,
             "world_fingerprint": self.world_fingerprint,
             "operation_cursor": self.operation_cursor,
-        }
+        })
 
 
 @dataclass
@@ -4800,6 +4908,7 @@ class StatePatchValidator:
         "review_advisory_proposals",
         "runtime_commands",
         "runtime_events",
+        "scene_world_snapshots",
         "scene_plans",
         "state_patch_conflicts",
         "state_patch_history",
@@ -4931,6 +5040,8 @@ class StatePatchValidator:
                 ActorFactValidator.validate_actor_map(value)
             if str(key) == "engine_scene_snapshots":
                 SceneSnapshotFactValidator.validate_snapshots(value)
+            if str(key) == "scene_world_snapshots":
+                SceneWorldSnapshotRecordValidator.validate_snapshots(value)
             if str(key) == "assets":
                 AssetFactValidator.validate_asset_map(value)
             if str(key) == "runtime_events":
@@ -9649,7 +9760,7 @@ class AgentRuntime:
                 user_visible_message="最终报告只能由 RuntimeState 与 OperationLog 生成后写入，已拒绝外部报告写入。",
             )
         self._report_persist_tokens.discard(persist_token)
-        report = dict(call.args.get("report") or {})
+        report = deepcopy(dict(call.args.get("report") or {}))
         if not report:
             return ToolResult(
                 False,
@@ -9657,14 +9768,103 @@ class AgentRuntime:
                 error_code="invalid_user_report_persist_request",
                 user_visible_message="最终报告写入缺少必要信息，已停止该步骤。",
             )
-        state_patch = StatePatch(
-            room_id=room,
-            changes={"reports": [report]},
-            expected_version=self.state.version,
-            source_tool_call_id=call.tool_call_id,
-        )
         try:
             ReportRecordValidator.validate(report)
+            report_plan_id = str(report.get("plan_id") or call.args.get("plan_id") or "").strip()
+            plan_summary = dict(report.get("plan_summary") or {})
+            report_status = str(plan_summary.get("status") or "").strip().lower()
+            terminal_report = report_status in {
+                ScenePlanStatus.COMPLETED.value,
+                ScenePlanStatus.FAILED.value,
+                ScenePlanStatus.CANCELLED.value,
+            }
+            snapshot = deepcopy(dict(report.get("scene_world_snapshot") or {}))
+            snapshot_key = ""
+            changes: dict[str, Any] = {"reports": [report]}
+            existing_terminal_report = False
+            if terminal_report:
+                snapshot_key = SceneWorldSnapshotRecordValidator.storage_key(
+                    snapshot.get("plan_id"), snapshot.get("scene_version")
+                )
+                room_state = self.state.room(room)
+                frozen_snapshots = dict(room_state.get("scene_world_snapshots") or {})
+                existing_snapshot = deepcopy(dict(frozen_snapshots.get(snapshot_key) or {}))
+                existing_frozen_snapshot = bool(existing_snapshot)
+                if not existing_snapshot:
+                    for existing_report_raw in reversed(list(room_state.get("reports") or [])):
+                        if not isinstance(existing_report_raw, Mapping):
+                            continue
+                        existing_report = dict(existing_report_raw)
+                        existing_plan_summary = dict(existing_report.get("plan_summary") or {})
+                        existing_status = str(existing_plan_summary.get("status") or "").strip().lower()
+                        existing_snapshot_candidate = dict(
+                            existing_report.get("scene_world_snapshot") or {}
+                        )
+                        if (
+                            str(existing_report.get("plan_id") or "") == report_plan_id
+                            and int(existing_plan_summary.get("version") or 0)
+                            == int(snapshot.get("scene_version") or 0)
+                            and existing_status
+                            in {
+                                ScenePlanStatus.COMPLETED.value,
+                                ScenePlanStatus.FAILED.value,
+                                ScenePlanStatus.CANCELLED.value,
+                            }
+                        ):
+                            existing_terminal_report = True
+                            existing_snapshot = deepcopy(existing_snapshot_candidate)
+                            break
+                else:
+                    existing_terminal_report = any(
+                        isinstance(existing_report_raw, Mapping)
+                        and str(existing_report_raw.get("plan_id") or "") == report_plan_id
+                        and int(
+                            dict(existing_report_raw.get("plan_summary") or {}).get("version") or 0
+                        )
+                        == int(snapshot.get("scene_version") or 0)
+                        and str(
+                            dict(existing_report_raw.get("plan_summary") or {}).get("status") or ""
+                        ).strip().lower()
+                        in {
+                            ScenePlanStatus.COMPLETED.value,
+                            ScenePlanStatus.FAILED.value,
+                            ScenePlanStatus.CANCELLED.value,
+                        }
+                        for existing_report_raw in list(room_state.get("reports") or [])
+                    )
+                if existing_snapshot:
+                    SceneWorldSnapshotRecordValidator.validate(existing_snapshot)
+                    if (
+                        SceneWorldSnapshotRecordValidator.immutable_payload(existing_snapshot)
+                        != SceneWorldSnapshotRecordValidator.immutable_payload(snapshot)
+                    ):
+                        return ToolResult(
+                            False,
+                            "scene world snapshot version conflict",
+                            error_code="scene_world_snapshot_version_conflict",
+                            user_visible_message="同一场景版本已存在不同的世界快照，已停止覆盖并等待版本协调。",
+                        )
+                if existing_terminal_report and existing_frozen_snapshot:
+                    return ToolResult(
+                        True,
+                        "immutable scene world snapshot already persisted",
+                        payload={
+                            "operation_log_event": str(report.get("operation_log_event") or ""),
+                            "operation_log_index": int(report.get("operation_log_index") or 0),
+                            "snapshot_key": snapshot_key,
+                            "snapshot_reused": True,
+                        },
+                        user_visible_message="当前场景版本的最终快照与报告已存在，已幂等复用。",
+                    )
+                changes["scene_world_snapshots"] = {snapshot_key: snapshot}
+                if existing_terminal_report:
+                    changes.pop("reports", None)
+            state_patch = StatePatch(
+                room_id=room,
+                changes=changes,
+                expected_version=self.state.version,
+                source_tool_call_id=call.tool_call_id,
+            )
             StatePatchValidator.validate(state_patch, self.state.room(room))
         except ValueError:
             return ToolResult(
@@ -9680,6 +9880,8 @@ class AgentRuntime:
             payload={
                 "operation_log_event": str(report.get("operation_log_event") or ""),
                 "operation_log_index": int(report.get("operation_log_index") or 0),
+                "snapshot_key": snapshot_key,
+                "snapshot_reused": bool(terminal_report and existing_terminal_report),
             },
             user_visible_message="最终报告已写入 Runtime 状态，可用于后续查询与复盘。",
         )
@@ -16639,6 +16841,7 @@ class AgentRuntime:
                     plan_id=plan_id,
                     payload={
                         "scene_version": scene_version,
+                        "world_fingerprint": str(world_snapshot.get("world_fingerprint") or ""),
                         "entity_count": int(registry.get("entity_count") or len(registry.get("entities") or [])),
                         "game_ready_entity_count": int(registry.get("game_ready_entity_count") or 0),
                     },
@@ -16696,6 +16899,7 @@ class AgentRuntime:
                     plan_id=plan_id,
                     payload={
                         "scene_version": int(world_snapshot.get("scene_version") or 0),
+                        "world_fingerprint": str(world_snapshot.get("world_fingerprint") or ""),
                         "world_readiness": str(world_snapshot.get("world_readiness") or "blocked"),
                         "consistency_status": str(
                             finalizer_consistency_audit.get("status") or "blocked"
@@ -21034,6 +21238,7 @@ class AgentRuntime:
         return {
             "available": bool(entities) or bool(failed_actor_requests) or bool(failed_environment_requests),
             "plan_id": active_plan_id,
+            "scene_version": scene_version,
             "batch_id": active_batch_id,
             "entity_count": len(entities),
             "actor_count": actor_count,
@@ -21108,6 +21313,12 @@ class AgentRuntime:
             world_readiness = "blocked"
         plan = dict(dict(room.get("scene_plans") or {}).get(str(plan_id or "")) or {})
         scene_version = max(1, int(scene_version_override or plan.get("version") or 1))
+        registry_plan_id = str(scene_entity_registry.get("plan_id") or "").strip()
+        registry_scene_version = int(scene_entity_registry.get("scene_version") or 0)
+        if registry_plan_id and registry_plan_id != str(plan_id or ""):
+            raise ValueError("scene entity registry plan_id does not match snapshot plan")
+        if registry_scene_version and registry_scene_version != scene_version:
+            raise ValueError("scene entity registry version does not match snapshot version")
         snapshot = SceneWorldSnapshot(
             room_id=str(room_id or ""),
             plan_id=str(plan_id or ""),
@@ -21132,7 +21343,9 @@ class AgentRuntime:
             ),
             operation_cursor=str(operation_cursor or ""),
         )
-        return snapshot.as_dict()
+        result = snapshot.as_dict()
+        SceneWorldSnapshotRecordValidator.validate(result)
+        return result
 
     def get_scene_world_snapshot(
         self,
@@ -21209,16 +21422,66 @@ class AgentRuntime:
             target_plan_id,
             terminal_only=True,
         )
-        persisted_snapshot = dict(persisted_report.get("scene_world_snapshot") or {})
-        if (
+        persisted_snapshot = deepcopy(dict(persisted_report.get("scene_world_snapshot") or {}))
+        snapshot_key = SceneWorldSnapshotRecordValidator.storage_key(target_plan_id, scene_version)
+        frozen_snapshot = deepcopy(
+            dict(dict(room.get("scene_world_snapshots") or {}).get(snapshot_key) or {})
+        )
+        if frozen_snapshot:
+            try:
+                SceneWorldSnapshotRecordValidator.validate(frozen_snapshot)
+                if persisted_snapshot and (
+                    SceneWorldSnapshotRecordValidator.immutable_payload(persisted_snapshot)
+                    != SceneWorldSnapshotRecordValidator.immutable_payload(frozen_snapshot)
+                ):
+                    raise ValueError("persisted report snapshot differs from frozen snapshot")
+            except ValueError as exc:
+                return {
+                    "handled": True,
+                    "action": "runtime.scene_world_snapshot.get",
+                    "recorded": False,
+                    "found": False,
+                    "plan_id": target_plan_id,
+                    "scene_version": scene_version,
+                    "world_readiness": "blocked",
+                    "world_fingerprint": str(frozen_snapshot.get("world_fingerprint") or ""),
+                    "snapshot": {},
+                    "operation_cursor": str(frozen_snapshot.get("operation_cursor") or ""),
+                    "snapshot_stability": "invalid",
+                    "reason": "immutable_snapshot_integrity_failed",
+                    "error_type": type(exc).__name__,
+                }
+            snapshot = constrain_scene_world_snapshot_readiness(
+                frozen_snapshot,
+                dict(persisted_report.get("scene_world_consistency_audit") or {}),
+            )
+            snapshot_stability = "immutable"
+        elif (
             str(persisted_snapshot.get("plan_id") or "") == target_plan_id
             and int(persisted_snapshot.get("scene_version") or 0) == scene_version
         ):
+            try:
+                SceneWorldSnapshotRecordValidator.validate(persisted_snapshot)
+            except ValueError:
+                return {
+                    "handled": True,
+                    "action": "runtime.scene_world_snapshot.get",
+                    "recorded": False,
+                    "found": False,
+                    "plan_id": target_plan_id,
+                    "scene_version": scene_version,
+                    "world_readiness": "blocked",
+                    "world_fingerprint": str(persisted_snapshot.get("world_fingerprint") or ""),
+                    "snapshot": {},
+                    "operation_cursor": str(persisted_snapshot.get("operation_cursor") or ""),
+                    "snapshot_stability": "legacy_report",
+                    "reason": "legacy_snapshot_integrity_failed",
+                }
             snapshot = constrain_scene_world_snapshot_readiness(
                 persisted_snapshot,
                 dict(persisted_report.get("scene_world_consistency_audit") or {}),
             )
-            snapshot_stability = "immutable"
+            snapshot_stability = "legacy_report"
         else:
             registry = self._scene_entity_registry_for_plan(room, target_plan_id)
             snapshot = self._scene_world_snapshot_for_plan(
@@ -23212,6 +23475,7 @@ class AgentRuntime:
             payload={
                 "status": str(plan.get("status") or ""),
                 "scene_version": int(scene_world_snapshot.get("scene_version") or 0),
+                "world_fingerprint": str(scene_world_snapshot.get("world_fingerprint") or ""),
                 "pipeline_status": completion_status["pipeline_status"],
                 "engine_materialization_status": completion_status["engine_materialization_status"],
                 "world_readiness": completion_status["world_readiness"],
@@ -23365,6 +23629,19 @@ class AgentRuntime:
                 "report_health_reasons": report_health_reasons,
             },
         )
+        if report_terminal:
+            frozen_report = self._latest_persisted_report_for_plan(
+                str(room_id),
+                active_plan_id,
+                terminal_only=True,
+            )
+            frozen_snapshot = dict(frozen_report.get("scene_world_snapshot") or {})
+            if (
+                frozen_report
+                and int(frozen_snapshot.get("scene_version") or 0)
+                == int(scene_world_snapshot.get("scene_version") or 0)
+            ):
+                report = frozen_report
         return report
 
     @staticmethod
@@ -33409,7 +33686,7 @@ class AgentRuntime:
 
     def _persist_user_report(self, room_id: str, plan_id: str, batch_id: str, report: Mapping[str, Any]) -> None:
         room = str(room_id or "default")
-        report_record = dict(report or {})
+        report_record = deepcopy(dict(report or {}))
         graph_plan_id = str(plan_id or "").strip() or "room-report"
         persist_token = _id("report-persist-token")
         self._report_persist_tokens.add(persist_token)
@@ -33990,7 +34267,7 @@ class AgentRuntime:
                 default_risk_level=RiskLevel.LOW,
                 requires_write=True,
                 required_args=("room_id", "report"),
-                produces_state=("reports",),
+                produces_state=("reports", "scene_world_snapshots"),
                 requires_user_visible_failure=True,
                 description="Persist a sanitized user-facing report through RuntimeState.",
             )

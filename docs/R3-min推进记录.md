@@ -1421,3 +1421,41 @@ business_graph_consistency 代码约束：已收口
 ```
 
 下一步按优先级进入 `snapshot_integrity`，核实同一 `plan_id + scene_version` 的 Snapshot 是否不可变、Fingerprint 是否稳定，以及 Registry/Snapshot/Report 是否引用同一版本；所有 Engine/Sync 实机效果仍为 **[待 F5/实机验证]**。
+
+## 45. W1.6 SceneWorldSnapshot 同版本不可变收口
+
+代码核查确认，终态 `SceneWorldSnapshot` 过去只嵌在 Report 中，没有独立的版本化事实集合；查询接口会把任意终态 Report 中的同版本 Snapshot 标为 immutable，却没有校验 Fingerprint，也无法阻止同一 `plan_id + scene_version` 被后续不同内容覆盖。原世界指纹只覆盖 Engine 可观测的身份、Transform 和 AABB，未覆盖下游 Agent 实际消费的语义、接地、交互、玩法和同步事实。
+
+本轮改动：
+
+- RuntimeState 新增 `scene_world_snapshots`，以 `plan_id@v<scene_version>` 保存终态不可变 Snapshot。
+- 终态 Report 与 Snapshot 原子写入；相同内容幂等复用，不同内容返回 `scene_world_snapshot_version_conflict`，禁止覆盖。
+- `SceneWorldSnapshotRecordValidator` 校验计划、版本、authority、实体 ID 唯一性、Readiness 摘要和 SHA-256 Fingerprint。
+- Registry 增加 `scene_version`，Report 持久化时强制 Registry、Snapshot、Consistency Audit 和 PlanSummary 使用同一版本。
+- `scene_world_fingerprint()` 扩展为下游 Agent 世界契约指纹；另设 `scene_materialization_fingerprint()` 专门用于 Runtime 与 Engine 可观测事实对账，避免混淆两种职责。
+- Snapshot 与 Report 使用深拷贝；调用方修改返回对象不能反向污染 RuntimeState。
+- 查询优先读取专用冻结 Snapshot；旧 Report 内 Snapshot 仅标记为 `legacy_report`，校验失败时返回明确 integrity failure，不再冒充 immutable。
+- Finalizer 的 Registry、Snapshot 与 Report 事件补充同版本 `world_fingerprint`，便于 F5 对账。
+
+聚焦自动验证：
+
+```text
+Fingerprint 顺序稳定且覆盖 Agent 语义契约：passed
+同版本终态 Snapshot 幂等复用与深拷贝隔离：passed
+同版本不同内容覆盖拒绝：passed
+旧 Report Snapshot 降级为 legacy_report：passed
+Game-ready + R3 Readiness 套件：37 tests passed
+Finalizer/Report 持久化关键回归：passed
+Python syntax compile：passed
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+snapshot_integrity 代码约束：已收口
+旧 F5 Snapshot 证据：不满足新不可变契约，保持 red
+新 F5 Registry/Snapshot/Report/Fingerprint 同版本事实：待实机验证
+```
+
+下一步按轨道 A 优先级进入 `environment_readiness`，核实室内 `room_box/room_floor`、室外 terrain 和混合 transition zone 是否以真实 Engine-ready 环境实体进入 Registry 与 Snapshot；所有 Engine/Sync 实机效果仍为 **[待 F5/实机验证]**。
