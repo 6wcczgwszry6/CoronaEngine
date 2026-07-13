@@ -20667,7 +20667,7 @@ class AgentRuntime:
                 "aabb": {},
                 "grounding_status": "not_applicable",
                 "interaction_capability": [],
-                "gameplay_tags": ["environment"],
+                "gameplay_tags": [],
                 "physics_profile": {},
                 "audio_profile": {},
                 "lighting_profile": {},

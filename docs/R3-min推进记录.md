@@ -617,3 +617,31 @@ Game-ready、Inspector、Peer Mirror、同步桥与 LANChat 披露 36 项通过
 - 追加批前后 Engine snapshot 分别携带正确 scene version，晚到旧快照不影响当前报告。
 - 房主与成员端本机 snapshot 使用同一宿主 plan/version，但各自保留本机 Engine AABB 来源。
 - Engine snapshot 缺失当前版本时 Snapshot 保持 `needs_review`，当前版本到达后自动收敛。
+
+## 24. 下游 Agent gameplay 事实不再使用模板默认值
+
+本轮审查 `scene_entity_registry -> SceneWorldSnapshot -> SceneInspectorAgent` 契约时发现，默认 Actor 导入器会为所有对象统一声明 `inspect/move`、`scene_actor/runtime_generated` 和静态碰撞；环境模板也会仅凭名称或 component type 推导 `walk_on`、`walkable` 和物理配置。这些字段没有来自 EntityIntent 或 Engine 的可信证据，交给后续 Agent 后会被误认为可执行能力。
+
+当前改动：
+
+- 默认 Actor 的 `interaction_capability/gameplay_tags/physics_profile` 改为空。
+- 环境组件和未物化 substrate 的上述字段同样保持为空。
+- ScenePlan、StatePatch 或 Engine 结果显式提供的可信字段仍原样进入 Registry 和 Snapshot。
+- `entity_type/semantic_role/component_type/environment_profile/grounding_status` 继续承担场景语义描述，不用 gameplay 字段重复猜测。
+- 不修改资源生成、Engine 导入、AABB、Finalizer 或多人同步主链。
+
+聚焦自动验证：
+
+```text
+默认 Actor/环境/substrate -> gameplay 字段为空
+显式 Actor gameplay 字段 -> Registry 原样保留
+显式环境 gameplay 字段 -> Registry 原样保留
+森林营地对象/环境分流回归通过
+Python syntax compile 通过
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 实机场景 Snapshot 中未知 gameplay 字段保持为空，不影响 Registry/报告完成。
+- 后续 SceneInspectorAgent 不会把空能力扩写成可执行动作。
+- 未来能力识别必须由独立、可审计的 EntityIntent/CapabilityPatch 写入，而不是恢复名称模板默认值。

@@ -2781,10 +2781,12 @@ def _normalize_environment_components_for_runtime(
             for field in ("aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds")
         ):
             raw_component["aabb"] = _default_environment_component_aabb(component_type)
-        raw_component.setdefault("interaction_capability", _default_environment_interaction_capability(raw_component))
-        raw_component.setdefault("gameplay_tags", _default_environment_component_tags(raw_component))
+        # Gameplay facts are downstream contracts, so only preserve values
+        # explicitly supplied by a trusted plan or Engine result.
+        raw_component.setdefault("interaction_capability", [])
+        raw_component.setdefault("gameplay_tags", [])
         raw_component.setdefault("script_bindings", ["runtime_environment_component"])
-        raw_component.setdefault("physics_profile", _default_environment_physics_profile(raw_component))
+        raw_component.setdefault("physics_profile", {})
         raw_component.setdefault("review_status", "pending_review")
 
 
@@ -2814,57 +2816,6 @@ def _default_environment_component_aabb(component_type: str) -> dict[str, list[f
         "min": [round(-width / 2.0, 4), 0.0, round(-depth / 2.0, 4)],
         "max": [round(width / 2.0, 4), round(height, 4), round(depth / 2.0, 4)],
     }
-
-
-def _default_environment_interaction_capability(component: Mapping[str, Any]) -> list[str]:
-    text = _environment_component_text(component)
-    component_type = str(component.get("component_type") or "").strip().lower()
-    surface = str(component.get("surface") or "").strip().lower()
-    if component_type in {"room_floor", "transition_zone"} or "walkable" in surface or any(term in text for term in ("grass", "草地", "floor", "地面")):
-        return ["walk_on"]
-    return ["inspect"]
-
-
-def _default_environment_physics_profile(component: Mapping[str, Any]) -> dict[str, Any]:
-    capability = _default_environment_interaction_capability(component)
-    component_type = str(component.get("component_type") or "").strip().lower()
-    if "walk_on" in capability:
-        return {
-            "collision": "walkable_static",
-            "grounding": "walkable_surface",
-            "engine_write_required": False,
-        }
-    if component_type in {"terrain", "room_box", "boundary", "terrain_boundary"}:
-        return {
-            "collision": "static",
-            "engine_write_required": False,
-        }
-    return {
-        "collision": "none",
-        "engine_write_required": False,
-    }
-
-
-def _default_environment_component_tags(component: Mapping[str, Any]) -> list[str]:
-    normalized = str(component.get("component_type") or "").strip().lower()
-    tags = ["environment", "runtime_generated"]
-    if normalized:
-        tags.append(normalized)
-    if normalized in {"terrain", "room_floor", "room_box", "boundary", "terrain_boundary", "transition_zone"}:
-        tags.append("scene_substrate")
-    text = _environment_component_text(component)
-    if "walk_on" in _default_environment_interaction_capability(component):
-        tags.append("walkable")
-    if normalized == "skybox" or "sky" in text or "天空" in text:
-        tags.append("sky")
-    return tags
-
-
-def _environment_component_text(component: Mapping[str, Any]) -> str:
-    return " ".join(
-        str(component.get(key) or "")
-        for key in ("name", "component_type", "handler", "surface", "terrain_profile", "sky_mode")
-    ).lower()
 
 
 def _add_default_framework_components(payload: dict[str, Any], components: dict[str, Any]) -> None:
@@ -5472,12 +5423,9 @@ def _default_actor_import_provider(payload: dict[str, Any]) -> dict[str, Any]:
             "entity_type": "actor",
             "grounding_status": "grounded",
             "support_type": "floor_supported",
-            "interaction_capability": ["inspect", "move"],
-            "gameplay_tags": ["scene_actor", "runtime_generated"],
-            "physics_profile": {
-                "collision": "static",
-                "grounding": "floor_supported",
-            },
+            "interaction_capability": [],
+            "gameplay_tags": [],
+            "physics_profile": {},
             "audio_profile": {
                 "surface": "generic",
             },
