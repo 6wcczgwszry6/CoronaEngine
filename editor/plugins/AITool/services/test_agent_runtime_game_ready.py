@@ -569,6 +569,14 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertTrue(result["report_ready"])
         events = runtime.operation_log.events()
         self.assertLess(events.index("scene_entity_registry_ready"), events.index("scene_world_snapshot_ready"))
+        self.assertLess(
+            events.index("scene_world_snapshot_ready"),
+            events.index("runtime_scene_world_consistency_audited"),
+        )
+        self.assertLess(
+            events.index("runtime_scene_world_consistency_audited"),
+            events.index("report_ready"),
+        )
         self.assertLess(events.index("scene_world_snapshot_ready"), events.index("report_ready"))
         self.assertLess(events.index("report_ready"), events.index("latest_completed_plan_set"))
 

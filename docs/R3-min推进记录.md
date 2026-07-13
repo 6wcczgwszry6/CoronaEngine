@@ -260,6 +260,7 @@ LANChat Scene Sync 静态协议回归
 - 新增只读接口 `runtime.scene_world_consistency.audit`，只消费 `SceneWorldSnapshot + engine_scene_snapshots`。
 - 审计按稳定 `entity_id` 对账，不根据名称或路径猜测身份；输出缺失、额外、无 Runtime 身份、重复 ID、actor/asset/version 漂移。
 - 审计被注册为 READ_ONLY，不创建 ScenePlan、PlanPatch、BatchPlan、ToolCallGraph 或 Engine 写入。
+- Finalizer 在 `scene_world_snapshot_ready` 之后、`report_ready` 之前记录 `runtime_scene_world_consistency_audited`；最终报告持久化同一份审计结果，F5 不再需要从零散日志人工拼接五方一致性。
 
 聚焦自动验证：
 

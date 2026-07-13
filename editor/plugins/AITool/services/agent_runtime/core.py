@@ -3320,6 +3320,7 @@ class ReportRecordValidator:
         "runtime_guard_replay_summary",
         "runtime_scene_flow_summary",
         "scene_entity_registry",
+        "scene_world_consistency_audit",
         "scene_world_snapshot",
         "completion_status",
         "tool_graph_domain_summary",
@@ -16508,6 +16509,33 @@ class AgentRuntime:
                         "operation_cursor": str(world_snapshot.get("operation_cursor") or ""),
                     },
                 )
+            finalizer_engine_snapshot = latest_engine_snapshot(
+                dict(finalizer_room.get("engine_scene_snapshots") or {}),
+                plan_id=plan_id,
+            )
+            finalizer_consistency_audit = build_scene_world_consistency_audit(
+                world_snapshot=world_snapshot,
+                engine_snapshot=finalizer_engine_snapshot,
+            )
+            self.operation_log.append(
+                "runtime_scene_world_consistency_audited",
+                room_id=str(room_id),
+                plan_id=plan_id,
+                payload={
+                    "status": str(finalizer_consistency_audit.get("status") or "blocked"),
+                    "scene_version": int(finalizer_consistency_audit.get("scene_version") or 0),
+                    "expected_entity_count": int(
+                        finalizer_consistency_audit.get("expected_entity_count") or 0
+                    ),
+                    "engine_actor_count": int(
+                        finalizer_consistency_audit.get("engine_actor_count") or 0
+                    ),
+                    "matched_entity_count": int(
+                        finalizer_consistency_audit.get("matched_entity_count") or 0
+                    ),
+                    "issue_count": int(finalizer_consistency_audit.get("issue_count") or 0),
+                },
+            )
             persisted_report = self._latest_persisted_report_for_plan(
                 str(room_id),
                 plan_id,
@@ -22250,6 +22278,16 @@ class AgentRuntime:
             scene_entity_registry=scene_entity_registry,
             operation_cursor=f"op:{len(self.operation_log.entries())}",
         )
+        engine_snapshot = latest_engine_snapshot(
+            dict(room.get("engine_scene_snapshots") or {}),
+            plan_id=active_plan_id,
+        )
+        scene_world_consistency_audit = build_scene_world_consistency_audit(
+            world_snapshot=scene_world_snapshot,
+            engine_snapshot=engine_snapshot,
+        )
+        if not engine_snapshot:
+            scene_world_consistency_audit["reason"] = "engine_scene_snapshot_unavailable"
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -22286,6 +22324,7 @@ class AgentRuntime:
             "scene_design_contract_summary": scene_design_contract_summary,
             "semantic_arbitration_summary": semantic_arbitration_summary,
             "scene_entity_registry": scene_entity_registry,
+            "scene_world_consistency_audit": scene_world_consistency_audit,
             "scene_world_snapshot": scene_world_snapshot,
             "completion_status": completion_status,
             "tool_graph_domain_summary": tool_graph_domain_summary,
