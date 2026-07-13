@@ -364,3 +364,59 @@ Python syntax compile 通过
 - 房主 Runtime Snapshot 与本机 Engine snapshot 的 fingerprint 一致。
 - 成员端 Actor 同步完成后，其 Engine 实体事实与房主权威 Snapshot 对账一致。
 - transform 更新、late-ready AABB 和追加批会产生新的 fingerprint，旧分析不会被继续使用。
+
+## 16. C++ LAN 同步事实接入 AgentRuntime
+
+本轮修复了多人同步验证中的假覆盖：Python 已有 `handle_lanchat_sync_event()` 和 Runtime reducer，但真实 Worker 只轮询聊天室消息与房间事件，C++ Actor/资源生命周期从未进入 RuntimeState。
+
+当前改动：
+
+- C++ `NetworkSystem` 新增有界 `LanChatSyncEvent` 队列和 Python pop binding，不修改现有网络包协议。
+- `ACTOR_CREATE`、transform、delete、state update 和资源传输完成会产出结构化同步事实。
+- 网络收到 Actor 只记录 `actor_create_received`；远端 Actor identity 注册成功后才记录 `actor_imported`，不把网络接收伪装成 Engine 成功。
+- Worker 每 tick 在 Runtime drain 前消费同步事实，并展开已有 `actor_json` 中的 plan/batch/entity/asset/version 元数据。
+- Runtime 保留 actor/entity 版本、语义角色与同步生命周期，现有 RuntimeGuard/StatePatch 写门保持不变。
+
+聚焦自动验证：
+
+```text
+C++ 队列、事件生产点和 Python binding 静态核对
+Worker 原生同步事件轮询与 actor_json 元数据展开
+actor_create_received != actor_imported
+既有 actor create/transform/delete Runtime 回归
+Python syntax compile
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 新 C++ binding 可在完整引擎中编译、加载并持续出队。
+- 真实 LAN 文件传输完成、远端 Actor 创建和 identity 注册按预期产生一次事件。
+- 高事件速率下有界队列不会造成关键终态事实丢失。
+
+## 17. 成员端只读 Peer Mirror Snapshot
+
+真实宿主同步的 `plan_id` 在成员本地没有对应 ScenePlan。旧逻辑会以 `no runtime plan` 拒绝这些事实，因此成员端无法形成可供只读下游 Agent 使用的 SceneWorldSnapshot。
+
+当前改动：
+
+- 仅接受 `authority=remote_host` 且包含 actor/asset 身份的未知计划同步事实进入 `peer_mirror`。
+- Peer mirror 不创建 ScenePlan、BatchPlan、ToolCallGraph、PlanPatch 或 Provider 请求，也不执行 Engine 写入。
+- `runtime.scene_world_snapshot.get` 在没有本地 active/latest plan 时回退只读 peer mirror，并标记 `snapshot_authority=peer_mirror`、`snapshot_stability=peer_mirror`。
+- 成员端 Snapshot 继续使用 Registry/Game-ready 规则；缺少真实 AABB、grounding 或同步终态时保持 `needs_review`，不伪造 Game-ready。
+- 非宿主权威的未知 plan 同步事实继续被拒绝。
+
+聚焦自动验证：
+
+```text
+未知宿主 plan -> peer mirror Snapshot
+peer mirror 不创建本地 ScenePlan/执行队列
+非宿主未知 plan -> rejected
+Snapshot/Game-ready/SceneInspector/同步桥 24 项通过
+Python syntax compile
+```
+
+以下仍为 **[待 F5/实机验证]**：
+
+- 房主与成员的 `entity_id/asset_id/actor_version/transform/AABB` 和 fingerprint 一致。
+- 成员远端 Actor identity 注册及真实 AABB 到达后，Snapshot 从 `needs_review` 正确收敛。
+- 房主切换执行计划或追加场景版本时，成员 peer mirror 不回退到迟到旧事实。

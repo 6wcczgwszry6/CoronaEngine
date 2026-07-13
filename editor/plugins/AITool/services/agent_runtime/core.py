@@ -3437,6 +3437,8 @@ class RuntimeState:
                 "active_discussion_plan_id": "",
                 "active_execution_plan_id": "",
                 "latest_completed_plan_id": "",
+                "peer_mirror_plan_id": "",
+                "peer_mirror_scene_versions": {},
                 "external_plan_links": {},
                 "scene_plans": {},
                 "batch_plans": {},
@@ -3782,6 +3784,7 @@ class SceneWorldSnapshot:
     plan_id: str
     scene_version: int
     world_readiness: str
+    snapshot_authority: str
     environment_entities: list[dict[str, Any]]
     actor_entities: list[dict[str, Any]]
     readiness_summary: dict[str, Any]
@@ -3794,6 +3797,7 @@ class SceneWorldSnapshot:
             "plan_id": self.plan_id,
             "scene_version": self.scene_version,
             "world_readiness": self.world_readiness,
+            "snapshot_authority": self.snapshot_authority,
             "environment_entities": [dict(item) for item in self.environment_entities],
             "actor_entities": [dict(item) for item in self.actor_entities],
             "readiness_summary": dict(self.readiness_summary),
@@ -4771,6 +4775,8 @@ class StatePatchValidator:
         "image_resource_plans",
         "layout_adjustment_proposals",
         "latest_completed_plan_id",
+        "peer_mirror_plan_id",
+        "peer_mirror_scene_versions",
         "model_item_lists",
         "model_resource_plans",
         "observed_actors",
@@ -4853,8 +4859,17 @@ class StatePatchValidator:
                 "active_discussion_plan_id",
                 "active_execution_plan_id",
                 "latest_completed_plan_id",
+                "peer_mirror_plan_id",
             } and not isinstance(value, str):
                 raise ValueError(f"state patch change for {key} must be a string")
+            if str(key) == "peer_mirror_scene_versions":
+                if not isinstance(value, dict):
+                    raise ValueError("state patch change for peer_mirror_scene_versions must be a dict")
+                for mirror_plan_id, version in value.items():
+                    if not str(mirror_plan_id or "").strip():
+                        raise ValueError("peer mirror scene version requires plan id")
+                    if not isinstance(version, int) or version < 1:
+                        raise ValueError("peer mirror scene version must be a positive int")
             if str(key) == "external_plan_links":
                 if not isinstance(value, dict):
                     raise ValueError("state patch change for external_plan_links must be a dict")
@@ -20770,6 +20785,8 @@ class AgentRuntime:
         room_id: str,
         scene_entity_registry: Mapping[str, Any],
         operation_cursor: str,
+        snapshot_authority: str = "local_runtime",
+        scene_version_override: int | None = None,
     ) -> dict[str, Any]:
         entities = [
             dict(item)
@@ -20796,11 +20813,13 @@ class AgentRuntime:
         else:
             world_readiness = "blocked"
         plan = dict(dict(room.get("scene_plans") or {}).get(str(plan_id or "")) or {})
+        scene_version = max(1, int(scene_version_override or plan.get("version") or 1))
         snapshot = SceneWorldSnapshot(
             room_id=str(room_id or ""),
             plan_id=str(plan_id or ""),
-            scene_version=max(1, int(plan.get("version") or 1)),
+            scene_version=scene_version,
             world_readiness=world_readiness,
+            snapshot_authority=str(snapshot_authority or "local_runtime"),
             environment_entities=environment_entities,
             actor_entities=actor_entities,
             readiness_summary={
@@ -20815,7 +20834,7 @@ class AgentRuntime:
             world_fingerprint=scene_world_fingerprint(
                 entities,
                 plan_id=str(plan_id or ""),
-                scene_version=max(1, int(plan.get("version") or 1)),
+                scene_version=scene_version,
             ),
             operation_cursor=str(operation_cursor or ""),
         )
@@ -20833,16 +20852,28 @@ class AgentRuntime:
         room_key = str(room_id)
         room = self.state.room(room_key)
         plans = dict(room.get("scene_plans") or {})
+        peer_mirror_plan_id = str(room.get("peer_mirror_plan_id") or "").strip()
+        peer_mirror_versions = dict(room.get("peer_mirror_scene_versions") or {})
         requested_plan_id = str(plan_id or "").strip()
         if requested_plan_id:
-            target_plan_id = requested_plan_id if requested_plan_id in plans else ""
+            target_plan_id = (
+                requested_plan_id
+                if requested_plan_id in plans or requested_plan_id == peer_mirror_plan_id
+                else ""
+            )
         else:
             target_plan_id = str(
                 room.get("active_execution_plan_id")
                 or room.get("latest_completed_plan_id")
+                or peer_mirror_plan_id
                 or ""
             ).strip()
-        if not target_plan_id or target_plan_id not in plans:
+        is_peer_mirror = bool(
+            target_plan_id
+            and target_plan_id == peer_mirror_plan_id
+            and target_plan_id not in plans
+        )
+        if not target_plan_id or (target_plan_id not in plans and not is_peer_mirror):
             return {
                 "handled": True,
                 "action": "runtime.scene_world_snapshot.get",
@@ -20858,7 +20889,12 @@ class AgentRuntime:
             }
 
         plan = dict(plans.get(target_plan_id) or {})
-        scene_version = max(1, int(plan.get("version") or 1))
+        scene_version = max(
+            1,
+            int(peer_mirror_versions.get(target_plan_id) or 1)
+            if is_peer_mirror
+            else int(plan.get("version") or 1),
+        )
         if min_version is not None and scene_version < max(0, int(min_version)):
             return {
                 "handled": True,
@@ -20874,7 +20910,7 @@ class AgentRuntime:
                 "reason": "minimum_scene_version_not_available",
             }
 
-        persisted_report = self._latest_persisted_report_for_plan(
+        persisted_report = {} if is_peer_mirror else self._latest_persisted_report_for_plan(
             room_key,
             target_plan_id,
             terminal_only=True,
@@ -20894,8 +20930,10 @@ class AgentRuntime:
                 room_id=room_key,
                 scene_entity_registry=registry,
                 operation_cursor=f"op:{len(self.operation_log.entries())}",
+                snapshot_authority="peer_mirror" if is_peer_mirror else "local_runtime",
+                scene_version_override=scene_version,
             )
-            snapshot_stability = "provisional"
+            snapshot_stability = "peer_mirror" if is_peer_mirror else "provisional"
 
         result = {
             "handled": True,
@@ -20905,6 +20943,7 @@ class AgentRuntime:
             "plan_id": target_plan_id,
             "scene_version": int(snapshot.get("scene_version") or scene_version),
             "world_readiness": str(snapshot.get("world_readiness") or "blocked"),
+            "snapshot_authority": str(snapshot.get("snapshot_authority") or "local_runtime"),
             "world_fingerprint": str(snapshot.get("world_fingerprint") or ""),
             "snapshot": snapshot,
             "operation_cursor": str(snapshot.get("operation_cursor") or ""),
@@ -28199,6 +28238,10 @@ class AgentRuntime:
                     1,
                     self._sync_non_negative_int_from_event(event, ("actor_version", "version")) or 1,
                 ),
+                "scene_version": max(
+                    1,
+                    self._sync_non_negative_int_from_event(event, ("scene_version", "plan_version")) or 1,
+                ),
                 "authority": str(event.get("authority") or ""),
                 "asset_id": asset_id,
                 "actor_asset_id": actor_asset_id,
@@ -28248,6 +28291,7 @@ class AgentRuntime:
         active_plan_id = str(
             room_state.get("active_execution_plan_id")
             or room_state.get("latest_completed_plan_id")
+            or room_state.get("peer_mirror_plan_id")
             or room_state.get("active_discussion_plan_id")
             or room_state.get("active_plan_id")
             or ""
@@ -28282,14 +28326,22 @@ class AgentRuntime:
                 ),
             }
 
+        peer_mirror_event = False
         if explicit_plan_id:
+            requested_sync_plan_id = explicit_plan_id
             explicit_plan_id = self._resolve_runtime_plan_id_from_state(
                 room_key,
                 plan_id=explicit_plan_id,
                 allow_active=False,
             )
             if not explicit_plan_id:
-                return skip_sync_event("no runtime plan")
+                is_remote_host_fact = str(normalized.get("authority") or "").strip().lower() == "remote_host"
+                is_scene_fact = bool(normalized.get("actor_id") or normalized.get("asset_id"))
+                if is_remote_host_fact and is_scene_fact:
+                    explicit_plan_id = requested_sync_plan_id
+                    peer_mirror_event = True
+                else:
+                    return skip_sync_event("no runtime plan")
         if not explicit_plan_id and explicit_external_plan_id:
             explicit_plan_id = self._resolve_runtime_plan_id_from_state(
                 room_key,
@@ -28355,7 +28407,6 @@ class AgentRuntime:
                 "semantic_role",
                 "grounding_status",
                 "model_ref",
-                "authority",
             ):
                 fact_value = normalized.get(fact_key)
                 if fact_value not in (None, ""):
@@ -28377,6 +28428,8 @@ class AgentRuntime:
                 actor_fact["bounds_source"] = "engine_actual"
                 actor_fact["engine_lifecycle_status"] = "bounds_ready"
                 actor_fact["status"] = "ready"
+                if str(normalized.get("authority") or "").strip().lower() == "remote_host":
+                    actor_fact["sync_status"] = "synced"
             affected_batch_id = str(actor_fact.get("batch_id") or affected_batch_id)
             transform_events = {
                 "actor_transform",
@@ -28403,6 +28456,7 @@ class AgentRuntime:
                 actor_fact["sync_lifecycle_status"] = "active"
                 if event_type == "actor_imported" and not actor_fact.get("bounds_ready"):
                     actor_fact["engine_lifecycle_status"] = "engine_imported"
+                    actor_fact["sync_status"] = "engine_imported"
             elif event_type == "actor_create_received":
                 actor_fact["sync_lifecycle_status"] = "received"
             if event_type in {"actor_removed", "actor_deleted", "actor_destroyed", "actor_delete"}:
@@ -28544,6 +28598,14 @@ class AgentRuntime:
             "actors": actors,
             "assets": assets,
         }
+        if peer_mirror_event:
+            mirror_versions = dict(room_state.get("peer_mirror_scene_versions") or {})
+            mirror_versions[effective_plan_id] = max(
+                int(mirror_versions.get(effective_plan_id) or 1),
+                int(normalized.get("scene_version") or normalized.get("actor_version") or 1),
+            )
+            changes["peer_mirror_plan_id"] = effective_plan_id
+            changes["peer_mirror_scene_versions"] = mirror_versions
         if actor_id and event_bounds is not None:
             changes["environment_components"] = environment_components
             changes["custom_import_facts"] = custom_import_facts
@@ -33248,6 +33310,8 @@ class AgentRuntime:
                     "assets",
                     "environment_components",
                     "custom_import_facts",
+                    "peer_mirror_plan_id",
+                    "peer_mirror_scene_versions",
                 ),
                 requires_user_visible_failure=True,
                 description="Record sanitized external sync facts through RuntimeState.",
