@@ -856,6 +856,15 @@ void DisplaySystem::update() {
         const Horizon::SubmitReceipt consumed_receipt = composite_resources.executor.last_receipt();
         if (use_optics_layer && optics_frame) {
             optics_frame->consumed_receipt = consumed_receipt;
+            if (optics_receipt_ptr != nullptr && !optics_receipt_ptr->empty()) {
+                if (auto* event_bus = context()->event_bus()) {
+                    event_bus->publish(Events::OpticsFrameConsumedEvent{
+                        surface,
+                        state.optics.frame_index,
+                        optics_receipt_ptr->serial,
+                    });
+                }
+            }
         }
         if (use_ui_layer && ui_frame) {
             ui_frame->consumed_receipt = consumed_receipt;
@@ -907,13 +916,13 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
     const Horizon::SubmitReceipt* optics_receipt,
     Horizon::HardwareImage& ui_image,
     const Horizon::SubmitReceipt* ui_receipt) {
-    if (state.optics.image_handle != 0 &&
-        (state.optics.frame_index <= 3 || state.optics.frame_index % 120 == 0)) {
-        CFW_LOG_INFO("Display: compose camera surface={} optics_handle={} optics_frame={} optics_extent={}x{} ui_handle={} ui_frame={}",
-                     surface, state.optics.image_handle, state.optics.frame_index,
-                     state.optics.width, state.optics.height, state.ui.image_handle,
-                     state.ui.frame_index);
-    }
+    // if (state.optics.image_handle != 0 &&
+    //     (state.optics.frame_index <= 3 || state.optics.frame_index % 120 == 0)) {
+    //     CFW_LOG_INFO("Display: compose camera surface={} optics_handle={} optics_frame={} optics_extent={}x{} ui_handle={} ui_frame={}",
+    //                  surface, state.optics.image_handle, state.optics.frame_index,
+    //                  state.optics.width, state.optics.height, state.ui.image_handle,
+    //                  state.ui.frame_index);
+    // }
     const PixelExtent optics_extent = hardware_image_extent(optics_image);
     const PixelExtent ui_extent = hardware_image_extent(ui_image);
 

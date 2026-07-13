@@ -10,6 +10,8 @@
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/optics/optics_system.h>
 
+#include "shadow_culling.h"
+
 #include <array>
 #include <algorithm>
 #include <cctype>
@@ -18,6 +20,7 @@
 #include <cstdint>
 #include <cstddef>
 #include <cstring>
+#include <cstdlib>
 #include <exception>
 #include <filesystem>
 #include <functional>
@@ -36,8 +39,10 @@
 #include <vector>
 
 #include "hardware.h"
+#include "native_diagnostics.h"
 #include "optics_debug_labels.h"
 #include "storage_snapshot.h"
+#include "../common/diagnostic_env.h"
 
 // CORONA_ENABLE_VISION is controlled by CMake (-DCORONA_ENABLE_VISION).
 
@@ -83,13 +88,7 @@ std::mutex g_optics_material_log_mutex;
 std::unordered_set<std::string> g_optics_material_logs;
 
 [[nodiscard]] bool env_flag_enabled(const char* name) {
-    const char* raw = std::getenv(name);
-    if (raw == nullptr || raw[0] == '\0') return false;
-    std::string value(raw);
-    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
-        return static_cast<char>(std::tolower(ch));
-    });
-    return value != "0" && value != "false" && value != "off" && value != "no";
+    return Corona::Systems::Diagnostics::parse_env_flag(std::getenv(name));
 }
 
 [[nodiscard]] std::optional<std::uint64_t> env_u64(const char* name) {
@@ -113,6 +112,7 @@ struct OpticsDiagConfig {
     std::optional<std::uintptr_t> only_geometry;
     std::optional<std::uint32_t> only_mesh;
     std::uint32_t draw_limit = std::numeric_limits<std::uint32_t>::max();
+    std::uint32_t shadow_cascade_mask = (1u << kShadowCascadeCount) - 1u;
 };
 
 [[nodiscard]] const OpticsDiagConfig& optics_diag_config() {
@@ -139,19 +139,24 @@ struct OpticsDiagConfig {
                 ? std::numeric_limits<std::uint32_t>::max()
                 : static_cast<std::uint32_t>(*v);
         }
+        c.shadow_cascade_mask =
+            Corona::Systems::OpticsDetail::parse_shadow_cascade_mask(
+                env_u64("CORONA_OPTICS_DIAG_SHADOW_CASCADE_MASK"),
+                kShadowCascadeCount);
         if (c.skip_scene_visibility || c.skip_shadows || c.skip_deferred_compute ||
             c.disable_textures || c.disable_albedo_sample || c.force_solid_material || c.profile ||
             c.only_actor || c.only_geometry || c.only_mesh ||
-            c.draw_limit != std::numeric_limits<std::uint32_t>::max()) {
+            c.draw_limit != std::numeric_limits<std::uint32_t>::max() ||
+            c.shadow_cascade_mask != ((1u << kShadowCascadeCount) - 1u)) {
             CFW_LOG_WARNING("OpticsSystem: diagnostic mode enabled "
                             "(skip_visibility={}, skip_shadows={}, skip_deferred={}, disable_textures={}, "
                             "disable_albedo_sample={}, force_solid={}, profile={}, only_actor={}, only_geometry={}, "
-                            "only_mesh={}, draw_limit={})",
+                            "only_mesh={}, draw_limit={}, shadow_cascade_mask=0x{:x})",
                             c.skip_scene_visibility, c.skip_shadows, c.skip_deferred_compute,
                             c.disable_textures, c.disable_albedo_sample, c.force_solid_material, c.profile,
                             c.only_actor.value_or(0), c.only_geometry.value_or(0),
                             c.only_mesh.value_or(std::numeric_limits<std::uint32_t>::max()),
-                            c.draw_limit);
+                            c.draw_limit, c.shadow_cascade_mask);
         }
         return c;
     }();
@@ -388,111 +393,59 @@ using PerfClock = std::chrono::steady_clock;
     return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
-struct OpticsNativePerfSample {
-    double total_ms = 0.0;
-    double collect_ms = 0.0;
-    double submit_ms = 0.0;
-    double shadow_ms = 0.0;
-    double commit_ms = 0.0;
-    uint32_t output_width = 0;
-    uint32_t output_height = 0;
-    uint32_t instance_count = 0;
-    bool shadows_enabled = false;
-    bool debug_mode = false;
-    bool sky_ambient_enabled = false;
-    bool sky_sh_updated = false;
-};
-
-void record_optics_native_perf(const OpticsNativePerfSample& sample) {
+void record_optics_native_perf(
+    const Corona::Systems::OpticsDetail::NativePerfSample& sample) {
     if (!optics_diag_config().profile) {
         return;
     }
-
-    struct Aggregate {
-        PerfClock::time_point window_start = PerfClock::now();
-        uint32_t samples = 0;
-        double total_ms = 0.0;
-        double collect_ms = 0.0;
-        double submit_ms = 0.0;
-        double shadow_ms = 0.0;
-        double commit_ms = 0.0;
-        double max_total_ms = 0.0;
-        double max_submit_ms = 0.0;
-        double max_shadow_ms = 0.0;
-        double max_commit_ms = 0.0;
-        uint32_t max_output_width = 0;
-        uint32_t max_output_height = 0;
-        uint32_t max_instance_count = 0;
-        uint32_t shadow_samples = 0;
-        uint32_t debug_samples = 0;
-        uint32_t sky_ambient_samples = 0;
-        uint32_t sky_sh_update_samples = 0;
-    };
-
-    static Aggregate aggregate;
-
-    aggregate.samples += 1;
-    aggregate.total_ms += sample.total_ms;
-    aggregate.collect_ms += sample.collect_ms;
-    aggregate.submit_ms += sample.submit_ms;
-    aggregate.shadow_ms += sample.shadow_ms;
-    aggregate.commit_ms += sample.commit_ms;
-    aggregate.max_total_ms = std::max(aggregate.max_total_ms, sample.total_ms);
-    aggregate.max_submit_ms = std::max(aggregate.max_submit_ms, sample.submit_ms);
-    aggregate.max_shadow_ms = std::max(aggregate.max_shadow_ms, sample.shadow_ms);
-    aggregate.max_commit_ms = std::max(aggregate.max_commit_ms, sample.commit_ms);
-    aggregate.max_instance_count = std::max(aggregate.max_instance_count, sample.instance_count);
-    if (sample.shadows_enabled) {
-        aggregate.shadow_samples += 1;
-    }
-    if (sample.debug_mode) {
-        aggregate.debug_samples += 1;
-    }
-    if (sample.sky_ambient_enabled) {
-        aggregate.sky_ambient_samples += 1;
-    }
-    if (sample.sky_sh_updated) {
-        aggregate.sky_sh_update_samples += 1;
-    }
-    if ((static_cast<uint64_t>(sample.output_width) * sample.output_height) >
-        (static_cast<uint64_t>(aggregate.max_output_width) * aggregate.max_output_height)) {
-        aggregate.max_output_width = sample.output_width;
-        aggregate.max_output_height = sample.output_height;
-    }
+    static Corona::Systems::OpticsDetail::NativePerfWindow window;
+    static PerfClock::time_point window_start = PerfClock::now();
+    window.add(sample);
 
     const auto now = PerfClock::now();
-    if (elapsed_ms(aggregate.window_start, now) < 1000.0) {
+    if (elapsed_ms(window_start, now) < 1000.0) {
         return;
     }
-
-    const double inv_samples = aggregate.samples > 0 ? 1.0 / aggregate.samples : 0.0;
+    const auto stats = window.snapshot();
     CFW_LOG_INFO(
         "OpticsNativePerf samples={} avg_total_ms={:.2f} max_total_ms={:.2f} "
+        "avg_throttle_wait_ms={:.2f} max_throttle_wait_ms={:.2f} "
         "avg_collect_ms={:.2f} avg_submit_ms={:.2f} max_submit_ms={:.2f} "
-        "avg_shadow_ms={:.2f} max_shadow_ms={:.2f} "
+        "avg_shadow_record_ms={:.2f} max_shadow_record_ms={:.2f} "
         "avg_commit_ms={:.2f} max_commit_ms={:.2f} "
+        "avg_visibility_draws={:.1f} avg_visibility_indices={:.1f} "
+        "cascade_draws=[{:.1f},{:.1f},{:.1f},{:.1f}] "
+        "cascade_indices=[{:.1f},{:.1f},{:.1f},{:.1f}] "
         "max_output={}x{} max_instances={} shadows={} debug={} "
         "sky_ambient={} sky_sh_updates={}",
-        aggregate.samples,
-        aggregate.total_ms * inv_samples,
-        aggregate.max_total_ms,
-        aggregate.collect_ms * inv_samples,
-        aggregate.submit_ms * inv_samples,
-        aggregate.max_submit_ms,
-        aggregate.shadow_ms * inv_samples,
-        aggregate.max_shadow_ms,
-        aggregate.commit_ms * inv_samples,
-        aggregate.max_commit_ms,
-        aggregate.max_output_width,
-        aggregate.max_output_height,
-        aggregate.max_instance_count,
-        aggregate.shadow_samples,
-        aggregate.debug_samples,
-        aggregate.sky_ambient_samples,
-        aggregate.sky_sh_update_samples);
+        stats.samples,
+        stats.avg_total_ms,
+        stats.max_total_ms,
+        stats.avg_throttle_wait_ms,
+        stats.max_throttle_wait_ms,
+        stats.avg_collect_ms,
+        stats.avg_submit_ms,
+        stats.max_submit_ms,
+        stats.avg_shadow_record_ms,
+        stats.max_shadow_record_ms,
+        stats.avg_commit_ms,
+        stats.max_commit_ms,
+        stats.avg_visibility_draws,
+        stats.avg_visibility_indices,
+        stats.avg_cascade_draws[0], stats.avg_cascade_draws[1],
+        stats.avg_cascade_draws[2], stats.avg_cascade_draws[3],
+        stats.avg_cascade_indices[0], stats.avg_cascade_indices[1],
+        stats.avg_cascade_indices[2], stats.avg_cascade_indices[3],
+        stats.max_output_width,
+        stats.max_output_height,
+        stats.max_instances,
+        stats.shadow_samples,
+        stats.debug_samples,
+        stats.sky_ambient_samples,
+        stats.sky_sh_update_samples);
 
-    aggregate = Aggregate{};
-    aggregate.window_start = now;
+    window.reset();
+    window_start = now;
 }
 
 struct OpticsEventViewport {
@@ -1264,7 +1217,7 @@ void include_shadow_bounds(
     return splits;
 }
 
-[[nodiscard]] ktm::fmat4x4 compute_shadow_light_view_proj(
+[[nodiscard]] Corona::Systems::OpticsDetail::ShadowCascadeView compute_shadow_light_view_proj(
     const Corona::CameraDevice& camera,
     const ktm::fvec3& sun_dir,
     float cascade_near,
@@ -1319,6 +1272,8 @@ void include_shadow_bounds(
 
     const float xy_padding = std::max(radius * 0.02f, 0.01f);
     const float z_padding = std::max(radius * 0.25f, 0.01f);
+    const float orthographic_width = std::max(max_x - min_x, 0.001f) + xy_padding * 2.0f;
+    const float orthographic_height = std::max(max_y - min_y, 0.001f) + xy_padding * 2.0f;
     const ktm::fmat4x4 light_proj = make_orthographic_off_center_lh(
         min_x - xy_padding,
         max_x + xy_padding,
@@ -1326,7 +1281,10 @@ void include_shadow_bounds(
         max_y + xy_padding,
         min_z - z_padding,
         max_z + z_padding);
-    return multiply_ktm_mat4(light_proj, light_view);
+    return Corona::Systems::OpticsDetail::make_shadow_cascade_view(
+        multiply_ktm_mat4(light_proj, light_view),
+        orthographic_width, orthographic_height,
+        static_cast<float>(kShadowMapSize));
 }
 
 [[nodiscard]] Corona::Horizon::ImageUsageFlags optics_storage_image_usage() {
@@ -3006,6 +2964,18 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
                     resident_actors_.erase(e.actor);
                 }
             });
+        native_frame_consumed_sub_id_ =
+            event_bus->subscribe<Events::OpticsFrameConsumedEvent>(
+                [this](const Events::OpticsFrameConsumedEvent& event) {
+                    if (event.submit_serial == 0) return;
+                    auto observed = pending_native_consumed_serial_.load(std::memory_order_relaxed);
+                    while (observed < event.submit_serial &&
+                           !pending_native_consumed_serial_.compare_exchange_weak(
+                               observed, event.submit_serial,
+                               std::memory_order_release,
+                               std::memory_order_relaxed)) {
+                    }
+                });
     }
 
     return true;
@@ -3013,9 +2983,17 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
 
 void OpticsSystem::update() {
     if (hardware_) {
-        hardware_->native_frame_throttle.make_room([this](const Horizon::SubmitReceipt& receipt) {
-            hardware_->executor.wait_for_completion(receipt);
-        });
+        const auto consumed_serial =
+            pending_native_consumed_serial_.exchange(0, std::memory_order_acq_rel);
+        if (consumed_serial != 0) {
+            hardware_->native_frame_throttle.acknowledge_consumed(consumed_serial);
+        }
+        // Never block the Optics update thread on an in-flight native receipt.
+        // The display/driver may retire it later; skipping this frame keeps the
+        // UI and event loop responsive when the GPU queue is stalled.
+        if (!hardware_->native_frame_throttle.try_acquire_slot()) {
+            return;
+        }
     }
     apply_pending_camera_moves();
     apply_pending_camera_viewport_updates();
@@ -3125,16 +3103,22 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     continue;
                 }
                 if (hardware_) {
-                    hardware_->native_frame_throttle.make_room([this](const Horizon::SubmitReceipt& receipt) {
-                        hardware_->executor.wait_for_completion(receipt);
-                    });
+                    if (!hardware_->native_frame_throttle.try_acquire_slot()) {
+                        continue;
+                    }
                 }
+                const double native_throttle_wait_ms =
+                    std::exchange(pending_native_throttle_wait_ms_, 0.0);
                 const auto native_frame_start = PerfClock::now();
                 double native_collect_ms = 0.0;
                 double native_submit_ms = 0.0;
                 double native_shadow_ms = 0.0;
                 double native_commit_ms = 0.0;
                 uint32_t native_instance_count = 0;
+                uint32_t native_visibility_draws = 0;
+                uint64_t native_visibility_indices = 0;
+                std::array<uint32_t, kShadowCascadeCount> native_cascade_draws{};
+                std::array<uint64_t, kShadowCascadeCount> native_cascade_indices{};
                 bool native_shadows_enabled = false;
                 bool native_debug_mode = false;
 
@@ -3532,13 +3516,69 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     return bounds;
                 };
 
+                struct ShadowCasterBounds {
+                    Corona::Spatial::AABB world_bounds{};
+                    bool valid = false;
+                };
+                std::array<Corona::Systems::OpticsDetail::ShadowCascadeView,
+                           kShadowCascadeCount> shadow_cascade_views{};
+                std::unordered_map<std::uintptr_t, ShadowCasterBounds> shadow_caster_bounds;
+                bool shadow_caster_bounds_built = false;
+                auto build_shadow_caster_bounds = [&]() {
+                    if (shadow_caster_bounds_built) return;
+                    shadow_caster_bounds_built = true;
+                    for (auto actor_handle : scene.actor_handles) {
+                        auto actor = actor_storage.try_acquire_read(actor_handle);
+                        if (!actor || actor->follow_camera || !diag_actor_allowed(actor_handle)) continue;
+                        {
+                            std::shared_lock lock(residency_mtx_);
+                            if (!resident_actors_.count(actor_handle)) continue;
+                        }
+                        for (auto profile_handle : actor->profile_handles) {
+                            auto profile = profile_storage.try_acquire_read(profile_handle);
+                            if (!profile || profile->optics_handle == 0) continue;
+                            auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
+                            if (!optics_acc || !optics_acc->visible ||
+                                !diag_geometry_allowed(optics_acc->geometry_handle)) continue;
+                            auto geom = geom_storage.try_acquire_read(optics_acc->geometry_handle);
+                            if (!geom || geom->transform_handle == 0) continue;
+                            auto transform = transform_storage.try_acquire_read(geom->transform_handle);
+                            auto mech = SharedDataHub::instance().mechanics_storage().try_acquire_read(
+                                profile->mechanics_handle);
+                            if (!transform || !mech) continue;
+                            const auto model_matrix = apply_native_local_correction(
+                                transform->compute_matrix(), *geom);
+                            ShadowCasterBounds entry;
+                            for (const auto& corner : bounds_corners(mech->min_xyz, mech->max_xyz)) {
+                                const auto point = transform_point(model_matrix, corner);
+                                if (!entry.valid) {
+                                    entry.world_bounds.min = point;
+                                    entry.world_bounds.max = point;
+                                    entry.valid = true;
+                                } else {
+                                    entry.world_bounds.min.x = std::min(entry.world_bounds.min.x, point.x);
+                                    entry.world_bounds.min.y = std::min(entry.world_bounds.min.y, point.y);
+                                    entry.world_bounds.min.z = std::min(entry.world_bounds.min.z, point.z);
+                                    entry.world_bounds.max.x = std::max(entry.world_bounds.max.x, point.x);
+                                    entry.world_bounds.max.y = std::max(entry.world_bounds.max.y, point.y);
+                                    entry.world_bounds.max.z = std::max(entry.world_bounds.max.z, point.z);
+                                }
+                            }
+                            entry.valid = entry.valid && entry.world_bounds.valid();
+                            shadow_caster_bounds.insert_or_assign(profile_handle, entry);
+                        }
+                    }
+                };
+
                 auto record_shadow_cascade =
                     [&](const ktm::fmat4x4& light_view_proj,
-                        Horizon::HardwareImage& shadow_depth) {
+                        Horizon::HardwareImage& shadow_depth,
+                        uint32_t cascade_index) {
                     shadow.clear_records();
                     shadow.bind_render_target(0, hardware_->shadowColorImage);
                     shadow.bind_depth_target(shadow_depth);
                     uint32_t shadow_draws = 0;
+                    build_shadow_caster_bounds();
 
                     for (auto actor_handle : scene.actor_handles) {
                         auto actor = actor_storage.try_acquire_read(actor_handle);
@@ -3552,6 +3592,15 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         for (auto profile_handle : actor->profile_handles) {
                             auto profile = profile_storage.try_acquire_read(profile_handle);
                             if (!profile || profile->optics_handle == 0) continue;
+
+                            const auto bounds_it = shadow_caster_bounds.find(profile_handle);
+                            if (bounds_it == shadow_caster_bounds.end() ||
+                                !Corona::Systems::OpticsDetail::shadow_caster_visible(
+                                    shadow_cascade_views[cascade_index].frustum,
+                                    bounds_it->second.world_bounds,
+                                    bounds_it->second.valid)) {
+                                continue;
+                            }
 
                             auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
                             if (!optics_acc || !optics_acc->visible) continue;
@@ -3569,9 +3618,14 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
                             ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
                             ktm::fvec3   world_center{0.0f, 0.0f, 0.0f};
+                            float shadow_scale_c = 1.0f;
                             if (auto transform = transform_storage.try_acquire_read(transform_handle_c)) {
                                 model_matrix = transform->compute_matrix();
                                 world_center = transform->position;
+                                shadow_scale_c = std::max({std::abs(transform->scale.x),
+                                                           std::abs(transform->scale.y),
+                                                           std::abs(transform->scale.z),
+                                                           std::abs(nlc_scale_c), 1.0e-6f});
                                 if (std::abs(nlc_scale_c - 1.0f) > 1e-6f ||
                                     std::abs(nlc_offset_c.x) > 1e-6f ||
                                     std::abs(nlc_offset_c.y) > 1e-6f ||
@@ -3602,10 +3656,11 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
                             // ---- query_mesh_slots（阴影pass无需 texture/material）----
                             const auto shadow_slots = (geometry_system_ && have_bounds_c)
-                                ? geometry_system_->query_mesh_slots(
+                                ? geometry_system_->query_shadow_mesh_slots(
                                       optics_acc->geometry_handle,
-                                      camera->position, camera->fov,
-                                      world_center, bounding_radius)
+                                      shadow_cascade_views[cascade_index].world_units_per_texel,
+                                      shadow_scale_c,
+                                      frame_index)
                                 : (geometry_system_
                                       ? geometry_system_->query_mesh_slots(optics_acc->geometry_handle)
                                       : std::vector<GeometrySystem::MeshSlot>{});
@@ -3636,6 +3691,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     ss.max_index);
                                 shadow.record(ss.geo.index, ss.geo.vertex, draw_params);
                                 ++shadow_draws;
+                                ++native_cascade_draws[cascade_index];
+                                native_cascade_indices[cascade_index] += ss.index_count;
                             }
                         }
                     }
@@ -3687,6 +3744,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
                     native_collect_ms = elapsed_ms(native_collect_start, PerfClock::now());
                     native_instance_count = static_cast<uint32_t>(sceneBatch.instances.size());
+                    native_visibility_draws = native_instance_count;
+                    for (const auto& instance : sceneBatch.instances) {
+                        native_visibility_indices += instance.indexCount;
+                    }
                 }
                 Horizon::HardwareBuffer& sceneInstanceBuffer = *instLease.buffer;
                 Horizon::HardwareBuffer& sceneMaterialBuffer = *matLease.buffer;
@@ -3729,13 +3790,15 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 float cascade_near = std::max(camera->near_plane, 0.01f);
                 for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
                     const float cascade_far = shadow_splits[cascade];
-                    hardware_->shadowInfoBufferObjects.lightViewProj[cascade] =
+                    shadow_cascade_views[cascade] =
                         compute_shadow_light_view_proj(*camera,
                                                        sun_dir,
                                                        cascade_near,
                                                        cascade_far,
                                                        shadow_min_world,
                                                        shadow_max_world);
+                    hardware_->shadowInfoBufferObjects.lightViewProj[cascade] =
+                        shadow_cascade_views[cascade].light_view_proj;
                     hardware_->shadowInfoBufferObjects.shadowMapDescriptors[cascade] =
                         hardware_->shadowCascadeImages[cascade].storeSampledDescriptor();
                     cascade_near = cascade_far;
@@ -3746,7 +3809,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     static_cast<float>(kShadowMapSize);
                 hardware_->shadowInfoBufferObjects.shadowBias = kShadowBias;
                 hardware_->shadowInfoBufferObjects.shadowEnabled =
-                    (!diag.skip_shadows && sun_intensity > 0.0f) ? 1u : 0u;
+                    (!diag.skip_shadows && diag.shadow_cascade_mask != 0u &&
+                     sun_intensity > 0.0f) ? 1u : 0u;
                 native_shadows_enabled = hardware_->shadowInfoBufferObjects.shadowEnabled != 0u;
                 (void)write_object_bytes(sceneShadowBuffer,
                                          hardware_->shadowInfoBufferObjects);
@@ -4070,9 +4134,13 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                             hardware_->shadowInfoBufferObjects.shadowEnabled != 0u) {
                             const auto native_shadow_start = PerfClock::now();
                             for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
+                                if ((diag.shadow_cascade_mask & (1u << cascade)) == 0u) {
+                                    continue;
+                                }
                                 record_shadow_cascade(
                                     hardware_->shadowInfoBufferObjects.lightViewProj[cascade],
-                                    hardware_->shadowCascadeImages[cascade]);
+                                    hardware_->shadowCascadeImages[cascade],
+                                    cascade);
                                 stream << shadow(kShadowMapSize, kShadowMapSize);
                             }
                             native_shadow_ms =
@@ -4138,12 +4206,17 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
 
 
 
-                OpticsNativePerfSample native_perf_sample;
+                Corona::Systems::OpticsDetail::NativePerfSample native_perf_sample;
                 native_perf_sample.total_ms = elapsed_ms(native_frame_start, PerfClock::now());
+                native_perf_sample.throttle_wait_ms = native_throttle_wait_ms;
                 native_perf_sample.collect_ms = native_collect_ms;
                 native_perf_sample.submit_ms = native_submit_ms;
-                native_perf_sample.shadow_ms = native_shadow_ms;
+                native_perf_sample.shadow_record_ms = native_shadow_ms;
                 native_perf_sample.commit_ms = native_commit_ms;
+                native_perf_sample.visibility_draws = native_visibility_draws;
+                native_perf_sample.visibility_indices = native_visibility_indices;
+                native_perf_sample.cascade_draws = native_cascade_draws;
+                native_perf_sample.cascade_indices = native_cascade_indices;
                 native_perf_sample.output_width = camera->width;
                 native_perf_sample.output_height = camera->height;
                 native_perf_sample.instance_count = native_instance_count;
@@ -4901,6 +4974,9 @@ void OpticsSystem::shutdown() {
 #endif
         if (residency_sub_id_ != 0) {
             event_bus->unsubscribe(residency_sub_id_);
+        }
+        if (native_frame_consumed_sub_id_ != 0) {
+            event_bus->unsubscribe(native_frame_consumed_sub_id_);
         }
     }
 
