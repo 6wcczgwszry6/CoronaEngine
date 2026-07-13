@@ -508,6 +508,8 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         )
 
         self.assertEqual(audit["status"], "needs_review")
+        self.assertEqual(audit["expected_entity_count"], 2)
+        self.assertEqual(audit["materialized_entity_count"], 1)
         self.assertEqual(audit["non_materialized_entity_count"], 1)
         self.assertGreaterEqual(audit["issue_count"], 1)
         self.assertFalse(audit["fingerprints_match"])

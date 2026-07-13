@@ -530,6 +530,7 @@ LANChat Scene Sync 静态检查通过
 当前改动：
 
 - `non_materialized_entity_count` 计入一致性审计问题总数；只要 Snapshot 中存在尚未形成 Engine Actor 的实体，审计至少为 `needs_review`。
+- `expected_entity_count` 统一表示 Runtime 世界完整实体数，并单独披露 `materialized_entity_count/non_materialized_entity_count`，避免“expected 与 Engine 数量相等但仍漏实体”的统计歧义。
 - Runtime world fingerprint 使用完整下游可见实体集合，不再只对已物化 Actor 求摘要。
 - Engine fingerprint 继续只由真实 Engine Actor 生成；两者在未物化实体存在时必须不同。
 - Engine Actor 缺失或漂移 `actor_id/asset_id/model_ref/version` 时均输出明确 mismatch；空值不再绕过检查。
@@ -544,6 +545,7 @@ LANChat Scene Sync 静态检查通过
 存在未物化 Runtime 实体 -> needs_review + fingerprint mismatch
 Game-ready 聚焦套件 19 项通过
 LANChat 世界一致性披露、Inspector 与 Peer Mirror 聚焦回归 7 项通过
+完整相关聚焦回归合计 29 项通过
 ```
 
 以下仍为 **[待 F5/实机验证]**：

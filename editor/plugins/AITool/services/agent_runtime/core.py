@@ -16545,6 +16545,12 @@ class AgentRuntime:
                     "expected_entity_count": int(
                         finalizer_consistency_audit.get("expected_entity_count") or 0
                     ),
+                    "materialized_entity_count": int(
+                        finalizer_consistency_audit.get("materialized_entity_count") or 0
+                    ),
+                    "non_materialized_entity_count": int(
+                        finalizer_consistency_audit.get("non_materialized_entity_count") or 0
+                    ),
                     "engine_actor_count": int(
                         finalizer_consistency_audit.get("engine_actor_count") or 0
                     ),
@@ -21018,6 +21024,10 @@ class AgentRuntime:
                 "status": str(audit.get("status") or "blocked"),
                 "scene_version": int(audit.get("scene_version") or 0),
                 "expected_entity_count": int(audit.get("expected_entity_count") or 0),
+                "materialized_entity_count": int(audit.get("materialized_entity_count") or 0),
+                "non_materialized_entity_count": int(
+                    audit.get("non_materialized_entity_count") or 0
+                ),
                 "engine_actor_count": int(audit.get("engine_actor_count") or 0),
                 "matched_entity_count": int(audit.get("matched_entity_count") or 0),
                 "issue_count": int(audit.get("issue_count") or 0),
