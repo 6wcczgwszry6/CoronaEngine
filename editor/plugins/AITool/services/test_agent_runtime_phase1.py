@@ -3182,6 +3182,96 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(second["report"]["plan_id"], plan.plan_id)
         self.assertEqual(attempts, 2)
 
+    def test_plan_finalizer_retries_missing_report_ready_event_before_clearing_execution_plan(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.propose_scene_plan(
+            room_id="room-worker-report-ready-retry",
+            text="create a bedroom with a bed",
+            owner_agent="planner",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=8)
+        original_apply_patch = runtime.state.apply_patch
+        reject_report_ready = True
+
+        def reject_report_ready_event(patch: StatePatch) -> tuple[bool, str]:
+            runtime_events = patch.changes.get("runtime_events")
+            contains_report_ready = isinstance(runtime_events, list) and any(
+                isinstance(event, dict) and event.get("event_type") == "report_ready"
+                for event in runtime_events
+            )
+            if reject_report_ready and contains_report_ready:
+                return False, "simulated report_ready state patch failure"
+            return original_apply_patch(patch)
+
+        runtime.state.apply_patch = reject_report_ready_event  # type: ignore[method-assign]
+
+        first = runtime.handle_message(
+            room_id="room-worker-report-ready-retry",
+            text="runtime worker drain",
+            action="worker_drain",
+            external_plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+
+        first_room = runtime.query_state("room-worker-report-ready-retry")["room"]
+        self.assertEqual(first["plan"]["status"], ScenePlanStatus.EXECUTING.value)
+        self.assertTrue(first_room["reports"])
+        self.assertEqual(first_room.get("active_execution_plan_id"), plan.plan_id)
+        self.assertFalse(first_room.get("latest_completed_plan_id"))
+        self.assertFalse(
+            any(event.get("event_type") == "report_ready" for event in first_room.get("runtime_events") or [])
+        )
+        self.assertIn(
+            "scene_plan_report_ready_event_persist_pending",
+            runtime.operation_log.events(),
+        )
+
+        reject_report_ready = False
+        second = runtime.handle_message(
+            room_id="room-worker-report-ready-retry",
+            text="runtime worker drain",
+            action="worker_drain",
+            external_plan_id=plan.plan_id,
+            max_graphs=1,
+        )
+
+        second_room = runtime.query_state("room-worker-report-ready-retry")["room"]
+        report_scene_version = int(second["report"]["scene_world_snapshot"]["scene_version"])
+        matching_report_events = [
+            event
+            for event in second_room.get("runtime_events") or []
+            if event.get("event_type") == "report_ready"
+            and int(dict(event.get("payload") or {}).get("scene_version") or 0) == report_scene_version
+        ]
+        self.assertEqual(second["drain"]["drained_count"], 0)
+        self.assertEqual(second["plan"]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertTrue(
+            matching_report_events,
+            {
+                "report_scene_version": report_scene_version,
+                "runtime_events": [
+                    {
+                        "event_type": event.get("event_type"),
+                        "scene_version": dict(event.get("payload") or {}).get("scene_version"),
+                    }
+                    for event in second_room.get("runtime_events") or []
+                    if event.get("event_type") in {"report_ready", "report_pending"}
+                ],
+            },
+        )
+        self.assertEqual(second_room.get("latest_completed_plan_id"), plan.plan_id)
+        self.assertFalse(second_room.get("active_execution_plan_id"))
+        self.assertIn("scene_plan_report_ready_event_recovered", runtime.operation_log.events())
+        gate = runtime.evaluate_r3_readiness(
+            room_id="room-worker-report-ready-retry",
+            plan_id=plan.plan_id,
+        )["gate_report"]
+        self.assertEqual(
+            gate["dimensions"]["finalizer_completeness"]["status"],
+            "green",
+        )
+
     def test_plan_finalizer_does_not_treat_pending_report_as_terminal_report(self) -> None:
         runtime = AgentRuntime()
         plan = runtime.propose_scene_plan(

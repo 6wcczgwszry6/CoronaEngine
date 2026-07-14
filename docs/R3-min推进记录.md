@@ -1602,3 +1602,39 @@ entity_readiness completed-batch grounding 断点：code_complete
 ```
 
 本轮没有移动 Actor，也没有放宽 `engine_actual`、Engine verification、稳定资源身份或 sync 事实要求。下一轮儿童卧室 F5 仍需通过 `@GM R3门禁` 和逐实体 `readiness_missing_fields` 证明是否达到 `8/14`；所有 Engine 接地与 Game-ready 效果仍为 **[待 F5/实机验证]**。
+
+## 50. W1.4 Finalizer `report_ready` 同版本持久化闭环
+
+继续核查 `finalizer_completeness` 时确认，终态报告会先写入 RuntimeState，再尝试写入 `report_ready` RuntimeEvent；Finalizer 过去只检查报告是否存在，即使事件 StatePatch 失败，也会设置 `latest_completed_plan_id` 并清空 `active_execution_plan_id`。此外，`RuntimeEventValidator` 的安全字段白名单会剥离 `scene_version`，导致正常写入的 `report_ready` 也无法成为 R3 Gate 所要求的同版本终态证据。
+
+本轮改动：
+
+- RuntimeEvent 安全 payload 明确保留数值型 `scene_version`，仍继续剔除 Provider、URL、路径、密钥和内部工具字段。
+- Finalizer 在清理执行计划前，必须从 RuntimeState 找到当前 `plan_id + scene_version` 的 `report_ready` 事件。
+- 报告已存在但终态事件缺失时，基于已持久化报告重发最小终态事件，不重复执行 Engine 写入。
+- 事件仍无法持久化时，计划恢复为 `executing`，保留 `active_execution_plan_id`，发布 `report_pending` 并等待下一次零 drain 重试。
+- 恢复成功后记录 `scene_plan_report_ready_event_recovered`，随后才设置 latest completed 并清理 active execution。
+
+聚焦验证：
+
+```text
+report 持久化失败后零 drain 重试：passed
+report_ready StatePatch 持续失败时不清理 execution plan：passed
+恢复后同版本 report_ready 写入并完成 Finalizer：passed
+RuntimeEvent 安全过滤回归：passed
+Finalizer 顺序 + R3 Readiness：9 tests passed
+Finalizer/RuntimeEvent 聚焦回归：4 tests passed
+Python syntax compile：passed
+F5 实机：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+finalizer_completeness 同版本事件闭环：code_complete
+旧 F5 终态事件缺少新 scene_version 证据，不可用于升级 Gate
+新 F5 的 finalizer_started -> report_ready 同版本序列：待验证
+```
+
+下一轮按轨道 A 优先级进入 `business_graph_consistency`，核对业务 Batch 与 `business_batch` ToolGraph 的数量、归属、节点终态和查询零污染；所有 Engine、多人同步和真实 Finalizer 效果仍为 **[待 F5/实机验证]**。

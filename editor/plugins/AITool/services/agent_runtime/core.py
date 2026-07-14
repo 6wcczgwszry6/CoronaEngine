@@ -694,6 +694,7 @@ class RuntimeEventValidator:
         "runtime_plan_id",
         "runtime_progress",
         "runtime_stage",
+        "scene_version",
         "runtime_fact_injection_count",
         "runtime_fact_injection_field_count",
         "runtime_fact_injection_field_counts",
@@ -11919,6 +11920,34 @@ class AgentRuntime:
             return dict(self._sanitize_report_record(report))
         return {}
 
+    def _persisted_runtime_event_for_plan_version(
+        self,
+        room_id: str,
+        plan_id: str,
+        *,
+        event_type: str,
+        scene_version: int,
+    ) -> dict[str, Any]:
+        """Return one RuntimeState event proving a plan/version terminal fact."""
+
+        safe_plan_id = str(plan_id or "").strip()
+        safe_event_type = str(event_type or "").strip()
+        expected_scene_version = max(0, int(scene_version or 0))
+        rows = self.state.room(str(room_id or "default")).get("runtime_events") or []
+        for raw_event in reversed(rows if isinstance(rows, list) else []):
+            if not isinstance(raw_event, Mapping):
+                continue
+            event = dict(raw_event)
+            if str(event.get("event_type") or "") != safe_event_type:
+                continue
+            if safe_plan_id and str(event.get("plan_id") or "") != safe_plan_id:
+                continue
+            payload = dict(event.get("payload") or {})
+            if int(payload.get("scene_version") or 0) != expected_scene_version:
+                continue
+            return event
+        return {}
+
     @staticmethod
     def _report_covers_current_plan_state(
         report: Mapping[str, Any] | None,
@@ -17015,6 +17044,90 @@ class AgentRuntime:
                         payload={"status": ScenePlanStatus.EXECUTING.value},
                     )
                     return result
+            report_ready_event = self._persisted_runtime_event_for_plan_version(
+                str(room_id),
+                plan_id,
+                event_type="report_ready",
+                scene_version=scene_version,
+            )
+            if not report_ready_event:
+                report_snapshot = dict(persisted_report.get("scene_world_snapshot") or {})
+                report_completion = dict(persisted_report.get("completion_status") or {})
+                report_registry = dict(persisted_report.get("scene_entity_registry") or {})
+                report_health = dict(persisted_report.get("report_health_summary") or {})
+                recovered_event = self.emit_runtime_event(
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    event_type="report_ready",
+                    phase="report",
+                    title="最终场景报告已就绪",
+                    message="最终报告与当前场景版本已经完成一致记录。",
+                    level="warning"
+                    if str(report_completion.get("world_readiness") or "") != "game_ready"
+                    else "info",
+                    progress=100,
+                    payload={
+                        "status": str(dict(persisted_report.get("plan_summary") or {}).get("status") or ""),
+                        "scene_version": scene_version,
+                        "world_fingerprint": str(report_snapshot.get("world_fingerprint") or ""),
+                        "pipeline_status": str(report_completion.get("pipeline_status") or "completed"),
+                        "engine_materialization_status": str(
+                            report_completion.get("engine_materialization_status") or "partial"
+                        ),
+                        "world_readiness": str(report_completion.get("world_readiness") or "needs_review"),
+                        "scene_entity_count": int(report_registry.get("entity_count") or 0),
+                        "game_ready_entity_count": int(report_registry.get("game_ready_entity_count") or 0),
+                        "needs_review_entity_count": int(report_registry.get("needs_review_entity_count") or 0),
+                        "report_health_status": str(report_health.get("status") or "unknown"),
+                        "report_attention_required": bool(report_health.get("attention_required")),
+                    },
+                )
+                if bool(recovered_event.get("persisted")):
+                    report_ready_event = recovered_event
+                    self.operation_log.append(
+                        "scene_plan_report_ready_event_recovered",
+                        room_id=str(room_id),
+                        plan_id=plan_id,
+                        payload={"scene_version": scene_version},
+                    )
+            if not report_ready_event:
+                plan.status = ScenePlanStatus.EXECUTING
+                plan.updated_at = _now()
+                self._persist_scene_plan_status(
+                    plan,
+                    reason="plan_finalizer:report_ready_event_persist_pending",
+                )
+                self.scene_plans[plan.plan_id] = plan
+                result.update({
+                    "status": ScenePlanStatus.EXECUTING.value,
+                    "reason": "report_ready_event_persist_pending",
+                    "report_ready": False,
+                })
+                self.operation_log.append(
+                    "scene_plan_report_ready_event_persist_pending",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    message="report_ready runtime event not persisted",
+                    payload={
+                        "scene_version": scene_version,
+                        "terminal_status": next_status.value,
+                    },
+                )
+                self.emit_runtime_event(
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    event_type="report_pending",
+                    phase="report",
+                    title="正在确认最终场景状态",
+                    message="最终报告已经写入，终态事件仍在确认，将自动继续重试。",
+                    level="warning",
+                    progress=96,
+                    payload={
+                        "status": ScenePlanStatus.EXECUTING.value,
+                        "scene_version": scene_version,
+                    },
+                )
+                return result
             result["report_ready"] = True
             identity_changes = {"latest_completed_plan_id": plan_id}
             if str(self.state.room(str(room_id)).get("active_execution_plan_id") or "") == plan_id:
