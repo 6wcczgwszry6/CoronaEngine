@@ -17041,7 +17041,7 @@ class AgentRuntime:
         return result
 
     def _reconcile_partial_engine_readiness(self, *, room_id: str, plan_id: str) -> dict[str, Any]:
-        """Refresh authoritative native bounds for partial batches via ToolCallGraph."""
+        """Refresh native bounds and reconcile provable floor support via ToolCallGraph."""
 
         if self._scene_snapshot_provider is None:
             return {}
@@ -17064,6 +17064,7 @@ class AgentRuntime:
                 and (
                     not bool(actor.get("bounds_ready"))
                     or str(actor.get("bounds_source") or "").strip().lower() != "engine_actual"
+                    or bool(self._grounding_status_from_actual_floor_bounds(actor))
                 )
                 for actor in actors_before.values()
             ):

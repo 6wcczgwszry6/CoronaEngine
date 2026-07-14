@@ -33967,6 +33967,94 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(AgentRuntime._grounding_status_from_actual_floor_bounds(wall_actor), "")
         self.assertEqual(AgentRuntime._grounding_status_from_actual_floor_bounds(floating_actor), "")
 
+    def test_completed_batch_reconciles_provable_grounding_with_actual_bounds(self) -> None:
+        snapshot_calls: list[dict[str, Any]] = []
+
+        def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
+            snapshot_calls.append(dict(request))
+            return {
+                "room_id": request.get("room_id"),
+                "source": "engine_scene_snapshot",
+                "actors": [
+                    {
+                        "actor_id": "engine-grounded-chair",
+                        "name": "chair",
+                        "position": [0.0, 0.0, 0.0],
+                        "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+                        "bounds_ready": True,
+                    }
+                ],
+            }
+
+        runtime = AgentRuntime(scene_snapshot_provider=fake_provider)
+        plan = runtime.propose_scene_plan(
+            room_id="room-completed-grounding-reconcile",
+            text="create a room with a chair",
+            owner_agent="designer",
+        )
+        plan.status = ScenePlanStatus.EXECUTING
+        batch = BatchPlan(
+            batch_id="batch-completed-grounding-reconcile",
+            plan_id=plan.plan_id,
+            room_id="room-completed-grounding-reconcile",
+            requested_items=["chair"],
+            status=BatchPlanStatus.COMPLETED,
+        )
+        runtime.scene_plans[plan.plan_id] = plan
+        runtime.batch_plans[batch.batch_id] = batch
+        applied, reason = runtime.state.apply_patch(StatePatch(
+            room_id="room-completed-grounding-reconcile",
+            changes={
+                "active_plan_id": plan.plan_id,
+                "scene_plans": {plan.plan_id: plan.as_dict()},
+                "batch_plans": {batch.batch_id: batch.as_dict()},
+                "actors": {
+                    "engine-grounded-chair": {
+                        "actor_id": "engine-grounded-chair",
+                        "entity_id": "entity-grounded-chair",
+                        "name": "chair",
+                        "plan_id": plan.plan_id,
+                        "batch_id": batch.batch_id,
+                        "asset_id": "asset-chair",
+                        "model_ref": "chair.glb",
+                        "position": [0.0, 0.0, 0.0],
+                        "rotation": [0.0, 0.0, 0.0],
+                        "scale": [1.0, 1.0, 1.0],
+                        "support_type": "floor_supported",
+                        "grounding_status": "needs_review",
+                        "sync_status": "local",
+                        "status": "ready",
+                        "source": "engine_scene_snapshot",
+                        "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
+                        "bounds_ready": True,
+                        "bounds_source": "engine_actual",
+                        "engine_lifecycle_status": "bounds_ready",
+                    }
+                },
+            },
+        ))
+        self.assertTrue(applied, reason)
+
+        result = runtime._reconcile_partial_engine_readiness(
+            room_id="room-completed-grounding-reconcile",
+            plan_id=plan.plan_id,
+        )
+        room = runtime.query_state("room-completed-grounding-reconcile")["room"]
+
+        self.assertTrue(result.get("recorded"), result)
+        self.assertTrue(snapshot_calls)
+        self.assertEqual(
+            room["actors"]["engine-grounded-chair"]["grounding_status"],
+            "grounded",
+        )
+        reconciled = [
+            entry
+            for entry in runtime.operation_log.entries()
+            if entry.event == "engine_readiness_reconciled_from_snapshot"
+        ]
+        self.assertTrue(reconciled)
+        self.assertEqual(reconciled[-1].payload.get("grounding_reconciled_count"), 1)
+
     def test_plan_finalizer_reconciles_native_ids_across_all_historical_batches(self) -> None:
         def fake_provider(request: dict[str, Any]) -> dict[str, Any]:
             return {

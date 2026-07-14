@@ -1567,3 +1567,38 @@ R3GateReport 聊天室证据入口：code_complete
 ```
 
 下一轮 F5 在每个场景 Finalizer 后发送 `@GM R3门禁`，保存聊天室输出和对应 `[R3GateTrace]`；只有新代码产生的 GateReport 可以决定红灯是否升级。所有真实 Engine、多人同步和 Game-ready 效果仍为 **[待 F5/实机验证]**。
+
+## 49. W1.3 Completed Batch 接地事实补录
+
+继续核查 `entity_readiness` 时确认，已有的 late-ready 修复只会选择 `partial` 批次，或仍缺少 `engine_actual` AABB 的 `completed` 批次。如果一个批次已经完成、Actor 已持有真实 AABB，但导入早期留下的 `grounding_status=needs_review` 尚未更新，Finalizer 会因为“bounds 已齐”而跳过整个批次。这样实际底面已经与地面接触的普通地面物体仍无法进入 Game-ready。
+
+本轮改动：
+
+- `batch_needs_reconcile()` 除 bounds 缺失外，也检查是否存在“可由真实 AABB 直接证明已贴地”的 floor-supported Actor。
+- 仅当 `bounds_ready=true`、`bounds_source=engine_actual`、支撑类型为 `floor_supported`，且 AABB bottom 与地面误差不超过 `0.05m` 时重新纳入 reconcile。
+- 仍通过 `runtime.scene.snapshot -> runtime.engine_readiness.reconcile -> ToolResult -> StatePatch -> RuntimeState` 写回，不直接修改 RuntimeState。
+- 墙挂、吊挂、未知支撑类型和真实浮空对象不会因为本次修改被提升为 grounded。
+- 已经具有合法 grounding 的实体不会重复进入该分支，避免无意义的持续 reconcile。
+
+聚焦验证：
+
+```text
+completed batch + engine_actual AABB + 实际贴地 + needs_review -> grounded：passed
+partial batch late-ready -> grounded -> Game-ready：passed
+wall_mounted / 真实浮空 Actor 不被误判：passed
+Game-ready + R3 Readiness 聚焦套件：37 tests passed
+Python syntax compile：passed
+git diff --check：clean（仅既有 CRLF 提示）
+F5 实机：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+entity_readiness completed-batch grounding 断点：code_complete
+旧 F5 基线：3/14 Game-ready
+新 F5 中 grounding_reconciled_count 与 Game-ready 提升：待验证
+```
+
+本轮没有移动 Actor，也没有放宽 `engine_actual`、Engine verification、稳定资源身份或 sync 事实要求。下一轮儿童卧室 F5 仍需通过 `@GM R3门禁` 和逐实体 `readiness_missing_fields` 证明是否达到 `8/14`；所有 Engine 接地与 Game-ready 效果仍为 **[待 F5/实机验证]**。
