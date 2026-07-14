@@ -2111,3 +2111,64 @@ old F5 baseline replay: correctly blocked
 
 当前 Gate 不变：`red / pending_reevaluation`。新代码的 Engine、Registry、Snapshot
 和 Finalizer 效果仍为 `[待 F5/实机验证]`。
+
+## 62. W1.4/W1.2 最新 F5：Render 二层投影断链与 Finalizer 空转
+
+实机日志：
+
+```text
+build/examples/engine/RelWithDebInfo/logs/2026-07-14_21-18-25_corona.log
+```
+
+自动对账结果：
+
+```text
+R3_F5_BLOCKED: PASS=2 WARN=2 FAIL=7
+business batches/graphs=3/3
+business nodes=54 succeeded=54 failed=0
+Game-ready=0/14
+render ready/observed=0/8
+terminal internal graph growth=3822 (99 -> 3921)
+runtime_finalizer_retry_exhausted=0
+```
+
+本轮确认业务 ToolGraph、混元资源生成和 C++ Actor 导入均已执行；日志中 `room_box`、
+`room_floor` 与普通模型均出现 GeometrySystem load/GPU resource ready 证据。红灯来自两个
+收尾断点，而不是业务批次失败：
+
+1. C++ Snapshot 与 `adapters.py` 已携带 render readiness，但
+   `agent_runtime/tools.py::_normalize_snapshot_actors()` 再次丢弃
+   `render_status_observed/render_ready/mesh_count` 等字段，导致 Registry 仍为 0/8 observed。
+2. 三个业务图完成后，BatchPlan 处于 `engine_readiness_pending`；Worker 熔断只识别报告
+   持久化 pending，未识别 Engine readiness pending，因此每次空 drain 都重复创建约 10 个
+   internal graph，并持续发送重复的部分完成状态。
+
+本轮修复：
+
+- Runtime scene snapshot 投影保留完整 render readiness 字段。
+- Engine import readiness 只通过稳定 `actor_id` 或 `entity_id` 对账；禁止按名称、模型路径或
+  资产相似度猜测 Actor 归属。
+- `engine_readiness_pending` 纳入 Finalizer 1/2/4/8 秒有界退避与四次熔断，避免内部图和
+  用户状态消息无限增长；不伪造 `report_ready`。
+- 历史 finalizer fixture 补齐新的 render-ready 强约束，并保留同名不同 Actor 不得误绑定测试。
+
+聚焦验证：
+
+```text
+Game-ready + R3 readiness suites: 50 passed
+snapshot render projection / stable entity matching / no same-name claim / finalizer backoff: 4 passed
+late-ready finalizer recovery and historical batch identity reconciliation: passed
+Python syntax compile: passed
+```
+
+当前 Gate 继续保持：
+
+```text
+red / pending_reevaluation
+render readiness 二层投影修复：code_complete
+engine_readiness_pending 有界退避：code_complete
+真实 render observed/Game-ready/Finalizer terminal： [待 F5/实机验证]
+```
+
+下一次 F5 必须核对：`render_observed > 0`、`internal graph` 在业务终态后不再无界增长、
+必要环境实体进入 ready，并出现 Registry/Snapshot/report_ready 的可信终态事件。

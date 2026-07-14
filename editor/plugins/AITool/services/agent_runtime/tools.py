@@ -5776,6 +5776,19 @@ def _normalize_snapshot_actors(snapshot: dict[str, Any]) -> dict[str, dict[str, 
             actor["bounds_source"] = "engine_actual" if bounds_ready else "estimated"
             actor["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
             actor["status"] = "ready" if bounds_ready else "engine_loading"
+        for field in ("render_status_observed", "render_ready", "render_failed"):
+            if field in item:
+                actor[field] = bool(item.get(field))
+        gpu_build_state = str(item.get("gpu_build_state") or "").strip()
+        if gpu_build_state:
+            actor["gpu_build_state"] = gpu_build_state
+        for field in ("mesh_count", "renderable_mesh_count", "invalid_mesh_count"):
+            if field not in item:
+                continue
+            try:
+                actor[field] = max(0, int(item.get(field) or 0))
+            except (TypeError, ValueError):
+                actor[field] = 0
         actors[actor_id] = actor
     return actors
 

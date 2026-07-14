@@ -3424,6 +3424,7 @@ class LANChatAgentWorker:
                     item
                     for item in finalized_plans
                     if str(item.get("reason") or "") in {
+                        "engine_readiness_pending",
                         "final_report_persist_pending",
                         "report_ready_event_persist_pending",
                     }

@@ -19684,6 +19684,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                                 "min": [0.5, 0.0, 1.5],
                                 "max": [1.5, 1.2, 2.5],
                             },
+                            "render_status_observed": True,
+                            "render_ready": True,
+                            "render_failed": False,
+                            "gpu_build_state": "Ready",
+                            "mesh_count": 1,
+                            "renderable_mesh_count": 1,
+                            "invalid_mesh_count": 0,
                         }
                     ],
                 }
@@ -19710,6 +19717,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("actor-chest", room["observed_actors"])
         self.assertEqual(room["actors"]["actor-chest"]["aabb"]["min"], [0.5, 0.0, 1.5])
         self.assertEqual(room["actors"]["actor-chest"]["aabb"]["max"], [1.5, 1.2, 2.5])
+        self.assertTrue(room["actors"]["actor-chest"]["render_status_observed"])
+        self.assertTrue(room["actors"]["actor-chest"]["render_ready"])
+        self.assertEqual(room["actors"]["actor-chest"]["renderable_mesh_count"], 1)
         self.assertEqual(room["actors"]["actor-chest"]["name"], "钘忓疂绠?")
         events = runtime.user_visible_events("room-snapshot-provider")
         snapshot_events = [event for event in events if event["event_type"] == "scene_snapshot_refreshed"]
@@ -19725,10 +19735,9 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status_snapshot["observed_actor_count"], 1)
         self.assertEqual(status_snapshot["latest_scene_name"], "Scene/场景1.scene")
         self.assertEqual(status_snapshot["latest_actors"][0]["actor_name"], "钘忓疂绠?")
-        report_snapshot = runtime.generate_report("room-snapshot-provider")["scene_snapshot_summary"]
-        self.assertEqual(report_snapshot, status_snapshot)
+        with self.assertRaisesRegex(ValueError, "requires plan_id"):
+            runtime.generate_report("room-snapshot-provider")
         self.assertNotIn("E:/private", str(status_snapshot))
-        self.assertNotIn("model_path", str(report_snapshot))
 
     def test_scene_snapshot_provider_keeps_runtime_scene_context_over_native_result(self) -> None:
         class WrongSceneSnapshotTool:
@@ -23817,6 +23826,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "actor_id": "actor-ready",
                     "name": "bed",
                     "bounds_ready": True,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "render_failed": False,
+                    "gpu_build_state": "Ready",
+                    "mesh_count": 1,
+                    "renderable_mesh_count": 1,
+                    "invalid_mesh_count": 0,
                     "position": [1.0, 0.5, 2.0],
                     "rotation": [0.0, 0.0, 0.0],
                     "scale": [1.0, 1.0, 1.0],
@@ -23843,6 +23859,73 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(actor["bounds_source"], "engine_actual")
         self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
         self.assertEqual(actor["aabb"]["max"], [2.0, 1.0, 3.0])
+        self.assertTrue(actor["render_status_observed"])
+        self.assertTrue(actor["render_ready"])
+
+    def test_engine_actor_import_provider_matches_snapshot_by_stable_entity_id(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool, payload: dict) -> dict:
+                return tool.invoke(payload)
+
+        identity: dict[str, str] = {}
+
+        class ImportTool:
+            def invoke(self, payload: dict) -> dict:
+                identity["entity_id"] = str(payload["entity_id"])
+                return {
+                    "status": "success",
+                    "actor": {
+                        "actor_guid": "import-result-actor-id",
+                        "entity_id": payload["entity_id"],
+                        "name": payload["actor_name"],
+                        "geometry": {"position": payload["position"]},
+                    },
+                }
+
+        def snapshot_provider(_request: dict) -> dict:
+            return {
+                "actors": [{
+                    "actor_id": "native-snapshot-actor-id",
+                    "entity_id": identity["entity_id"],
+                    "name": "bed",
+                    "bounds_ready": True,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "render_failed": False,
+                    "gpu_build_state": "Ready",
+                    "mesh_count": 1,
+                    "renderable_mesh_count": 1,
+                    "invalid_mesh_count": 0,
+                    "position": [0.0, 0.5, 0.0],
+                    "aabb": {"min": [-1.0, 0.0, -1.0], "max": [1.0, 1.0, 1.0]},
+                }],
+            }
+
+        provider = make_engine_actor_import_provider(
+            import_tool=ImportTool(),
+            engine_gate=FakeGate(),
+            scene_snapshot_provider=snapshot_provider,
+        )
+        result = provider({
+            "room_id": "room-entity-match",
+            "batch_id": "batch-entity-match",
+            "plan_id": "plan-entity-match",
+            "model_items": ["bed"],
+            "model_resources": {
+                "bed": {
+                    "status": "ready",
+                    "local_path": "E:/models/bed.glb",
+                    "asset_id": "asset-bed",
+                },
+            },
+            "placements": {"bed": {"position": [0.0, 0.0, 0.0]}},
+        })
+
+        actor = result["actors"]["import-result-actor-id"]
+        self.assertTrue(actor["bounds_ready"])
+        self.assertEqual(actor["bounds_source"], "engine_actual")
+        self.assertTrue(actor["render_status_observed"])
+        self.assertTrue(actor["render_ready"])
 
     def test_engine_actor_import_provider_selectively_grounds_ready_floor_actor(self) -> None:
         guid_holder = {"value": ""}
@@ -33988,6 +34071,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "position": [0.0, 0.0, 0.0],
                         "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
                         "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "render_failed": False,
+                        "gpu_build_state": "Ready",
+                        "mesh_count": 1,
+                        "renderable_mesh_count": 1,
+                        "invalid_mesh_count": 0,
                     },
                 ],
             }
@@ -34058,6 +34148,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "position": [0.0, 0.0, 0.0],
                         "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
                         "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "render_failed": False,
+                        "gpu_build_state": "Ready",
+                        "mesh_count": 1,
+                        "renderable_mesh_count": 1,
+                        "invalid_mesh_count": 0,
                     },
                     {
                         "actor_id": "engine-room-floor-ready",
@@ -34065,6 +34162,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "position": [0.0, 0.0, 0.0],
                         "aabb": {"min": [-3.0, -0.1, -3.0], "max": [3.0, 0.0, 3.0]},
                         "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "render_failed": False,
+                        "gpu_build_state": "Ready",
+                        "mesh_count": 1,
+                        "renderable_mesh_count": 1,
+                        "invalid_mesh_count": 0,
                     },
                 ],
             }
@@ -34171,7 +34275,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertIn("engine_readiness_reconciled_from_snapshot", runtime.operation_log.events())
         registry = runtime._scene_entity_registry_for_plan(room, plan.plan_id)
         chair = next(entity for entity in registry["entities"] if entity.get("actor_id") == "engine-chair-ready")
-        self.assertTrue(chair["game_ready"])
+        self.assertTrue(chair["game_ready"], chair)
         self.assertTrue(room["reports"])
 
     def test_late_actual_bounds_do_not_ground_wall_or_floating_actors(self) -> None:
@@ -34295,6 +34399,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "position": [-1.0, 0.0, 0.0],
                         "aabb": {"min": [-1.5, 0.0, -0.5], "max": [-0.5, 1.0, 0.5]},
                         "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "render_failed": False,
+                        "gpu_build_state": "Ready",
+                        "mesh_count": 1,
+                        "renderable_mesh_count": 1,
+                        "invalid_mesh_count": 0,
                     },
                     {
                         "actor_id": "native-handle-table",
@@ -34302,6 +34413,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "position": [1.0, 0.0, 0.0],
                         "aabb": {"min": [0.5, 0.0, -0.5], "max": [1.5, 0.8, 0.5]},
                         "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "render_failed": False,
+                        "gpu_build_state": "Ready",
+                        "mesh_count": 1,
+                        "renderable_mesh_count": 1,
+                        "invalid_mesh_count": 0,
                     },
                     {
                         "actor_id": "native-unrelated-scene-actor",

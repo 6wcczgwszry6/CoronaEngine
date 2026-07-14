@@ -10230,64 +10230,66 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         evidence_log.assert_called_once()
         self.assertEqual(evidence_log.call_args.kwargs["runtime_plan_id"], "plan-late-ready")
 
-    def test_auto_drain_backs_off_and_suspends_repeated_finalizer_persistence_failure(self) -> None:
-        worker = _TestWorker(
-            corona_engine=_FakeIdleEngine(),
-            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
-        )
-        room_id = "room-finalizer-retry"
-        plan_id = "plan-finalizer-retry"
-        worker._remember_room_id(room_id)
-        runtime_result = {
-            "drain": {
-                "drained_count": 0,
-                "status": "idle",
-                "finalized_plans": [{
-                    "plan_id": plan_id,
-                    "status": "executing",
-                    "reason": "final_report_persist_pending",
-                }],
-            },
-            "plan": {"plan_id": plan_id, "status": "executing"},
-        }
-        clock = [100.0]
+    def test_auto_drain_backs_off_and_suspends_repeated_finalizer_pending_state(self) -> None:
+        for reason in ("final_report_persist_pending", "engine_readiness_pending"):
+            with self.subTest(reason=reason):
+                worker = _TestWorker(
+                    corona_engine=_FakeIdleEngine(),
+                    agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+                )
+                room_id = f"room-finalizer-retry-{reason}"
+                plan_id = f"plan-finalizer-retry-{reason}"
+                worker._remember_room_id(room_id)
+                runtime_result = {
+                    "drain": {
+                        "drained_count": 0,
+                        "status": "idle",
+                        "finalized_plans": [{
+                            "plan_id": plan_id,
+                            "status": "executing",
+                            "reason": reason,
+                        }],
+                    },
+                    "plan": {"plan_id": plan_id, "status": "executing"},
+                }
+                clock = [100.0]
 
-        with (
-            patch.object(worker, "_active_runtime_execution_plan_id", return_value=plan_id),
-            patch.object(worker._agent_runtime, "handle_message", return_value=runtime_result) as handle_message,
-            patch.object(worker, "_latest_agent_runtime_event_timestamp", return_value=10.0),
-            patch.object(worker, "_start_runtime_drain_heartbeat", return_value=None),
-            patch.object(worker, "_emit_agent_runtime_events_since", return_value=0),
-            patch.object(worker, "_runtime_evidence_result", side_effect=lambda result, **_: result),
-            patch.object(worker, "_record_runtime_audit_event") as audit_event,
-            patch.object(worker, "_log_agent_runtime_evidence"),
-            patch("plugins.AITool.services.lanchat_agent_worker.time.monotonic", side_effect=lambda: clock[0]),
-            patch("plugins.AITool.services.lanchat_agent_worker.MAX_AGENT_RUNTIME_FINALIZER_RETRY_ATTEMPTS", 2),
-        ):
-            self.assertFalse(worker._drain_agent_runtime_queue_once())
-            self.assertEqual(handle_message.call_count, 1)
+                with (
+                    patch.object(worker, "_active_runtime_execution_plan_id", return_value=plan_id),
+                    patch.object(worker._agent_runtime, "handle_message", return_value=runtime_result) as handle_message,
+                    patch.object(worker, "_latest_agent_runtime_event_timestamp", return_value=10.0),
+                    patch.object(worker, "_start_runtime_drain_heartbeat", return_value=None),
+                    patch.object(worker, "_emit_agent_runtime_events_since", return_value=0),
+                    patch.object(worker, "_runtime_evidence_result", side_effect=lambda result, **_: result),
+                    patch.object(worker, "_record_runtime_audit_event") as audit_event,
+                    patch.object(worker, "_log_agent_runtime_evidence"),
+                    patch("plugins.AITool.services.lanchat_agent_worker.time.monotonic", side_effect=lambda: clock[0]),
+                    patch("plugins.AITool.services.lanchat_agent_worker.MAX_AGENT_RUNTIME_FINALIZER_RETRY_ATTEMPTS", 2),
+                ):
+                    self.assertFalse(worker._drain_agent_runtime_queue_once())
+                    self.assertEqual(handle_message.call_count, 1)
 
-            clock[0] = 100.5
-            self.assertFalse(worker._drain_agent_runtime_queue_once())
-            self.assertEqual(handle_message.call_count, 1)
+                    clock[0] = 100.5
+                    self.assertFalse(worker._drain_agent_runtime_queue_once())
+                    self.assertEqual(handle_message.call_count, 1)
 
-            clock[0] = 101.1
-            self.assertTrue(worker._drain_agent_runtime_queue_once())
+                    clock[0] = 101.1
+                    self.assertTrue(worker._drain_agent_runtime_queue_once())
 
-        self.assertEqual(handle_message.call_count, 2)
-        self.assertNotIn(room_id, worker._active_room_ids)
-        self.assertNotIn(room_id, worker._active_room_order)
-        retry_state = worker._runtime_finalizer_retry_by_room[room_id]
-        self.assertTrue(retry_state["exhausted"])
-        self.assertEqual(retry_state["attempt_count"], 2)
-        audit_event.assert_called_once()
-        self.assertEqual(
-            audit_event.call_args.kwargs["event"],
-            "runtime_finalizer_retry_exhausted",
-        )
-        with patch.object(worker, "_runtime_plan_has_active_graph", return_value=True):
-            self.assertTrue(worker._runtime_finalizer_retry_due(room_id, plan_id))
-        self.assertNotIn(room_id, worker._runtime_finalizer_retry_by_room)
+                self.assertEqual(handle_message.call_count, 2)
+                self.assertNotIn(room_id, worker._active_room_ids)
+                self.assertNotIn(room_id, worker._active_room_order)
+                retry_state = worker._runtime_finalizer_retry_by_room[room_id]
+                self.assertTrue(retry_state["exhausted"])
+                self.assertEqual(retry_state["attempt_count"], 2)
+                audit_event.assert_called_once()
+                self.assertEqual(
+                    audit_event.call_args.kwargs["event"],
+                    "runtime_finalizer_retry_exhausted",
+                )
+                with patch.object(worker, "_runtime_plan_has_active_graph", return_value=True):
+                    self.assertTrue(worker._runtime_finalizer_retry_due(room_id, plan_id))
+                self.assertNotIn(room_id, worker._runtime_finalizer_retry_by_room)
 
     def test_process_once_forgets_room_when_runtime_plan_is_terminal(self) -> None:
         class _TerminalRuntime:

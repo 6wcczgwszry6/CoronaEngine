@@ -1959,10 +1959,13 @@ def _reconcile_engine_ready_facts(
         except Exception:  # noqa: BLE001
             snapshot = {}
         rows = [dict(item) for item in list(snapshot.get("actors") or []) if isinstance(item, dict)]
-        by_id = {str(item.get("actor_id") or ""): item for item in rows if str(item.get("actor_id") or "")}
         all_ready = True
         for entity_id, entity in entities.items():
-            observed = by_id.get(str(entity.get("actor_id") or entity_id))
+            observed = _match_engine_snapshot_actor(
+                rows,
+                entity,
+                fallback_actor_id=str(entity_id or ""),
+            )
             bounds = _normalized_bounds_from(observed or {}) if observed else None
             observed_bounds_ready = bool(observed and observed.get("bounds_ready"))
             render_status_observed = bool(observed and observed.get("render_status_observed"))
@@ -1998,6 +2001,51 @@ def _reconcile_engine_ready_facts(
         if all_ready or time.monotonic() >= deadline:
             return
         time.sleep(interval_s)
+
+
+def _match_engine_snapshot_actor(
+    rows: list[dict[str, Any]],
+    entity: dict[str, Any],
+    *,
+    fallback_actor_id: str = "",
+) -> dict[str, Any] | None:
+    """Match one Runtime entity to one native snapshot actor without guessing.
+
+    Native scene snapshots and import results can expose the same stable actor
+    through different identity fields.  Only actor identity or stable entity
+    identity may reconcile Engine facts; asset/name similarity is not ownership
+    evidence and must never claim an unrelated native actor.
+    """
+
+    def normalized(value: Any) -> str:
+        return str(value or "").strip().casefold()
+
+    def unique_match(snapshot_fields: tuple[str, ...], values: list[Any]) -> dict[str, Any] | None:
+        wanted = {normalized(value) for value in values if normalized(value)}
+        if not wanted:
+            return None
+        matches = [
+            row
+            for row in rows
+            if any(normalized(row.get(field)) in wanted for field in snapshot_fields)
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    actor_match = unique_match(
+        ("actor_id", "actor_guid", "guid"),
+        [entity.get("actor_id"), fallback_actor_id],
+    )
+    if actor_match is not None:
+        return actor_match
+
+    entity_match = unique_match(
+        ("entity_id", "runtime_entity_id"),
+        [entity.get("entity_id")],
+    )
+    if entity_match is not None:
+        return entity_match
+
+    return None
 
 
 def make_engine_layout_transform_provider(

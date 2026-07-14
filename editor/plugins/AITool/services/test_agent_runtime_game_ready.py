@@ -162,6 +162,26 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(actor["renderable_mesh_count"], 1)
         self.assertEqual(actor["invalid_mesh_count"], 0)
 
+    def test_runtime_scene_snapshot_projection_preserves_render_readiness(self) -> None:
+        runtime = AgentRuntime(
+            scene_snapshot_provider=make_scene_snapshot_provider(
+                snapshot_tool=_RuntimeIdentitySnapshotTool(),
+                scene_name="Scene/runtime-render.scene",
+            )
+        )
+
+        result = runtime.refresh_scene_snapshot("room-runtime-render")
+        actor = runtime.query_state("room-runtime-render")["room"]["observed_actors"]["actor-runtime-1"]
+
+        self.assertEqual(result["graph"]["status"], "completed")
+        self.assertTrue(actor["render_status_observed"])
+        self.assertTrue(actor["render_ready"])
+        self.assertFalse(actor["render_failed"])
+        self.assertEqual(actor["gpu_build_state"], "Ready")
+        self.assertEqual(actor["mesh_count"], 1)
+        self.assertEqual(actor["renderable_mesh_count"], 1)
+        self.assertEqual(actor["invalid_mesh_count"], 0)
+
     def test_invalid_render_mesh_cannot_be_game_ready_even_with_actual_bounds(self) -> None:
         room = _room_fact(game_ready=True)
         actor = room["actors"]["actor-cupid"]
