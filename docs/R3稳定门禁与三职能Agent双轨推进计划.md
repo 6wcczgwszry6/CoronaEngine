@@ -30,11 +30,11 @@
 
 当前基线：
 
-- Runtime 聚焦测试 43 项通过。
+- 轨道 A 的 W1.3-W1.8 已达到 `code_complete`；最近一轮扩展聚焦套件 49 项通过。
 - 最近一次 F5 使用较旧代码，结果为 14 个实体中 3 个 Game-ready。
 - 最新 Readiness、业务图分域、Finalizer 和 Peer Mirror 修复尚未重新 F5。
 - 当前门禁状态为 `red / pending_reevaluation`，不得据此冻结 Snapshot v1。
-- `services/agent_collaboration/` 尚未建立。
+- `services/agent_collaboration/` 的强类型契约、ProjectState、ArtifactRegistry、AgentTaskGraph 和三个非执行型职能 Agent 已达到 `code_complete`，但红灯期间没有生产入口，也不得接入真实或 Mock Snapshot。
 
 ---
 

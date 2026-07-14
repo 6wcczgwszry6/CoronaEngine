@@ -4499,6 +4499,9 @@ class LANChatAgentWorker:
         if message_kind not in {"", "chat"}:
             return None
         room_id = str(trigger.get("room_id") or "default")
+        if self._is_runtime_r3_gate_query(trigger):
+            self._remember_room_id(room_id)
+            return self._agent_runtime_r3_gate_reply(room_id=room_id)
         runtime_gm_summary_query = self._is_runtime_gm_summary_query(trigger)
         if runtime_gm_summary_query:
             runtime_external_plan_id = self._active_runtime_external_plan_id(room_id)
@@ -9205,6 +9208,24 @@ class LANChatAgentWorker:
         return rows
 
     @classmethod
+    def _is_runtime_r3_gate_query(cls, trigger: dict[str, Any]) -> bool:
+        text = str((trigger or {}).get("text") or "").strip()
+        if not text:
+            return False
+        normalized = text.lower().replace(" ", "")
+        is_gm_target = cls._is_gm_target_trigger(trigger) or normalized.startswith("@gm")
+        if not is_gm_target:
+            return False
+        return any(token in normalized for token in (
+            "r3门禁",
+            "r3gate",
+            "r3readiness",
+            "game-ready门禁",
+            "gameready门禁",
+            "就绪门禁",
+        ))
+
+    @classmethod
     def _is_runtime_gm_summary_query(cls, trigger: dict[str, Any]) -> bool:
         text = str((trigger or {}).get("text") or "").strip()
         if not text:
@@ -9680,6 +9701,88 @@ class LANChatAgentWorker:
             if text:
                 return text
         return ""
+
+    def _agent_runtime_r3_gate_reply(self, *, room_id: str) -> str:
+        """Return a read-only, user-safe R3 gate summary for F5 diagnosis."""
+
+        try:
+            result = self._agent_runtime.handle_message(
+                room_id=str(room_id or "default"),
+                text="r3_readiness",
+                action="runtime.r3_readiness.evaluate",
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("AgentRuntime R3 gate query skipped: %s", type(exc).__name__)
+            return "R3 门禁暂时不可用；未执行任何场景写入。"
+        report = result.get("gate_report", {}) if isinstance(result, dict) else {}
+        if not isinstance(report, dict) or not report:
+            return "R3 门禁暂时不可用；未执行任何场景写入。"
+
+        dimension_labels = {
+            "snapshot_integrity": "Snapshot 完整性",
+            "environment_readiness": "环境就绪",
+            "entity_readiness": "实体就绪",
+            "finalizer_completeness": "收尾完整性",
+            "business_graph_consistency": "业务图一致性",
+            "multiplayer_consistency": "多人一致性",
+            "runtime_write_safety": "Runtime 写入安全",
+        }
+        dimensions = report.get("dimensions", {}) if isinstance(report.get("dimensions"), dict) else {}
+        metrics = report.get("metrics", {}) if isinstance(report.get("metrics"), dict) else {}
+        entity_dimension = (
+            dimensions.get("entity_readiness", {})
+            if isinstance(dimensions.get("entity_readiness"), dict)
+            else {}
+        )
+        entity_metrics = (
+            entity_dimension.get("metrics", {})
+            if isinstance(entity_dimension.get("metrics"), dict)
+            else {}
+        )
+        entity_count = int(
+            entity_metrics.get("expected_entity_count")
+            or metrics.get("entity_count")
+            or 0
+        )
+        game_ready_count = int(
+            entity_metrics.get("game_ready_entity_count")
+            or metrics.get("game_ready_entity_count")
+            or 0
+        )
+        overall = str(report.get("overall") or "red").strip().upper()
+        scene_version = max(0, int(report.get("scene_version") or 0))
+        lines = [
+            f"【R3 门禁】{overall}",
+            f"场景版本：v{scene_version}；Game-ready：{game_ready_count}/{entity_count}",
+        ]
+        dimension_statuses: list[str] = []
+        for name, label in dimension_labels.items():
+            value = dimensions.get(name, {}) if isinstance(dimensions.get(name), dict) else {}
+            status = str(value.get("status") or "red").strip().upper()
+            dimension_statuses.append(f"{name}:{status.lower()}")
+            lines.append(f"- {label}：{status}")
+        blockers = [str(item).strip() for item in list(report.get("blockers") or []) if str(item).strip()]
+        if blockers:
+            lines.append("阻塞项：" + "；".join(blockers[:3]))
+            if len(blockers) > 3:
+                lines.append(f"另有 {len(blockers) - 3} 项阻塞，可在 Runtime 诊断中查看。")
+        unlocks = [str(item).strip() for item in list(report.get("capability_unlocks") or []) if str(item).strip()]
+        if unlocks:
+            lines.append("当前允许：" + "、".join(unlocks))
+        self._logger.info(
+            "[R3GateTrace] room=%s plan=%s scene_version=%s overall=%s dimensions=%s "
+            "game_ready=%s/%s blockers=%s report_id=%s",
+            str(room_id or "default"),
+            str(report.get("plan_id") or result.get("plan_id") or ""),
+            scene_version,
+            overall.lower(),
+            ",".join(dimension_statuses),
+            game_ready_count,
+            entity_count,
+            len(blockers),
+            str(report.get("gate_report_id") or ""),
+        )
+        return "\n".join(lines)
 
     def _send_coordinator_sync_system_reply(self, message: dict[str, Any], text: str) -> bool:
         safe_text = self._safe_control_text(text)

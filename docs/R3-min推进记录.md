@@ -1532,3 +1532,38 @@ multiplayer_consistency 代码证据链：已补齐
 ```
 
 所有真实 Engine、网络传输与多人一致性效果仍为 **[待 F5/实机验证]**。下一轮应先执行固定多人 F5，对账房主/成员的 `entity_id / asset_id / version / identity_fingerprint`，再根据新 GateReport 决定是否从红灯切换为黄灯或绿灯。
+
+## 48. R3 Gate 聊天室只读诊断入口
+
+代码核查确认，`runtime.r3_readiness.evaluate` 已经具备七维聚合、确定性输出和零副作用测试，但此前只存在于 AgentRuntime 内部接口与测试中。下一轮 F5 若仍依赖人工拼接 RuntimeState、Registry、Snapshot 和日志，既容易漏项，也无法稳定复现红黄绿判定。
+
+本轮完成：
+
+- 新增窄口径 GM 查询：`@GM R3门禁`、`@GM R3 Gate`、`@GM R3 readiness`。
+- 查询直接调用 `runtime.r3_readiness.evaluate`，不经过 LLM、Coordinator 写链、PlanPatch、ToolCallGraph 或 Provider。
+- 聊天室返回总体 Gate、scene version、Game-ready 数量以及七个维度的红黄绿状态。
+- 阻塞项只展示前三项并给出剩余计数；能力解锁项读取 GateReport，不根据聊天历史猜测。
+- 新增安全日志 `[R3GateTrace]`，仅记录 room/plan/version、维度状态、Game-ready 计数、阻塞数量和 report ID，不记录实体明细、Provider 或内部 URL。
+- 普通 Agent 或不明确的“检查门禁”不会命中该入口，避免扩大控制词规则面。
+
+聚焦验证：
+
+```text
+Python syntax compile：passed
+GM R3 Gate 零副作用与 Coordinator 绕过：passed
+AgentRuntime R3 Readiness 回归：passed
+聚焦套件：9 tests passed
+Native C++ build：未执行
+F5 实机 Gate 输出：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+R3GateReport 聊天室证据入口：code_complete
+旧 F5 基线：3/14 Game-ready，不满足新 Gate 契约
+新一轮儿童卧室、森林营地、混合场景和多人 F5：待执行
+```
+
+下一轮 F5 在每个场景 Finalizer 后发送 `@GM R3门禁`，保存聊天室输出和对应 `[R3GateTrace]`；只有新代码产生的 GateReport 可以决定红灯是否升级。所有真实 Engine、多人同步和 Game-ready 效果仍为 **[待 F5/实机验证]**。

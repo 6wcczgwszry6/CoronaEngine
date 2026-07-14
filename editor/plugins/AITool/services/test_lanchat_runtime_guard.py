@@ -3459,6 +3459,53 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(coordinator.ingest_calls, [])
         self.assertIn("runtime_gm_summary_exported", worker._agent_runtime.operation_log.events())
 
+    def test_gm_r3_gate_query_is_read_only_and_bypasses_coordinator(self) -> None:
+        coordinator = _ExplodingCoordinator()
+        worker = _TestWorker(
+            interaction_coordinator=coordinator,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        rooms_before = dict(worker._agent_runtime.state.rooms)
+        version_before = worker._agent_runtime.state.version
+        operations_before = [
+            entry.as_dict() for entry in worker._agent_runtime.operation_log.entries()
+        ]
+
+        trigger = {
+            "room_id": "room-r3-gate-missing",
+            "message_id": "msg-r3-gate",
+            "text": "@GM R3门禁",
+            "sender_id": "host-1",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "gm",
+            "agent_name": "GM",
+            "is_host": True,
+        }
+        reply = worker._handle_coordinator_status_query(trigger)
+
+        self.assertIn("【R3 门禁】RED", reply or "")
+        self.assertIn("Snapshot 完整性：RED", reply or "")
+        self.assertIn("环境就绪：RED", reply or "")
+        self.assertIn("实体就绪：RED", reply or "")
+        self.assertIn("多人一致性：YELLOW", reply or "")
+        self.assertIn("Game-ready：0/0", reply or "")
+        self.assertEqual(worker._agent_runtime.state.rooms, rooms_before)
+        self.assertEqual(worker._agent_runtime.state.version, version_before)
+        self.assertEqual(
+            [entry.as_dict() for entry in worker._agent_runtime.operation_log.entries()],
+            operations_before,
+        )
+        self.assertEqual(coordinator.ingest_calls, [])
+        self.assertTrue(worker._is_runtime_r3_gate_query(trigger))
+        self.assertFalse(worker._is_runtime_r3_gate_query({
+            **trigger,
+            "text": "检查门禁",
+            "agent_id": "agent-1",
+            "agent_name": "商人",
+        }))
+
     def test_gm_summary_includes_runtime_pending_intervention_summary(self) -> None:
         coordinator = _FakeCoordinator()
         worker = _TestWorker(
