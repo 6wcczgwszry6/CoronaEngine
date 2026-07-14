@@ -290,6 +290,26 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
         self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
 
+    def test_worker_entity_question_reads_latest_failed_terminal_plan(self) -> None:
+        runtime = AgentRuntime()
+        room_fact = _room_fact(game_ready=False)
+        room_fact["scene_plans"]["plan-1"]["status"] = "failed"
+        applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=room_fact))
+        self.assertTrue(applied)
+        worker = LANChatAgentWorker(agent_runtime=runtime)
+        before = runtime.state.room("room-1")
+
+        reply = worker._handle_runtime_entity_status_query({
+            "room_id": "room-1",
+            "message_id": "msg-query-failed-plan",
+            "text": "@GM \u4e18\u6bd4\u7279\u96d5\u50cf\u5df2\u7ecf\u52a0\u5165\u4e86\u5417",
+        })
+
+        after = runtime.state.room("room-1")
+        self.assertIn("\u4e18\u6bd4\u7279\u96d5\u50cf", reply or "")
+        self.assertEqual(before.get("tool_graphs", {}), after.get("tool_graphs", {}))
+        self.assertEqual(before.get("pending_interventions", {}), after.get("pending_interventions", {}))
+
     def test_worker_typo_add_returns_clarification_without_patch(self) -> None:
         runtime = AgentRuntime()
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))

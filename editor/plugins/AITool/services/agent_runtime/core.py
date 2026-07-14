@@ -3137,10 +3137,13 @@ class EnvironmentComponentValidator:
         "entity_id",
         "entity_version",
         "entity_type",
+        "gpu_build_state",
         "gameplay_tags",
         "handler",
         "interaction_capability",
+        "invalid_mesh_count",
         "lighting_profile",
+        "mesh_count",
         "model_ref",
         "name",
         "native_name",
@@ -3148,6 +3151,10 @@ class EnvironmentComponentValidator:
         "position",
         "requested_name",
         "requires_engine_write",
+        "render_failed",
+        "render_ready",
+        "render_status_observed",
+        "renderable_mesh_count",
         "review_status",
         "rotation",
         "scale",
@@ -3245,6 +3252,7 @@ class EnvironmentComponentValidator:
             "engine_lifecycle_status",
             "entity_id",
             "entity_type",
+            "gpu_build_state",
             "handler",
             "model_ref",
             "review_status",
@@ -3286,6 +3294,9 @@ class EnvironmentComponentValidator:
             raise ValueError("environment component fact requires name")
         if "requires_engine_write" in component and not isinstance(component.get("requires_engine_write"), bool):
             raise ValueError("environment component fact requires_engine_write must be a bool")
+        for field in ("render_status_observed", "render_ready", "render_failed"):
+            if field in component and not isinstance(component.get(field), bool):
+                raise ValueError(f"environment component fact {field} must be a bool")
         for field in ("entity_version", "version"):
             if field in component and (
                 not isinstance(component.get(field), int)
@@ -3293,6 +3304,13 @@ class EnvironmentComponentValidator:
                 or int(component.get(field) or 0) <= 0
             ):
                 raise ValueError(f"environment component fact {field} must be a positive integer")
+        for field in ("mesh_count", "renderable_mesh_count", "invalid_mesh_count"):
+            if field in component and (
+                not isinstance(component.get(field), int)
+                or isinstance(component.get(field), bool)
+                or int(component.get(field) or 0) < 0
+            ):
+                raise ValueError(f"environment component fact {field} must be a non-negative integer")
         for field in (
             "actor_id",
             "boundary_style",
@@ -3306,6 +3324,7 @@ class EnvironmentComponentValidator:
             "engine_lifecycle_status",
             "entity_id",
             "entity_type",
+            "gpu_build_state",
             "model_ref",
             "review_status",
             "scene_name",

@@ -2040,3 +2040,41 @@ red / pending_reevaluation
 R3 render readiness 自动对账：code_complete
 真实 Engine 字段与用户摘要：[待 F5/实机验证]
 ```
+
+## 60. W1.4 Finalizer Completeness：自动收尾退避与熔断
+
+最新 F5 日志：
+
+```text
+build/examples/engine/RelWithDebInfo/logs/2026-07-14_18-47-10_corona.log
+```
+
+该轮三个业务图均失败后，自动 worker 继续对空队列执行 Finalizer；内部图数量从 85 增长到 352，最终报告与 `report_ready` 未形成可信终态。上一断点已修复 Environment render-ready 字段在 C++ 安全桥、Adapter 和 Validator 之间的契约丢失，本节只收敛 Finalizer 的自动重试放大。
+
+本轮改动：
+
+- `final_report_persist_pending` 与 `report_ready_event_persist_pending` 保留自动恢复语义，但采用 1/2/4/8 秒指数退避，最长不超过 30 秒。
+- 同一计划连续 4 次收尾持久化失败后，暂停该房间的自动 drain，记录 `runtime_finalizer_retry_exhausted`；不伪造 `report_ready`，不把失败计划声明为完成。
+- 若同一 ScenePlan 后续出现新的 queued/running ToolGraph，自动解除收尾暂停，避免阻断真实追加批。
+- 正常一次失败后恢复、零 drain 晚到 `report_ready`、正常终态清理房间的既有语义保持不变。
+
+聚焦验证：
+
+```text
+Finalizer backoff/circuit-breaker Worker tests: 3 passed
+Transient report persistence retry: passed
+Missing report_ready recovery retry: passed
+Python syntax compile: passed
+git diff --check: clean（仅既有 CRLF 提示）
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+Environment render-ready 字段闭环：code_complete
+Finalizer 自动重试退避与熔断：code_complete
+真实业务图完成、Registry/Snapshot/report_ready 终态：[待 F5/实机验证]
+```
+
+下一次 F5 重点核对：三个业务图应不再在 Environment 状态写入节点失败；正常成功时必须出现完整 Finalizer 终态事件。若报告持久化仍失败，内部图不得继续无界增长，并应出现一次 `runtime_finalizer_retry_exhausted` 审计事实。

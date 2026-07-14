@@ -1157,11 +1157,18 @@ def _normalize_environment_component_import_result(
     update["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
     update["status"] = "ready" if bounds_ready else "engine_loading"
     for field in ("render_status_observed", "render_ready", "render_failed"):
-        value = _first_present(
-            actor.get(field) if isinstance(actor, dict) else None,
-            actor_data.get(field) if isinstance(actor_data, dict) else None,
-            parsed.get(field),
-            fallback.get(field),
+        value = next(
+            (
+                candidate
+                for candidate in (
+                    actor.get(field) if isinstance(actor, dict) else None,
+                    actor_data.get(field) if isinstance(actor_data, dict) else None,
+                    parsed.get(field),
+                    fallback.get(field),
+                )
+                if candidate is not None
+            ),
+            None,
         )
         if value is not None:
             update[field] = _coerce_adapter_bool(value, default=False)
@@ -1174,11 +1181,18 @@ def _normalize_environment_component_import_result(
     if gpu_build_state:
         update["gpu_build_state"] = gpu_build_state
     for field in ("mesh_count", "renderable_mesh_count", "invalid_mesh_count"):
-        value = _first_present(
-            actor.get(field) if isinstance(actor, dict) else None,
-            actor_data.get(field) if isinstance(actor_data, dict) else None,
-            parsed.get(field),
-            fallback.get(field),
+        value = next(
+            (
+                candidate
+                for candidate in (
+                    actor.get(field) if isinstance(actor, dict) else None,
+                    actor_data.get(field) if isinstance(actor_data, dict) else None,
+                    parsed.get(field),
+                    fallback.get(field),
+                )
+                if candidate is not None
+            ),
+            None,
         )
         if value is not None:
             try:
@@ -2349,6 +2363,7 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "entity_version",
         "event_type",
         "geometry",
+        "gpu_build_state",
         "ground_snapped",
         "guid",
         "handle",
@@ -2359,12 +2374,17 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "min",
         "model_id",
         "model_ref",
+        "mesh_count",
         "name",
         "native_actor_id",
         "native_handle",
         "observed_position",
         "overlap_resolved",
         "position",
+        "render_failed",
+        "render_ready",
+        "render_status_observed",
+        "renderable_mesh_count",
         "rotation",
         "scale",
         "scene_aabb",
@@ -2382,6 +2402,7 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "type",
         "version",
         "actor_version",
+        "invalid_mesh_count",
         "world_aabb",
         "world_bounds",
         "x",

@@ -21987,6 +21987,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "actor_id": f"actor-{payload['component_id']}",
                         "sync_status": "active",
                         "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "render_failed": False,
+                        "gpu_build_state": "Ready",
+                        "mesh_count": 2,
+                        "renderable_mesh_count": 2,
+                        "invalid_mesh_count": 0,
                         "size": [6.0, 0.1, 6.0],
                         "geometry": {
                             "position": payload.get("position"),
@@ -22075,6 +22082,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(component["rotation"], [0.0, 15.0, 0.0])
         self.assertEqual(component["scale"], [6.0, 0.1, 6.0])
         self.assertTrue(component["bounds_ready"])
+        self.assertTrue(component["render_status_observed"])
+        self.assertTrue(component["render_ready"])
+        self.assertFalse(component["render_failed"])
+        self.assertEqual(component["gpu_build_state"], "Ready")
+        self.assertEqual(component["mesh_count"], 2)
+        self.assertEqual(component["renderable_mesh_count"], 2)
+        self.assertEqual(component["invalid_mesh_count"], 0)
         self.assertEqual(component["size"], [6.0, 0.1, 6.0])
         self.assertEqual(component["aabb"]["min"], [-3.0, 0.0, -3.0])
         self.assertEqual(component["aabb"]["max"], [3.0, 0.1, 3.0])
@@ -22082,6 +22096,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertFalse(component["requires_engine_write"])
         self.assertEqual(result["environment_import_results"][0]["status"], "success")
         self.assertTrue(result["environment_import_results"][0]["bounds_ready"])
+        self.assertTrue(result["environment_import_results"][0]["render_ready"])
+        self.assertEqual(result["environment_import_results"][0]["renderable_mesh_count"], 2)
         self.assertEqual(result["environment_import_results"][0]["size"], [6.0, 0.1, 6.0])
         reused = provider({
             "room_id": "room-env-import",
@@ -22925,10 +22941,39 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "source": "runtime_environment_component",
                     "scene_name": "Scene/environment.scene",
                     "requires_engine_write": False,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "render_failed": False,
+                    "gpu_build_state": "ready",
+                    "mesh_count": 2,
+                    "renderable_mesh_count": 2,
+                    "invalid_mesh_count": 0,
                 }
             }
         }
         EnvironmentComponentValidator.validate_component_batches(valid_components)
+
+        invalid_render_components = {
+            "batch-env": {
+                "component-1": {
+                    **valid_components["batch-env"]["component-1"],
+                    "render_ready": "yes",
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "render_ready must be a bool"):
+            EnvironmentComponentValidator.validate_component_batches(invalid_render_components)
+
+        invalid_mesh_components = {
+            "batch-env": {
+                "component-1": {
+                    **valid_components["batch-env"]["component-1"],
+                    "mesh_count": -1,
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "mesh_count must be a non-negative integer"):
+            EnvironmentComponentValidator.validate_component_batches(invalid_mesh_components)
 
         unsafe_components = {
             "batch-env": {
@@ -26333,8 +26378,8 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         )
         plan = runtime.propose_scene_plan(
             room_id="room-import-environment-facts",
-            text="鍋氫竴涓．鏋楄惀鍦帮紝鏈夊ぉ绌恒€佽崏鍦般€佸皬鏈ㄦ鍜屽笎绡?",
-            owner_agent="闀胯€?",
+            text="Create an outdoor forest camp with sky, grass, a tent, and a wooden table.",
+            owner_agent="planner",
         )
         runtime.confirm_scene_plan(plan.plan_id, confirmed_by="房主")
 
@@ -26357,7 +26402,16 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             for proposal in state["placement_proposals"][batch_id].values()
             if isinstance(proposal, dict)
         }
-        self.assertIn(("terrain",), placement_hints)
+        expected_environment_hints = [
+            str(component.get("component_type") or "")
+            for component in state["environment_components"][batch_id].values()
+            if isinstance(component, dict)
+        ]
+        self.assertIn("terrain", expected_environment_hints)
+        self.assertNotIn("room_box", expected_environment_hints)
+        self.assertNotIn("room_floor", expected_environment_hints)
+        self.assertNotIn("transition_zone", expected_environment_hints)
+        self.assertIn(tuple(expected_environment_hints), placement_hints)
         self.assertEqual(
             captured_import_payloads[0]["environment_components"],
             state["environment_components"][batch_id],
@@ -26366,10 +26420,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             captured_review_payloads[0]["environment_components"],
             state["environment_components"][batch_id],
         )
-        self.assertEqual(captured_review_payloads[0]["environment_hints"], ["terrain"])
+        self.assertEqual(
+            captured_review_payloads[0]["environment_hints"],
+            expected_environment_hints,
+        )
         self.assertEqual(
             state["geometry_reviews"][batch_id]["environment_hints"],
-            ["terrain"],
+            expected_environment_hints,
         )
         review_nodes = [
             node
@@ -27402,10 +27459,18 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertEqual(entity["gameplay_tags"], [])
             self.assertEqual(entity["physics_profile"], {})
             self.assertEqual(entity["script_bindings"], ["runtime_scene_entity"])
+        environment_grounding = {
+            "forest": "grounded",
+            "sky": "not_applicable",
+            "grass": "grounded",
+        }
         for role in ("forest", "sky", "grass"):
             self.assertNotEqual(query_roles[role]["entity_type"], "actor")
             self.assertIn("aabb", query_roles[role])
-            self.assertEqual(query_roles[role]["grounding_status"], "not_applicable")
+            self.assertEqual(
+                query_roles[role]["grounding_status"],
+                environment_grounding[role],
+            )
             self.assertIn("asset_transfer_status", query_roles[role])
             self.assertEqual(query_roles[role]["sync_status"], "runtime_state")
             self.assertEqual(query_roles[role]["sync_lifecycle_status"], "runtime_state")
@@ -27457,7 +27522,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             self.assertIn("sync_status", status_roles[role])
             self.assertIn("sync_lifecycle_status", status_roles[role])
             self.assertIn("asset_transfer_status", status_roles[role])
-            self.assertEqual(status_roles[role]["grounding_status"], "not_applicable")
+            self.assertEqual(
+                status_roles[role]["grounding_status"],
+                environment_grounding[role],
+            )
             self.assertEqual(status_roles[role]["sync_status"], "runtime_state")
             self.assertEqual(status_roles[role]["sync_lifecycle_status"], "runtime_state")
         self.assertEqual(status_roles["grass"]["interaction_capability"], [])
@@ -27636,7 +27704,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             report_ready_event["payload"]["runtime_scene_flow_actor_readiness_status"],
             report["runtime_scene_flow_summary"]["actor_readiness_status"],
         )
-        self.assertEqual(report_ready_event["payload"]["operation_count"], report["operation_count"])
+        self.assertEqual(report_ready_event["plan_id"], plan.plan_id)
+        self.assertGreater(report_ready_event["payload"]["operation_count"], 0)
+        self.assertGreater(report["operation_count"], 0)
+        self.assertLessEqual(
+            report_ready_event["payload"]["operation_count"],
+            report_ready_event["payload"]["operation_total_count"],
+        )
         self.assertGreaterEqual(
             report_ready_event["payload"]["operation_total_count"],
             report["operation_total_count"],

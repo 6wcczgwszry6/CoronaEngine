@@ -30,6 +30,9 @@ MAX_SYNC_EVENTS_PER_TICK = 8
 MAX_AGENT_RUNTIME_DRAIN_ROOMS_PER_TICK = 1
 MAX_AGENT_RUNTIME_GRAPHS_PER_TICK = 1
 MAX_AGENT_RUNTIME_DISCLOSURE_EVENT_LOOKBACK = 32
+MAX_AGENT_RUNTIME_FINALIZER_RETRY_ATTEMPTS = 4
+AGENT_RUNTIME_FINALIZER_RETRY_BASE_SECONDS = 1.0
+AGENT_RUNTIME_FINALIZER_RETRY_MAX_SECONDS = 30.0
 MAX_COORDINATOR_SEEN_MESSAGE_IDS = 2048
 MAX_ACTIVE_ROOM_IDS = 256
 _SENSITIVE_WORKER_PAYLOAD_KEYS = {
@@ -102,6 +105,7 @@ class LANChatAgentWorker:
         self._message_dispatch_ledger = MessageDispatchLedger()
         self._active_room_ids: set[str] = set()
         self._active_room_order: deque[str] = deque()
+        self._runtime_finalizer_retry_by_room: dict[str, dict[str, Any]] = {}
         self._progress_disclosure_lock = threading.RLock()
         self._progress_disclosure_last_by_room: dict[str, tuple[str, float]] = {}
         if self._generation_scheduler is not None:
@@ -2415,6 +2419,20 @@ class LANChatAgentWorker:
             return plan_id
         return ""
 
+    def _latest_runtime_terminal_plan_id(self, room_id: str) -> str:
+        """Resolve the latest terminal plan for read-only status queries."""
+
+        try:
+            snapshot = self._agent_runtime.query_state(str(room_id or "default"))
+        except Exception:  # noqa: BLE001
+            return ""
+        room_state = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        plan_id = str(room_state.get("latest_completed_plan_id") or "").strip()
+        plan = dict(dict(room_state.get("scene_plans") or {}).get(plan_id) or {})
+        if plan_id and str(plan.get("status") or "") in {"completed", "failed", "cancelled"}:
+            return plan_id
+        return ""
+
     def _remember_runtime_increment_message_id(self, message_id: str) -> None:
         key = str(message_id or "").strip()
         if not key or key in self._runtime_increment_message_ids:
@@ -2519,7 +2537,7 @@ class LANChatAgentWorker:
 
     def _handle_runtime_entity_status_query(self, trigger: dict[str, Any]) -> str | None:
         room_id = str((trigger or {}).get("room_id") or "default")
-        plan_id = self._active_runtime_execution_plan_id(room_id) or self._latest_runtime_completed_plan_id(room_id)
+        plan_id = self._active_runtime_execution_plan_id(room_id) or self._latest_runtime_terminal_plan_id(room_id)
         if not plan_id:
             return None
         intent = self._runtime_action_intent_for_trigger(trigger, target_plan_id=plan_id)
@@ -3354,6 +3372,10 @@ class LANChatAgentWorker:
         graph_limit = max(1, int(max_graphs_per_room or 1))
         for room_id in room_snapshot[:room_limit]:
             active_plan_id = self._active_runtime_execution_plan_id(str(room_id))
+            if not active_plan_id:
+                self._clear_runtime_finalizer_retry(str(room_id))
+            elif not self._runtime_finalizer_retry_due(str(room_id), active_plan_id):
+                continue
             runtime_state_readable = callable(getattr(self._agent_runtime, "query_state", None))
             before_timestamp = self._latest_agent_runtime_event_timestamp(str(room_id))
             heartbeat_stop = threading.Event()
@@ -3392,6 +3414,32 @@ class LANChatAgentWorker:
                 if heartbeat_thread is not None and heartbeat_thread.is_alive():
                     heartbeat_thread.join(timeout=0.1)
             drained_count = int(result.get("drained_count") or 0)
+            finalized_plans = [
+                dict(item)
+                for item in list(result.get("finalized_plans") or [])
+                if isinstance(item, dict)
+            ]
+            pending_finalizer = next(
+                (
+                    item
+                    for item in finalized_plans
+                    if str(item.get("reason") or "") in {
+                        "final_report_persist_pending",
+                        "report_ready_event_persist_pending",
+                    }
+                ),
+                None,
+            )
+            finalizer_retry_exhausted = False
+            if pending_finalizer is not None and active_plan_id:
+                retry_state = self._record_runtime_finalizer_retry(
+                    room_id=str(room_id),
+                    plan_id=active_plan_id,
+                    reason=str(pending_finalizer.get("reason") or "finalizer_pending"),
+                )
+                finalizer_retry_exhausted = bool(retry_state.get("exhausted"))
+            else:
+                self._clear_runtime_finalizer_retry(str(room_id), plan_id=active_plan_id)
             drain_failed = str(result.get("status") or "").strip().lower() == "failed"
             if drain_failed:
                 reason = str(result.get("reason") or "").strip()
@@ -3427,6 +3475,26 @@ class LANChatAgentWorker:
                 str(room_id),
                 after_timestamp=before_timestamp,
             )
+            if finalizer_retry_exhausted:
+                self._record_runtime_audit_event(
+                    event="runtime_finalizer_retry_exhausted",
+                    room_id=str(room_id),
+                    message="AgentRuntime finalizer automatic retries were suspended.",
+                    payload={
+                        "runtime_plan_id": active_plan_id,
+                        "reason": str((pending_finalizer or {}).get("reason") or "finalizer_pending"),
+                        "attempt_count": MAX_AGENT_RUNTIME_FINALIZER_RETRY_ATTEMPTS,
+                        "phase": "agent_runtime_finalizer",
+                    },
+                )
+                self._forget_room_id(str(room_id))
+                self._log_agent_runtime_evidence(
+                    phase="runtime_queue_drain_result",
+                    room_id=str(room_id),
+                    runtime_plan_id=runtime_plan_id,
+                    result=runtime_result,
+                )
+                return True
             if drained_count <= 0:
                 remaining_execution_plan_id = self._active_runtime_execution_plan_id(str(room_id))
                 if remaining_execution_plan_id and not list(result.get("finalized_plans") or []):
@@ -4405,6 +4473,75 @@ class LANChatAgentWorker:
         while len(self._active_room_order) > MAX_ACTIVE_ROOM_IDS:
             oldest = self._active_room_order.popleft()
             self._active_room_ids.discard(oldest)
+            self._runtime_finalizer_retry_by_room.pop(oldest, None)
+
+    def _runtime_finalizer_retry_due(self, room_id: str, plan_id: str) -> bool:
+        room = str(room_id or "").strip()
+        plan = str(plan_id or "").strip()
+        state = dict(self._runtime_finalizer_retry_by_room.get(room) or {})
+        if not state:
+            return True
+        if str(state.get("plan_id") or "") != plan:
+            self._runtime_finalizer_retry_by_room.pop(room, None)
+            return True
+        if self._runtime_plan_has_active_graph(room, plan):
+            self._runtime_finalizer_retry_by_room.pop(room, None)
+            return True
+        if bool(state.get("exhausted")):
+            return False
+        return time.monotonic() >= float(state.get("next_attempt_at") or 0.0)
+
+    def _runtime_plan_has_active_graph(self, room_id: str, plan_id: str) -> bool:
+        try:
+            snapshot = self._agent_runtime.query_state(str(room_id or "default"))
+        except Exception:  # noqa: BLE001
+            return False
+        room = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        return any(
+            isinstance(row, dict)
+            and str(row.get("plan_id") or "") == str(plan_id or "")
+            and str(row.get("status") or "") in {"queued", "running", "planned", "ready"}
+            for row in dict(room.get("tool_graph_queue") or {}).values()
+        )
+
+    def _record_runtime_finalizer_retry(
+        self,
+        *,
+        room_id: str,
+        plan_id: str,
+        reason: str,
+    ) -> dict[str, Any]:
+        room = str(room_id or "").strip()
+        plan = str(plan_id or "").strip()
+        previous = dict(self._runtime_finalizer_retry_by_room.get(room) or {})
+        attempts = int(previous.get("attempt_count") or 0) + 1 if previous.get("plan_id") == plan else 1
+        exhausted = attempts >= MAX_AGENT_RUNTIME_FINALIZER_RETRY_ATTEMPTS
+        delay_seconds = min(
+            AGENT_RUNTIME_FINALIZER_RETRY_MAX_SECONDS,
+            AGENT_RUNTIME_FINALIZER_RETRY_BASE_SECONDS * (2 ** max(0, attempts - 1)),
+        )
+        state = {
+            "plan_id": plan,
+            "attempt_count": attempts,
+            "reason": str(reason or "finalizer_pending"),
+            "exhausted": exhausted,
+            "next_attempt_at": float("inf") if exhausted else time.monotonic() + delay_seconds,
+        }
+        self._runtime_finalizer_retry_by_room[room] = state
+        while len(self._runtime_finalizer_retry_by_room) > MAX_ACTIVE_ROOM_IDS:
+            oldest = next(iter(self._runtime_finalizer_retry_by_room))
+            self._runtime_finalizer_retry_by_room.pop(oldest, None)
+        return dict(state)
+
+    def _clear_runtime_finalizer_retry(self, room_id: str, *, plan_id: str = "") -> None:
+        room = str(room_id or "").strip()
+        state = dict(self._runtime_finalizer_retry_by_room.get(room) or {})
+        if not state:
+            return
+        expected_plan = str(plan_id or "").strip()
+        if expected_plan and str(state.get("plan_id") or "") != expected_plan:
+            return
+        self._runtime_finalizer_retry_by_room.pop(room, None)
 
     def _forget_room_id(self, room_id: str) -> None:
         room = str(room_id or "").strip()
