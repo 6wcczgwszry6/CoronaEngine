@@ -80,6 +80,11 @@ class ScratchRuntimeContext:
     mouse_y: float = 0.0
     mouse_delta_x: float = 0.0
     mouse_delta_y: float = 0.0
+    mouse_viewport_x: float = 0.0
+    mouse_viewport_y: float = 0.0
+    mouse_viewport_width: float = 0.0
+    mouse_viewport_height: float = 0.0
+    last_mouse_pick_object: str = ""
     key_handler: Optional[Callable] = None
     mouse_handler: Optional[Callable] = None
     broadcast_handlers: dict = field(default_factory=dict)
@@ -101,6 +106,9 @@ class ScratchRuntimeContext:
     crossing_state: dict = field(default_factory=dict)
     last_collision_axis_value: str = ""
     last_collision_normal_value: list = field(default_factory=lambda: [0.0, 0.0, 0.0])
+    last_collision_target_name: str = ""
+    previous_actor_positions: dict = field(default_factory=dict)
+    tag_velocity_times: dict = field(default_factory=dict)
     checkpoints: dict = field(default_factory=dict)
     cooldowns: dict = field(default_factory=dict)
     initial_tag_transforms: dict = field(default_factory=dict)
@@ -115,6 +123,7 @@ _scene_object_tags: dict[str, dict[str, str]] = {}
 _scene_shared_variables: dict[str, dict[str, object]] = {}
 _scene_shared_lists: dict[str, dict[str, list]] = {}
 _scene_shared_declarations: dict[str, dict[str, tuple]] = {}
+_scene_logical_collision_enabled: dict[str, dict[str, bool]] = {}
 _clone_threads: dict[str, list[_threading.Thread]] = {}
 _handler_threads: dict[str, list[_threading.Thread]] = {}
 
@@ -182,6 +191,10 @@ def release_context(ctx: ScratchRuntimeContext | None = None):
         ctx.crossing_state.clear()
         ctx.last_collision_axis_value = ""
         ctx.last_collision_normal_value = [0.0, 0.0, 0.0]
+        ctx.last_collision_target_name = ""
+        ctx.previous_actor_positions.clear()
+        ctx.tag_velocity_times.clear()
+        ctx.last_mouse_pick_object = ""
         ctx.checkpoints.clear()
         ctx.cooldowns.clear()
         ctx.initial_tag_transforms.clear()
@@ -295,7 +308,7 @@ def handle_key_release(key, display_key=None):
                 ctx.key_state[display_key.upper()] = False
 
 
-def handle_mouse_event(event_type, button, x, y):
+def handle_mouse_event(event_type, button, x, y, viewport_x=None, viewport_y=None, viewport_width=None, viewport_height=None):
     for ctx in _live_contexts() or [_default_context]:
         if event_type in ("click", "mousedown"):
             ctx.mouse_pressed = True
@@ -307,6 +320,10 @@ def handle_mouse_event(event_type, button, x, y):
         ctx.mouse_delta_y = next_y - ctx.mouse_y
         ctx.mouse_x = next_x
         ctx.mouse_y = next_y
+        ctx.mouse_viewport_x = float(next_x if viewport_x is None else viewport_x)
+        ctx.mouse_viewport_y = float(next_y if viewport_y is None else viewport_y)
+        ctx.mouse_viewport_width = max(0.0, float(viewport_width or 0.0))
+        ctx.mouse_viewport_height = max(0.0, float(viewport_height or 0.0))
         if ctx.mouse_handler is None or ctx.stop_requested:
             continue
         try:
@@ -2202,10 +2219,22 @@ def _actor_aabb(actor):
         return None
 
 
+def _actor_identity(actor):
+    if actor is None:
+        return ""
+    for value in (getattr(actor, 'actor_guid', None), getattr(actor, 'handle', None), _object_name(actor)):
+        if value not in (None, ""):
+            return _norm_name(str(value))
+    return str(id(actor))
+
+
 def _set_actor_position(actor, pos):
     if actor is None:
         return False
     pos = [_safe_float(pos[0]), _safe_float(pos[1]), _safe_float(pos[2])]
+    previous = _actor_position(actor)
+    if previous is not None:
+        _current_context().previous_actor_positions[_actor_identity(actor)] = list(previous)
     try:
         if hasattr(actor, 'set_position'):
             actor.set_position(pos)
@@ -2260,13 +2289,82 @@ def _position_distance(a, b):
     )
 
 
+def _logical_collision_store(ctx=None):
+    key = _runtime_scene_key(ctx)
+    with _context_lock:
+        return _scene_logical_collision_enabled.setdefault(key, {})
+
+
+def _actor_logical_collision_enabled(actor) -> bool:
+    if actor is None:
+        return False
+    return bool(_logical_collision_store().get(_actor_identity(actor), True))
+
+
+def object_logical_collision_enabled(name=''):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    return _actor_logical_collision_enabled(actor)
+
+
+def set_object_logical_collision(name, enabled=True):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    if actor is None:
+        return False
+    _logical_collision_store()[_actor_identity(actor)] = bool(enabled)
+    return True
+
+
+def set_object_native_physics(name, enabled=True):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    if actor is None:
+        return False
+    setter = getattr(actor, 'set_physics_enabled', None)
+    if not callable(setter):
+        setter = getattr(getattr(actor, '_mechanics', None), 'set_physics_enabled', None)
+    if not callable(setter):
+        raise RuntimeError(f'对象「{_object_name(actor)}」不支持原生物理开关')
+    setter(bool(enabled))
+    return True
+
+
+def _segment_intersects_aabb(start, end, bounds):
+    t_min, t_max = 0.0, 1.0
+    for axis in range(3):
+        delta = end[axis] - start[axis]
+        if abs(delta) < 1e-9:
+            if start[axis] < bounds[axis] or start[axis] > bounds[axis + 3]:
+                return False
+            continue
+        inv = 1.0 / delta
+        near = (bounds[axis] - start[axis]) * inv
+        far = (bounds[axis + 3] - start[axis]) * inv
+        if near > far:
+            near, far = far, near
+        t_min, t_max = max(t_min, near), min(t_max, far)
+        if t_min > t_max:
+            return False
+    return True
+
+
+def _swept_actor_touch(source, target, source_aabb, target_aabb):
+    previous = _current_context().previous_actor_positions.get(_actor_identity(source))
+    current = _actor_position(source)
+    if previous is None or current is None or source_aabb is None or target_aabb is None:
+        return False
+    half = [(source_aabb[i + 3] - source_aabb[i]) * 0.5 for i in range(3)]
+    expanded = tuple(target_aabb[i] - half[i] for i in range(3)) + tuple(target_aabb[i + 3] + half[i] for i in range(3))
+    return _segment_intersects_aabb(previous, current, expanded)
+
+
 def _actors_touch(a, b) -> bool:
     if a is None or b is None or a is b or _is_actor_deleted(a) or _is_actor_deleted(b):
+        return False
+    if not _actor_logical_collision_enabled(a) or not _actor_logical_collision_enabled(b):
         return False
     aabb_a = _actor_aabb(a)
     aabb_b = _actor_aabb(b)
     if aabb_a is not None and aabb_b is not None:
-        return _aabb_overlap(aabb_a, aabb_b)
+        return _aabb_overlap(aabb_a, aabb_b) or _swept_actor_touch(a, b, aabb_a, aabb_b)
     dist = _position_distance(a, b)
     return bool(dist is not None and dist <= 1.0)
 
@@ -2300,6 +2398,23 @@ def touch(target):
     if hit:
         _record_touch(actor)
     return hit
+
+
+def touch_any():
+    """Return whether the current actor overlaps any other known actor."""
+    source = _current_actor()
+    if source is None:
+        return False
+    source_name = _norm_name(_object_name(source))
+    for actor in _iter_known_actors():
+        if actor is source:
+            continue
+        if source_name and _norm_name(_object_name(actor)) == source_name:
+            continue
+        if _actors_touch(source, actor):
+            _record_touch(actor)
+            return True
+    return False
 
 
 def touch_tag(tag):
@@ -2654,7 +2769,8 @@ def ground_below(distance):
     pos = _actor_position(actor) if actor is not None else [_current_context().x, _current_context().y, _current_context().z]
     if pos is None:
         return False
-    dist = max(0.0, _safe_float(distance, 1.0))
+    # A negative value is accepted as the same detection length in the downward direction.
+    dist = abs(_safe_float(distance, 1.0))
     cache = _get_raycast_cache().copy()
     try:
         hit = raycast_hit(pos, [0.0, -1.0, 0.0], dist)
@@ -2798,6 +2914,7 @@ def clear_runtime_state_snapshots():
         _scene_shared_variables.clear()
         _scene_shared_lists.clear()
         _scene_shared_declarations.clear()
+        _scene_logical_collision_enabled.clear()
 
 
 def game_win():
@@ -3575,35 +3692,38 @@ def _remember_collision(source, target):
     ctx = _current_context()
     ctx.last_collision_axis_value = axis
     ctx.last_collision_normal_value = normal
+    ctx.last_collision_target_name = _object_name(target)
 
 
 def touch_started(name, trigger_id):
     source, target = _current_actor(), _resolve_actor(name)
-    touching = _actors_touch(source, target)
+    current = {_actor_identity(target)} if _actors_touch(source, target) else set()
     key = f'object:{trigger_id}'
-    previous = bool(_current_context().touch_state.get(key, False))
-    _current_context().touch_state[key] = touching
-    if touching:
+    previous = set(_current_context().touch_state.get(key, set()) or set())
+    _current_context().touch_state[key] = current
+    entered = current - previous
+    if entered:
         _record_touch(target)
         _remember_collision(source, target)
-    return bool(touching and not previous)
+    return bool(entered)
 
 
 def touch_tag_started(tag, trigger_id):
-    source, target = _current_actor(), None
+    source = _current_actor()
+    touched = []
     if source is not None:
-        for actor in _iter_known_actors():
-            if actor is not source and _actor_matches_tag(actor, tag) and _actors_touch(source, actor):
-                target = actor
-                break
-    touching = target is not None
+        touched = [actor for actor in _iter_known_actors()
+                   if actor is not source and _actor_matches_tag(actor, tag) and _actors_touch(source, actor)]
+    current = {_actor_identity(actor) for actor in touched}
     key = f'tag:{trigger_id}'
-    previous = bool(_current_context().touch_state.get(key, False))
-    _current_context().touch_state[key] = touching
-    if touching:
+    previous = set(_current_context().touch_state.get(key, set()) or set())
+    _current_context().touch_state[key] = current
+    entered = current - previous
+    if entered:
+        target = next((actor for actor in touched if _actor_identity(actor) in entered), touched[0])
         _record_touch(target)
         _remember_collision(source, target)
-    return bool(touching and not previous)
+    return bool(entered)
 
 
 def crossed_axis_once(name, axis, threshold, direction, trigger_id):
@@ -3620,7 +3740,13 @@ def crossed_axis_once(name, axis, threshold, direction, trigger_id):
     if previous is None:
         return False
     mode = str(direction or 'GREATER').upper()
-    return bool(previous >= limit and current < limit) if mode in ('LESS', 'LT', 'BELOW', '-') else bool(previous <= limit and current > limit)
+    crossed_negative = previous >= limit and current < limit
+    crossed_positive = previous <= limit and current > limit
+    if mode in ('ANY', 'BOTH', 'EITHER', '*'):
+        return bool(crossed_negative or crossed_positive)
+    if mode in ('LESS', 'LT', 'BELOW', 'NEGATIVE', '-'):
+        return bool(crossed_negative)
+    return bool(crossed_positive)
 
 
 def outside_axis(name, axis, minimum, maximum):
@@ -3631,6 +3757,16 @@ def outside_axis(name, axis, minimum, maximum):
     index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
     lo, hi = sorted((_safe_float(minimum), _safe_float(maximum)))
     return pos[index] < lo or pos[index] > hi
+
+
+def inside_axis(name, axis, minimum, maximum):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if pos is None:
+        return False
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    lo, hi = sorted((_safe_float(minimum), _safe_float(maximum)))
+    return lo <= pos[index] <= hi
 
 
 def inside_box(name, cx, cy, cz, sx, sy, sz):
@@ -3653,13 +3789,24 @@ def last_collision_normal(axis):
 
 
 def bounce_last_collision(factor=1.0):
-    normal = list(_current_context().last_collision_normal_value or [0.0, 0.0, 0.0])
+    ctx = _current_context()
+    normal = list(ctx.last_collision_normal_value or [0.0, 0.0, 0.0])
     if not any(abs(v) > 1e-9 for v in normal):
         return False
     velocity = _velocity_list()
     dot = sum(velocity[i] * normal[i] for i in range(3))
     coefficient = max(0.0, _safe_float(factor, 1.0))
     reflected = [velocity[i] - (1.0 + coefficient) * dot * normal[i] for i in range(3)]
+    source, target = _current_actor(), _resolve_actor(ctx.last_collision_target_name)
+    source_box, target_box = _actor_aabb(source), _actor_aabb(target)
+    if source_box is not None and target_box is not None:
+        penetrations = [min(source_box[i + 3], target_box[i + 3]) - max(source_box[i], target_box[i]) for i in range(3)]
+        axis = next((i for i, value in enumerate(normal) if abs(value) > 0.5), None)
+        if axis is not None and penetrations[axis] >= 0:
+            position = _actor_position(source)
+            if position is not None:
+                position[axis] += normal[axis] * (penetrations[axis] + 1e-3)
+                _set_actor_position(source, position)
     return set_velocity(*reflected)
 
 
@@ -3755,6 +3902,60 @@ def object_move_to_lane(name, axis, lane, origin, spacing):
     return _set_actor_position(actor, pos)
 
 
+def object_move_to_lane_smooth(name, axis, lane, origin, spacing, speed):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    index = {'X': 0, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    target = _safe_float(origin) + _safe_int(lane, 0) * _safe_float(spacing, 1.0)
+    delta = target - pos[index]
+    step = max(0.0, abs(_safe_float(speed, 5.0))) * 0.05
+    if abs(delta) <= max(step, 1e-6):
+        pos[index] = target
+        _set_actor_position(actor, pos)
+        return True
+    pos[index] += step if delta > 0 else -step
+    _set_actor_position(actor, pos)
+    return False
+
+
+def set_tag_velocity_axis(tag, axis, value):
+    ctx = _current_context()
+    key = f'{_norm_name(tag)}:{str(axis or "X").upper()}'
+    now = _time.monotonic()
+    previous = ctx.tag_velocity_times.get(key, now - 0.05)
+    ctx.tag_velocity_times[key] = now
+    dt = min(0.1, max(0.0, now - previous))
+    index = {'X': 0, 'Y': 1, 'Z': 2}.get(str(axis or 'X').upper(), 0)
+    moved = 0
+    for actor in _iter_known_actors():
+        if not _actor_matches_tag(actor, tag):
+            continue
+        pos = _actor_position(actor)
+        if pos is None:
+            continue
+        pos[index] += _safe_float(value) * dt
+        if _set_actor_position(actor, pos):
+            moved += 1
+    return moved
+
+
+def reset_crossed_once(name, trigger_id=''):
+    target = _norm_name(str(name or '').strip())
+    trigger = str(trigger_id or '')
+    ctx = _current_context()
+    removed = 0
+    for key in list(ctx.crossing_state):
+        if target and target not in _norm_name(key):
+            continue
+        if trigger and not key.startswith(f'{trigger}:'):
+            continue
+        ctx.crossing_state.pop(key, None)
+        removed += 1
+    return removed
+
+
 def object_lane_index(name, axis, origin, spacing):
     actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
     pos, step = _actor_position(actor), _safe_float(spacing, 1.0)
@@ -3822,6 +4023,7 @@ def object_recycle_tag_axis(tag, axis, direction, boundary, reset_value, random_
             lo, hi = sorted((_safe_float(random_min), _safe_float(random_max)))
             pos[random_index] = _random.uniform(lo, hi)
         if _set_actor_position(actor, pos):
+            reset_crossed_once(_object_name(actor))
             reset += 1
     return reset
 
@@ -3864,6 +4066,71 @@ def cooldown_ready(name, seconds, consume=True):
 def reset_cooldown(name):
     _current_context().cooldowns.pop(str(name or '').strip() or 'default', None)
     return True
+
+
+def position_near(name, x, y, z, tolerance=0.1):
+    actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
+    position = _actor_position(actor)
+    if position is None:
+        return False
+    target = [_safe_float(x), _safe_float(y), _safe_float(z)]
+    tolerance = abs(_safe_float(tolerance, 0.1))
+    return sum((position[i] - target[i]) ** 2 for i in range(3)) <= tolerance ** 2
+
+
+def _mouse_pick_native():
+    ctx = _current_context()
+    if ctx.mouse_viewport_width <= 0 or ctx.mouse_viewport_height <= 0:
+        raise RuntimeError('无法取得视口尺寸，不能执行 3D 鼠标拾取')
+    scene_name = str(ctx.scene_name or ctx.target_scene_name or getattr(ctx.scene, 'route', '') or '')
+    if not scene_name:
+        raise RuntimeError('当前运行上下文没有绑定场景，不能执行鼠标拾取')
+    payload = None
+    try:
+        from CoronaCore.core.editor_api import CoronaEditorApi
+        for attempt in range(3):
+            result = CoronaEditorApi.scene_tools.pick_actor(
+                scene_name, ctx.mouse_viewport_x, ctx.mouse_viewport_y,
+                ctx.mouse_viewport_width, ctx.mouse_viewport_height)
+            payload = _native_payload(result) or result
+            status = str(payload.get('status', '') if isinstance(payload, dict) else '').lower()
+            if status != 'pending':
+                break
+            _time.sleep(0.035 * (attempt + 1))
+    except Exception as exc:
+        raise RuntimeError(f'原生鼠标拾取失败：{exc}') from exc
+    if not isinstance(payload, dict) or str(payload.get('status', '')).lower() != 'success':
+        ctx.last_mouse_pick_object = ''
+        return ''
+    actor_data = payload.get('actor') if isinstance(payload.get('actor'), dict) else {}
+    name = str(actor_data.get('name') or actor_data.get('route') or '')
+    ctx.last_mouse_pick_object = name
+    return name
+
+
+def mouse_pick_object():
+    ctx = _current_context()
+    if isinstance(_runtime_scene(), _NativeEditorSceneProxy):
+        return _mouse_pick_native()
+    hit = raycast_hit_object()
+    ctx.last_mouse_pick_object = str(hit or '')
+    return ctx.last_mouse_pick_object
+
+
+def mouse_pick_hit_tag(tag):
+    name = mouse_pick_object()
+    actor = _resolve_actor(name)
+    return bool(actor is not None and _actor_matches_tag(actor, tag))
+
+
+def object_randomize_mouse_pick(cx, cy, cz, sx, sy, sz):
+    name = _current_context().last_mouse_pick_object or mouse_pick_object()
+    return bool(name) and object_set_random_position(name, cx, cy, cz, sx, sy, sz)
+
+
+def object_delete_mouse_pick():
+    name = _current_context().last_mouse_pick_object or mouse_pick_object()
+    return bool(name) and object_delete(name)
 
 
 # ── Audio ──

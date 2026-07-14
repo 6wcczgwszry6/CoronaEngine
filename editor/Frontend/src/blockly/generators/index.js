@@ -259,6 +259,20 @@ function sortedEnabledTopBlocks(workspace) {
     });
 }
 
+function outputChecks(block) {
+  const checks = block?.outputConnection?.getCheck?.();
+  return Array.isArray(checks) ? checks : [];
+}
+
+function hasKnownNonBooleanOutput(block) {
+  const checks = outputChecks(block);
+  return checks.length > 0 && !checks.includes('Boolean');
+}
+
+function edgeConditionLabel(edge, index) {
+  return String(edge?.name || index + 1);
+}
+
 function pythonString(value) {
   return JSON.stringify(String(value ?? ''));
 }
@@ -368,6 +382,13 @@ export function nodeGraphToCode(rawGraph) {
 
   const codeAfterHat = (block) => {
     let code = block.getInput?.('DO') ? pythonGenerator.statementToCode(block, 'DO') : '';
+    if (code) {
+      const baseIndent = pythonGenerator.INDENT || '  ';
+      code = code
+        .split('\n')
+        .map((line) => (line.startsWith(baseIndent) ? line.slice(baseIndent.length) : line))
+        .join('\n');
+    }
     if (!code) {
       const next = block.getNextBlock?.();
       if (next) code = normalizeCode(pythonGenerator.blockToCode(next));
@@ -442,9 +463,18 @@ export function nodeGraphToCode(rawGraph) {
     try {
       pythonGenerator.init(workspace);
       const topBlocks = sortedEnabledTopBlocks(workspace);
-      if (topBlocks.length !== 1 || !topBlocks[0].outputConnection) throw new Error(`\u8fde\u7ebf\u201c${edge?.name || index + 1}\u201d\u7684\u6761\u4ef6\u5fc5\u987b\u662f\u4e00\u4e2a\u8fd4\u56de\u503c\u79ef\u6728`);
+      const label = edgeConditionLabel(edge, index);
+      if (topBlocks.length > 1) {
+        throw new Error(`\u8fde\u7ebf\u201c${label}\u201d\u6709\u591a\u4e2a\u9876\u5c42\u5224\u65ad\uff1b\u8bf7\u4f7f\u7528\u201c\u4e0e / \u6216\u201d\u79ef\u6728\u7ec4\u5408\u6210\u4e00\u4e2a\u6761\u4ef6`);
+      }
+      if (topBlocks.length !== 1 || !topBlocks[0].outputConnection) {
+        throw new Error(`\u8fde\u7ebf\u201c${label}\u201d\u7684\u8df3\u8f6c\u6761\u4ef6\u6700\u5916\u5c42\u5fc5\u987b\u662f\u8fd4\u56de\u503c\u79ef\u6728`);
+      }
+      if (hasKnownNonBooleanOutput(topBlocks[0])) {
+        throw new Error(`\u8fde\u7ebf\u201c${label}\u201d\u7684\u6761\u4ef6\u5fc5\u987b\u8fd4\u56de\u771f\u6216\u5047\uff1b\u8bf7\u5c06\u6570\u5b57\u3001\u5750\u6807\u6216\u6587\u672c\u8fde\u63a5\u5230\u6bd4\u8f83\u79ef\u6728`);
+      }
       const expression = normalizeCode(pythonGenerator.blockToCode(topBlocks[0])).trim();
-      if (!expression) throw new Error(`\u8fde\u7ebf\u201c${edge?.name || index + 1}\u201d\u6ca1\u6709\u751f\u6210\u6709\u6548\u6761\u4ef6`);
+      if (!expression) throw new Error(`\u8fde\u7ebf\u201c${label}\u201d\u6ca1\u6709\u751f\u6210\u6709\u6548\u6761\u4ef6`);
       conditionFunctions.set(index, { functionName: safePythonId(edge?.id || index, '_node_condition'), expression });
     } finally {
       workspace.dispose();

@@ -1,28 +1,28 @@
-import { pythonGenerator } from 'blockly/python';
+﻿import { pythonGenerator } from 'blockly/python';
 
 export const defineMathGenerators = () => {
   pythonGenerator.forBlock['math_add'] = function (block) {
     const x1 = block.getFieldValue('x1');
     const x2 = block.getFieldValue('x2');
-    return [`(${x1} + ${x2})`, pythonGenerator.ORDER_ADDITION];
+    return [`(${x1} + ${x2})`, pythonGenerator.ORDER_ADDITIVE];
   };
 
   pythonGenerator.forBlock['math_mul'] = function (block) {
     const x1 = block.getFieldValue('x1');
     const x2 = block.getFieldValue('x2');
-    return [`(${x1} * ${x2})`, pythonGenerator.ORDER_MULTIPLICATION];
+    return [`(${x1} * ${x2})`, pythonGenerator.ORDER_MULTIPLICATIVE];
   };
 
   pythonGenerator.forBlock['math_div'] = function (block) {
     const x1 = block.getFieldValue('x1');
     const x2 = block.getFieldValue('x2');
-    return [`(${x1} / ${x2})`, pythonGenerator.ORDER_MULTIPLICATION];
+    return [`(${x1} / ${x2})`, pythonGenerator.ORDER_MULTIPLICATIVE];
   };
 
   pythonGenerator.forBlock['math_sub'] = function (block) {
     const x1 = block.getFieldValue('x1');
     const x2 = block.getFieldValue('x2');
-    return [`(${x1} - ${x2})`, pythonGenerator.ORDER_ADDITION];
+    return [`(${x1} - ${x2})`, pythonGenerator.ORDER_ADDITIVE];
   };
 
   pythonGenerator.forBlock['math_random'] = function (block) {
@@ -46,7 +46,7 @@ export const defineMathGenerators = () => {
   pythonGenerator.forBlock['math_E'] = function (block) {
     const x1 = block.getFieldValue('x1');
     const x2 = block.getFieldValue('x2');
-    return [`(${x1} == ${x2})`, pythonGenerator.ORDER_EQUALITY];
+    return [`(${x1} == ${x2})`, pythonGenerator.ORDER_RELATIONAL];
   };
 
   pythonGenerator.forBlock['math_AND'] = function (block) {
@@ -71,19 +71,19 @@ export const defineMathGenerators = () => {
     const right = pythonGenerator.valueToCode(block, 'RIGHT', pythonGenerator.ORDER_NONE) || "''";
     const leftStr = `str(${left})`;
     const rightStr = `str(${right})`;
-    return [leftStr + ' + ' + rightStr, pythonGenerator.ORDER_ADDITION];
+    return [leftStr + ' + ' + rightStr, pythonGenerator.ORDER_ADDITIVE];
   };
 
   // COMPOSABLE_MATH_INPUTS
   const operand = (block, input, legacy, fallback = '0') => pythonGenerator.valueToCode(block, input, pythonGenerator.ORDER_NONE) || block.getFieldValue(legacy) || fallback;
   const binary = (operator, order) => (block) => [`(${operand(block,'A','x1')} ${operator} ${operand(block,'B','x2')})`, order];
-  pythonGenerator.forBlock.math_add = binary('+', pythonGenerator.ORDER_ADDITION);
-  pythonGenerator.forBlock.math_sub = binary('-', pythonGenerator.ORDER_ADDITION);
-  pythonGenerator.forBlock.math_mul = binary('*', pythonGenerator.ORDER_MULTIPLICATION);
-  pythonGenerator.forBlock.math_div = binary('/', pythonGenerator.ORDER_MULTIPLICATION);
+  pythonGenerator.forBlock.math_add = binary('+', pythonGenerator.ORDER_ADDITIVE);
+  pythonGenerator.forBlock.math_sub = binary('-', pythonGenerator.ORDER_ADDITIVE);
+  pythonGenerator.forBlock.math_mul = binary('*', pythonGenerator.ORDER_MULTIPLICATIVE);
+  pythonGenerator.forBlock.math_div = binary('/', pythonGenerator.ORDER_MULTIPLICATIVE);
   pythonGenerator.forBlock.math_G = binary('>', pythonGenerator.ORDER_RELATIONAL);
   pythonGenerator.forBlock.math_L = binary('<', pythonGenerator.ORDER_RELATIONAL);
-  pythonGenerator.forBlock.math_E = binary('==', pythonGenerator.ORDER_EQUALITY);
+  pythonGenerator.forBlock.math_E = binary('==', pythonGenerator.ORDER_RELATIONAL);
   pythonGenerator.forBlock.math_random = (block) => [`CoronaEngine.random(${operand(block,'A','x1')}, ${operand(block,'B','x2','10')})`, pythonGenerator.ORDER_FUNCTION_CALL];
 
 };

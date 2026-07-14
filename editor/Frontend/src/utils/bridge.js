@@ -552,8 +552,12 @@ const editorApiStatic = {
       call_manifest_editor_api('scratch.sendKeyEvent', [key, modifiers || '', displayKey || key]),
     sendKeyUpEvent: (key, displayKey) =>
       call_manifest_editor_api('scratch.sendKeyUpEvent', [key, displayKey || key]),
-    sendMouseEvent: (eventType, button, x, y) =>
-      call_manifest_editor_api('scratch.sendMouseEvent', [eventType, button || '', x || 0, y || 0]),
+    sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight) =>
+      call_manifest_editor_api('scratch.sendMouseEvent', [
+        eventType, button || '', x || 0, y || 0,
+        viewportX ?? x ?? 0, viewportY ?? y ?? 0,
+        viewportWidth ?? 0, viewportHeight ?? 0,
+      ]),
   },
   sceneTools: {
     createScene: (sceneName) => call_manifest_editor_api('sceneTools.createScene', [sceneName]),
@@ -982,8 +986,8 @@ export const scriptingService = {
   /**
    * 发送鼠标事件到积木脚本
    */
-  sendMouseEvent: (eventType, button, x, y) =>
-    editorApi.scratch.sendMouseEvent(eventType, button, x, y),
+  sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight) =>
+    editorApi.scratch.sendMouseEvent(eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight),
 };
 
 export const projectLauncherService = {

@@ -4,7 +4,8 @@ export const defineDetectBlocks = () => {
   Blockly.Blocks['detect_touch'] = {
     init: function () {
       this.setStyle('detect_blocks');
-      this.appendDummyInput()
+      this.appendValueInput('x')
+        .setCheck('String')
         .appendField('碰到')
         .appendField(new Blockly.FieldTextInput(''), 'x');
       this.setOutput(true, 'Boolean'); // 设置输出为布尔值
@@ -14,9 +15,45 @@ export const defineDetectBlocks = () => {
     },
   };
 
+
+  Blockly.Blocks['detect_not_touch'] = {
+    init: function () {
+      this.appendValueInput('NAME')
+        .setCheck('String')
+        .appendField('\u5f53\u524d\u7269\u4f53\u6ca1\u6709\u78b0\u5230\u5bf9\u8c61')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u5f53\u524d\u7269\u4f53\u672a\u4e0e\u6307\u5b9a\u5bf9\u8c61\u63a5\u89e6\u65f6\u8fd4\u56de true\u3002');
+    },
+  };
+
+  Blockly.Blocks['detect_touch_any'] = {
+    init: function () {
+      this.appendDummyInput().appendField('\u5f53\u524d\u7269\u4f53\u78b0\u5230\u4efb\u610f\u7269\u4f53\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u68c0\u6d4b\u5f53\u524d\u7269\u4f53\u662f\u5426\u78b0\u5230\u573a\u666f\u4e2d\u7684\u4efb\u610f\u5176\u4ed6\u7269\u4f53\u3002');
+    },
+  };
+
+  Blockly.Blocks['detect_not_touch_any'] = {
+    init: function () {
+      this.appendDummyInput().appendField('\u5f53\u524d\u7269\u4f53\u6ca1\u6709\u78b0\u5230\u4efb\u610f\u7269\u4f53\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u5f53\u524d\u7269\u4f53\u672a\u4e0e\u573a\u666f\u4e2d\u7684\u5176\u4ed6\u7269\u4f53\u63a5\u89e6\u65f6\u8fd4\u56de true\u3002');
+    },
+  };
+
   Blockly.Blocks['detect_distance'] = {
     init: function () {
-      this.appendDummyInput()
+      this.appendValueInput('x')
+        .setCheck('String')
         .appendField('到')
         .appendField(new Blockly.FieldTextInput(''), 'x')
         .appendField('的距离');
@@ -169,7 +206,8 @@ export const defineDetectBlocks = () => {
 
   Blockly.Blocks['detect_touch_tag'] = {
     init: function () {
-      this.appendDummyInput()
+      this.appendValueInput('TAG')
+        .setCheck('String')
         .appendField('碰到标签')
         .appendField(new Blockly.FieldTextInput('tag'), 'TAG')
         .appendField('？');
@@ -178,6 +216,21 @@ export const defineDetectBlocks = () => {
       this.setStyle('detect_blocks');
       this.setHelpUrl('');
       this.setTooltip('检测当前对象是否碰到指定标签的对象。');
+    },
+  };
+
+
+  Blockly.Blocks['detect_not_touch_tag'] = {
+    init: function () {
+      this.appendValueInput('TAG')
+        .setCheck('String')
+        .appendField('\u5f53\u524d\u7269\u4f53\u6ca1\u6709\u78b0\u5230\u6807\u7b7e')
+        .appendField(new Blockly.FieldTextInput('tag'), 'TAG')
+        .appendField('\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u5f53\u524d\u7269\u4f53\u672a\u4e0e\u6307\u5b9a\u6807\u7b7e\u7684\u5bf9\u8c61\u63a5\u89e6\u65f6\u8fd4\u56de true\u3002');
     },
   };
 
@@ -193,16 +246,58 @@ export const defineDetectBlocks = () => {
     init: function () {
       this.appendDummyInput()
         .appendField('脚下有地面？距离')
-        .appendField(new Blockly.FieldNumber(1, 0), 'DISTANCE');
+        .appendField(new Blockly.FieldNumber(1), 'DISTANCE');
       this.setOutput(true, 'Boolean');
       this.setInputsInline(true);
       this.setStyle('detect_blocks');
       this.setTooltip('检测当前对象下方指定距离内是否有地面；无射线接口时用 Y 坐标降级');
     },
   };
-  Blockly.Blocks['detect_raycast_hit_tag'] = {
+
+  Blockly.Blocks['detect_no_ground_below'] = {
     init: function () {
       this.appendDummyInput()
+        .appendField('\u811a\u4e0b\u6ca1\u6709\u5730\u9762\uff1f\u8ddd\u79bb')
+        .appendField(new Blockly.FieldNumber(1), 'DISTANCE');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u68c0\u6d4b\u5f53\u524d\u7269\u4f53\u4e0b\u65b9\u6307\u5b9a\u8ddd\u79bb\u5185\u662f\u5426\u6ca1\u6709\u5730\u9762\u3002');
+    },
+  };
+
+  Blockly.Blocks['detect_object_exists'] = {
+    init: function () {
+      this.appendValueInput('NAME')
+        .setCheck('String')
+        .appendField('\u5bf9\u8c61')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('\u5b58\u5728\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u68c0\u6d4b\u5f53\u524d\u573a\u666f\u4e2d\u662f\u5426\u5b58\u5728\u6307\u5b9a\u5bf9\u8c61\u3002');
+    },
+  };
+
+  Blockly.Blocks['detect_object_not_exists'] = {
+    init: function () {
+      this.appendValueInput('NAME')
+        .setCheck('String')
+        .appendField('\u5bf9\u8c61')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('\u4e0d\u5b58\u5728\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u6307\u5b9a\u5bf9\u8c61\u4e0d\u5b58\u5728\u6216\u5df2\u7ecf\u88ab\u5220\u9664\u65f6\u8fd4\u56de true\u3002');
+    },
+  };
+
+  Blockly.Blocks['detect_raycast_hit_tag'] = {
+    init: function () {
+      this.appendValueInput('TAG')
+        .setCheck('String')
         .appendField('射线命中标签')
         .appendField(new Blockly.FieldTextInput('tag'), 'TAG')
         .appendField('？');
@@ -214,7 +309,8 @@ export const defineDetectBlocks = () => {
   };
   Blockly.Blocks['detect_passed_x'] = {
     init: function () {
-      this.appendDummyInput()
+      this.appendValueInput('NAME')
+        .setCheck('String')
         .appendField('对象')
         .appendField(new Blockly.FieldTextInput(''), 'NAME')
         .appendField('通过 X')
@@ -228,7 +324,8 @@ export const defineDetectBlocks = () => {
   };
   Blockly.Blocks['detect_passed_z'] = {
     init: function () {
-      this.appendDummyInput()
+      this.appendValueInput('NAME')
+        .setCheck('String')
         .appendField('对象')
         .appendField(new Blockly.FieldTextInput(''), 'NAME')
         .appendField('通过 Z')
@@ -279,6 +376,27 @@ export const defineDetectBlocks = () => {
       this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
     },
   };
+
+  Blockly.Blocks.detect_inside_axis = {
+    init() {
+      this.appendValueInput('NAME')
+        .setCheck('String')
+        .appendField('\u5bf9\u8c61')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('\u5728')
+        .appendField(new Blockly.FieldDropdown([['X', 'X'], ['Y', 'Y'], ['Z', 'Z']]), 'AXIS')
+        .appendField('\u8303\u56f4')
+        .appendField(new Blockly.FieldNumber(0), 'MIN')
+        .appendField('\u5230')
+        .appendField(new Blockly.FieldNumber(10), 'MAX')
+        .appendField('\u5185\uff1f');
+      this.setOutput(true, 'Boolean');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u68c0\u6d4b\u5bf9\u8c61\u7684\u6307\u5b9a\u5750\u6807\u662f\u5426\u4f4d\u4e8e\u7ed9\u5b9a\u8303\u56f4\u5185\uff1b\u5bf9\u8c61\u540d\u7559\u7a7a\u65f6\u68c0\u6d4b\u5f53\u524d\u7269\u4f53\u3002');
+    },
+  };
+
   Blockly.Blocks.detect_inside_box = {
     init() {
       this.appendValueInput('NAME').setCheck('String').appendField('\u5bf9\u8c61\u5728 3D \u533a\u57df\u5185');
@@ -290,5 +408,20 @@ export const defineDetectBlocks = () => {
   for (const axis of ['X', 'Y', 'Z']) {
     Blockly.Blocks[`detect_last_collision_normal_${axis.toLowerCase()}`] = { init() { this.appendDummyInput().appendField(`\u6700\u8fd1\u78b0\u649e\u6cd5\u7ebf ${axis}`); this.setOutput(true, 'Number'); this.setStyle('detect_blocks'); } };
   }
+
+
+  Blockly.Blocks.detect_position_near = { init() {
+    this.appendValueInput('NAME').setCheck('String').appendField('对象').appendField(new Blockly.FieldTextInput(''), 'NAME_TEXT');
+    for (const [key,label,def] of [['X','接近位置 X',0],['Y','Y',0],['Z','Z',0],['TOLERANCE','误差',0.1]]) addNumberInput(this,key,label,def);
+    this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+    this.setTooltip('对象接近指定 3D 位置且位于误差范围内时返回真');
+  } };
+  Blockly.Blocks.detect_mouse_pick_object = { init() {
+    this.appendDummyInput().appendField('最近鼠标命中的对象'); this.setOutput(true, 'String'); this.setStyle('detect_blocks');
+  } };
+  Blockly.Blocks.detect_mouse_pick_hit_tag = { init() {
+    this.appendValueInput('TAG').setCheck('String').appendField('最近鼠标命中的对象有标签').appendField(new Blockly.FieldTextInput('target'), 'TAG_TEXT');
+    this.appendDummyInput().appendField('?'); this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+  } };
 
 };

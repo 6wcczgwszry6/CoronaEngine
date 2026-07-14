@@ -25,6 +25,10 @@ import { useI18n } from 'vue-i18n';
 import { TOOLBOX_CONFIG } from '@/blockly/configs/toolboxConfig.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 
+const props = defineProps({
+  workspaceRole: { type: String, default: 'node' },
+});
+
 const emit = defineEmits([
   'pick',
   'ready',
@@ -39,6 +43,7 @@ const { error: logError } = useErrorHandler('BlocklyToolboxPalette');
 const blockdiv = ref(null);
 const loadingLabel = ref('');
 const activeCategoryName = ref('');
+const returnValueBlocks = ref([]);
 
 let workspace = null;
 let BlocklyLib = null;
@@ -52,7 +57,7 @@ let paletteLayoutFrame = null;
 let paletteRenderGeneration = 0;
 const DRAG_THRESHOLD = 5;
 
-const categories = computed(() =>
+const normalCategories = computed(() =>
   (TOOLBOX_CONFIG.contents || [])
     .filter((category) => category.kind === 'category')
     .map((category) => ({
@@ -61,6 +66,80 @@ const categories = computed(() =>
     }))
     .filter((category) => category.blocks.length > 0)
 );
+
+const categories = computed(() =>
+  props.workspaceRole === 'condition'
+    ? [{ name: '返回值', blocks: returnValueBlocks.value }]
+    : normalCategories.value
+);
+
+const CONDITION_BLOCK_PRIORITY = new Map([
+  ['math_AND', 0],
+  ['math_OR', 1],
+  ['math_NOT', 2],
+  ['logic_operation', 3],
+  ['logic_negate', 4],
+  ['logic_compare', 5],
+  ['math_E', 6],
+  ['math_G', 7],
+  ['math_L', 8],
+  ['logic_boolean', 9],
+  ['math_number', 10],
+  ['text', 11],
+]);
+
+function outputChecks(block) {
+  const checks = block?.outputConnection?.getCheck?.();
+  return Array.isArray(checks) ? checks : [];
+}
+
+function collectReturnValueBlocks() {
+  if (!BlocklyLib) return;
+  const itemsByType = new Map();
+  for (const category of normalCategories.value) {
+    for (const item of category.blocks) {
+      if (!itemsByType.has(item.type)) itemsByType.set(item.type, item);
+    }
+  }
+
+  const probeWorkspace = new BlocklyLib.Workspace();
+  const discovered = [];
+  try {
+    for (const item of itemsByType.values()) {
+      let block = null;
+      try {
+        block = probeWorkspace.newBlock(item.type);
+        if (!block.outputConnection) continue;
+        const checks = outputChecks(block);
+        discovered.push({
+          item,
+          isBoolean: checks.includes('Boolean'),
+          priority: CONDITION_BLOCK_PRIORITY.get(item.type) ?? Number.MAX_SAFE_INTEGER,
+        });
+      } catch (e) {
+        logError(`检查返回值积木失败: ${item.type}`, e);
+      } finally {
+        try { block?.dispose?.(false); } catch {}
+      }
+    }
+  } finally {
+    probeWorkspace.dispose();
+  }
+
+  discovered.sort((a, b) =>
+    a.priority - b.priority ||
+    Number(b.isBoolean) - Number(a.isBoolean) ||
+    a.item.type.localeCompare(b.item.type)
+  );
+  returnValueBlocks.value = discovered.map(({ item }) => item);
+}
+
+function syncActiveCategory() {
+  const preferredName = props.workspaceRole === 'condition' ? '返回值' : categories.value[0]?.name;
+  if (!categories.value.some((category) => category.name === activeCategoryName.value)) {
+    activeCategoryName.value = preferredName || '';
+  }
+}
 
 function blocklyMessageBundle() {
   const module = locale.value === 'en-US' ? blocklyEN : blocklyCN;
@@ -333,6 +412,8 @@ async function initBlockly() {
     blocklyEN = await import('blockly/msg/en');
     applyBlocklyLocale();
     await registerBlocks();
+    collectReturnValueBlocks();
+    syncActiveCategory();
 
     const { createWorkspaceConfig } = await import('@/blockly/configs/workspaceConfig.js');
     const config = createWorkspaceConfig(t);
@@ -345,7 +426,7 @@ async function initBlockly() {
     config.move = { wheel: true, drag: false, scrollbars: true };
 
     workspace = BlocklyLib.inject(container, config);
-    if (!activeCategoryName.value && categories.value[0]) activeCategoryName.value = categories.value[0].name;
+    syncActiveCategory();
     renderPaletteBlocks();
 
     resizeObserver = new ResizeObserver(() => resizeBlockly());
@@ -365,6 +446,15 @@ watch(locale, () => {
   applyBlocklyLocale();
   renderPaletteBlocks();
 });
+
+watch(
+  () => props.workspaceRole,
+  () => {
+    cancelExternalDrag();
+    syncActiveCategory();
+    renderPaletteBlocks();
+  }
+);
 
 onMounted(() => {
   initBlockly();

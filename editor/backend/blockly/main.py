@@ -1657,8 +1657,15 @@ class ScratchTool:
         button: str = "",
         x: float = 0.0,
         y: float = 0.0,
+        viewport_x: float | None = None,
+        viewport_y: float | None = None,
+        viewport_width: float | None = None,
+        viewport_height: float | None = None,
     ) -> dict:
         from CoronaCore.utils import corona_engine_scratch
 
-        corona_engine_scratch.handle_mouse_event(event_type, button, x, y)
+        corona_engine_scratch.handle_mouse_event(
+            event_type, button, x, y,
+            viewport_x, viewport_y, viewport_width, viewport_height,
+        )
         return {"status": "ok"}

@@ -1005,11 +1005,18 @@ const restoreCameraViews = async (sceneId) => {
 
 const scratchMouseButton = (button) => ({ 0: 'LeftButton', 1: 'MiddleButton', 2: 'RightButton' }[button] || '');
 const sendScratchPointerEvent = (type, event) => {
+  const renderRect = getViewportRenderRect();
+  const localX = Number(event.clientX || 0) - Number(renderRect.left || 0);
+  const localY = Number(event.clientY || 0) - Number(renderRect.top || 0);
   scriptingService.sendMouseEvent(
     type,
     scratchMouseButton(event.button),
     event.clientX || 0,
-    event.clientY || 0
+    event.clientY || 0,
+    localX,
+    localY,
+    renderRect.width || 0,
+    renderRect.height || 0
   ).catch(() => {});
 };
 const handleWheel = (event) => {

@@ -148,6 +148,7 @@ function loadState(state) {
   } finally {
     isLoadingWorkspace = false;
     resizeBlockly();
+    validateWorkspace();
   }
 }
 
@@ -217,6 +218,16 @@ function setDropActive(active, valid = true) {
   dropInvalid.value = Boolean(active) && !valid;
 }
 
+function outputChecks(block) {
+  const checks = block?.outputConnection?.getCheck?.();
+  return Array.isArray(checks) ? checks : [];
+}
+
+function hasKnownNonBooleanOutput(block) {
+  const checks = outputChecks(block);
+  return checks.length > 0 && !checks.includes('Boolean');
+}
+
 function inspectBlockAcceptance(block) {
   if (!block) return { accepted: false, message: '无法识别该积木' };
   if (props.workspaceRole === 'global') {
@@ -224,7 +235,7 @@ function inspectBlockAcceptance(block) {
     return { accepted: false, message: '此积木应放入节点内部编辑区' };
   }
   if (props.workspaceRole === 'condition' && !block.outputConnection) {
-    return { accepted: false, message: '连线条件只能放入返回值积木' };
+    return { accepted: false, message: '跳转条件只能放入返回值积木；多个判断请使用“与 / 或”组合' };
   }
   return { accepted: true, message: '' };
 }
@@ -255,8 +266,12 @@ function validateWorkspace() {
       }
     }
   } else if (props.workspaceRole === 'condition') {
-    if (topBlocks.length > 1 || (topBlocks.length === 1 && !topBlocks[0].outputConnection)) {
-      errors.push('连线条件必须是一个返回值积木');
+    if (topBlocks.length > 1) {
+      errors.push('请使用“与 / 或”积木把多个判断连接成一个顶层条件');
+    } else if (topBlocks.length === 1 && !topBlocks[0].outputConnection) {
+      errors.push('跳转条件最外层必须是返回值积木');
+    } else if (topBlocks.length === 1 && hasKnownNonBooleanOutput(topBlocks[0])) {
+      errors.push('跳转条件必须返回真或假；请将数字、坐标或文本连接到比较积木');
     }
   }
   validationMessage.value = errors[0] || '';

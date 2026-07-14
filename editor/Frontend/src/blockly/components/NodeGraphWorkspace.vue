@@ -54,11 +54,12 @@
           </div>
         </div>
         <div class="ng-section-title mt">
-          微观积木
-          <small>Blockly 原生形状</small>
+          {{ paletteWorkspaceRole === 'condition' ? '返回值积木' : '微观积木' }}
+          <small>{{ paletteWorkspaceRole === 'condition' ? '用于组合跳转条件' : 'Blockly 原生形状' }}</small>
         </div>
         <BlocklyToolboxPalette
           class="ng-native-palette"
+          :workspace-role="paletteWorkspaceRole"
           @pick="handlePalettePick"
           @external-drag-start="handlePaletteDragStart"
           @external-drag-move="handlePaletteDragMove"
@@ -273,7 +274,7 @@
     <div v-if="runDetailVisible && runDetail" class="ng-run-detail">
       <div class="ng-run-detail-head">
         <strong>运行诊断</strong>
-        <button type="button" @click="copyRunDetail">??</button>
+        <button type="button" @click="copyRunDetail">复制</button>
       </div>
       <pre>{{ runDetail }}</pre>
     </div>
@@ -292,7 +293,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { scriptingService } from '@/utils/bridge.js';
+import { scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 
@@ -401,6 +402,9 @@ const selectedNode = computed(() =>
 const selectedEdge = computed(() =>
   selectedKind.value === 'edge' ? graph.edges.find((e) => e.id === selectedId.value) : null
 );
+const paletteWorkspaceRole = computed(() =>
+  selectedEdge.value ? 'condition' : selectedNode.value ? 'node' : 'global'
+);
 const nodeTypeOptions = [
   { value: 'start', label: '开始节点' },
   { value: 'end', label: '结束节点' },
@@ -409,7 +413,7 @@ const nodeTypeOptions = [
 const edgeConditionNote = computed(() => {
   const blocks = selectedEdge.value?.conditionWorkspace?.blocks?.blocks;
   return Array.isArray(blocks) && blocks.length
-    ? '条件积木将在运行前校验，必须只有一个顶层返回值积木'
+    ? '最外层使用“与 / 或 / 非”组合多个判断，最终只保留一个顶层布尔条件'
     : '未设置条件，当前连线会被视为始终成立';
 });
 const pendingEdgePath = computed(() => {
@@ -444,7 +448,7 @@ const activeEditorSubtitle = computed(() =>
   selectedNode.value
     ? '拖入微观积木编辑该节点'
     : selectedEdge.value
-      ? '拖入微观积木编辑条件块'
+      ? '从左侧“返回值”中拖入积木，可使用“与 / 或 / 非”组合条件'
       : '未选择'
 );
 function setMode(v) {
@@ -1524,6 +1528,33 @@ async function handleToggleRun() {
     runBusy.value = false;
   }
 }
+
+function collectActorNames(value, output = new Set()) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectActorNames(item, output));
+    return output;
+  }
+  if (!value || typeof value !== 'object') return output;
+  const candidate = value.actor_name ?? value.actorName ?? value.name ?? value.label;
+  const typeHint = String(value.actor_type ?? value.actorType ?? value.type ?? '').toLowerCase();
+  if (candidate && !['scene', 'folder', 'root'].includes(typeHint)) output.add(String(candidate));
+  Object.values(value).forEach((child) => {
+    if (child && typeof child === 'object') collectActorNames(child, output);
+  });
+  return output;
+}
+async function refreshSceneActorOptions() {
+  const options = new Set();
+  if (props.actorName) options.add(String(props.actorName));
+  try {
+    const response = await sceneService.listActorTree(props.sceneName || '');
+    const payload = response?.data ?? response?.result ?? response;
+    collectActorNames(payload, options);
+  } catch (error) {
+    logError('刷新当前场景对象列表失败', error);
+  }
+  window.__coronaBlocklyActorOptions = Array.from(options).sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => [name, name]);
+}
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
   if (!r) return;
@@ -1545,6 +1576,7 @@ watch(
     runStatus.value = '';
     currentRunNodeId.value = '';
     runWarnings.value = [];
+    await refreshSceneActorOptions();
     await loadGraphForCurrentTarget();
   },
   { immediate: true }

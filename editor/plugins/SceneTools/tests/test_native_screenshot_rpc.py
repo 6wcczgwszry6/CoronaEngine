@@ -2779,7 +2779,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "ScratchTool.save_blockly_target": ("kObjectPayloadParam", "EditorApiValueType::Any"),
             "ScratchTool.start_game_preview": ("kObjectPayloadParam", "EditorApiValueType::Any"),
             "ScratchTool.stop_game_preview": ("kNoParams", "EditorApiValueType::Any"),
-            "ScratchTool.stop_script_execution": ("kNoParams", "EditorApiValueType::Any"),
+            "ScratchTool.stop_script_execution": ("kScratchStopScriptParams", "EditorApiValueType::Any"),
         }
         for api_name, (params_name, return_type) in expected.items():
             module, method = api_name.split(".", 1)
@@ -2814,11 +2814,12 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "startGamePreview: (payload = { scope: 'project' }) =>",
             "stopGamePreview: () => call_manifest_editor_api('scratch.stopGamePreview', [])",
             "getGamePreviewStatus: () => call_manifest_editor_api('scratch.getGamePreviewStatus', [])",
-            "stopScriptExecution: () => call_manifest_editor_api('scratch.stopScriptExecution', [])",
+            "stopScriptExecution: (restoreState = false) =>",
+            "call_manifest_editor_api('scratch.stopScriptExecution', [Boolean(restoreState)])",
             "getScriptStatus: () => call_manifest_editor_api('scratch.getScriptStatus', [])",
             "sendKeyEvent: (key, modifiers, displayKey) =>",
             "sendKeyUpEvent: (key, displayKey) =>",
-            "sendMouseEvent: (eventType, button, x, y) =>",
+            "sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight) =>",
             "sendMessageToAIStream: (payload) => editorApi.ai.sendMessageToAIStream(payload)",
             "readLocalFileAsBase64: (filePath) => editorApi.ai.readLocalFileAsBase64(filePath)",
             "generateHint: (elementType, context = {}) => editorApi.ai.generateHint(elementType, context)",
