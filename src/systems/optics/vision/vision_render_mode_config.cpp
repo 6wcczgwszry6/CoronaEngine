@@ -96,8 +96,11 @@ void configure_vision_scene_for_mode(::vision::DataWrap& data,
     auto& pipeline = ensure_vision_json_object(data, "pipeline");
     auto& pipeline_param = ensure_vision_json_object(pipeline, "param");
     auto& frame_buffer = ensure_vision_json_object(pipeline_param, "frame_buffer");
-    frame_buffer["type"] =
-        mode == CameraVisionRenderMode::SSAT ? "lightfield" : "normal";
+    if (mode == CameraVisionRenderMode::SSAT) {
+        frame_buffer["type"] = "lightfield";
+    } else {
+        set_default_vision_json_value(frame_buffer, "type", "normal");
+    }
     auto& frame_buffer_param = ensure_vision_json_object(frame_buffer, "param");
     if (mode == CameraVisionRenderMode::SSAT) {
         apply_ssat_framebuffer_defaults(frame_buffer_param);

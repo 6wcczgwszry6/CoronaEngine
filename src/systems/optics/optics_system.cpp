@@ -2030,6 +2030,27 @@ void bind_pipeline_scene_gpu_resource(
     }
 }
 
+[[nodiscard]] std::string vision_framebuffer_type_from_project_data(
+    const vision::DataWrap& data) {
+    if (!data.contains("pipeline") || !data["pipeline"].is_object()) {
+        return "<missing>";
+    }
+    const auto& pipeline = data["pipeline"];
+    if (!pipeline.contains("param") || !pipeline["param"].is_object()) {
+        return "<missing>";
+    }
+    const auto& pipeline_param = pipeline["param"];
+    if (!pipeline_param.contains("frame_buffer") ||
+        !pipeline_param["frame_buffer"].is_object()) {
+        return "<missing>";
+    }
+    const auto& frame_buffer = pipeline_param["frame_buffer"];
+    if (!frame_buffer.contains("type") || !frame_buffer["type"].is_string()) {
+        return "<missing>";
+    }
+    return frame_buffer["type"].get<std::string>();
+}
+
 // Loads a Vision scene description and brings it to a renderable state,
 // mirroring the reference snippet (ProjectDesc -> init -> prepare).
 // Resolves relative texture/mesh references against base_dir.
@@ -2042,7 +2063,17 @@ void bind_pipeline_scene_gpu_resource(
                                                     scene_resource,
                                                 Corona::Systems::Vision::VisionPipelineSource source)
     -> ocarina::SP<vision::Pipeline> {
+    const auto source_framebuffer_type =
+        vision_framebuffer_type_from_project_data(project_data);
     Corona::Systems::Vision::configure_vision_scene_for_mode(project_data, mode);
+    const auto configured_framebuffer_type =
+        vision_framebuffer_type_from_project_data(project_data);
+    CFW_LOG_INFO(
+        "OpticsSystem: Vision framebuffer config (scene={}, mode={}, source={}, configured={})",
+        scene_label,
+        std::string(Corona::Systems::Vision::vision_render_mode_name(mode)),
+        source_framebuffer_type,
+        configured_framebuffer_type);
 
     vision::Global::instance().set_scene_path(base_dir);
 
@@ -2069,6 +2100,11 @@ void bind_pipeline_scene_gpu_resource(
     // prepare() does not create FrameBuffer::view_texture_; the render path tone
     // maps into it and we later read it back, so create it explicitly here.
     pipeline->frame_buffer()->prepare_view_texture();
+    CFW_LOG_INFO(
+        "OpticsSystem: Vision framebuffer realized (scene={}, configured={}, lightfield={})",
+        scene_label,
+        configured_framebuffer_type,
+        dynamic_cast<const vision::ILightFieldFrameBuffer*>(pipeline->frame_buffer()) != nullptr);
     return pipeline;
 }
 
