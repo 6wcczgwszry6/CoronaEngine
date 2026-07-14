@@ -503,6 +503,11 @@ def _business_graph_dimension(
 ) -> R3GateDimension:
     batch_rows = _stable_rows(batches)
     graph_rows = _stable_rows(graphs)
+    all_graphs_by_id = {
+        str(graph.get("graph_id") or "").strip(): graph
+        for graph in graph_rows
+        if str(graph.get("graph_id") or "").strip()
+    }
     referenced_ids = {
         str(batch.get("tool_graph_id") or "").strip()
         for batch in batch_rows
@@ -512,33 +517,76 @@ def _business_graph_dimension(
         graph
         for graph in graph_rows
         if str(graph.get("graph_role") or "") == "business_batch"
-        or str(graph.get("graph_id") or "") in referenced_ids
     ]
-    graph_by_id = {
-        str(graph.get("graph_id") or ""): graph
-        for graph in business_graphs
-        if str(graph.get("graph_id") or "")
-    }
     missing: list[str] = []
     contradictions: list[str] = []
-    terminal_batch_statuses = {"completed", "failed", "cancelled", "abandoned", "partial"}
-    terminal_graph_statuses = {"completed", "failed", "cancelled", "abandoned", "skipped"}
+    terminal_batch_statuses = {
+        "completed",
+        "failed",
+        "cancelled",
+        "abandoned",
+        "partial",
+    }
+    terminal_graph_statuses = {
+        "completed",
+        "failed",
+        "blocked",
+        "incomplete",
+        "cancelled",
+        "abandoned",
+        "skipped",
+    }
+    terminal_node_statuses = {"succeeded", "failed", "blocked", "skipped"}
+    node_status_counts: dict[str, int] = {}
     for batch in batch_rows:
         batch_id = str(batch.get("batch_id") or "")
+        batch_plan_id = str(batch.get("plan_id") or "")
+        if not batch_id:
+            missing.append("batch_id")
+            continue
         graph_id = str(batch.get("tool_graph_id") or "").strip()
         if not graph_id:
             missing.append(f"{batch_id}:tool_graph_id")
             continue
-        graph = graph_by_id.get(graph_id)
+        graph = all_graphs_by_id.get(graph_id)
         if graph is None:
             missing.append(f"{batch_id}:business_graph")
             continue
+        graph_role = str(graph.get("graph_role") or "").strip()
+        if graph_role != "business_batch":
+            contradictions.append(
+                f"{batch_id}:graph_role_mismatch:{graph_role or 'missing'}"
+            )
         if str(graph.get("batch_id") or "") != batch_id:
             contradictions.append(f"{batch_id}:graph_batch_mismatch")
+        if str(graph.get("plan_id") or "") != batch_plan_id:
+            contradictions.append(f"{batch_id}:graph_plan_mismatch")
         if str(batch.get("status") or "") not in terminal_batch_statuses:
             contradictions.append(f"{batch_id}:batch_not_terminal")
         if str(graph.get("status") or "") not in terminal_graph_statuses:
             contradictions.append(f"{batch_id}:graph_not_terminal")
+        nodes = graph.get("nodes")
+        if not isinstance(nodes, Mapping) or not nodes:
+            missing.append(f"{batch_id}:business_graph_nodes")
+            continue
+        active_node_count = 0
+        unknown_node_count = 0
+        for node in nodes.values():
+            if not isinstance(node, Mapping):
+                unknown_node_count += 1
+                node_status_counts["invalid"] = node_status_counts.get("invalid", 0) + 1
+                continue
+            node_status = str(node.get("status") or "").strip().lower() or "missing"
+            node_status_counts[node_status] = node_status_counts.get(node_status, 0) + 1
+            if node_status not in terminal_node_statuses:
+                if node_status in {"planned", "ready", "running"}:
+                    active_node_count += 1
+                else:
+                    unknown_node_count += 1
+        if active_node_count:
+            contradictions.append(f"{batch_id}:business_graph_nodes_active")
+        if unknown_node_count:
+            contradictions.append(f"{batch_id}:business_graph_node_status_unknown")
     orphan_graphs = [
         str(graph.get("graph_id") or "")
         for graph in business_graphs
@@ -566,6 +614,16 @@ def _business_graph_dimension(
             "terminal_graph_count": sum(
                 1 for graph in business_graphs if str(graph.get("status") or "") in terminal_graph_statuses
             ),
+            "business_node_count": sum(node_status_counts.values()),
+            "succeeded_node_count": node_status_counts.get("succeeded", 0),
+            "failed_node_count": node_status_counts.get("failed", 0),
+            "blocked_node_count": node_status_counts.get("blocked", 0),
+            "skipped_node_count": node_status_counts.get("skipped", 0),
+            "active_node_count": sum(
+                node_status_counts.get(status, 0)
+                for status in ("planned", "ready", "running")
+            ),
+            "node_status_counts": dict(sorted(node_status_counts.items())),
         },
         missing=missing,
         contradictions=contradictions,

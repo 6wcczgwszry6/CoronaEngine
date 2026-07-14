@@ -120,7 +120,12 @@ def _gate_facts(*, game_ready_count: int) -> dict:
             "plan_id": plan_id,
             "graph_role": "business_batch",
             "status": "completed",
-            "nodes": {},
+            "nodes": {
+                f"tool-{index}": {
+                    "tool_call_id": f"tool-{index}",
+                    "status": "succeeded",
+                }
+            },
         }
         for index in range(1, 4)
     ]
@@ -228,6 +233,103 @@ class R3ReadinessGateTests(unittest.TestCase):
         self.assertEqual(dimension.status, "red")
         self.assertIn("scene_entity_registry_ready", dimension.missing)
         self.assertIn("finalizer_scene_version_mismatch", dimension.contradictions)
+
+    def test_business_graph_dimension_ignores_internal_graphs_and_counts_terminal_nodes(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        facts["tool_graphs"] = deepcopy(facts["tool_graphs"])
+        facts["tool_graphs"].append(
+            {
+                "graph_id": "graph-query",
+                "batch_id": "",
+                "plan_id": facts["plan_id"],
+                "graph_role": "query_snapshot",
+                "status": "completed",
+                "nodes": {
+                    "tool-query": {
+                        "tool_call_id": "tool-query",
+                        "status": "succeeded",
+                    }
+                },
+            }
+        )
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["business_graph_consistency"]
+        self.assertEqual(dimension.status, "green")
+        self.assertEqual(dimension.metrics["business_batch_count"], 3)
+        self.assertEqual(dimension.metrics["business_graph_count"], 3)
+        self.assertEqual(dimension.metrics["business_node_count"], 3)
+        self.assertEqual(dimension.metrics["succeeded_node_count"], 3)
+        self.assertEqual(dimension.metrics["active_node_count"], 0)
+
+    def test_business_graph_dimension_rejects_wrong_role_and_active_terminal_nodes(self) -> None:
+        wrong_role = _gate_facts(game_ready_count=8)
+        wrong_role["tool_graphs"] = deepcopy(wrong_role["tool_graphs"])
+        wrong_role["tool_graphs"][0]["graph_role"] = "internal_state"
+
+        wrong_role_report = evaluate_r3_gate(**wrong_role)
+
+        wrong_role_dimension = wrong_role_report.dimensions["business_graph_consistency"]
+        self.assertEqual(wrong_role_dimension.status, "red")
+        self.assertIn(
+            "batch-1:graph_role_mismatch:internal_state",
+            wrong_role_dimension.contradictions,
+        )
+        self.assertIn(
+            "business_batch_graph_count_mismatch",
+            wrong_role_dimension.contradictions,
+        )
+
+        active_node = _gate_facts(game_ready_count=8)
+        active_node["tool_graphs"] = deepcopy(active_node["tool_graphs"])
+        active_node["tool_graphs"][1]["nodes"]["tool-2"]["status"] = "running"
+
+        active_node_report = evaluate_r3_gate(**active_node)
+
+        active_node_dimension = active_node_report.dimensions["business_graph_consistency"]
+        self.assertEqual(active_node_dimension.status, "red")
+        self.assertIn(
+            "batch-2:business_graph_nodes_active",
+            active_node_dimension.contradictions,
+        )
+        self.assertEqual(active_node_dimension.metrics["active_node_count"], 1)
+
+    def test_business_graph_dimension_rejects_plan_batch_and_orphan_mismatches(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        facts["tool_graphs"] = deepcopy(facts["tool_graphs"])
+        facts["tool_graphs"][0]["plan_id"] = "plan-other"
+        facts["tool_graphs"][1]["batch_id"] = "batch-other"
+        facts["tool_graphs"].append(
+            {
+                "graph_id": "graph-orphan",
+                "batch_id": "batch-orphan",
+                "plan_id": facts["plan_id"],
+                "graph_role": "business_batch",
+                "status": "completed",
+                "nodes": {
+                    "tool-orphan": {
+                        "tool_call_id": "tool-orphan",
+                        "status": "succeeded",
+                    }
+                },
+            }
+        )
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["business_graph_consistency"]
+        self.assertEqual(dimension.status, "red")
+        self.assertIn("batch-1:graph_plan_mismatch", dimension.contradictions)
+        self.assertIn("batch-2:graph_batch_mismatch", dimension.contradictions)
+        self.assertIn(
+            "orphan_business_graph:graph-orphan",
+            dimension.contradictions,
+        )
+        self.assertIn(
+            "business_batch_graph_count_mismatch",
+            dimension.contradictions,
+        )
 
     def test_entity_diagnostics_include_identity_failures_without_trusting_game_ready(self) -> None:
         facts = _gate_facts(game_ready_count=8)

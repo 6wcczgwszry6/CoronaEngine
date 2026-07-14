@@ -1638,3 +1638,37 @@ finalizer_completeness 同版本事件闭环：code_complete
 ```
 
 下一轮按轨道 A 优先级进入 `business_graph_consistency`，核对业务 Batch 与 `business_batch` ToolGraph 的数量、归属、节点终态和查询零污染；所有 Engine、多人同步和真实 Finalizer 效果仍为 **[待 F5/实机验证]**。
+
+## 51. W1.5 R3 Gate 业务图角色、归属与节点终态收紧
+
+复核既有 principal business graph 一对一闭环时确认，执行层已经能够拒绝悬空 principal graph 和错误 graph identity，但 `runtime.r3_readiness.evaluate` 的只读判定仍存在两处宽松口径：被 Batch 引用的 `internal_state/query_snapshot` 图也会被计入业务图；已经标记 terminal 的图不会检查节点是否仍停留在 `planned/ready/running`。这会让错误图角色、错误归属或未真正收尾的节点被误判为 `business_graph_consistency=green`。
+
+本轮改动：
+
+- `business_graph_consistency` 只把 `graph_role=business_batch` 的图计入业务图数量，query、review、finalizer 和 internal 图不再污染业务统计。
+- 每个 Batch 的 `tool_graph_id` 必须解析到真实图，且图的 `plan_id / batch_id / graph_role` 必须与 Batch 一致。
+- 独立的 orphan `business_batch` 图明确列为 contradiction，不通过减少审计事实来让数量看起来一致。
+- terminal business graph 必须保留非空节点事实；节点必须处于 `succeeded / failed / blocked / skipped` 之一，`planned / ready / running` 会被判定为 active contradiction。
+- GateReport 增加业务节点总数以及 succeeded、failed、blocked、skipped、active 状态计数，F5 不再需要人工从完整 ToolGraph 日志拼接节点状态。
+- `blocked / incomplete` 图按执行器现有失败终态语义识别为 terminal；本轮不改变图执行器和失败策略。
+
+聚焦验证：
+
+```text
+R3 Readiness Gate（含角色、归属、orphan、节点终态、query 零污染）：11 tests passed
+Game-ready / 报告图分域回归：29 tests passed
+principal graph 缺图补建、partial 复用、悬空引用拒绝：passed
+Python syntax compile：passed
+F5 实机：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+business_graph_consistency 严格事实判定：code_complete
+旧 F5 的业务图统计不满足新角色/节点终态证据口径，不可用于升级 Gate
+新 F5 的 Batch/principal graph/terminal node 对账：待验证
+```
+
+下一步按轨道 A 顺序复核 `snapshot_integrity`，重点确认同一 `plan_id + scene_version` 的 Registry、Snapshot、Consistency Audit 与 Report 是否引用同一 Fingerprint；所有真实 Engine、多人同步和终态效果仍为 **[待 F5/实机验证]**。
