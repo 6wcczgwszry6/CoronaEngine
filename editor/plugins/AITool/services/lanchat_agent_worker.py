@@ -1791,7 +1791,26 @@ class LANChatAgentWorker:
                 agent_id=target_agent_id or "gm",
                 agent_name=target_agent_name or "GM",
             )
-            self._process_trigger(trigger)
+            message_id = str(message.get("message_id") or "").strip()
+            owner = "native_queue" if source == "lanchat_native_queue" else "structured_gm"
+            if not self._message_dispatch_ledger.claim(
+                str(message.get("room_id") or "default"),
+                message_id,
+                owner=owner,
+                route="gm_control",
+            ):
+                return "gm_control"
+            self._message_dispatch_ledger.transition(
+                str(message.get("room_id") or "default"),
+                message_id,
+                "routed",
+            )
+            handled = bool(self._process_trigger(trigger))
+            self._message_dispatch_ledger.transition(
+                str(message.get("room_id") or "default"),
+                message_id,
+                "replied" if handled else "failed",
+            )
             return "gm_control"
         if draft_action == "chat" and target_scope == "group":
             group_agents = self._structured_group_agents(metadata)

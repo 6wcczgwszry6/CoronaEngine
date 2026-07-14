@@ -1852,3 +1852,43 @@ GM R3 查询双入口幂等：待修复
 ```
 
 下一次 F5 优先复用同类卧室场景并执行 `@GM R3门禁`。必须核对 `blocker_codes`、Snapshot plan/version/fingerprint、Registry 计数和重复回复；Snapshot 转为 yellow/green 后，再处理 GM 查询双入口幂等与剩余 3 个 `grounding_status` 缺失。所有本轮 Engine Snapshot 一致性改进仍标记 **[待 F5/实机验证]**。
+
+## 56. W2.1 GM R3 查询双入口原子收口
+
+`2026-07-14_13-28-28_corona.log` 同时记录了：
+
+```text
+Native Queue 对 @GM R3门禁 执行一次 runtime.r3_readiness.evaluate 并回复
+随后 Agent Trigger 对同一 message_id 再执行一次并回复
+两次 R3GateReport 使用相同 plan/version/facts，但产生两条用户消息
+第二条路径完成后还输出一次零事实 RuntimeEvidence
+```
+
+代码链复核确认：Native Queue 的 structured GM route 会同步调用 `_process_trigger()`，但该分支此前没有先写入 `MessageDispatchLedger`；R3 Gate 查询又不属于已有的确认、拒绝、暂停协议，因而不会进入 `_gm_control_message_ids` 去重集合。Agent Trigger 随后看到消息未被认领，便完整执行第二次。
+
+本轮改动：
+
+- structured GM route 在调用 `_process_trigger()` 前，以 `room_id + message_id` 原子认领消息。
+- Native Queue 为权威 owner，route 记录为 `gm_control`；处理成功后状态写为 `replied`。
+- Agent Trigger 入口继续使用既有 Ledger 终态检查，命中同一消息时直接返回，不调用 Runtime、不回复第二次。
+- 该收口覆盖 R3 Gate、GM 总结和其他 structured GM 只读控制，不改变确定性确认/拒绝协议，也不扩大到普通 RoleAgent 消息。
+
+聚焦验证：
+
+```text
+Game-ready/消息幂等：31 tests passed
+structured GM target 优先路由：passed
+裸 GM 确认双队列去重：passed
+Python syntax compile：passed
+```
+
+当前结论：
+
+```text
+GM R3 查询双入口幂等：code_complete
+单次 Runtime evaluate + 单条权威回复：自动测试通过
+Native Queue / Agent Trigger 实机单回复：[待 F5/实机验证]
+Snapshot terminal refresh：[待 F5/实机验证]
+```
+
+下一次 F5 的同一条 `@GM R3门禁` 应只出现一个 `R3GateTrace` 和一条回复；若仍重复，直接根据 `message_dispatch_deduped`、owner、route 和 blocker_codes 定位，不再扩展新的去重集合。

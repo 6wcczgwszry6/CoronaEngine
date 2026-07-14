@@ -200,6 +200,44 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(ledger.get("owner"), "native_queue")
         self.assertEqual(ledger.get("state"), "replied")
 
+    def test_structured_gm_r3_query_is_claimed_once_across_both_ingress_paths(self) -> None:
+        worker = _DispatchTrackingWorker(agent_runtime=AgentRuntime())
+        message = {
+            "room_id": "room-r3-query",
+            "message_id": "msg-r3-query",
+            "text": "@GM R3门禁",
+            "sender_id": "host-1",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "gm",
+            "agent_name": "GM",
+            "target_agent_id": "gm",
+            "target_agent_name": "GM",
+            "is_host": True,
+            "metadata": {
+                "draft_action": "chat",
+                "target_scope": "gm",
+                "target_agent_id": "gm",
+                "target_agent_name": "GM",
+            },
+        }
+
+        with patch.object(worker, "_agent_runtime_r3_gate_reply", return_value="R3 gate result"):
+            self.assertTrue(
+                worker.sync_chat_message_to_coordinator(
+                    dict(message),
+                    source="lanchat_native_queue",
+                )
+            )
+            self.assertTrue(worker._process_trigger(dict(message)))
+
+        self.assertEqual(worker.authoritative_replies, ["R3 gate result"])
+        ledger = worker._message_dispatch_ledger.entry("room-r3-query", "msg-r3-query")
+        self.assertEqual(ledger.get("owner"), "native_queue")
+        self.assertEqual(ledger.get("route"), "gm_control")
+        self.assertEqual(ledger.get("state"), "replied")
+
     def test_worker_entity_question_is_read_only_end_to_end(self) -> None:
         runtime = AgentRuntime()
         applied, _ = runtime.state.apply_patch(StatePatch(room_id="room-1", changes=_room_fact(game_ready=True)))
