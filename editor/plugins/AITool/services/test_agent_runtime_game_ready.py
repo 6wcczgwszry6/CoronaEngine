@@ -542,6 +542,7 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                 "room_id": "room-1",
                 "scene_name": "Scene/runtime.scene",
                 "plan_id": "plan-1",
+                "scene_version": 2,
                 "actor_count": 1,
                 "source": "scene_snapshot_tool",
                 "timestamp": 10.0,
@@ -767,6 +768,77 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
 
         self.assertEqual(selected["snapshot_id"], "current")
         self.assertEqual(missing, {})
+
+    def test_legacy_engine_snapshot_cannot_prove_current_world_version(self) -> None:
+        entity = {
+            "entity_id": "entity-desk",
+            "actor_id": "actor-desk",
+            "asset_id": "asset-desk",
+            "model_ref": "desk.obj",
+            "version": 1,
+            "transform": {
+                "position": [0.0, 0.0, 0.0],
+                "rotation": [0.0, 0.0, 0.0],
+                "scale": [1.0, 1.0, 1.0],
+            },
+            "world_aabb": {
+                "min": [-0.5, 0.0, -0.5],
+                "max": [0.5, 1.0, 0.5],
+            },
+        }
+        snapshots = {
+            "legacy": {
+                "snapshot_id": "legacy",
+                "plan_id": "plan-1",
+                "scene_version": 0,
+                "timestamp": 30.0,
+                "actors": [dict(entity)],
+            }
+        }
+
+        selected = latest_engine_snapshot(snapshots, plan_id="plan-1", scene_version=3)
+        audit = audit_scene_world_consistency(
+            world_snapshot={
+                "plan_id": "plan-1",
+                "scene_version": 3,
+                "environment_entities": [],
+                "actor_entities": [dict(entity)],
+            },
+            engine_snapshot=selected,
+        )
+
+        self.assertEqual(selected["snapshot_id"], "legacy")
+        self.assertEqual(audit["status"], "needs_review")
+        self.assertEqual(audit["engine_scene_version"], 0)
+        self.assertFalse(audit["scene_version_matches"])
+        self.assertIn(
+            "engine_snapshot_scene_version_missing",
+            audit["snapshot_identity_issues"],
+        )
+        self.assertFalse(audit["fingerprints_match"])
+
+        wrong_plan_audit = audit_scene_world_consistency(
+            world_snapshot={
+                "plan_id": "plan-1",
+                "scene_version": 3,
+                "environment_entities": [],
+                "actor_entities": [dict(entity)],
+            },
+            engine_snapshot={
+                "snapshot_id": "wrong-plan",
+                "plan_id": "plan-other",
+                "scene_version": 3,
+                "actors": [dict(entity)],
+            },
+        )
+
+        self.assertEqual(wrong_plan_audit["status"], "needs_review")
+        self.assertFalse(wrong_plan_audit["plan_id_matches"])
+        self.assertIn(
+            "engine_snapshot_plan_id_mismatch",
+            wrong_plan_audit["snapshot_identity_issues"],
+        )
+        self.assertFalse(wrong_plan_audit["fingerprints_match"])
 
     def test_batch_scene_snapshot_call_carries_scene_version(self) -> None:
         runtime = AgentRuntime()

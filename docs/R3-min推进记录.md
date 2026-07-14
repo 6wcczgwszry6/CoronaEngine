@@ -1672,3 +1672,40 @@ business_graph_consistency 严格事实判定：code_complete
 ```
 
 下一步按轨道 A 顺序复核 `snapshot_integrity`，重点确认同一 `plan_id + scene_version` 的 Registry、Snapshot、Consistency Audit 与 Report 是否引用同一 Fingerprint；所有真实 Engine、多人同步和终态效果仍为 **[待 F5/实机验证]**。
+
+## 52. W1.6 Engine Snapshot 同计划同版本身份闭环
+
+复核 `snapshot_integrity` 时确认，冻结的 `SceneWorldSnapshot` 已具备不可变记录和世界 Fingerprint，但 Engine 对账仍存在一个同版本漏洞：`latest_engine_snapshot()` 在目标版本不存在时允许回退到 `scene_version=0` 的 legacy Engine Snapshot；随后 consistency audit 又使用世界 Snapshot 的 `plan_id + scene_version` 替该旧 Engine Snapshot 计算 materialization fingerprint。这样旧版或跨计划 Engine 事实在 Actor 内容恰好相同时，可能冒充当前版本的一致性证据。
+
+本轮改动：
+
+- consistency audit 独立读取并保留世界与 Engine 两侧各自的 `plan_id + scene_version`，不再使用世界版本替 Engine 版本计算 Fingerprint。
+- Engine Snapshot 缺少 plan/version、plan 不一致或 scene version 不一致时，明确写入 `snapshot_identity_issues` 并返回 `needs_review`。
+- audit 输出 `engine_plan_id / engine_scene_version / plan_id_matches / scene_version_matches`，供 Finalizer、报告和 R3 Gate 统一消费。
+- `snapshot_integrity` 维度增加 Engine plan/version 匹配指标和明确 contradiction；Actor 内容完全相同也不能掩盖版本漂移。
+- 保留 `latest_engine_snapshot()` 的 legacy 读取能力用于旧状态诊断，但 legacy 事实不再具备证明当前版本一致性的资格。
+- 本轮没有修改冻结 Snapshot 写入、Engine 查询、RuntimeState 或 final report 主链。
+
+聚焦验证：
+
+```text
+当前版本 Runtime/Engine Snapshot 一致：passed
+scene_version=0 legacy Engine Snapshot 不得证明 v3 世界：passed
+跨 plan Engine Snapshot 不得证明当前世界：passed
+R3 Gate 对跨版本 Engine Snapshot 判 red：passed
+Game-ready + Snapshot + R3 Readiness：42 tests passed
+Python syntax compile：passed
+git diff --check：clean（仅既有 CRLF 提示）
+F5 实机：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+snapshot_integrity Engine plan/version 身份约束：code_complete
+旧 F5 的 legacy/缺版本 Engine Snapshot 证据不可用于升级 Gate
+新 F5 的 Registry/Snapshot/Engine Audit/Report 同版本 Fingerprint：待验证
+```
+
+下一步按轨道 A 顺序复核 `environment_readiness`，重点确认必要环境实体的 stable entity identity、真实 Engine AABB、support semantics 与 Snapshot 版本是否同时满足 Gate；所有真实 Engine、多人同步和环境渲染效果仍为 **[待 F5/实机验证]**。

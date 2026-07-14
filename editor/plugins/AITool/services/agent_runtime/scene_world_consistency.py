@@ -228,6 +228,18 @@ def audit_scene_world_consistency(
 
     plan_id = _text(world_snapshot.get("plan_id"))
     scene_version = int(world_snapshot.get("scene_version") or 0)
+    engine_plan_id = _text(engine_snapshot.get("plan_id"))
+    try:
+        engine_scene_version = max(0, int(engine_snapshot.get("scene_version") or 0))
+    except (TypeError, ValueError):
+        engine_scene_version = 0
+    engine_snapshot_available = bool(engine_snapshot)
+    plan_id_matches = bool(plan_id and engine_plan_id and plan_id == engine_plan_id)
+    scene_version_matches = bool(
+        scene_version > 0
+        and engine_scene_version > 0
+        and scene_version == engine_scene_version
+    )
     world_entities = [
         dict(row)
         for row in (
@@ -318,6 +330,16 @@ def audit_scene_world_consistency(
             })
 
     non_materialized_entity_count = max(0, len(world_entities) - len(expected_entities))
+    snapshot_identity_issues: list[str] = []
+    if engine_snapshot_available:
+        if not engine_plan_id:
+            snapshot_identity_issues.append("engine_snapshot_plan_id_missing")
+        elif not plan_id_matches:
+            snapshot_identity_issues.append("engine_snapshot_plan_id_mismatch")
+        if engine_scene_version <= 0:
+            snapshot_identity_issues.append("engine_snapshot_scene_version_missing")
+        elif not scene_version_matches:
+            snapshot_identity_issues.append("engine_snapshot_scene_version_mismatch")
     issue_count = sum((
         len(duplicate_world_ids),
         len(duplicate_engine_ids),
@@ -332,6 +354,7 @@ def audit_scene_world_consistency(
         len(transform_mismatches),
         len(world_aabb_mismatches),
         non_materialized_entity_count,
+        len(snapshot_identity_issues),
     ))
     # The Runtime fingerprint represents the whole downstream-visible world,
     # including entities that have not materialized into Engine actors yet.
@@ -344,15 +367,15 @@ def audit_scene_world_consistency(
     )
     engine_fingerprint = scene_materialization_fingerprint(
         engine_actors,
-        plan_id=plan_id,
-        scene_version=scene_version,
+        plan_id=engine_plan_id,
+        scene_version=engine_scene_version,
     )
     fingerprints_match = world_fingerprint == engine_fingerprint
     unclassified_fingerprint_mismatch_count = int(
         bool(plan_id and engine_snapshot and not fingerprints_match and issue_count == 0)
     )
     issue_count += unclassified_fingerprint_mismatch_count
-    if not plan_id or not engine_snapshot:
+    if not plan_id or not engine_snapshot_available:
         status = "blocked"
     elif issue_count:
         status = "needs_review"
@@ -363,6 +386,12 @@ def audit_scene_world_consistency(
         "status": status,
         "plan_id": plan_id,
         "scene_version": scene_version,
+        "engine_plan_id": engine_plan_id,
+        "engine_scene_version": engine_scene_version,
+        "engine_snapshot_available": engine_snapshot_available,
+        "plan_id_matches": plan_id_matches,
+        "scene_version_matches": scene_version_matches,
+        "snapshot_identity_issues": snapshot_identity_issues,
         "engine_snapshot_id": _text(engine_snapshot.get("snapshot_id")),
         "expected_entity_count": len(world_entities),
         "materialized_entity_count": len(expected_entities),

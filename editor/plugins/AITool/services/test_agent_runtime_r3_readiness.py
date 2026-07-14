@@ -378,6 +378,35 @@ class R3ReadinessGateTests(unittest.TestCase):
             any("duplicate_entity_id" in item for item in identity_report.blockers)
         )
 
+    def test_engine_snapshot_from_other_scene_version_is_red_even_when_entities_match(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        snapshot = deepcopy(facts["snapshot_result"]["snapshot"])
+        engine_snapshot = {
+            "snapshot_id": "engine-old-version",
+            "plan_id": facts["plan_id"],
+            "scene_version": facts["scene_version"] - 1,
+            "actors": [
+                dict(entity)
+                for entity in (
+                    snapshot["environment_entities"] + snapshot["actor_entities"]
+                )
+            ],
+        }
+        facts["consistency_audit"] = audit_scene_world_consistency(
+            world_snapshot=snapshot,
+            engine_snapshot=engine_snapshot,
+        )
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["snapshot_integrity"]
+        self.assertEqual(dimension.status, "red")
+        self.assertFalse(dimension.metrics["engine_snapshot_scene_version_matches"])
+        self.assertIn(
+            "engine_snapshot_scene_version_mismatch",
+            dimension.contradictions,
+        )
+
     def test_report_is_deterministic_for_identical_facts(self) -> None:
         facts = _gate_facts(game_ready_count=8)
         first = evaluate_r3_gate(**facts).as_dict()

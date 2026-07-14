@@ -213,6 +213,10 @@ def _snapshot_dimension(
         contradictions.append("peer_snapshot_stability_mismatch")
     if engine_available and not audit_consistent:
         contradictions.append("engine_snapshot_fingerprint_mismatch")
+    if engine_available and not bool(audit.get("plan_id_matches")):
+        contradictions.append("engine_snapshot_plan_id_mismatch")
+    if engine_available and not bool(audit.get("scene_version_matches")):
+        contradictions.append("engine_snapshot_scene_version_mismatch")
     if not missing and not contradictions and engine_available and audit_consistent and stability == "immutable":
         status = "green"
         summary = "Immutable Runtime and Engine snapshots have matching fingerprints."
@@ -234,6 +238,10 @@ def _snapshot_dimension(
             "entity_count": len(entities),
             "fingerprint_matches_payload": bool(fingerprint and fingerprint == computed_fingerprint),
             "engine_snapshot_available": engine_available,
+            "engine_snapshot_plan_id_matches": bool(audit.get("plan_id_matches")),
+            "engine_snapshot_scene_version_matches": bool(
+                audit.get("scene_version_matches")
+            ),
             "engine_fingerprints_match": bool(audit.get("fingerprints_match")),
         },
         missing=missing,
