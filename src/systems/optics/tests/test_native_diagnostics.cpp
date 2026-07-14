@@ -75,6 +75,8 @@ void native_perf_window_aggregates_cpu_and_workload_metrics() {
     expect(stats.samples == 2, "window must count samples");
     expect_near(stats.avg_total_ms, 15.0, "window must average total time");
     expect_near(stats.max_total_ms, 20.0, "window must retain max total time");
+    expect_near(stats.p95_total_ms, 20.0,
+                "two-sample p95 must use the nearest-rank upper sample");
     expect_near(stats.avg_throttle_wait_ms, 4.0,
                 "window must average throttle wait time");
     expect(stats.max_instances == 8, "window must retain maximum instances");
@@ -89,6 +91,15 @@ void native_perf_window_aggregates_cpu_and_workload_metrics() {
 
     window.reset();
     expect(window.snapshot().samples == 0, "reset must clear the window");
+
+    NativePerfWindow percentile_window;
+    for (int value = 1; value <= 20; ++value) {
+        NativePerfSample sample;
+        sample.total_ms = static_cast<double>(value);
+        percentile_window.add(sample);
+    }
+    expect_near(percentile_window.snapshot().p95_total_ms, 19.0,
+                "p95 must use nearest-rank selection over frame samples");
 }
 
 }  // namespace
