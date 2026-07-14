@@ -2078,3 +2078,36 @@ Finalizer 自动重试退避与熔断：code_complete
 ```
 
 下一次 F5 重点核对：三个业务图应不再在 Environment 状态写入节点失败；正常成功时必须出现完整 Finalizer 终态事件。若报告持久化仍失败，内部图不得继续无界增长，并应出现一次 `runtime_finalizer_retry_exhausted` 审计事实。
+
+## 61. W2.2 R3 F5 日志自动对账探针
+
+新增只读工具 `docs/probes/r3_f5_log_check.py`，直接消费 `R3GateTrace` 与
+`LANChatRuntimeEvidence`，不导入 AgentRuntime，不修改 RuntimeState、OperationLog 或 Engine。
+
+自动输出：
+
+- 七个 R3 Gate 维度的最新 red/yellow/green 状态。
+- 业务 BatchPlan 与 business ToolGraph 数量、终态对账。
+- 业务终态后 internal graph 增长量与 Finalizer 熔断证据。
+- Game-ready、render-ready 与 render observation 摘要。
+
+旧基线回放：
+
+```text
+2026-07-14_18-47-10_corona.log
+R3_F5_BLOCKED: PASS=2 WARN=2 FAIL=7
+business batches/graphs=3/3
+terminal internal graph growth=267
+render ready/observed=0/2
+```
+
+聚焦验证：
+
+```text
+R3 log probe unit tests: 3 passed
+Python syntax compile: passed
+old F5 baseline replay: correctly blocked
+```
+
+当前 Gate 不变：`red / pending_reevaluation`。新代码的 Engine、Registry、Snapshot
+和 Finalizer 效果仍为 `[待 F5/实机验证]`。
