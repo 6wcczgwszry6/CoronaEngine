@@ -344,9 +344,44 @@ class R3ReadinessGateTests(unittest.TestCase):
         self.assertEqual(dimension.status, "red")
         diagnostics = dimension.metrics["entity_diagnostics"]
         entity = next(item for item in diagnostics if item["entity_ref"] == "entity-00")
-        self.assertTrue(entity["game_ready"])
-        self.assertEqual(entity["readiness_missing_fields"], ["asset_identity"])
+        self.assertTrue(entity["declared_game_ready"])
+        self.assertFalse(entity["game_ready"])
+        self.assertEqual(
+            entity["readiness_missing_fields"],
+            ["asset_id", "asset_identity", "model_ref"],
+        )
         self.assertIn("entity-00:asset_identity", dimension.missing)
+        self.assertIn(
+            "entity-00:game_ready_without_hard_facts",
+            dimension.contradictions,
+        )
+
+    def test_entity_readiness_recomputes_engine_facts_instead_of_trusting_flag(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        registry = deepcopy(facts["scene_entity_registry"])
+        registry["entities"][2]["bounds_source"] = "estimated"
+        facts["scene_entity_registry"] = registry
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["entity_readiness"]
+        self.assertEqual(dimension.status, "red")
+        self.assertEqual(dimension.metrics["game_ready_entity_count"], 7)
+        self.assertEqual(dimension.metrics["declared_game_ready_entity_count"], 8)
+        self.assertEqual(report.metrics["game_ready_entity_count"], 7)
+        self.assertEqual(report.metrics["declared_game_ready_entity_count"], 8)
+        self.assertIn(
+            "entity-02:game_ready_without_hard_facts",
+            dimension.contradictions,
+        )
+        entity = next(
+            item
+            for item in dimension.metrics["entity_diagnostics"]
+            if item["entity_ref"] == "entity-02"
+        )
+        self.assertTrue(entity["declared_game_ready"])
+        self.assertFalse(entity["game_ready"])
+        self.assertIn("engine_actual_aabb", entity["readiness_missing_fields"])
 
     def test_environment_fingerprint_and_identity_failures_are_red(self) -> None:
         missing_environment = _gate_facts(game_ready_count=8)

@@ -337,6 +337,64 @@ def _environment_entity_missing_fields(
     return _unique_text(missing)
 
 
+def _entity_hard_readiness_missing_fields(entity: Mapping[str, Any]) -> list[str]:
+    """Recompute ordinary entity readiness from public Engine-backed facts."""
+
+    missing: list[str] = []
+    if not str(entity.get("entity_id") or "").strip():
+        missing.append("entity_id")
+    if not str(entity.get("actor_id") or "").strip():
+        missing.append("actor_id")
+    if not str(entity.get("asset_id") or "").strip():
+        missing.append("asset_id")
+    if not str(entity.get("model_ref") or "").strip():
+        missing.append("model_ref")
+    if _safe_int(entity.get("version"), 0) <= 0:
+        missing.append("version")
+    if not str(entity.get("entity_type") or "").strip():
+        missing.append("entity_type")
+    if not str(entity.get("semantic_role") or "").strip():
+        missing.append("semantic_role")
+    if not isinstance(entity.get("transform"), Mapping) or not entity.get("transform"):
+        missing.append("transform")
+    if not isinstance(entity.get("world_aabb"), Mapping) or not entity.get("world_aabb"):
+        missing.append("world_aabb")
+    if str(entity.get("bounds_source") or "").strip().lower() != "engine_actual":
+        missing.append("engine_actual_aabb")
+    if str(entity.get("engine_write_verification_status") or "").strip().lower() != "engine_verified":
+        missing.append("engine_ready")
+    if str(entity.get("grounding_status") or "").strip().lower() not in {
+        "grounded",
+        "wall_mounted",
+        "suspended",
+        "ceiling_hung",
+        "not_applicable",
+        "enclosure",
+    }:
+        missing.append("grounding_status")
+
+    sync_status = str(entity.get("sync_status") or "").strip().lower()
+    if sync_status in {
+        "",
+        "unknown",
+        "partial",
+        "failed",
+        "needs_attention",
+        "timeout",
+        "timed_out",
+        "abandoned",
+        "cancelled",
+        "deleted",
+    }:
+        missing.append("sync_status")
+    declared_missing = entity.get("readiness_missing_fields")
+    if isinstance(declared_missing, Sequence) and not isinstance(
+        declared_missing, (str, bytes, bytearray)
+    ):
+        missing.extend(str(item) for item in declared_missing if str(item or "").strip())
+    return _unique_text(missing)
+
+
 def _environment_dimension(
     snapshot_result: Mapping[str, Any],
     required_environment_components: Sequence[Any],
@@ -434,15 +492,16 @@ def _entity_dimension(
     data = _stable_mapping(registry)
     entities = _stable_rows(data.get("entities"))
     entity_count = len(entities)
-    game_ready_count = sum(1 for entity in entities if bool(entity.get("game_ready")))
     denominator = max(entity_count, max(0, expected_entity_count))
-    ratio = round(game_ready_count / float(denominator), 4) if denominator else 0.0
     ids = [str(entity.get("entity_id") or "").strip() for entity in entities]
     duplicate_ids = sorted({entity_id for entity_id in ids if entity_id and ids.count(entity_id) > 1})
     missing: list[str] = []
     contradictions: list[str] = []
     entity_diagnostics: list[dict[str, Any]] = []
     partial_without_reasons = 0
+    game_ready_count = 0
+    declared_game_ready_count = sum(1 for entity in entities if bool(entity.get("game_ready")))
+    readiness_missing_field_counts: dict[str, int] = {}
     for index, entity in enumerate(entities):
         entity_ref = str(entity.get("entity_id") or f"entity[{index}]")
         identity_missing: list[str] = []
@@ -467,16 +526,30 @@ def _entity_dimension(
             and not isinstance(raw_readiness_missing, (str, bytes, bytearray))
             else []
         )
-        diagnostic_missing = _unique_text([*identity_missing, *readiness_missing])
-        if not bool(entity.get("game_ready")) and not readiness_missing:
+        hard_readiness_missing = _entity_hard_readiness_missing_fields(entity)
+        diagnostic_missing = _unique_text(
+            [*identity_missing, *readiness_missing, *hard_readiness_missing]
+        )
+        declared_game_ready = bool(entity.get("game_ready"))
+        verified_game_ready = declared_game_ready and not hard_readiness_missing
+        if verified_game_ready:
+            game_ready_count += 1
+        if declared_game_ready and hard_readiness_missing:
+            contradictions.append(f"{entity_ref}:game_ready_without_hard_facts")
+        if not declared_game_ready and not readiness_missing:
             partial_without_reasons += 1
-        if not bool(entity.get("game_ready")) or identity_missing:
+        for field_name in diagnostic_missing:
+            readiness_missing_field_counts[field_name] = (
+                readiness_missing_field_counts.get(field_name, 0) + 1
+            )
+        if not verified_game_ready or identity_missing:
             entity_diagnostics.append(
                 {
                     "entity_ref": entity_ref,
                     "entity_type": str(entity.get("entity_type") or "unknown"),
                     "semantic_role": str(entity.get("semantic_role") or "unknown"),
-                    "game_ready": bool(entity.get("game_ready")),
+                    "declared_game_ready": declared_game_ready,
+                    "game_ready": verified_game_ready,
                     "readiness_missing_fields": diagnostic_missing,
                 }
             )
@@ -486,6 +559,7 @@ def _entity_dimension(
     contradictions.extend(f"duplicate_entity_id:{entity_id}" for entity_id in duplicate_ids)
     if partial_without_reasons:
         contradictions.append("needs_review_entities_without_missing_fields")
+    ratio = round(game_ready_count / float(denominator), 4) if denominator else 0.0
     profile = str(benchmark_profile or "generic").strip().lower()
     if profile == "bedroom_14":
         if game_ready_count >= 8:
@@ -515,11 +589,12 @@ def _entity_dimension(
             "entity_count": entity_count,
             "expected_entity_count": denominator,
             "game_ready_entity_count": game_ready_count,
+            "declared_game_ready_entity_count": declared_game_ready_count,
             "needs_review_entity_count": max(0, entity_count - game_ready_count),
             "game_ready_ratio": ratio,
             "identity_complete_count": max(0, entity_count - len({item.split(":", 1)[0] for item in missing})),
             "partial_without_missing_fields_count": partial_without_reasons,
-            "readiness_missing_field_counts": dict(data.get("readiness_missing_field_counts") or {}),
+            "readiness_missing_field_counts": dict(sorted(readiness_missing_field_counts.items())),
             "entity_diagnostics": entity_diagnostics,
             "entity_diagnostics_total_count": diagnostic_total_count,
             "entity_diagnostics_truncated_count": max(0, diagnostic_total_count - len(entity_diagnostics)),
@@ -954,7 +1029,7 @@ def evaluate_r3_gate(
             ],
         ]
     )
-    registry = _stable_mapping(scene_entity_registry)
+    entity_metrics = dimensions["entity_readiness"].metrics
     report_body = {
         "room_id": str(room_id),
         "plan_id": str(plan_id),
@@ -963,8 +1038,13 @@ def evaluate_r3_gate(
         "dimensions": {name: dimensions[name].as_dict() for name in R3_DIMENSION_NAMES},
         "metrics": {
             "state_version": max(0, int(state_version)),
-            "entity_count": _safe_int(registry.get("entity_count")),
-            "game_ready_entity_count": _safe_int(registry.get("game_ready_entity_count")),
+            "entity_count": _safe_int(entity_metrics.get("entity_count")),
+            "game_ready_entity_count": _safe_int(
+                entity_metrics.get("game_ready_entity_count")
+            ),
+            "declared_game_ready_entity_count": _safe_int(
+                entity_metrics.get("declared_game_ready_entity_count")
+            ),
             "dimension_status_counts": {
                 status: statuses.count(status) for status in ("red", "yellow", "green")
             },

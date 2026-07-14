@@ -1746,3 +1746,47 @@ environment_readiness 硬事实与稳定 Actor 身份判定：code_complete
 ```
 
 下一步进入 W2 固定场景 F5 Vertical Slice，先执行儿童卧室，使用 `runtime.r3_readiness.evaluate` 自动核对 Engine Actor、RuntimeState、OperationLog、Registry、Snapshot 与 final report；若仍为 red，只修 GateReport 指向的首个真实环境或实体 readiness 断点。所有真实 Engine、多人同步与渲染效果仍为 **[待 F5/实机验证]**。
+
+## 54. W1.8 普通实体 Readiness 硬事实重算
+
+W2 F5 前置核查发现，Registry 已经会依据 Engine verification、真实 AABB、稳定资源身份、支撑和同步状态计算 `game_ready`，但 `runtime.r3_readiness.evaluate` 的 `entity_readiness` 仍直接累计该布尔值。若 Registry 行出现 `game_ready=true` 与 `bounds_source=estimated`、Engine 未验证、支撑未知或同步 partial 等公开字段相互矛盾，Gate 仍可能把该实体计入卧室 `8/14` 门槛，导致自动对账失去独立校验价值。
+
+本轮改动：
+
+- `entity_readiness` 从 Registry 的公开、Engine-backed 字段重新核验 `entity_id / actor_id / asset_id / model_ref / version / entity_type / semantic_role / transform / world_aabb / bounds_source / Engine verification / grounding / sync`。
+- Gate 不会自行把实体提升为 Game-ready；只有 Registry 已声明 ready 且重算无缺失时才计入核验数量。
+- “声明 ready 但缺少硬事实”进入 `game_ready_without_hard_facts` contradiction，并在逐实体诊断中列出具体字段。
+- 非 ready 实体仍必须由 Registry 提供 `readiness_missing_fields`；Gate 重算结果不能替 Registry 掩盖缺失原因。
+- GateReport 同时输出 `declared_game_ready_entity_count` 与核验后的 `game_ready_entity_count`；顶层聊天室摘要读取核验值，不再出现维度为 `7/14`、摘要仍显示 `8/14` 的双口径。
+- `readiness_missing_field_counts` 改为由本次硬事实核验结果确定性计算，不再直接转抄 Registry 聚合值。
+
+聚焦验证：
+
+```text
+Game-ready + R3 Readiness：45 tests passed
+GM R3 Gate 只读查询回归：1 test passed
+普通家具 game_ready=true + estimated AABB -> 不计入 Game-ready、Gate 判 red：passed
+声明计数 8、核验计数 7 的顶层/维度口径一致：passed
+Python syntax compile：passed
+F5 实机：未执行
+```
+
+F5 证据边界：
+
+```text
+最新现有日志：2026-07-14_04-51-51_corona.log
+本轮 Gate 修复提交时间：2026-07-14 08:24-08:47 之后
+结论：现有日志早于当前代码，不得用于升级 Gate
+verify_ultimate_plan.py：旧 phase1 长超时路径运行约 1 小时 50 分钟后终止，不作为通过证据
+```
+
+当前 Gate 保持：
+
+```text
+red / pending_reevaluation
+entity_readiness 硬事实独立核验：code_complete
+旧基线：3/14 Game-ready
+当前代码的儿童卧室 GateReport：待新 F5
+```
+
+下一步严格进入 W2.1 儿童卧室 F5。必须保存运行日志与代码 commit、room/plan/version、Engine Actor 摘要、OperationLog cursor、Registry、Snapshot fingerprint、final report 和 `@GM R3门禁` 输出；若仍为 red，只处理 GateReport 指向的第一个实机事实断点。所有真实 Engine、渲染、接地和多人效果仍为 **[待 F5/实机验证]**。
