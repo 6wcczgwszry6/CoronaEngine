@@ -510,8 +510,24 @@ def _entity_dimension(
     game_ready_count = 0
     declared_game_ready_count = sum(1 for entity in entities if bool(entity.get("game_ready")))
     readiness_missing_field_counts: dict[str, int] = {}
+    render_status_observed_count = 0
+    render_ready_entity_count = 0
+    render_failed_entity_count = 0
+    invalid_mesh_entity_count = 0
+    invalid_mesh_slot_count = 0
     for index, entity in enumerate(entities):
         entity_ref = str(entity.get("entity_id") or f"entity[{index}]")
+        render_status_observed = bool(entity.get("render_status_observed"))
+        if render_status_observed:
+            render_status_observed_count += 1
+        if render_status_observed and bool(entity.get("render_ready")):
+            render_ready_entity_count += 1
+        if render_status_observed and bool(entity.get("render_failed")):
+            render_failed_entity_count += 1
+        entity_invalid_mesh_count = max(0, _safe_int(entity.get("invalid_mesh_count")))
+        if entity_invalid_mesh_count:
+            invalid_mesh_entity_count += 1
+            invalid_mesh_slot_count += entity_invalid_mesh_count
         identity_missing: list[str] = []
         if not str(entity.get("entity_id") or "").strip():
             missing.append(f"{entity_ref}:entity_id")
@@ -603,6 +619,17 @@ def _entity_dimension(
             "identity_complete_count": max(0, entity_count - len({item.split(":", 1)[0] for item in missing})),
             "partial_without_missing_fields_count": partial_without_reasons,
             "readiness_missing_field_counts": dict(sorted(readiness_missing_field_counts.items())),
+            "render_status_observed_count": render_status_observed_count,
+            "render_status_unobserved_count": max(
+                0, entity_count - render_status_observed_count
+            ),
+            "render_ready_entity_count": render_ready_entity_count,
+            "render_not_ready_entity_count": max(
+                0, entity_count - render_ready_entity_count
+            ),
+            "render_failed_entity_count": render_failed_entity_count,
+            "invalid_mesh_entity_count": invalid_mesh_entity_count,
+            "invalid_mesh_slot_count": invalid_mesh_slot_count,
             "entity_diagnostics": entity_diagnostics,
             "entity_diagnostics_total_count": diagnostic_total_count,
             "entity_diagnostics_truncated_count": max(0, diagnostic_total_count - len(entity_diagnostics)),
@@ -1052,6 +1079,30 @@ def evaluate_r3_gate(
             ),
             "declared_game_ready_entity_count": _safe_int(
                 entity_metrics.get("declared_game_ready_entity_count")
+            ),
+            "readiness_missing_field_counts": dict(
+                entity_metrics.get("readiness_missing_field_counts") or {}
+            ),
+            "render_status_observed_count": _safe_int(
+                entity_metrics.get("render_status_observed_count")
+            ),
+            "render_status_unobserved_count": _safe_int(
+                entity_metrics.get("render_status_unobserved_count")
+            ),
+            "render_ready_entity_count": _safe_int(
+                entity_metrics.get("render_ready_entity_count")
+            ),
+            "render_not_ready_entity_count": _safe_int(
+                entity_metrics.get("render_not_ready_entity_count")
+            ),
+            "render_failed_entity_count": _safe_int(
+                entity_metrics.get("render_failed_entity_count")
+            ),
+            "invalid_mesh_entity_count": _safe_int(
+                entity_metrics.get("invalid_mesh_entity_count")
+            ),
+            "invalid_mesh_slot_count": _safe_int(
+                entity_metrics.get("invalid_mesh_slot_count")
             ),
             "dimension_status_counts": {
                 status: statuses.count(status) for status in ("red", "yellow", "green")

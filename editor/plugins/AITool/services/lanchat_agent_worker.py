@@ -9763,6 +9763,11 @@ class LANChatAgentWorker:
             or metrics.get("entity_count")
             or 0
         )
+        actual_entity_count = int(
+            entity_metrics.get("entity_count")
+            or metrics.get("entity_count")
+            or 0
+        )
         game_ready_count = int(
             entity_metrics.get("game_ready_entity_count")
             or metrics.get("game_ready_entity_count")
@@ -9774,6 +9779,17 @@ class LANChatAgentWorker:
             f"【R3 门禁】{overall}",
             f"场景版本：v{scene_version}；Game-ready：{game_ready_count}/{entity_count}",
         ]
+        render_observed_count = int(entity_metrics.get("render_status_observed_count") or 0)
+        render_ready_count = int(entity_metrics.get("render_ready_entity_count") or 0)
+        invalid_mesh_entity_count = int(entity_metrics.get("invalid_mesh_entity_count") or 0)
+        invalid_mesh_slot_count = int(entity_metrics.get("invalid_mesh_slot_count") or 0)
+        if actual_entity_count:
+            lines.append(
+                "渲染就绪："
+                f"{render_ready_count}/{actual_entity_count}"
+                f"（已观测 {render_observed_count}/{actual_entity_count}；"
+                f"无效 Mesh 实体 {invalid_mesh_entity_count}，slot {invalid_mesh_slot_count}）"
+            )
         dimension_statuses: list[str] = []
         for name, label in dimension_labels.items():
             value = dimensions.get(name, {}) if isinstance(dimensions.get(name), dict) else {}
@@ -9785,12 +9801,35 @@ class LANChatAgentWorker:
             lines.append("阻塞项：" + "；".join(blockers[:3]))
             if len(blockers) > 3:
                 lines.append(f"另有 {len(blockers) - 3} 项阻塞，可在 Runtime 诊断中查看。")
+        readiness_missing_counts = entity_metrics.get("readiness_missing_field_counts")
+        readiness_missing_counts = (
+            dict(readiness_missing_counts)
+            if isinstance(readiness_missing_counts, dict)
+            else {}
+        )
+        ranked_missing_counts = sorted(
+            (
+                (str(name).strip(), int(count or 0))
+                for name, count in readiness_missing_counts.items()
+                if str(name).strip() and int(count or 0) > 0
+            ),
+            key=lambda item: (-item[1], item[0]),
+        )
+        if ranked_missing_counts:
+            lines.append(
+                "实体待检查："
+                + "；".join(
+                    f"{name} x{count}" for name, count in ranked_missing_counts[:5]
+                )
+            )
         unlocks = [str(item).strip() for item in list(report.get("capability_unlocks") or []) if str(item).strip()]
         if unlocks:
             lines.append("当前允许：" + "、".join(unlocks))
         self._logger.info(
             "[R3GateTrace] room=%s plan=%s scene_version=%s overall=%s dimensions=%s "
-            "game_ready=%s/%s blockers=%s blocker_codes=%s report_id=%s",
+            "game_ready=%s/%s render=%s/%s render_observed=%s/%s "
+            "invalid_mesh=entities:%s,slots:%s entity_missing=%s "
+            "blockers=%s blocker_codes=%s report_id=%s",
             str(room_id or "default"),
             str(report.get("plan_id") or result.get("plan_id") or ""),
             scene_version,
@@ -9798,6 +9837,13 @@ class LANChatAgentWorker:
             ",".join(dimension_statuses),
             game_ready_count,
             entity_count,
+            render_ready_count,
+            actual_entity_count,
+            render_observed_count,
+            actual_entity_count,
+            invalid_mesh_entity_count,
+            invalid_mesh_slot_count,
+            ",".join(f"{name}:{count}" for name, count in ranked_missing_counts[:5]),
             len(blockers),
             "|".join(blockers[:3]),
             str(report.get("gate_report_id") or ""),

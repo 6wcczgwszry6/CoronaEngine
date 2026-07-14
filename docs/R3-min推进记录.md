@@ -2004,3 +2004,39 @@ Actor Snapshot 中出现 render_status_observed/render_ready/invalid_mesh_count
 同一条 @GM R3门禁 只有一个 R3GateTrace 和一条回复
 Snapshot plan/version/fingerprint 与终态 Registry 一致
 ```
+
+## 59. W2.1 R3GateReport：Render Readiness 自动对账
+
+在真实 render readiness bridge 落地后，R3 聚合器虽然已经能逐实体识别 `render_readiness_unobserved` 和 `render_not_ready`，但顶层 Gate 摘要此前只披露 Game-ready 总数。若下一次 F5 仍有无效 mesh，仍需要人工展开 Registry 才能区分“未观测”“不可渲染”和“支撑状态缺失”。
+
+本轮改动：
+
+- `entity_readiness.metrics` 增加渲染观测数、渲染就绪数、失败数、无效 mesh 实体数和无效 slot 总数。
+- `R3GateReport.metrics` 提升同一组聚合指标，并提升 `readiness_missing_field_counts`，供后续 runtime doctor 与 ProjectGate 只读复用。
+- GM R3 门禁回复同时显示基准 Game-ready 分母和当前实际实体渲染分母，避免把“14 个基准目标”和“9 个已存在实体”混为同一统计口径。
+- `R3GateTrace` 直接记录 render、render_observed、invalid_mesh 和 entity_missing 摘要，下一轮日志可以自动对账，不再人工关联 GeometrySystem warning。
+- 普通 `needs_review` 仍按既有阈值进入 yellow/red；渲染诊断指标不会被错误写成身份矛盾，也不会改变 RuntimeState。
+
+预期用户可见摘要：
+
+```text
+场景版本：vN；Game-ready：6/14
+渲染就绪：7/9（已观测 9/9；无效 Mesh 实体 2，slot 3）
+实体待检查：grounding_status x3；render_not_ready x2
+```
+
+聚焦验证：
+
+```text
+Game-ready + R3 readiness + support semantics + GM 只读披露：55 tests passed
+R3 查询零 Runtime 写入：passed
+渲染聚合口径与无效 mesh 统计：passed
+```
+
+当前 Gate 不变：
+
+```text
+red / pending_reevaluation
+R3 render readiness 自动对账：code_complete
+真实 Engine 字段与用户摘要：[待 F5/实机验证]
+```

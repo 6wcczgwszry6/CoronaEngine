@@ -3506,6 +3506,61 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             "agent_name": "商人",
         }))
 
+    def test_gm_r3_gate_reply_exposes_render_readiness_diagnostics(self) -> None:
+        worker = _TestWorker(
+            interaction_coordinator=_FakeCoordinator(),
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        dimensions = {
+            name: {"status": "green", "metrics": {}}
+            for name in (
+                "snapshot_integrity",
+                "environment_readiness",
+                "entity_readiness",
+                "finalizer_completeness",
+                "business_graph_consistency",
+                "multiplayer_consistency",
+                "runtime_write_safety",
+            )
+        }
+        dimensions["entity_readiness"] = {
+            "status": "yellow",
+            "metrics": {
+                "entity_count": 9,
+                "expected_entity_count": 14,
+                "game_ready_entity_count": 6,
+                "render_status_observed_count": 9,
+                "render_ready_entity_count": 7,
+                "invalid_mesh_entity_count": 2,
+                "invalid_mesh_slot_count": 3,
+                "readiness_missing_field_counts": {
+                    "grounding_status": 3,
+                    "render_not_ready": 2,
+                },
+            },
+        }
+        gate_report = {
+            "gate_report_id": "r3gate-test",
+            "plan_id": "plan-test",
+            "scene_version": 4,
+            "overall": "yellow",
+            "dimensions": dimensions,
+            "metrics": {"entity_count": 9, "game_ready_entity_count": 6},
+            "blockers": [],
+            "capability_unlocks": ["readonly_snapshot_analysis"],
+        }
+
+        with patch.object(
+            worker._agent_runtime,
+            "handle_message",
+            return_value={"plan_id": "plan-test", "gate_report": gate_report},
+        ):
+            reply = worker._agent_runtime_r3_gate_reply(room_id="room-render-gate")
+
+        self.assertIn("Game-ready：6/14", reply)
+        self.assertIn("渲染就绪：7/9（已观测 9/9；无效 Mesh 实体 2，slot 3）", reply)
+        self.assertIn("实体待检查：grounding_status x3；render_not_ready x2", reply)
+
     def test_gm_summary_includes_runtime_pending_intervention_summary(self) -> None:
         coordinator = _FakeCoordinator()
         worker = _TestWorker(

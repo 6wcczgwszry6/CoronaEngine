@@ -390,6 +390,32 @@ class R3ReadinessGateTests(unittest.TestCase):
         self.assertFalse(entity["game_ready"])
         self.assertIn("engine_actual_aabb", entity["readiness_missing_fields"])
 
+    def test_entity_readiness_summarizes_render_observation_and_invalid_meshes(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        registry = deepcopy(facts["scene_entity_registry"])
+        registry["entities"][2]["render_ready"] = False
+        registry["entities"][2]["invalid_mesh_count"] = 2
+        registry["entities"][3]["render_status_observed"] = False
+        registry["entities"][3]["render_ready"] = False
+        facts["scene_entity_registry"] = registry
+
+        report = evaluate_r3_gate(**facts)
+
+        metrics = report.dimensions["entity_readiness"].metrics
+        self.assertEqual(metrics["render_status_observed_count"], 13)
+        self.assertEqual(metrics["render_status_unobserved_count"], 1)
+        self.assertEqual(metrics["render_ready_entity_count"], 12)
+        self.assertEqual(metrics["render_not_ready_entity_count"], 2)
+        self.assertEqual(metrics["invalid_mesh_entity_count"], 1)
+        self.assertEqual(metrics["invalid_mesh_slot_count"], 2)
+        self.assertEqual(metrics["readiness_missing_field_counts"]["render_not_ready"], 1)
+        self.assertEqual(
+            metrics["readiness_missing_field_counts"]["render_readiness_unobserved"],
+            1,
+        )
+        self.assertEqual(report.metrics["invalid_mesh_entity_count"], 1)
+        self.assertEqual(report.metrics["invalid_mesh_slot_count"], 2)
+
     def test_environment_fingerprint_and_identity_failures_are_red(self) -> None:
         missing_environment = _gate_facts(game_ready_count=8)
         missing_environment["required_environment_components"] = ["room_box", "room_floor", "ceiling"]
