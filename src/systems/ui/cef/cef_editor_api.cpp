@@ -357,11 +357,15 @@ constexpr std::array<EditorApiParamSpec, 2> kScratchKeyReleaseParams = {{
     param("display_key", EditorApiValueType::String, true),
 }};
 
-constexpr std::array<EditorApiParamSpec, 4> kScratchMouseEventParams = {{
+constexpr std::array<EditorApiParamSpec, 8> kScratchMouseEventParams = {{
     param("event_type", EditorApiValueType::String),
     param("button", EditorApiValueType::String, true),
     param("x", EditorApiValueType::Number),
     param("y", EditorApiValueType::Number),
+    param("viewport_x", EditorApiValueType::Number, true),
+    param("viewport_y", EditorApiValueType::Number, true),
+    param("viewport_width", EditorApiValueType::Number, true),
+    param("viewport_height", EditorApiValueType::Number, true),
 }};
 
 #define EDITOR_API_METHOD0_WRAPPED(module, function, js_path, python_path, return_type) \
