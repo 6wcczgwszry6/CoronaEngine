@@ -1709,3 +1709,40 @@ snapshot_integrity Engine plan/version 身份约束：code_complete
 ```
 
 下一步按轨道 A 顺序复核 `environment_readiness`，重点确认必要环境实体的 stable entity identity、真实 Engine AABB、support semantics 与 Snapshot 版本是否同时满足 Gate；所有真实 Engine、多人同步和环境渲染效果仍为 **[待 F5/实机验证]**。
+
+## 53. W1.7 Environment Readiness 硬事实重算与 Actor 身份收口
+
+复核既有 Environment framework、稳定 GUID 和支撑语义修复后确认，生成与 Registry 链路已经能够表达 `room_box / room_floor / terrain / transition_zone`，但 R3 Gate 与 Engine readiness reconcile 仍有两个可信性缺口：`environment_readiness` 只读取 Snapshot 中已经计算好的 `game_ready` 布尔值，没有独立核验必要环境实体的 Engine Actor 身份、真实 AABB 和 component-specific support；Engine readiness polling 在 `actor_id` 未命中时仍按显示名称匹配，可能把同名旧 Actor 的几何事实写到当前环境实体。
+
+本轮改动：
+
+- `environment_readiness` 不再仅相信 `game_ready=True`，而是从 `SceneWorldSnapshot.environment_entities` 重新核验 `entity_id / actor_id / asset_id / model_ref / version / transform / world_aabb / bounds_source / Engine verification / support / sync`。
+- 必要环境实体只有 `bounds_source=engine_actual`、`engine_write_verification_status=engine_verified` 且无 `readiness_missing_fields` 时才计入 ready。
+- 支撑语义按组件类型独立检查：`room_box -> enclosure`，`room_floor / terrain / transition_zone -> grounded`，sky 类为 `not_applicable`。
+- GateReport 增加逐环境实体 `component_diagnostics`，可直接定位 `room_floor:engine_actual_aabb`、`room_box:grounding_status` 等阻断项，不再人工拼接 Registry 与 Snapshot。
+- 对 `room_shell / indoor_enclosure / walkable_floor / ground / transition` 做通用 canonical alias 归一，不为单一测试场景写特例。
+- Engine readiness reconcile 删除名称匹配兜底，只接受稳定 `actor_id`；同名但 actor_id 不同的旧 Actor 不得让当前环境实体晋升为 Engine-ready。
+
+聚焦验证：
+
+```text
+环境 game_ready 布尔值与 Engine AABB/support 事实冲突时 Gate 判 red：passed
+room_shell 等 canonical alias 仍能匹配契约组件：passed
+同名但 actor_id 不同的 Engine Actor 不得提供 readiness：passed
+既有真实环境导入与支撑语义回归：passed
+Game-ready + R3 Readiness + Environment adapter：46 tests passed
+Python syntax compile：passed
+git diff --check：clean（仅既有 CRLF 提示）
+F5 实机：未执行
+```
+
+当前 Gate：
+
+```text
+red / pending_reevaluation
+environment_readiness 硬事实与稳定 Actor 身份判定：code_complete
+旧 F5 的 3/14 Game-ready 与 legacy 环境证据不可用于升级 Gate
+新 F5 的 room_box/room_floor/terrain/transition_zone 真实 Engine Actor、AABB 与 support：待验证
+```
+
+下一步进入 W2 固定场景 F5 Vertical Slice，先执行儿童卧室，使用 `runtime.r3_readiness.evaluate` 自动核对 Engine Actor、RuntimeState、OperationLog、Registry、Snapshot 与 final report；若仍为 red，只修 GateReport 指向的首个真实环境或实体 readiness 断点。所有真实 Engine、多人同步与渲染效果仍为 **[待 F5/实机验证]**。

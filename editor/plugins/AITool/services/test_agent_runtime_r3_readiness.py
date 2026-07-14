@@ -378,6 +378,43 @@ class R3ReadinessGateTests(unittest.TestCase):
             any("duplicate_entity_id" in item for item in identity_report.blockers)
         )
 
+    def test_required_environment_recomputes_engine_facts_instead_of_trusting_flag(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        snapshot = deepcopy(facts["snapshot_result"])
+        room_floor = snapshot["snapshot"]["environment_entities"][1]
+        room_floor["game_ready"] = True
+        room_floor["bounds_source"] = "estimated"
+        room_floor["grounding_status"] = "enclosure"
+        facts["snapshot_result"] = snapshot
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["environment_readiness"]
+        self.assertEqual(dimension.status, "red")
+        self.assertEqual(dimension.metrics["ready_count"], 1)
+        self.assertIn("room_floor:engine_actual_aabb", dimension.contradictions)
+        self.assertIn("room_floor:grounding_status", dimension.contradictions)
+        diagnostic = next(
+            item
+            for item in dimension.metrics["component_diagnostics"]
+            if item["component_type"] == "room_floor"
+        )
+        self.assertFalse(diagnostic["ready"])
+
+    def test_required_environment_accepts_canonical_component_aliases(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        snapshot = deepcopy(facts["snapshot_result"])
+        room_box = snapshot["snapshot"]["environment_entities"][0]
+        room_box["component_type"] = "room_shell"
+        room_box["semantic_role"] = "indoor_enclosure"
+        facts["snapshot_result"] = snapshot
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["environment_readiness"]
+        self.assertEqual(dimension.status, "green")
+        self.assertEqual(dimension.metrics["ready_count"], 2)
+
     def test_engine_snapshot_from_other_scene_version_is_red_even_when_entities_match(self) -> None:
         facts = _gate_facts(game_ready_count=8)
         snapshot = deepcopy(facts["snapshot_result"]["snapshot"])

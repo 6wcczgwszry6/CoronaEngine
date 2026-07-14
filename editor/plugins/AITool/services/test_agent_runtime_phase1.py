@@ -22153,6 +22153,70 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertNotIn("secret", serialized)
         self.assertNotIn("provider-should-not-win", serialized)
 
+    def test_engine_environment_readiness_never_matches_same_name_different_actor(self) -> None:
+        class FakeGate:
+            def invoke_tool(self, tool: Any, payload: dict[str, Any]) -> dict[str, Any]:
+                return tool.invoke(payload)
+
+        class LoadingEnvironmentImportTool:
+            def invoke(self, payload: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "status": "success",
+                    "component_id": payload["component_id"],
+                    "actor_id": payload["actor_guid"],
+                    "actor_data": {
+                        "actor_id": payload["actor_guid"],
+                        "name": payload["name"],
+                        "bounds_ready": False,
+                    },
+                }
+
+        def wrong_identity_snapshot(_request: dict[str, Any]) -> dict[str, Any]:
+            return {
+                "actors": [{
+                    "actor_id": "different-native-actor",
+                    "name": "room_floor",
+                    "bounds_ready": True,
+                    "aabb": {
+                        "min": [-3.0, 0.0, -3.0],
+                        "max": [3.0, 0.1, 3.0],
+                    },
+                }],
+            }
+
+        provider = make_engine_environment_component_import_provider(
+            environment_import_tool=LoadingEnvironmentImportTool(),
+            engine_gate=FakeGate(),
+            scene_snapshot_provider=wrong_identity_snapshot,
+        )
+        with patch.dict(os.environ, {"AGENT_RUNTIME_ENGINE_READY_TIMEOUT_S": "0"}):
+            result = provider({
+                "room_id": "room-env-stable-identity",
+                "plan_id": "plan-env-stable-identity",
+                "batch_id": "batch-env-stable-identity",
+                "environment_components": {
+                    "room-floor": {
+                        "component_id": "room-floor",
+                        "name": "room_floor",
+                        "component_type": "room_floor",
+                        "asset_id": "asset-room-floor",
+                        "model_ref": "room-floor.obj",
+                        "position": [0.0, 0.025, 0.0],
+                        "rotation": [0.0, 0.0, 0.0],
+                        "scale": [6.0, 0.05, 6.0],
+                        "aabb": {
+                            "min": [-3.0, 0.0, -3.0],
+                            "max": [3.0, 0.05, 3.0],
+                        },
+                    }
+                },
+            })
+
+        component = result["environment_components"]["room-floor"]
+        self.assertFalse(component["bounds_ready"])
+        self.assertEqual(component["bounds_source"], "estimated")
+        self.assertEqual(component["engine_lifecycle_status"], "engine_loading")
+
     def test_engine_environment_component_import_provider_unwraps_import_tool_envelope(self) -> None:
         class FakeGate:
             def invoke_tool(self, tool: Any, payload: dict[str, Any]) -> str:

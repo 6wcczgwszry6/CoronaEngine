@@ -1887,19 +1887,9 @@ def _reconcile_engine_ready_facts(
             snapshot = {}
         rows = [dict(item) for item in list(snapshot.get("actors") or []) if isinstance(item, dict)]
         by_id = {str(item.get("actor_id") or ""): item for item in rows if str(item.get("actor_id") or "")}
-        by_name = {str(item.get("name") or ""): item for item in rows if str(item.get("name") or "")}
         all_ready = True
         for entity_id, entity in entities.items():
             observed = by_id.get(str(entity.get("actor_id") or entity_id))
-            if observed is None:
-                for alias in (
-                    entity.get("native_name"),
-                    entity.get("name"),
-                    entity.get("requested_name"),
-                ):
-                    observed = by_name.get(str(alias or ""))
-                    if observed is not None:
-                        break
             bounds = _normalized_bounds_from(observed or {}) if observed else None
             observed_bounds_ready = bool(observed and observed.get("bounds_ready"))
             if observed_bounds_ready and bounds:

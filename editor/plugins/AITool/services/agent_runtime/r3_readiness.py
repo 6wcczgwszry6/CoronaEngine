@@ -250,29 +250,150 @@ def _snapshot_dimension(
     )
 
 
+_ENVIRONMENT_COMPONENT_ALIASES = {
+    "ground": "terrain",
+    "indoor_enclosure": "room_box",
+    "room_shell": "room_box",
+    "walkable_floor": "room_floor",
+    "indoor_outdoor_transition": "transition_zone",
+    "transition": "transition_zone",
+}
+
+
+def _canonical_environment_component_type(value: Any) -> str:
+    normalized = str(value or "").strip().lower()
+    return _ENVIRONMENT_COMPONENT_ALIASES.get(normalized, normalized)
+
+
+def _environment_entity_missing_fields(
+    entity: Mapping[str, Any],
+    *,
+    component_type: str,
+) -> list[str]:
+    """Recompute required environment readiness from downstream-visible facts."""
+
+    missing: list[str] = []
+    if str(entity.get("entity_type") or "").strip().lower() != "environment":
+        missing.append("entity_type")
+    if not str(entity.get("entity_id") or "").strip():
+        missing.append("entity_id")
+    if not str(entity.get("actor_id") or "").strip():
+        missing.append("actor_id")
+    if not str(entity.get("asset_id") or "").strip():
+        missing.append("asset_id")
+    if not str(entity.get("model_ref") or "").strip():
+        missing.append("model_ref")
+    if _safe_int(entity.get("version"), 0) <= 0:
+        missing.append("version")
+    if not isinstance(entity.get("transform"), Mapping) or not entity.get("transform"):
+        missing.append("transform")
+    if not isinstance(entity.get("world_aabb"), Mapping) or not entity.get("world_aabb"):
+        missing.append("world_aabb")
+    if str(entity.get("bounds_source") or "").strip().lower() != "engine_actual":
+        missing.append("engine_actual_aabb")
+    if str(entity.get("engine_write_verification_status") or "").strip().lower() != "engine_verified":
+        missing.append("engine_ready")
+
+    grounding = str(entity.get("grounding_status") or "").strip().lower()
+    expected_grounding = {
+        "room_box": {"enclosure"},
+        "room_floor": {"grounded"},
+        "terrain": {"grounded"},
+        "transition_zone": {"grounded"},
+        "sky": {"not_applicable"},
+        "skybox": {"not_applicable"},
+    }.get(component_type, {
+        "grounded",
+        "enclosure",
+        "not_applicable",
+        "wall_mounted",
+        "suspended",
+        "ceiling_hung",
+    })
+    if grounding not in expected_grounding:
+        missing.append("grounding_status")
+
+    sync_status = str(entity.get("sync_status") or "").strip().lower()
+    if sync_status in {
+        "",
+        "unknown",
+        "partial",
+        "failed",
+        "needs_attention",
+        "timeout",
+        "timed_out",
+        "abandoned",
+        "cancelled",
+        "deleted",
+    }:
+        missing.append("sync_status")
+    declared_missing = entity.get("readiness_missing_fields")
+    if isinstance(declared_missing, Sequence) and not isinstance(
+        declared_missing, (str, bytes, bytearray)
+    ):
+        missing.extend(str(item) for item in declared_missing if str(item or "").strip())
+    if not bool(entity.get("game_ready")):
+        missing.append("game_ready")
+    return _unique_text(missing)
+
+
 def _environment_dimension(
     snapshot_result: Mapping[str, Any],
     required_environment_components: Sequence[Any],
 ) -> R3GateDimension:
     snapshot = _stable_mapping(_stable_mapping(snapshot_result).get("snapshot"))
     entities = _stable_rows(snapshot.get("environment_entities"))
-    required = _unique_text(list(required_environment_components))
+    required = _unique_text(
+        _canonical_environment_component_type(item)
+        for item in required_environment_components
+        if _canonical_environment_component_type(item)
+    )
     by_type: dict[str, list[dict[str, Any]]] = {}
     for entity in entities:
-        component_type = str(
+        component_type = _canonical_environment_component_type(
             entity.get("component_type")
             or entity.get("environment_component_type")
             or entity.get("semantic_role")
-            or ""
-        ).strip()
+        )
         if component_type:
             by_type.setdefault(component_type, []).append(entity)
     missing = [item for item in required if item not in by_type]
+    component_diagnostics: list[dict[str, Any]] = []
+    ready_components: set[str] = set()
+    for component_type in required:
+        rows = by_type.get(component_type, [])
+        for index, row in enumerate(rows):
+            row_missing = _environment_entity_missing_fields(
+                row,
+                component_type=component_type,
+            )
+            component_diagnostics.append({
+                "component_type": component_type,
+                "entity_ref": str(
+                    row.get("entity_id")
+                    or row.get("actor_id")
+                    or f"{component_type}[{index}]"
+                ),
+                "ready": not row_missing,
+                "readiness_missing_fields": row_missing,
+            })
+            if not row_missing:
+                ready_components.add(component_type)
+    component_diagnostics.sort(
+        key=lambda item: (
+            str(item.get("component_type") or ""),
+            str(item.get("entity_ref") or ""),
+        )
+    )
     not_ready = [
-        item
-        for item in required
-        if item in by_type and not any(bool(row.get("game_ready")) for row in by_type[item])
+        item for item in required if item in by_type and item not in ready_components
     ]
+    readiness_contradictions = _unique_text(
+        f"{item['component_type']}:{field}"
+        for item in component_diagnostics
+        if not item["ready"]
+        for field in item["readiness_missing_fields"]
+    )
     if not required:
         status = "red"
         missing.append("required_environment_components")
@@ -290,14 +411,16 @@ def _environment_dimension(
         metrics={
             "required_count": len(required),
             "present_count": sum(1 for item in required if item in by_type),
-            "ready_count": sum(
-                1 for item in required if any(bool(row.get("game_ready")) for row in by_type.get(item, []))
-            ),
+            "ready_count": len(ready_components),
             "environment_entity_count": len(entities),
             "required_components": required,
+            "component_diagnostics": component_diagnostics,
         },
         missing=missing,
-        contradictions=[f"environment_not_ready:{item}" for item in not_ready],
+        contradictions=[
+            *[f"environment_not_ready:{item}" for item in not_ready],
+            *readiness_contradictions,
+        ],
         evidence_refs=["SceneWorldSnapshot.environment_entities"],
     )
 
