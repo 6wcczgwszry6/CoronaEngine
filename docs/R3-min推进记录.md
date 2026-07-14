@@ -1892,3 +1892,46 @@ Snapshot terminal refresh：[待 F5/实机验证]
 ```
 
 下一次 F5 的同一条 `@GM R3门禁` 应只出现一个 `R3GateTrace` 和一条回复；若仍重复，直接根据 `message_dispatch_deduped`、owner、route 和 blocker_codes 定位，不再扩展新的去重集合。
+
+## 57. W2.1 Entity Readiness：支撑语义统一
+
+`2026-07-14_13-28-28_corona.log` 的终态事实为：
+
+```text
+Runtime entities：9（environment 2 + actor 7）
+Game-ready：6/14
+readiness_missing：grounding_status x3
+Engine bridge：13/13 success
+```
+
+结合本次保留的 7 张混元输入图和 Actor 导入顺序，普通对象依次属于：衣柜、书桌、床、地毯、台灯、玩偶、书架。旧代码在 Runtime import、geometry review 和 layout reflow 三处各维护一份名称规则，前四类可识别为 `floor_supported`，台灯、玩偶和书架落为 `unknown`；因此 13 次 Engine 写入可解释为 `2 environment + 7 actor create + 4 ground transform`，与 3 个 grounding 缺失完全对应。
+
+本轮改动：
+
+- 新增共享 `support_semantics.classify_support_type()`，统一 import、ground review 和 layout reflow。
+- 补齐台灯/落地灯、玩偶/玩具、书架/书柜等通用地面支撑语义。
+- 保持严格优先级：吊灯/悬挂物先判 `ceiling_hung`，壁灯/墙饰先判 `wall_mounted`，不会因包含“灯”而统一落地。
+- 显式 `support_type` 优先于名称推断，允许上游结构化语义覆盖规则 fallback。
+- 分类结果只决定 support domain；只有 Engine actual AABB 证明 bottom 接触地面，或 Engine ground transform 返回成功，才能写入 `grounding_status=grounded`。
+- `estimated` AABB、浮空 AABB、挂墙/悬挂和 unknown 对象不得伪造 grounded。
+
+聚焦验证：
+
+```text
+Support semantics + Game-ready：36 passed
+AgentRuntime phase1：2 passed
+Python syntax compile：passed
+git diff --check：clean（仅既有 CRLF 提示）
+```
+
+日志还存在 4 次 `GeometrySystem: invalid mesh slot skipped`。这证明当前 `engine_accepted/load_finished` 尚不能完整代表 render-ready；该问题先作为下一 Gate 事实断点记录，不在本轮 support/grounding 修改中顺带改 C++。
+
+当前 Gate 保持：
+
+```text
+red / pending_reevaluation
+entity support semantic closure：code_complete
+台灯、玩偶、书架 ground transform + actual AABB：[待 F5/实机验证]
+预期 Game-ready：若三者 Engine 事实成立，可由 6/14 提升至 9/14
+invalid mesh render readiness：待独立诊断
+```

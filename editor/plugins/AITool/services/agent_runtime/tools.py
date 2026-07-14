@@ -28,6 +28,7 @@ from .core import (
     ToolRegistry,
     ToolResult,
 )
+from .support_semantics import classify_support_type
 
 
 _ABSTRACT_LAYOUT_TERMS = (
@@ -4572,43 +4573,7 @@ def _check_actor_overlap_facts_tool(call: ToolCall) -> ToolResult:
 
 
 def _support_type_for_ground_snap(name: str) -> str:
-    safe_name = str(name or "").strip()
-    lowered = safe_name.lower()
-    if not safe_name:
-        return "unknown"
-    if (
-        lowered.startswith("__room")
-        or lowered.startswith("__terrain")
-        or lowered.startswith("_terrain")
-        or lowered in {"terrain", "ground", "sky", "room_box", "__room_box", "__room_terrain"}
-        or any(term in safe_name for term in ("地形", "天空", "边界"))
-    ):
-        return "system"
-    if any(
-        term in lowered or term in safe_name
-        for term in (
-            "吊灯", "吊旗", "吊笼", "悬挂", "铁链", "天花",
-            "ceiling", "chandelier", "hanging",
-        )
-    ):
-        return "ceiling_hung"
-    if any(
-        term in lowered or term in safe_name
-        for term in (
-            "火把", "壁灯", "墙灯", "墙饰", "地图", "旗帜", "窗", "门", "招牌", "武器架",
-            "torch", "sconce", "wall", "map", "flag", "window", "door", "sign", "weapon rack",
-        )
-    ):
-        return "wall_mounted"
-    if _floor_supported_name(safe_name) or any(
-        term in lowered
-        for term in (
-            "table", "chair", "box", "chest", "coin", "barrel", "sack", "bed", "cabinet",
-            "rug", "carpet", "statue", "animal", "bench", "sofa",
-        )
-    ):
-        return "floor_supported"
-    return "unknown"
+    return classify_support_type(name)
 
 
 def _snap_actor_grounding_facts_tool(call: ToolCall) -> ToolResult:
@@ -5897,27 +5862,7 @@ def _zone_hint(index: int, layout_items: list[str]) -> str:
 
 
 def _floor_supported_name(name: str) -> bool:
-    return any(
-        term in name
-        for term in (
-            "桌",
-            "椅",
-            "箱",
-            "宝箱",
-            "金币",
-            "木桶",
-            "酒桶",
-            "麻袋",
-            "床",
-            "柜",
-            "地毯",
-            "雕像",
-            "动物",
-            "帐篷",
-            "篝火",
-            "摊位",
-        )
-    )
+    return classify_support_type(name) == "floor_supported"
 
 
 def _safe_actor_map_arg(value: Any) -> dict[str, dict[str, Any]]:

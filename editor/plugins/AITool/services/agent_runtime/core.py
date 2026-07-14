@@ -24,6 +24,7 @@ from .scene_world_consistency import (
     scene_world_fingerprint,
 )
 from .r3_readiness import evaluate_r3_gate
+from .support_semantics import classify_support_type
 
 
 def _now() -> float:
@@ -35804,90 +35805,17 @@ class AgentRuntime:
 
     @staticmethod
     def _layout_support_type(actor: Mapping[str, Any]) -> str:
-        name = str(actor.get("name") or actor.get("actor_name") or actor.get("actor_id") or "").strip().lower()
-        if not name:
-            return "unknown"
-        if AgentRuntime._is_system_actor_name(name):
-            return "system"
-        wall_tokens = (
-            "torch",
-            "wall lamp",
-            "wall_light",
-            "sconce",
-            "map",
-            "flag",
-            "banner",
-            "window",
-            "door",
-            "sign",
-            "weapon rack",
-            "火把",
-            "壁灯",
-            "墙灯",
-            "墙饰",
-            "地图",
-            "旗帜",
-            "窗",
-            "门",
-            "招牌",
-            "武器架",
+        return classify_support_type(
+            (
+                actor.get("requested_name"),
+                actor.get("name"),
+                actor.get("display_name"),
+                actor.get("semantic_role"),
+                actor.get("actor_name"),
+                actor.get("actor_id"),
+            ),
+            explicit=actor.get("support_type"),
         )
-        if any(token in name for token in wall_tokens):
-            return "wall_mounted"
-        ceiling_tokens = (
-            "ceiling",
-            "chandelier",
-            "hanging",
-            "chain",
-            "吊灯",
-            "吊旗",
-            "吊笼",
-            "悬挂",
-            "铁链",
-            "天花",
-        )
-        if any(token in name for token in ceiling_tokens):
-            return "ceiling_hung"
-        floor_tokens = (
-            "table",
-            "desk",
-            "chair",
-            "box",
-            "chest",
-            "coin",
-            "barrel",
-            "sack",
-            "bag",
-            "bed",
-            "cabinet",
-            "wardrobe",
-            "rug",
-            "carpet",
-            "statue",
-            "dog",
-            "bench",
-            "sofa",
-            "桌",
-            "椅",
-            "箱",
-            "宝箱",
-            "藏宝箱",
-            "金币",
-            "木桶",
-            "酒桶",
-            "麻袋",
-            "床",
-            "柜",
-            "地毯",
-            "雕像",
-            "动物",
-            "小狗",
-            "长椅",
-            "沙发",
-        )
-        if any(token in name for token in floor_tokens):
-            return "floor_supported"
-        return "unknown"
 
     @staticmethod
     def _vector3_from(value: Any) -> list[float] | None:

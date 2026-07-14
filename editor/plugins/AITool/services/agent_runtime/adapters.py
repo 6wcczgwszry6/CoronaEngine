@@ -16,6 +16,7 @@ import threading
 import time
 from typing import Any, Callable
 
+from .support_semantics import classify_support_type
 from .tools import ResourceProvider
 
 
@@ -1810,27 +1811,15 @@ def _stable_runtime_entity_id(actor_guid: str) -> str:
 
 
 def _runtime_actor_support_type(actor: dict[str, Any]) -> str:
-    name = " ".join(
-        str(actor.get(key) or "")
-        for key in ("requested_name", "name", "display_name", "semantic_role")
-    ).strip()
-    lowered = name.lower()
-    if any(term in lowered or term in name for term in (
-        "吊灯", "吊旗", "悬挂", "铁链", "天花", "ceiling", "chandelier", "hanging",
-    )):
-        return "ceiling_hung"
-    if any(term in lowered or term in name for term in (
-        "火把", "壁灯", "墙灯", "墙饰", "地图", "旗帜", "窗", "门", "招牌", "武器架",
-        "torch", "sconce", "wall", "map", "flag", "window", "door", "sign", "weapon rack",
-    )):
-        return "wall_mounted"
-    if any(term in lowered or term in name for term in (
-        "桌", "椅", "箱", "宝箱", "金币", "桶", "麻袋", "床", "柜", "地毯", "雕像", "动物", "长椅", "沙发", "帐篷",
-        "table", "chair", "box", "chest", "coin", "barrel", "sack", "bed", "cabinet",
-        "rug", "carpet", "statue", "animal", "bench", "sofa", "tent",
-    )):
-        return "floor_supported"
-    return "unknown"
+    return classify_support_type(
+        (
+            actor.get("requested_name"),
+            actor.get("name"),
+            actor.get("display_name"),
+            actor.get("semantic_role"),
+        ),
+        explicit=actor.get("support_type"),
+    )
 
 
 def _actor_bottom_is_grounded(
