@@ -9771,7 +9771,7 @@ class LANChatAgentWorker:
             lines.append("当前允许：" + "、".join(unlocks))
         self._logger.info(
             "[R3GateTrace] room=%s plan=%s scene_version=%s overall=%s dimensions=%s "
-            "game_ready=%s/%s blockers=%s report_id=%s",
+            "game_ready=%s/%s blockers=%s blocker_codes=%s report_id=%s",
             str(room_id or "default"),
             str(report.get("plan_id") or result.get("plan_id") or ""),
             scene_version,
@@ -9780,6 +9780,7 @@ class LANChatAgentWorker:
             game_ready_count,
             entity_count,
             len(blockers),
+            "|".join(blockers[:3]),
             str(report.get("gate_report_id") or ""),
         )
         return "\n".join(lines)

@@ -16869,6 +16869,32 @@ class AgentRuntime:
         else:
             return {}
 
+        if next_status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED}:
+            # Batch snapshots may have been captured before the plan reached
+            # its terminal version. Compare the frozen world against one fresh
+            # Engine observation carrying the same plan/version.
+            snapshot_refresh = self.refresh_scene_snapshot(
+                str(room_id),
+                plan_id=plan_id,
+                scene_version=finalizer_scene_version,
+            )
+            snapshot_graph_status = str(
+                dict(snapshot_refresh.get("graph") or {}).get("status")
+                if isinstance(snapshot_refresh, Mapping)
+                else ""
+            )
+            if snapshot_graph_status != "completed":
+                self.operation_log.append(
+                    "finalizer_engine_snapshot_refresh_failed",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    message=snapshot_graph_status or "unknown",
+                    payload={
+                        "scene_version": finalizer_scene_version,
+                        "graph_status": snapshot_graph_status or "unknown",
+                    },
+                )
+
         previous_status = plan.status
         if previous_status != next_status:
             plan.status = next_status
@@ -31554,11 +31580,18 @@ class AgentRuntime:
         }
         return snapshot
 
-    def refresh_scene_snapshot(self, room_id: str) -> dict[str, Any]:
+    def refresh_scene_snapshot(
+        self,
+        room_id: str,
+        *,
+        plan_id: str = "",
+        scene_version: int | None = None,
+    ) -> dict[str, Any]:
         room = str(room_id)
         room_before_snapshot = self.state.room(room)
         target_plan_id = str(
-            room_before_snapshot.get("active_execution_plan_id")
+            plan_id
+            or room_before_snapshot.get("active_execution_plan_id")
             or room_before_snapshot.get("latest_completed_plan_id")
             or room_before_snapshot.get("peer_mirror_plan_id")
             or room_before_snapshot.get("active_discussion_plan_id")
@@ -31567,11 +31600,15 @@ class AgentRuntime:
         ).strip()
         scene_name = ""
         target_plan = self._runtime_plan_from_state(room, target_plan_id)
-        if target_plan is not None:
+        if scene_version is not None:
+            resolved_scene_version = max(1, int(scene_version or 1))
+            if target_plan is not None:
+                scene_name = str(target_plan.scene_name or "")
+        elif target_plan is not None:
             scene_name = str(target_plan.scene_name or "")
-            scene_version = max(1, int(target_plan.version or 1))
+            resolved_scene_version = max(1, int(target_plan.version or 1))
         else:
-            scene_version = max(
+            resolved_scene_version = max(
                 1,
                 int(
                     dict(room_before_snapshot.get("peer_mirror_scene_versions") or {}).get(
@@ -31590,7 +31627,7 @@ class AgentRuntime:
                     "room_id": room,
                     "scene_name": scene_name,
                     "plan_id": target_plan_id,
-                    "scene_version": scene_version,
+                    "scene_version": resolved_scene_version,
                     "known_actors": known_actors,
                 },
                 risk_level=RiskLevel.LOW,

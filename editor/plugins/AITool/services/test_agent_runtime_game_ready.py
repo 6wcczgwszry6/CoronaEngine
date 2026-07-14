@@ -1023,6 +1023,11 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
             patch.object(runtime, "_runtime_plan_by_id_from_state", return_value=plan),
             patch.object(runtime, "_planned_batches_for_plan", return_value=[batch]),
             patch.object(runtime, "_reconcile_partial_engine_readiness", return_value={}),
+            patch.object(
+                runtime,
+                "refresh_scene_snapshot",
+                return_value={"graph": {"status": "completed"}},
+            ) as refresh_snapshot,
             patch.object(runtime, "_scene_entity_registry_for_plan", return_value=registry),
             patch.object(runtime, "_scene_world_snapshot_for_plan", return_value=snapshot),
             patch.object(runtime, "_latest_persisted_report_for_plan", side_effect=[{}, report]),
@@ -1035,6 +1040,11 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
             )
 
         self.assertTrue(result["report_ready"])
+        refresh_snapshot.assert_called_once_with(
+            plan.room_id,
+            plan_id=plan.plan_id,
+            scene_version=plan.version,
+        )
         events = runtime.operation_log.events()
         self.assertLess(
             events.index("runtime_scene_world_consistency_audited"),

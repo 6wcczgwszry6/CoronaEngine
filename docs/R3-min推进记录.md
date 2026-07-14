@@ -1790,3 +1790,65 @@ entity_readiness 硬事实独立核验：code_complete
 ```
 
 下一步严格进入 W2.1 儿童卧室 F5。必须保存运行日志与代码 commit、room/plan/version、Engine Actor 摘要、OperationLog cursor、Registry、Snapshot fingerprint、final report 和 `@GM R3门禁` 输出；若仍为 red，只处理 GateReport 指向的第一个实机事实断点。所有真实 Engine、渲染、接地和多人效果仍为 **[待 F5/实机验证]**。
+
+## 55. W2.1 儿童卧室 F5：Snapshot 终态版本断点
+
+有效 VSCode F5 日志：
+
+```text
+build/examples/engine/RelWithDebInfo/logs/2026-07-14_13-28-28_corona.log
+Runtime plan: plan-2bde99becad5
+Scene version: 4
+```
+
+本轮实机证据：
+
+```text
+业务批次：3/3 terminal
+业务 ToolGraph：3/3 terminal
+ToolCall：54/54 succeeded，0 failed
+Runtime entities：9（environment 2 + actor 7）
+核验 Game-ready：6/14（实际场景 6/9）
+Engine bridge：13/13 success，0 failed
+Environment readiness：green
+Finalizer completeness：green
+Business graph consistency：green
+Runtime write safety：green
+Entity readiness：yellow
+Snapshot integrity：red
+Overall Gate：red
+```
+
+结论：当前代码已把环境、执行图、Finalizer 与写权限边界跑通，Game-ready 从旧基线 `3/14` 提升到 `6/14`；但最终 Registry/SceneWorldSnapshot 仍可能与批次早期 Engine Snapshot 对账。原 Finalizer 在 readiness reconcile 后直接选择已有快照，没有按终态 `plan_id + scene_version` 重新采集 Engine 事实，因此最终 v4 世界可能与旧批次快照发生 identity/fingerprint 冲突。
+
+本轮小修：
+
+- Finalizer 仅在计划进入 terminal 时，按显式 `plan_id + scene_version` 刷新一次 Engine Snapshot。
+- 刷新发生在 Registry、SceneWorldSnapshot 和 consistency audit 之前，不修改 Provider、C++ 导入或业务 ToolGraph。
+- 执行仍处于 partial/96% 时不反复刷新，避免继续膨胀 internal graph。
+- R3 trace 增加前三个 `blocker_codes`，下一次 F5 可直接定位 Snapshot、实体或多人维度的具体缺失事实。
+- 增加 Finalizer 必须以终态计划身份刷新快照的回归断言。
+
+聚焦验证：
+
+```text
+Game-ready tests：30 passed
+R3 Readiness tests：15 passed
+Python syntax compile：passed
+git diff --check：clean（仅既有 CRLF 提示）
+```
+
+本次日志还暴露一个后续控制面断点：同一条 `@GM R3门禁` 先被 Native Queue 处理，随后又被 Agent Task 处理，产生两条回复和两个 report id；第二条路径末尾还出现一次零事实 RuntimeEvidence。该问题不影响本轮 Snapshot 修复的代码边界，列入 W2.1 下一断点。
+
+当前 Gate：
+
+```text
+red / snapshot_fix_pending_f5
+四个基础维度已由本次 F5 证明为 green
+entity_readiness：yellow，6/14
+finalizer terminal-version Engine Snapshot refresh：code_complete
+Snapshot fingerprint 一致性：待下一次 F5 验证
+GM R3 查询双入口幂等：待修复
+```
+
+下一次 F5 优先复用同类卧室场景并执行 `@GM R3门禁`。必须核对 `blocker_codes`、Snapshot plan/version/fingerprint、Registry 计数和重复回复；Snapshot 转为 yellow/green 后，再处理 GM 查询双入口幂等与剩余 3 个 `grounding_status` 缺失。所有本轮 Engine Snapshot 一致性改进仍标记 **[待 F5/实机验证]**。
