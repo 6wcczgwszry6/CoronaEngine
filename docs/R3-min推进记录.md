@@ -2172,3 +2172,47 @@ engine_readiness_pending 有界退避：code_complete
 
 下一次 F5 必须核对：`render_observed > 0`、`internal graph` 在业务终态后不再无界增长、
 必要环境实体进入 ready，并出现 Registry/Snapshot/report_ready 的可信终态事件。
+
+## 63. W1.2 F5 前置核验：Native `created` 与 Engine-ready 事实脱节
+
+在 `f56dae61` 的 Render Snapshot 投影和 Finalizer 有界重试修复后，F5 provider 聚焦回归仍
+报告一个 `actor_import` readiness mismatch。测试事实显示普通 Actor 已同时具备：
+
+```text
+stable actor_id
+engine_actual AABB
+engine_lifecycle_status=bounds_ready
+render_status_observed=true
+render_ready=true
+```
+
+但 C++ 导入返回的同步生命周期仍为 `created`。Registry 的 Engine write 判定此前只接受
+`engine_created/engine_imported/...`，因此将这类已经被原生 Snapshot 独立证明就绪的 Actor
+保留为 `engine_write_verification_status=unknown`。这会导致上一节字段投影修好后，普通模型
+仍无法进入 Game-ready。
+
+本轮修复严格限定为：只有 actual bounds、render observation、render-ready 和 ready lifecycle
+四项同时成立时，`sync_status=created` 才可计为 `engine_verified`。单独的 handle 或 created
+返回仍不代表 Engine ready，也不能进入 Game-ready。
+
+同时更新 F5 provider fixture，使其显式模拟 native render readiness，不再用旧的
+handle/AABB-only 事实冒充完整 Engine 终态。
+
+聚焦验证：
+
+```text
+Game-ready + R3 readiness + F5 provider bridge + Finalizer backoff：52 passed
+Python syntax compile：passed
+旧 F5 日志探针：R3_F5_BLOCKED PASS=2 WARN=2 FAIL=7（符合修复前基线）
+```
+
+当前 Gate 仍为：
+
+```text
+red / pending_reevaluation
+native created + actual render-ready reconcile：code_complete
+真实普通 Actor Game-ready 与 Finalizer 终态：[待 F5/实机验证]
+```
+
+下一次 F5 除上一节检查项外，还必须确认普通 Actor 的
+`engine_write_verification_status=engine_verified`，不能只看到 Environment ready。

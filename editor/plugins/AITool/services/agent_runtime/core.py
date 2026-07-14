@@ -20838,7 +20838,10 @@ class AgentRuntime:
             lifecycle = str(row.get("engine_lifecycle_status") or "").strip().lower()
             render_observed = bool(row.get("render_status_observed"))
             render_ready = bool(row.get("render_ready"))
+            # A native "created" sync label is terminal only after the snapshot
+            # independently proves actual bounds and render-ready geometry.
             if bounds_ready and render_observed and render_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and sync_status in {
+                "created",
                 "engine_created",
                 "engine_imported",
                 "engine_transformed",

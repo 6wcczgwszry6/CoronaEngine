@@ -1475,6 +1475,13 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                             "world_aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.0, 0.5]},
                             "bounds_ready": True,
                             "engine_lifecycle_status": "bounds_ready",
+                            "render_status_observed": True,
+                            "render_ready": True,
+                            "render_failed": False,
+                            "gpu_build_state": "Ready",
+                            "mesh_count": 1,
+                            "renderable_mesh_count": 1,
+                            "invalid_mesh_count": 0,
                             "sync_status": "engine_imported",
                         })
                     for index, import_call in enumerate(
@@ -1491,6 +1498,13 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                             "world_aabb": {"min": [-8.0, 0.0, -8.0], "max": [8.0, 0.05, 8.0]},
                             "bounds_ready": True,
                             "engine_lifecycle_status": "bounds_ready",
+                            "render_status_observed": True,
+                            "render_ready": True,
+                            "render_failed": False,
+                            "gpu_build_state": "Ready",
+                            "mesh_count": 1,
+                            "renderable_mesh_count": 1,
+                            "invalid_mesh_count": 0,
                             "sync_status": "engine_imported",
                         })
                     return {"scene_name": "Scene/f5.scene", "actors": actors}
@@ -1597,12 +1611,16 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(bridge_summary["bridge_failed_count"], 0)
         self.assertIn("engine_actor_import", bridge_summary["write_source_counts"])
         self.assertIn("engine_environment_import", bridge_summary["write_source_counts"])
-        self.assertEqual(adapter_summary["readiness_mismatch_count"], 0)
+        registry = report["scene_entity_registry"]
+        self.assertEqual(
+            adapter_summary["readiness_mismatch_count"],
+            0,
+            {"adapter": adapter_summary, "registry": registry},
+        )
         self.assertEqual(
             set(adapter_summary["resolved_readiness_mismatch_channels"]),
             {"actor_import", "environment_import"},
         )
-        registry = report["scene_entity_registry"]
         self.assertGreaterEqual(registry["actor_count"], 1)
         self.assertEqual(registry["missing_transform_count"], 0)
         self.assertEqual(registry["missing_aabb_count"], 0)
