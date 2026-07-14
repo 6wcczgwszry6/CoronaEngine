@@ -1935,3 +1935,72 @@ entity support semantic closure：code_complete
 预期 Game-ready：若三者 Engine 事实成立，可由 6/14 提升至 9/14
 invalid mesh render readiness：待独立诊断
 ```
+
+## 58. W2.1 Entity Readiness：真实可渲染几何门禁
+
+用户提供的 VSCode F5 日志仍为：
+
+```text
+build/examples/engine/RelWithDebInfo/logs/2026-07-14_13-28-28_corona.log
+日志结束时间：2026-07-14 14:05:18
+```
+
+该日志早于以下修复提交：
+
+```text
+d9dc806f 2026-07-14 14:15:22 terminal Engine Snapshot refresh
+6173c9a9 2026-07-14 14:18:55 structured GM query dedupe
+1695c56b 2026-07-14 14:28:39 unified entity support semantics
+```
+
+因此它是修复前基线，不能用于验证 Snapshot 终态刷新、GM 单回复或支撑语义修复。日志中仍有以下有效问题证据：
+
+```text
+GeometrySystem load finished：存在
+GeometrySystem invalid mesh slot skipped：4 次
+OpticsSystem skipped invalid mesh draw：存在
+render_status_observed/render_ready：未进入 Runtime 事实
+RuntimeEvidence：Game-ready 6/14，grounding_status 缺失 3 个
+R3GateTrace：2 次，Snapshot integrity red
+```
+
+其中无效 mesh slot 的 vertex/index/storage buffer 均为 false，但旧 `get_editor_actor_geometry_status_from_python()` 只检查 `gpu_build_state == Ready` 和 `mesh_count > 0`。这会把“Actor 已加载但当前没有有效可绘制 mesh slot”错误计为 Engine-ready，进而污染 Registry、SceneWorldSnapshot 和 R3GateReport。
+
+本轮改动：
+
+- 在 C++ `Geometry` API 增加只读 `GeometryRenderStatus`，通过 `GeometrySystem::query_mesh_slots()` 统计可绘制和无效 mesh slot。
+- CEF Actor Snapshot 输出 `render_status_observed`、`render_ready`、`render_failed`、`gpu_build_state`、`mesh_count`、`renderable_mesh_count` 和 `invalid_mesh_count`。
+- Runtime actor/environment import 与 late-ready reconcile 保留上述真实 Engine 字段。
+- `engine_verified` 和 `game_ready` 现在同时要求 actual AABB 与真实 render-ready；无效 slot 不再被伪装为 Game-ready。
+- R3 readiness 对未观测和不可渲染实体分别输出 `render_readiness_unobserved`、`render_not_ready`。
+- 不修改资源生成、LOD 切换、渲染或 Engine 写入链路；本轮只补真实事实观测与门禁。
+
+聚焦验证：
+
+```text
+Game-ready + R3 readiness + support semantics：52 tests passed
+Python syntax compile：passed
+RelWithDebInfo corona_engine 增量构建：passed
+新增回归：actual AABB 存在但 mesh slot 无效时不得 Game-ready
+```
+
+当前 Gate 保持：
+
+```text
+red / pending_reevaluation
+真实 render readiness bridge：code_complete
+Snapshot terminal refresh：code_complete
+GM structured query dedupe：code_complete
+support semantics closure：code_complete
+上述四项真实 Engine/UI 效果：[待 F5/实机验证]
+```
+
+下一次 F5 必须使用包含本节改动的新构建，并核对：
+
+```text
+Actor Snapshot 中出现 render_status_observed/render_ready/invalid_mesh_count
+无效 mesh slot 对应实体进入 needs_review，而不是 Game-ready
+台灯、玩偶、书架不再缺 grounding_status（以实际 AABB/ground transform 为准）
+同一条 @GM R3门禁 只有一个 R3GateTrace 和一条回复
+Snapshot plan/version/fingerprint 与终态 Registry 一致
+```

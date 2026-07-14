@@ -1657,6 +1657,16 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["world_aabb"] = world_aabb ? aabb_to_json(*world_aabb) : nlohmann::json(nullptr);
     item["aabb"] = item["world_aabb"];
     item["bounds_ready"] = static_cast<bool>(world_aabb);
+    const auto render_status = actor.geometry
+        ? actor.geometry->get_render_status()
+        : Corona::API::GeometryRenderStatus{};
+    item["render_status_observed"] = render_status.observed;
+    item["render_ready"] = render_status.ready;
+    item["render_failed"] = render_status.failed;
+    item["gpu_build_state"] = render_status.gpu_build_state;
+    item["mesh_count"] = render_status.mesh_count;
+    item["renderable_mesh_count"] = render_status.renderable_mesh_count;
+    item["invalid_mesh_count"] = render_status.invalid_mesh_count;
     item["size"] = world_aabb
         ? nlohmann::json::array({
             (*world_aabb)[3] - (*world_aabb)[0],
@@ -4729,11 +4739,15 @@ std::string get_editor_actor_geometry_status_from_python(const std::string& scen
             }.dump();
         }
         const bool valid = actor->geometry && actor->geometry->is_valid();
-        const auto gpu_state = valid ? actor->geometry->get_gpu_build_state() : std::string("Invalid");
-        const auto mesh_count = valid ? actor->geometry->get_mesh_count() : 0;
+        const auto render_status = actor->geometry
+            ? actor->geometry->get_render_status()
+            : Corona::API::GeometryRenderStatus{};
+        const auto gpu_state = valid ? render_status.gpu_build_state : std::string("Invalid");
+        const auto mesh_count = valid ? render_status.mesh_count : 0;
         const auto model_id = valid ? actor->geometry->get_model_id() : 0;
-        const bool render_ready = valid && gpu_state == "Ready" &&
-            (mesh_count > 0 || actor->actor_type == "audio");
+        const bool render_ready = actor->actor_type == "audio"
+            ? valid && gpu_state == "Ready"
+            : valid && render_status.ready;
         return nlohmann::json{
             {"status", "success"},
             {"scene", scene->route},
@@ -4743,6 +4757,9 @@ std::string get_editor_actor_geometry_status_from_python(const std::string& scen
             {"failed", gpu_state == "Failed"},
             {"gpu_build_state", gpu_state},
             {"mesh_count", mesh_count},
+            {"render_status_observed", render_status.observed},
+            {"renderable_mesh_count", render_status.renderable_mesh_count},
+            {"invalid_mesh_count", render_status.invalid_mesh_count},
             {"model_id", model_id},
         }.dump();
     } catch (const std::exception& e) {

@@ -62,6 +62,13 @@ class _RuntimeIdentitySnapshotTool:
                     "source_batch_id": "batch-runtime-1",
                     "actor_version": 4,
                     "bounds_ready": True,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "render_failed": False,
+                    "gpu_build_state": "Ready",
+                    "mesh_count": 1,
+                    "renderable_mesh_count": 1,
+                    "invalid_mesh_count": 0,
                     "world_aabb": [-1.0, 0.0, -0.5, 1.0, 1.2, 0.5],
                     "geometry": {
                         "position": [0.0, 0.0, 0.0],
@@ -87,6 +94,13 @@ def _room_fact(*, game_ready: bool) -> dict:
         "aabb": {"min": [-0.5, 0.0, -0.5], "max": [0.5, 1.8, 0.5]},
         "bounds_source": "engine_actual" if game_ready else "estimated",
         "bounds_ready": True,
+        "render_status_observed": True,
+        "render_ready": True,
+        "render_failed": False,
+        "gpu_build_state": "Ready",
+        "mesh_count": 1,
+        "renderable_mesh_count": 1,
+        "invalid_mesh_count": 0,
         "engine_lifecycle_status": "bounds_ready",
         "sync_status": "engine_created",
         "grounding_status": "grounded",
@@ -142,6 +156,26 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(actor["bounds_source"], "engine_actual")
         self.assertEqual(actor["engine_lifecycle_status"], "bounds_ready")
         self.assertEqual(actor["sync_status"], "engine_imported")
+        self.assertTrue(actor["render_status_observed"])
+        self.assertTrue(actor["render_ready"])
+        self.assertEqual(actor["gpu_build_state"], "Ready")
+        self.assertEqual(actor["renderable_mesh_count"], 1)
+        self.assertEqual(actor["invalid_mesh_count"], 0)
+
+    def test_invalid_render_mesh_cannot_be_game_ready_even_with_actual_bounds(self) -> None:
+        room = _room_fact(game_ready=True)
+        actor = room["actors"]["actor-cupid"]
+        actor["render_ready"] = False
+        actor["renderable_mesh_count"] = 0
+        actor["invalid_mesh_count"] = 1
+        room["observed_actors"]["actor-cupid"] = deepcopy(actor)
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        entity = next(row for row in registry["entities"] if row.get("actor_id") == "actor-cupid")
+
+        self.assertFalse(entity["game_ready"])
+        self.assertIn("render_not_ready", entity["readiness_missing_fields"])
+        self.assertNotEqual(entity["engine_write_verification_status"], "engine_verified")
 
     def test_non_authoritative_client_does_not_execute_completed_scene_write(self) -> None:
         runtime = AgentRuntime()
@@ -931,6 +965,12 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
                     "bounds_source": "engine_actual",
                     "bounds_ready": True,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "gpu_build_state": "Ready",
+                    "mesh_count": 1,
+                    "renderable_mesh_count": 1,
+                    "invalid_mesh_count": 0,
                     "engine_lifecycle_status": "bounds_ready",
                     "sync_status": "engine_created",
                     "source": "engine_environment_import",
@@ -949,6 +989,12 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 3.0, 3.0]},
                     "bounds_source": "engine_actual",
                     "bounds_ready": True,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "gpu_build_state": "Ready",
+                    "mesh_count": 1,
+                    "renderable_mesh_count": 1,
+                    "invalid_mesh_count": 0,
                     "engine_lifecycle_status": "bounds_ready",
                     "sync_status": "engine_created",
                     "source": "engine_environment_import",
@@ -967,6 +1013,12 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "aabb": {"min": [-2.0, 0.0, 2.0], "max": [2.0, 0.1, 4.0]},
                     "bounds_source": "engine_actual",
                     "bounds_ready": True,
+                    "render_status_observed": True,
+                    "render_ready": True,
+                    "gpu_build_state": "Ready",
+                    "mesh_count": 1,
+                    "renderable_mesh_count": 1,
+                    "invalid_mesh_count": 0,
                     "engine_lifecycle_status": "bounds_ready",
                     "sync_status": "engine_created",
                     "source": "engine_environment_import",

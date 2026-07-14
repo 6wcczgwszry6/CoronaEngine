@@ -293,6 +293,10 @@ def _environment_entity_missing_fields(
         missing.append("engine_actual_aabb")
     if str(entity.get("engine_write_verification_status") or "").strip().lower() != "engine_verified":
         missing.append("engine_ready")
+    if not bool(entity.get("render_status_observed")):
+        missing.append("render_readiness_unobserved")
+    elif not bool(entity.get("render_ready")):
+        missing.append("render_not_ready")
 
     grounding = str(entity.get("grounding_status") or "").strip().lower()
     expected_grounding = {
@@ -363,6 +367,10 @@ def _entity_hard_readiness_missing_fields(entity: Mapping[str, Any]) -> list[str
         missing.append("engine_actual_aabb")
     if str(entity.get("engine_write_verification_status") or "").strip().lower() != "engine_verified":
         missing.append("engine_ready")
+    if not bool(entity.get("render_status_observed")):
+        missing.append("render_readiness_unobserved")
+    elif not bool(entity.get("render_ready")):
+        missing.append("render_not_ready")
     if str(entity.get("grounding_status") or "").strip().lower() not in {
         "grounded",
         "wall_mounted",

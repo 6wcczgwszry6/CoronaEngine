@@ -1467,6 +1467,7 @@ class ActorFactValidator:
         "entity_id",
         "entity_version",
         "engine_lifecycle_status",
+        "gpu_build_state",
         "gameplay_tags",
         "grounding_status",
         "interaction_capability",
@@ -1497,6 +1498,12 @@ class ActorFactValidator:
         "native_name",
         "version",
         "review_status",
+        "render_failed",
+        "render_ready",
+        "render_status_observed",
+        "mesh_count",
+        "renderable_mesh_count",
+        "invalid_mesh_count",
         "world_aabb",
         "world_bounds",
         "zone_hint",
@@ -1542,9 +1549,16 @@ class ActorFactValidator:
         "entity_type",
         "entity_id",
         "engine_lifecycle_status",
+        "gpu_build_state",
         "sync_status",
         "sync_lifecycle_status",
         "review_status",
+        "render_failed",
+        "render_ready",
+        "render_status_observed",
+        "mesh_count",
+        "renderable_mesh_count",
+        "invalid_mesh_count",
         "zone_hint",
     }
     _LIST_FIELDS = {
@@ -20803,7 +20817,9 @@ class AgentRuntime:
             status = str(row.get("status") or "").strip().lower()
             bounds_ready = bool(row.get("bounds_ready"))
             lifecycle = str(row.get("engine_lifecycle_status") or "").strip().lower()
-            if bounds_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and sync_status in {
+            render_observed = bool(row.get("render_status_observed"))
+            render_ready = bool(row.get("render_ready"))
+            if bounds_ready and render_observed and render_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and sync_status in {
                 "engine_created",
                 "engine_imported",
                 "engine_transformed",
@@ -20811,7 +20827,7 @@ class AgentRuntime:
                 "synchronized",
             }:
                 return "engine_verified"
-            if bounds_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and source.startswith("engine_") and status not in {"runtime_state_only", "planned"}:
+            if bounds_ready and render_observed and render_ready and lifecycle in {"bounds_ready", "engine_ready", "ready"} and source.startswith("engine_") and status not in {"runtime_state_only", "planned"}:
                 return "engine_verified"
             if lifecycle in {"engine_loading", "engine_accepted", "import_requested"}:
                 return "engine_loading"
@@ -20892,6 +20908,8 @@ class AgentRuntime:
                 grounding_known = True
             return (
                 str(entity.get("engine_write_verification_status") or "") == "engine_verified"
+                and bool(entity.get("render_status_observed"))
+                and bool(entity.get("render_ready"))
                 and bool(entity.get("actor_id"))
                 and bool(entity.get("transform"))
                 and bool(entity.get("aabb"))
@@ -20917,6 +20935,10 @@ class AgentRuntime:
                 missing.append("engine_actual_aabb")
             if str(entity.get("engine_write_verification_status") or "") != "engine_verified":
                 missing.append("engine_ready")
+            if not bool(entity.get("render_status_observed")):
+                missing.append("render_readiness_unobserved")
+            elif not bool(entity.get("render_ready")):
+                missing.append("render_not_ready")
             if str(entity.get("grounding_status") or "").strip().lower() not in {
                 "grounded", "wall_mounted", "suspended", "ceiling_hung", "not_applicable", "enclosure"
             }:
@@ -21149,6 +21171,13 @@ class AgentRuntime:
                 "world_aabb": dict(bounds),
                 "bounds_ready": bool(merged.get("bounds_ready")) if "bounds_ready" in merged else bool(bounds),
                 "bounds_source": raw_bounds_source or "runtime_state",
+                "render_status_observed": bool(merged.get("render_status_observed")),
+                "render_ready": bool(merged.get("render_ready")),
+                "render_failed": bool(merged.get("render_failed")),
+                "gpu_build_state": str(merged.get("gpu_build_state") or ""),
+                "mesh_count": int(merged.get("mesh_count") or 0),
+                "renderable_mesh_count": int(merged.get("renderable_mesh_count") or 0),
+                "invalid_mesh_count": int(merged.get("invalid_mesh_count") or 0),
                 "size": vector3(merged.get("size")),
                 "geometry_source": geometry_source,
                 "grounding_status": actor_grounding_status(merged),
@@ -21268,6 +21297,13 @@ class AgentRuntime:
                     "world_aabb": dict(bounds),
                     "bounds_ready": bool(component.get("bounds_ready")) if "bounds_ready" in component else bool(bounds),
                     "bounds_source": str(component.get("bounds_source") or "runtime_state"),
+                    "render_status_observed": bool(component.get("render_status_observed")),
+                    "render_ready": bool(component.get("render_ready")),
+                    "render_failed": bool(component.get("render_failed")),
+                    "gpu_build_state": str(component.get("gpu_build_state") or ""),
+                    "mesh_count": int(component.get("mesh_count") or 0),
+                    "renderable_mesh_count": int(component.get("renderable_mesh_count") or 0),
+                    "invalid_mesh_count": int(component.get("invalid_mesh_count") or 0),
                     "size": vector3(component.get("size")),
                     "grounding_status": component_grounding,
                     "interaction_capability": list_field(component, "interaction_capability"),

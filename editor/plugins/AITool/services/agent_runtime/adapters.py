@@ -688,6 +688,13 @@ def make_engine_environment_component_import_provider(
                 "bounds_ready",
                 "bounds_source",
                 "engine_lifecycle_status",
+                "render_status_observed",
+                "render_ready",
+                "render_failed",
+                "gpu_build_state",
+                "mesh_count",
+                "renderable_mesh_count",
+                "invalid_mesh_count",
                 "entity_type",
                 "semantic_role",
                 "size",
@@ -711,6 +718,17 @@ def make_engine_environment_component_import_provider(
                 row["engine_lifecycle_status"] = str(
                     component.get("engine_lifecycle_status") or "engine_loading"
                 )
+                for field in (
+                    "render_status_observed",
+                    "render_ready",
+                    "render_failed",
+                    "gpu_build_state",
+                    "mesh_count",
+                    "renderable_mesh_count",
+                    "invalid_mesh_count",
+                ):
+                    if field in component:
+                        row[field] = component.get(field)
         status_counts: dict[str, int] = {}
         for item in import_results:
             status_key = str(item.get("status") or "unknown").strip().lower() or "unknown"
@@ -1138,6 +1156,35 @@ def _normalize_environment_component_import_result(
     update["bounds_source"] = "engine_actual" if bounds_ready else "estimated"
     update["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
     update["status"] = "ready" if bounds_ready else "engine_loading"
+    for field in ("render_status_observed", "render_ready", "render_failed"):
+        value = _first_present(
+            actor.get(field) if isinstance(actor, dict) else None,
+            actor_data.get(field) if isinstance(actor_data, dict) else None,
+            parsed.get(field),
+            fallback.get(field),
+        )
+        if value is not None:
+            update[field] = _coerce_adapter_bool(value, default=False)
+    gpu_build_state = str(_first_present(
+        actor.get("gpu_build_state") if isinstance(actor, dict) else None,
+        actor_data.get("gpu_build_state") if isinstance(actor_data, dict) else None,
+        parsed.get("gpu_build_state"),
+        fallback.get("gpu_build_state"),
+    ) or "").strip()
+    if gpu_build_state:
+        update["gpu_build_state"] = gpu_build_state
+    for field in ("mesh_count", "renderable_mesh_count", "invalid_mesh_count"):
+        value = _first_present(
+            actor.get(field) if isinstance(actor, dict) else None,
+            actor_data.get(field) if isinstance(actor_data, dict) else None,
+            parsed.get(field),
+            fallback.get(field),
+        )
+        if value is not None:
+            try:
+                update[field] = max(0, int(value or 0))
+            except (TypeError, ValueError):
+                update[field] = 0
     update["entity_type"] = "environment"
     update["semantic_role"] = _safe_component_token(
         _first_present(
@@ -1358,6 +1405,18 @@ def _normalize_snapshot_actor(actor: Any, *, scene_name: str, index: int = 0) ->
         default=aabb is not None,
     )
     safe["bounds_ready"] = bounds_ready
+    for field in ("render_status_observed", "render_ready", "render_failed"):
+        if field in actor:
+            safe[field] = _coerce_adapter_bool(actor.get(field), default=False)
+    gpu_build_state = str(actor.get("gpu_build_state") or "").strip()
+    if gpu_build_state:
+        safe["gpu_build_state"] = gpu_build_state
+    for field in ("mesh_count", "renderable_mesh_count", "invalid_mesh_count"):
+        if field in actor:
+            try:
+                safe[field] = max(0, int(actor.get(field) or 0))
+            except (TypeError, ValueError):
+                safe[field] = 0
     if bounds_ready and aabb is not None:
         safe["bounds_source"] = "engine_actual"
         safe["engine_lifecycle_status"] = "bounds_ready"
@@ -1672,6 +1731,17 @@ def make_engine_actor_import_provider(
                 row["engine_lifecycle_status"] = str(
                     actor.get("engine_lifecycle_status") or "engine_loading"
                 )
+                for field in (
+                    "render_status_observed",
+                    "render_ready",
+                    "render_failed",
+                    "gpu_build_state",
+                    "mesh_count",
+                    "renderable_mesh_count",
+                    "invalid_mesh_count",
+                ):
+                    if field in actor:
+                        row[field] = actor.get(field)
         if transform_tool is not None and actors:
             for actor_id, actor in list(actors.items()):
                 support_type = _runtime_actor_support_type(actor)
@@ -1881,7 +1951,21 @@ def _reconcile_engine_ready_facts(
             observed = by_id.get(str(entity.get("actor_id") or entity_id))
             bounds = _normalized_bounds_from(observed or {}) if observed else None
             observed_bounds_ready = bool(observed and observed.get("bounds_ready"))
-            if observed_bounds_ready and bounds:
+            render_status_observed = bool(observed and observed.get("render_status_observed"))
+            render_ready = bool(observed and observed.get("render_ready"))
+            if observed:
+                for field in (
+                    "render_status_observed",
+                    "render_ready",
+                    "render_failed",
+                    "gpu_build_state",
+                    "mesh_count",
+                    "renderable_mesh_count",
+                    "invalid_mesh_count",
+                ):
+                    if field in observed:
+                        entity[field] = observed.get(field)
+            if observed_bounds_ready and bounds and render_status_observed and render_ready:
                 entity["aabb"] = bounds
                 entity["bounds_ready"] = True
                 entity["bounds_source"] = "engine_actual"
@@ -1892,8 +1976,8 @@ def _reconcile_engine_ready_facts(
                     if value:
                         entity[field] = value
             else:
-                entity["bounds_ready"] = False
-                entity["bounds_source"] = "estimated"
+                entity["bounds_ready"] = observed_bounds_ready and bool(bounds)
+                entity["bounds_source"] = "engine_actual" if entity["bounds_ready"] else "estimated"
                 entity["engine_lifecycle_status"] = "engine_loading"
                 entity["status"] = "engine_loading"
                 all_ready = False
@@ -2675,6 +2759,32 @@ def _normalize_import_result(
     result["bounds_source"] = "engine_actual" if bounds_ready else "estimated"
     result["engine_lifecycle_status"] = "bounds_ready" if bounds_ready else "engine_loading"
     result["status"] = "ready" if bounds_ready else "engine_loading"
+    for field in ("render_status_observed", "render_ready", "render_failed"):
+        value = _first_present(
+            actor.get(field) if isinstance(actor, dict) else None,
+            actor_data.get(field) if isinstance(actor_data, dict) else None,
+            parsed.get(field),
+        )
+        if value is not None:
+            result[field] = _coerce_adapter_bool(value, default=False)
+    gpu_build_state = str(_first_present(
+        actor.get("gpu_build_state") if isinstance(actor, dict) else None,
+        actor_data.get("gpu_build_state") if isinstance(actor_data, dict) else None,
+        parsed.get("gpu_build_state"),
+    ) or "").strip()
+    if gpu_build_state:
+        result["gpu_build_state"] = gpu_build_state
+    for field in ("mesh_count", "renderable_mesh_count", "invalid_mesh_count"):
+        value = _first_present(
+            actor.get(field) if isinstance(actor, dict) else None,
+            actor_data.get(field) if isinstance(actor_data, dict) else None,
+            parsed.get(field),
+        )
+        if value is not None:
+            try:
+                result[field] = max(0, int(value or 0))
+            except (TypeError, ValueError):
+                result[field] = 0
     size_value = _first_present(
         actor.get("size") if isinstance(actor, dict) else None,
         actor_data.get("size") if isinstance(actor_data, dict) else None,

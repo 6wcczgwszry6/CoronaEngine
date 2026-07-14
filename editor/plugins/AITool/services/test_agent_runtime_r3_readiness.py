@@ -41,6 +41,13 @@ def _entity(index: int, *, game_ready: bool, environment: bool = False) -> dict:
         "grounding_status": "enclosure" if component_type == "room_box" else "grounded",
         "sync_status": "synced",
         "engine_write_verification_status": "engine_verified",
+        "render_status_observed": True,
+        "render_ready": True,
+        "render_failed": False,
+        "gpu_build_state": "Ready",
+        "mesh_count": 1,
+        "renderable_mesh_count": 1,
+        "invalid_mesh_count": 0,
         "game_ready": bool(game_ready),
         "readiness_missing_fields": [] if game_ready else ["support_classification"],
     }
