@@ -1335,6 +1335,54 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
 
         self.assertIs(worker._runtime_ai_config_override, expected)
 
+    def test_runtime_ai_config_synchronizes_duplicate_quasar_namespaces(self) -> None:
+        class FakeCollector:
+            def __init__(self, settings: dict[str, Any]) -> None:
+                self._ai_settings = dict(settings)
+                self._setting_sources = {}
+                self._ai_load = {
+                    "hunyuan3d": lambda value: types.SimpleNamespace(
+                        enable=bool(value.get("enable")),
+                    )
+                }
+                self._ai_config = types.SimpleNamespace(
+                    hunyuan3d=types.SimpleNamespace(enable=False),
+                )
+
+            @property
+            def AI_SETTINGS(self) -> dict[str, Any]:
+                return dict(self._ai_settings)
+
+            @property
+            def AIConfig(self):
+                return self._ai_config
+
+        runtime_collector = FakeCollector({"hunyuan3d": {"enable": True}})
+        plugin_collector = FakeCollector({"hunyuan3d": {"enable": False}})
+        runtime_module = types.ModuleType("Quasar.ai_service.entrance")
+        runtime_module.ai_entrance = types.SimpleNamespace(collector=runtime_collector)
+        plugin_module = types.ModuleType("plugins.AITool.Quasar.ai_service.entrance")
+        plugin_module.ai_entrance = types.SimpleNamespace(collector=plugin_collector)
+        worker = LANChatAgentWorker.__new__(LANChatAgentWorker)
+        worker._logger = __import__("logging").getLogger("test-runtime-ai-config-sync")
+
+        with patch.dict(
+            sys.modules,
+            {
+                "Quasar.ai_service.entrance": runtime_module,
+                "plugins.AITool.Quasar.ai_service.entrance": plugin_module,
+            },
+        ):
+            worker._synchronize_quasar_ai_settings_namespaces()
+
+        self.assertTrue(runtime_collector.AIConfig.hunyuan3d.enable)
+        self.assertTrue(plugin_collector.AIConfig.hunyuan3d.enable)
+        self.assertTrue(plugin_collector.AI_SETTINGS["hunyuan3d"]["enable"])
+        self.assertEqual(
+            plugin_collector._setting_sources["hunyuan3d"],
+            "plugins.AITool.utils.ai_setting",
+        )
+
     def test_runtime_direct_engine_tool_overrides_stale_import_model(self) -> None:
         class FakeTool:
             def __init__(self, name: str, source: str) -> None:

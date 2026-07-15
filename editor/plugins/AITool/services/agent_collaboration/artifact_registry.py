@@ -160,6 +160,15 @@ class ArtifactRegistry:
                 raise ArtifactNotFoundError(f"{project}:{parsed}")
             return record
 
+    def is_usable(self, project_id: str, ref: str | ArtifactRef) -> bool:
+        project = _text(project_id)
+        parsed = ArtifactRef.parse(ref)
+        with self._lock:
+            record = self._records.get((project, parsed))
+            if record is None:
+                return False
+            return self._record_usable_for_project(project, record)
+
     def current(
         self,
         project_id: str,
@@ -174,9 +183,10 @@ class ArtifactRegistry:
             if ref is None:
                 raise ArtifactNotFoundError(f"{project}:{normalized_id}")
             record = self._records[(project, ref)]
-            if require_usable and not record.usable:
+            if require_usable and not self._record_usable_for_project(project, record):
                 raise ArtifactNotUsableError(
-                    f"{project}:{ref} is {record.registry_status}/{record.artifact.status}"
+                    f"{project}:{ref} is {record.registry_status}/{record.artifact.status} "
+                    "or is bound to a stale world version"
                 )
             return record
 
@@ -205,8 +215,20 @@ class ArtifactRegistry:
                 if record_project == project
             ]
             if not include_stale:
-                records = [record for record in records if record.usable]
+                records = [
+                    record
+                    for record in records
+                    if self._record_usable_for_project(project, record)
+                ]
             return tuple(sorted(records, key=lambda record: (record.ref.artifact_id, record.ref.version)))
+
+    def _record_usable_for_project(self, project_id: str, record: ArtifactRecord) -> bool:
+        if not record.usable:
+            return False
+        if record.artifact.snapshot_source != "runtime":
+            return True
+        project_state = self._project_states.get(project_id)
+        return record.artifact.base_world_version == project_state.scene_world_version
 
     def dependents(self, project_id: str, ref: str | ArtifactRef) -> tuple[ArtifactRef, ...]:
         project = _text(project_id)
@@ -374,6 +396,14 @@ class ArtifactRegistry:
                 raise ArtifactVersionConflictError(
                     f"{ref}: base_project_version {artifact.base_project_version} does not match "
                     f"project version {project_state.project_version}"
+                )
+            if (
+                artifact.snapshot_source == "runtime"
+                and artifact.base_world_version != project_state.scene_world_version
+            ):
+                raise ArtifactVersionConflictError(
+                    f"{ref}: base_world_version {artifact.base_world_version} does not match "
+                    f"project scene_world_version {project_state.scene_world_version}"
                 )
 
             old_ref = self._current.get((project, ref.artifact_id))

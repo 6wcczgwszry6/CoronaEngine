@@ -46,6 +46,14 @@ def _envelope(**overrides) -> ArtifactEnvelope:
 
 
 class AgentCollaborationContractTests(unittest.TestCase):
+    def test_artifact_type_has_one_functional_producer_role(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires producer_role planning"):
+            _envelope(producer_role="art")
+        for legacy_persona in ("elder", "little_girl", "bandit", "merchant", "coordinator"):
+            with self.subTest(legacy_persona=legacy_persona):
+                with self.assertRaisesRegex(ValueError, "unsupported producer_role"):
+                    _envelope(producer_role=legacy_persona)
+
     def test_artifact_hash_is_deterministic_and_payload_is_deeply_immutable(self) -> None:
         first = _envelope(payload={
             "acceptance_criteria": ["same world"],
@@ -107,9 +115,20 @@ class AgentCollaborationContractTests(unittest.TestCase):
             snapshot_source="runtime",
             non_executable=False,
             status="validated",
+            base_world_version=1,
         )
 
         assert_executable(artifact)
+
+    def test_executable_artifact_requires_real_versioned_runtime_snapshot(self) -> None:
+        with self.assertRaisesRegex(NonExecutableArtifactError, "runtime snapshot_source"):
+            _envelope(snapshot_source="none", non_executable=False)
+        with self.assertRaisesRegex(NonExecutableArtifactError, "positive base_world_version"):
+            _envelope(
+                snapshot_source="runtime",
+                non_executable=False,
+                base_world_version=0,
+            )
 
     def test_non_executable_or_invalid_artifact_is_rejected(self) -> None:
         with self.assertRaises(NonExecutableArtifactError):

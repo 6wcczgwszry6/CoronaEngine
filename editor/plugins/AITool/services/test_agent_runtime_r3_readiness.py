@@ -137,6 +137,8 @@ def _gate_facts(*, game_ready_count: int) -> dict:
         for index in range(1, 4)
     ]
     registry = {
+        "plan_id": plan_id,
+        "scene_version": scene_version,
         "entity_count": 14,
         "game_ready_entity_count": game_ready_count,
         "engine_write_verified_count": 14,
@@ -180,6 +182,9 @@ def _gate_facts(*, game_ready_count: int) -> dict:
         "multiplayer_evidence": {
             "applicable": True,
             "peer_count": 1,
+            "acknowledged_peer_count": 1,
+            "unacknowledged_peer_count": 0,
+            "comparison_mode": "peer_snapshot_ack",
             "entity_count": 14,
             "verified_entity_count": 14,
             "partial_entity_count": 0,
@@ -202,6 +207,22 @@ class R3ReadinessGateTests(unittest.TestCase):
         self.assertEqual(tuple(report.dimensions), R3_DIMENSION_NAMES)
         self.assertEqual(report.dimensions["entity_readiness"].status, "green")
         R3GateReportValidator.validate(report)
+
+    def test_multiplayer_gate_stays_yellow_until_every_known_peer_acknowledges(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        facts["multiplayer_evidence"] = dict(facts["multiplayer_evidence"])
+        facts["multiplayer_evidence"].update({
+            "peer_count": 2,
+            "acknowledged_peer_count": 1,
+            "unacknowledged_peer_count": 1,
+        })
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["multiplayer_consistency"]
+        self.assertEqual(dimension.status, "yellow")
+        self.assertIn("peer_snapshot_ack", dimension.missing)
+        self.assertEqual(dimension.metrics["unacknowledged_peer_count"], 1)
 
     def test_five_of_fourteen_is_yellow(self) -> None:
         report = evaluate_r3_gate(**_gate_facts(game_ready_count=5))
@@ -338,6 +359,34 @@ class R3ReadinessGateTests(unittest.TestCase):
             dimension.contradictions,
         )
 
+    def test_business_graph_dimension_rejects_terminal_failed_execution(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        facts["batch_plans"] = deepcopy(facts["batch_plans"])
+        facts["tool_graphs"] = deepcopy(facts["tool_graphs"])
+        facts["batch_plans"][0]["status"] = "failed"
+        facts["tool_graphs"][0]["status"] = "failed"
+        facts["tool_graphs"][0]["nodes"]["tool-1"]["status"] = "failed"
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["business_graph_consistency"]
+        self.assertEqual(dimension.status, "red")
+        self.assertIn(
+            "batch-1:batch_terminal_unsuccessful:failed",
+            dimension.contradictions,
+        )
+        self.assertIn(
+            "batch-1:graph_terminal_unsuccessful:failed",
+            dimension.contradictions,
+        )
+        self.assertIn(
+            "batch-1:business_graph_nodes_unsuccessful",
+            dimension.contradictions,
+        )
+        self.assertEqual(dimension.metrics["successful_batch_count"], 2)
+        self.assertEqual(dimension.metrics["successful_graph_count"], 2)
+        self.assertEqual(dimension.metrics["failed_node_count"], 1)
+
     def test_entity_diagnostics_include_identity_failures_without_trusting_game_ready(self) -> None:
         facts = _gate_facts(game_ready_count=8)
         registry = deepcopy(facts["scene_entity_registry"])
@@ -446,6 +495,38 @@ class R3ReadinessGateTests(unittest.TestCase):
             any("duplicate_entity_id" in item for item in identity_report.blockers)
         )
 
+    def test_snapshot_integrity_rejects_same_version_registry_drift(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        registry = deepcopy(facts["scene_entity_registry"])
+        registry["entities"][2]["semantic_role"] = "stale-registry-role"
+        facts["scene_entity_registry"] = registry
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["snapshot_integrity"]
+        self.assertEqual(dimension.status, "red")
+        self.assertFalse(dimension.metrics["registry_fingerprint_matches_snapshot"])
+        self.assertIn(
+            "scene_entity_registry_snapshot_fingerprint_mismatch",
+            dimension.contradictions,
+        )
+
+    def test_snapshot_integrity_rejects_registry_version_drift(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        registry = deepcopy(facts["scene_entity_registry"])
+        registry["scene_version"] = facts["scene_version"] - 1
+        facts["scene_entity_registry"] = registry
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["snapshot_integrity"]
+        self.assertEqual(dimension.status, "red")
+        self.assertFalse(dimension.metrics["registry_scene_version_matches"])
+        self.assertIn(
+            "scene_entity_registry_scene_version_mismatch",
+            dimension.contradictions,
+        )
+
     def test_required_environment_recomputes_engine_facts_instead_of_trusting_flag(self) -> None:
         facts = _gate_facts(game_ready_count=8)
         snapshot = deepcopy(facts["snapshot_result"])
@@ -468,6 +549,43 @@ class R3ReadinessGateTests(unittest.TestCase):
             if item["component_type"] == "room_floor"
         )
         self.assertFalse(diagnostic["ready"])
+
+    def test_required_environment_rejects_duplicate_partial_component_instance(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        snapshot = deepcopy(facts["snapshot_result"])
+        duplicate_floor = deepcopy(snapshot["snapshot"]["environment_entities"][1])
+        duplicate_floor["entity_id"] = "entity-room-floor-duplicate"
+        duplicate_floor["actor_id"] = "actor-room-floor-duplicate"
+        duplicate_floor["bounds_source"] = "estimated"
+        duplicate_floor["game_ready"] = False
+        duplicate_floor["readiness_missing_fields"] = ["engine_actual_aabb"]
+        snapshot["snapshot"]["environment_entities"].append(duplicate_floor)
+        snapshot["snapshot"]["world_fingerprint"] = scene_world_fingerprint(
+            [
+                *snapshot["snapshot"]["environment_entities"],
+                *snapshot["snapshot"]["actor_entities"],
+            ],
+            plan_id=facts["plan_id"],
+            scene_version=facts["scene_version"],
+        )
+        snapshot["world_fingerprint"] = snapshot["snapshot"]["world_fingerprint"]
+        facts["snapshot_result"] = snapshot
+
+        report = evaluate_r3_gate(**facts)
+
+        dimension = report.dimensions["environment_readiness"]
+        self.assertEqual(dimension.status, "red")
+        self.assertEqual(dimension.metrics["ready_count"], 1)
+        self.assertIn("environment_not_ready:room_floor", dimension.contradictions)
+        self.assertIn("room_floor:engine_actual_aabb", dimension.contradictions)
+        diagnostics = [
+            item
+            for item in dimension.metrics["component_diagnostics"]
+            if item["component_type"] == "room_floor"
+        ]
+        self.assertEqual(len(diagnostics), 2)
+        self.assertTrue(any(item["ready"] for item in diagnostics))
+        self.assertTrue(any(not item["ready"] for item in diagnostics))
 
     def test_required_environment_accepts_canonical_component_aliases(self) -> None:
         facts = _gate_facts(game_ready_count=8)

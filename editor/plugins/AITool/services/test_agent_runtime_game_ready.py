@@ -16,12 +16,16 @@ from editor.plugins.AITool.services.agent_runtime import (
     ToolCallGraphValidator,
     make_scene_snapshot_provider,
 )
+from editor.plugins.AITool.services.agent_runtime.adapters import (
+    make_engine_environment_component_import_provider,
+)
 from editor.plugins.AITool.services.agent_runtime.scene_world_consistency import (
     audit_scene_world_consistency,
     constrain_scene_world_snapshot_readiness,
     latest_engine_snapshot,
     scene_world_fingerprint,
 )
+from editor.plugins.AITool.services.agent_runtime.core import SceneWorldSnapshotRecordValidator
 from editor.plugins.AITool.services.lanchat_agent_worker import LANChatAgentWorker
 from editor.plugins.AITool.services.runtime_action_intent import RuntimeActionIntent
 
@@ -196,6 +200,50 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertFalse(entity["game_ready"])
         self.assertIn("render_not_ready", entity["readiness_missing_fields"])
         self.assertNotEqual(entity["engine_write_verification_status"], "engine_verified")
+
+    def test_engine_observation_overrides_stale_estimated_geometry_and_render_facts(self) -> None:
+        room = _room_fact(game_ready=False)
+        runtime_actor = room["actors"]["actor-cupid"]
+        runtime_actor.update({
+            "position": [9.0, 4.0, 9.0],
+            "aabb": {"min": [8.5, 4.0, 8.5], "max": [9.5, 5.8, 9.5]},
+            "bounds_source": "estimated",
+            "render_status_observed": False,
+            "render_ready": False,
+            "engine_lifecycle_status": "engine_loading",
+            "grounding_status": "needs_review",
+            "support_type": "floor_supported",
+        })
+        observed_actor = deepcopy(runtime_actor)
+        observed_actor.update({
+            "position": [1.0, 0.0, 2.0],
+            "aabb": {"min": [0.5, 0.0, 1.5], "max": [1.5, 1.8, 2.5]},
+            "bounds_source": "engine_actual",
+            "bounds_ready": True,
+            "render_status_observed": True,
+            "render_ready": True,
+            "render_failed": False,
+            "gpu_build_state": "Ready",
+            "renderable_mesh_count": 1,
+            "invalid_mesh_count": 0,
+            "engine_lifecycle_status": "bounds_ready",
+            "actor_version": 4,
+        })
+        room["observed_actors"]["actor-cupid"] = observed_actor
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        entity = next(
+            row for row in registry["entities"] if row.get("actor_id") == "actor-cupid"
+        )
+
+        self.assertEqual(entity["transform"]["position"], [1.0, 0.0, 2.0])
+        self.assertEqual(entity["world_aabb"]["min"], [0.5, 0.0, 1.5])
+        self.assertEqual(entity["bounds_source"], "engine_actual")
+        self.assertTrue(entity["render_ready"])
+        self.assertEqual(entity["version"], 4)
+        self.assertEqual(entity["grounding_status"], "grounded")
+        self.assertTrue(entity["game_ready"])
+        self.assertEqual(entity["readiness_missing_fields"], [])
 
     def test_non_authoritative_client_does_not_execute_completed_scene_write(self) -> None:
         runtime = AgentRuntime()
@@ -534,6 +582,10 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
             "grounding_status": "grounded",
             "interaction_capability": ["inspect", "use"],
             "gameplay_tags": ["workspace", "furniture"],
+            "script_bindings": [
+                {"event": "inspect", "handler": "show_details"},
+                {"event": "use", "handler": "open_desk"},
+            ],
             "sync_status": "synced",
             "game_ready": True,
             "readiness_missing_fields": [],
@@ -561,7 +613,14 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
             scene_version=2,
         )
         reordered = scene_world_fingerprint(
-            [second, {**first, "interaction_capability": ["use", "inspect"]}],
+            [
+                second,
+                {
+                    **first,
+                    "interaction_capability": ["use", "inspect"],
+                    "script_bindings": list(reversed(first["script_bindings"])),
+                },
+            ],
             plan_id="plan-1",
             scene_version=2,
         )
@@ -601,6 +660,31 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
             first_report["scene_world_snapshot"]["world_fingerprint"],
             second_report["scene_world_snapshot"]["world_fingerprint"],
         )
+
+    def test_snapshot_rejects_entity_without_stable_identity(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(
+            StatePatch(room_id="room-1", changes=_room_fact(game_ready=True))
+        )
+        self.assertTrue(applied)
+        snapshot = runtime._scene_world_snapshot_for_plan(
+            runtime.state.room("room-1"),
+            "plan-1",
+            room_id="room-1",
+            scene_entity_registry=runtime._scene_entity_registry_for_plan(
+                runtime.state.room("room-1"), "plan-1"
+            ),
+            operation_cursor="op:1",
+        )
+        snapshot["actor_entities"][0]["entity_id"] = ""
+        snapshot["world_fingerprint"] = scene_world_fingerprint(
+            [*snapshot["environment_entities"], *snapshot["actor_entities"]],
+            plan_id="plan-1",
+            scene_version=snapshot["scene_version"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "stable entity_id"):
+            SceneWorldSnapshotRecordValidator.validate(snapshot)
 
     def test_same_version_terminal_snapshot_conflict_is_rejected(self) -> None:
         runtime = AgentRuntime()
@@ -1016,6 +1100,7 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "source": "engine_environment_import",
                     "status": "success",
                     "requires_engine_write": False,
+                    "grounding_status": "enclosure",
                 },
                 "shell": {
                     "component_id": "shell",
@@ -1040,6 +1125,7 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
                     "source": "engine_environment_import",
                     "status": "success",
                     "requires_engine_write": False,
+                    "grounding_status": "grounded",
                 },
                 "transition": {
                     "component_id": "transition",
@@ -1083,6 +1169,126 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
             for entity in registry["entities"]
             if entity.get("entity_type") == "environment"
         ))
+
+    def test_environment_component_absorbs_engine_actor_observation(self) -> None:
+        room = _room_fact(game_ready=True)
+        room["environment_components"] = {
+            "batch-1": {
+                "floor": {
+                    "component_id": "floor",
+                    "component_type": "room_floor",
+                    "actor_id": "actor-floor",
+                    "asset_id": "asset-floor",
+                    "model_ref": "room_floor.obj",
+                    "position": [0.0, 0.0, 0.0],
+                    "rotation": [0.0, 0.0, 0.0],
+                    "scale": [1.0, 1.0, 1.0],
+                    "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+                    "bounds_source": "estimated",
+                    "bounds_ready": False,
+                    "render_status_observed": False,
+                    "render_ready": False,
+                    "engine_lifecycle_status": "engine_loading",
+                    "sync_status": "engine_created",
+                    "source": "engine_environment_import",
+                    "status": "success",
+                    "grounding_status": "grounded",
+                }
+            }
+        }
+        room["observed_actors"]["actor-floor"] = {
+            "actor_id": "actor-floor",
+            "plan_id": "plan-1",
+            "batch_id": "batch-1",
+            "position": [0.0, 0.0, 0.0],
+            "rotation": [0.0, 0.0, 0.0],
+            "scale": [1.0, 1.0, 1.0],
+            "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 0.1, 3.0]},
+            "bounds_source": "engine_actual",
+            "bounds_ready": True,
+            "render_status_observed": True,
+            "render_ready": True,
+            "render_failed": False,
+            "gpu_build_state": "Ready",
+            "mesh_count": 1,
+            "renderable_mesh_count": 1,
+            "invalid_mesh_count": 0,
+            "engine_lifecycle_status": "bounds_ready",
+            "actor_version": 3,
+        }
+
+        registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
+        floor = next(
+            entity
+            for entity in registry["entities"]
+            if entity.get("component_type") == "room_floor"
+        )
+
+        self.assertEqual(floor["bounds_source"], "engine_actual")
+        self.assertTrue(floor["render_status_observed"])
+        self.assertTrue(floor["render_ready"])
+        self.assertEqual(floor["version"], 3)
+        self.assertEqual(floor["grounding_status"], "grounded")
+        self.assertTrue(floor["game_ready"])
+        self.assertEqual(floor["readiness_missing_fields"], [])
+
+    def test_environment_import_persists_room_support_semantics_before_snapshot(self) -> None:
+        class Gate:
+            def invoke_tool(self, tool, payload):
+                return tool.invoke(payload)
+
+        class ImportTool:
+            def invoke(self, payload):
+                return {
+                    "status": "success",
+                    "component_id": payload["component_id"],
+                    "component_type": payload["component_type"],
+                    "entity_id": payload["entity_id"],
+                    "actor_id": f"actor-{payload['component_id']}",
+                    "asset_id": payload["asset_id"],
+                    "model_ref": payload["model_ref"],
+                    "actor_data": {
+                        "actor_id": f"actor-{payload['component_id']}",
+                        "bounds_ready": True,
+                        "render_status_observed": True,
+                        "render_ready": True,
+                        "geometry": {
+                            "position": [0.0, 0.0, 0.0],
+                            "rotation": [0.0, 0.0, 0.0],
+                            "scale": [1.0, 1.0, 1.0],
+                            "aabb": {"min": [-3.0, 0.0, -3.0], "max": [3.0, 3.0, 3.0]},
+                        },
+                    },
+                }
+
+        provider = make_engine_environment_component_import_provider(
+            environment_import_tool=ImportTool(),
+            engine_gate=Gate(),
+        )
+        result = provider({
+            "room_id": "room-support",
+            "plan_id": "plan-support",
+            "batch_id": "batch-support",
+            "environment_components": {
+                "shell": {
+                    "component_id": "shell",
+                    "component_type": "room_box",
+                    "asset_id": "asset-shell",
+                    "model_ref": "room_box.obj",
+                },
+                "floor": {
+                    "component_id": "floor",
+                    "component_type": "room_floor",
+                    "asset_id": "asset-floor",
+                    "model_ref": "room_floor.obj",
+                },
+            },
+        })
+
+        self.assertEqual(result["environment_components"]["shell"]["grounding_status"], "enclosure")
+        self.assertEqual(result["environment_components"]["floor"]["grounding_status"], "grounded")
+        self.assertEqual(result["environment_import_results"][0]["grounding_status"], "enclosure")
+        self.assertEqual(result["environment_import_results"][1]["grounding_status"], "grounded")
 
     def test_business_graph_role_is_persisted_and_validated(self) -> None:
         graph = ToolCallGraph(

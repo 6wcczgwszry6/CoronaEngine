@@ -14,6 +14,7 @@ from editor.plugins.AITool.services.agent_collaboration import (
     GameDesignBrief,
     GameplayLogicPlan,
     InvalidArtifactError,
+    ProjectStatePatch,
     ProjectStateStore,
 )
 
@@ -54,6 +55,8 @@ def _artifact(
     dependencies: tuple[str, ...] = (),
     label: str = "v1",
     status: str = "validated",
+    base_world_version: int = 0,
+    snapshot_source: str = "none",
 ) -> ArtifactEnvelope:
     return ArtifactEnvelope(
         artifact_id=artifact_id,
@@ -62,9 +65,9 @@ def _artifact(
         producer_role=role,
         source_task_id=f"task-{artifact_id}-{version}",
         base_project_version=base_project_version,
-        base_world_version=0,
+        base_world_version=base_world_version,
         dependencies=dependencies,
-        snapshot_source="none",
+        snapshot_source=snapshot_source,
         non_executable=True,
         status=status,
         payload=_payload(artifact_type, label),
@@ -107,6 +110,93 @@ class ArtifactRegistryTests(unittest.TestCase):
         self.assertEqual(self.projects.get("project-1").artifact_refs, ("art@1", "brief@1"))
         self.assertEqual(self.registry.dependents("project-1", "brief@1"), (records[0].ref,))
         self.assertTrue(self.registry.current("project-1", "art").usable)
+
+    def test_runtime_artifact_must_match_current_project_world_version(self) -> None:
+        self.projects.apply_patch(ProjectStatePatch(
+            patch_id="patch-world-v2",
+            project_id="project-1",
+            expected_project_version=1,
+            source="test",
+            changes={"scene_world_version": 2},
+        ))
+        stale = _artifact(
+            artifact_id="brief",
+            artifact_type="GameDesignBrief",
+            role="planning",
+            version=1,
+            base_project_version=2,
+            base_world_version=1,
+            snapshot_source="runtime",
+        )
+
+        with self.assertRaisesRegex(ArtifactVersionConflictError, "base_world_version 1"):
+            self.registry.register(
+                project_id="project-1",
+                artifact=stale,
+                expected_project_version=2,
+                patch_id="patch-stale-world-artifact",
+                source="test",
+            )
+
+        current = _artifact(
+            artifact_id="brief",
+            artifact_type="GameDesignBrief",
+            role="planning",
+            version=1,
+            base_project_version=2,
+            base_world_version=2,
+            snapshot_source="runtime",
+        )
+        record = self.registry.register(
+            project_id="project-1",
+            artifact=current,
+            expected_project_version=2,
+            patch_id="patch-current-world-artifact",
+            source="test",
+        )
+
+        self.assertEqual(record.artifact.base_world_version, 2)
+        self.assertEqual(self.projects.get("project-1").artifact_refs, ("brief@1",))
+
+    def test_runtime_artifact_becomes_unusable_after_world_version_advances(self) -> None:
+        self.projects.apply_patch(ProjectStatePatch(
+            patch_id="patch-world-v1",
+            project_id="project-1",
+            expected_project_version=1,
+            source="test",
+            changes={"scene_world_version": 1},
+        ))
+        artifact = _artifact(
+            artifact_id="brief",
+            artifact_type="GameDesignBrief",
+            role="planning",
+            version=1,
+            base_project_version=2,
+            base_world_version=1,
+            snapshot_source="runtime",
+        )
+        self.registry.register(
+            project_id="project-1",
+            artifact=artifact,
+            expected_project_version=2,
+            patch_id="patch-register-world-v1",
+            source="test",
+        )
+        self.projects.apply_patch(ProjectStatePatch(
+            patch_id="patch-world-v2-after-register",
+            project_id="project-1",
+            expected_project_version=3,
+            source="test",
+            changes={"scene_world_version": 2},
+        ))
+
+        with self.assertRaisesRegex(ArtifactNotUsableError, "stale world version"):
+            self.registry.current("project-1", "brief")
+        self.assertEqual(self.registry.list_current("project-1", include_stale=False), ())
+        self.assertEqual(
+            self.registry.current("project-1", "brief", require_usable=False).artifact.base_world_version,
+            1,
+        )
 
     def test_new_upstream_version_marks_direct_and_transitive_dependents_stale(self) -> None:
         brief = _artifact(

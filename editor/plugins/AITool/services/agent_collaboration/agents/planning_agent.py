@@ -174,7 +174,10 @@ class PlanningAgent:
                     )
                 return previous_result
 
-            graph = self._task_graphs.get(request.graph_id)
+            graph = self._task_graphs.refresh(
+                request.graph_id,
+                source=f"planning-agent:{request.request_id}:preflight",
+            )
             if graph.project_id != request.project_id:
                 raise PlanningAgentError("task graph belongs to a different project")
             task_record = graph.task(request.task_id)

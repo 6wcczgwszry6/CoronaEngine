@@ -128,7 +128,18 @@ def scene_world_fingerprint(
             "audio_profile": _canonical_value(row.get("audio_profile") or {}),
             "lighting_profile": _canonical_value(row.get("lighting_profile") or {}),
             "environment_profile": _canonical_value(row.get("environment_profile") or {}),
-            "script_bindings": _canonical_value(row.get("script_bindings") or []),
+            "script_bindings": sorted(
+                (
+                    _canonical_value(item)
+                    for item in list(row.get("script_bindings") or [])
+                ),
+                key=lambda item: json.dumps(
+                    item,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+            ),
             "sync_status": _text(row.get("sync_status")),
             "sync_lifecycle_status": _text(row.get("sync_lifecycle_status")),
             "materialization_status": _text(row.get("materialization_status")),

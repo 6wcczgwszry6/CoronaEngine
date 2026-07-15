@@ -288,13 +288,14 @@ class AgentTaskGraphStore:
             return tuple(self._histories.get(normalized, ()))
 
     def start_task(self, graph_id: str, task_id: str, *, source: str) -> AgentTaskGraph:
-        def mutate(record: AgentTaskRecord, _records: dict[str, AgentTaskRecord]) -> AgentTaskRecord:
-            if record.status != "ready":
-                raise TaskTransitionError(f"{task_id}: expected ready, got {record.status}")
+        def mutate(record: AgentTaskRecord, records: dict[str, AgentTaskRecord]) -> AgentTaskRecord:
+            resolved = self._resolve_record_status(self.get(graph_id).project_id, record, records)
+            if resolved.status != "ready":
+                raise TaskTransitionError(f"{task_id}: expected ready, got {resolved.status}")
             return replace(
-                record,
+                resolved,
                 status="in_progress",
-                attempt_count=record.attempt_count + 1,
+                attempt_count=resolved.attempt_count + 1,
                 blocked_reasons=(),
                 last_error="",
             )
@@ -349,7 +350,7 @@ class AgentTaskGraphStore:
                     artifact_record = self._artifacts.get(self.get(graph_id).project_id, ref)
                 except ArtifactNotFoundError as exc:
                     raise TaskOutputValidationError(f"{task_id}: missing output {ref}") from exc
-                if not artifact_record.usable:
+                if not self._artifacts.is_usable(self.get(graph_id).project_id, ref):
                     raise TaskOutputValidationError(f"{task_id}: output {ref} is not usable")
                 artifact = artifact_record.artifact
                 if artifact.source_task_id != task_id:
@@ -530,7 +531,7 @@ class AgentTaskGraphStore:
             except ArtifactNotFoundError:
                 input_reasons.append(TaskBlockReason("input_artifact_missing", value))
                 continue
-            if not artifact_record.usable:
+            if not self._artifacts.is_usable(project_id, value):
                 input_reasons.append(
                     TaskBlockReason(
                         "input_artifact_not_usable",

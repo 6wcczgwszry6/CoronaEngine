@@ -2347,6 +2347,13 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
 
         report = runtime.generate_report("room-drain-health")
 
+        self.assertEqual(report["plan_id"], "")
+        self.assertIsNone(report["scene_world_snapshot"])
+        self.assertEqual(report["completion_status"]["world_readiness"], "blocked")
+        self.assertEqual(
+            report["scene_world_consistency_audit"]["reason"],
+            "runtime_scene_plan_unavailable",
+        )
         worker_drain = report["operation_replay_summary"]["worker_drain_replay_summary"]
         self.assertEqual(worker_drain["failed_count"], 1)
         self.assertEqual(worker_drain["latest_drain_event"]["event"], "runtime_worker_drain_failed")
@@ -2374,6 +2381,46 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(replay_health["latest_worker_drain_event"]["event"], "runtime_worker_drain_failed")
         self.assertEqual(replay_health["latest_worker_drain_event"]["reason"], "synthetic queue drain failure")
 
+    def test_generate_report_prefers_latest_completed_plan_over_new_discussion_plan(self) -> None:
+        runtime = AgentRuntime()
+        room_id = "room-report-plan-priority"
+        completed = ScenePlan(
+            plan_id="plan-report-completed",
+            room_id=room_id,
+            title="completed scene",
+            design_brief="completed scene facts",
+            status=ScenePlanStatus.COMPLETED,
+        )
+        discussion = ScenePlan(
+            plan_id="plan-report-discussion",
+            room_id=room_id,
+            title="new discussion",
+            design_brief="new discussion only",
+            status=ScenePlanStatus.PROPOSED,
+        )
+        applied, reason = runtime.state.apply_patch(StatePatch(
+            room_id=room_id,
+            changes={
+                "scene_plans": {
+                    completed.plan_id: completed.as_dict(),
+                    discussion.plan_id: discussion.as_dict(),
+                },
+                "latest_completed_plan_id": completed.plan_id,
+                "active_discussion_plan_id": discussion.plan_id,
+                "active_plan_id": discussion.plan_id,
+            },
+            expected_version=runtime.state.version,
+            source_tool_call_id="unit-test",
+        ))
+        self.assertTrue(applied, reason)
+
+        report = runtime.generate_report(room_id)
+
+        self.assertEqual(report["plan_id"], completed.plan_id)
+        self.assertEqual(report["plan_summary"]["status"], ScenePlanStatus.COMPLETED.value)
+        self.assertEqual(report["scene_world_snapshot"]["plan_id"], completed.plan_id)
+        self.assertNotEqual(report["plan_id"], discussion.plan_id)
+
     def test_safe_drain_result_marks_failed_graph_without_internal_details(self) -> None:
         safe = AgentRuntime._safe_drain_result_for_user(
             {
@@ -2389,12 +2436,36 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                         "nodes": {"tool-1": {"error": "provider raw url https://internal.example"}},
                     }
                 ],
+                "finalized_plans": [
+                    {
+                        "plan_id": "plan-drain-safe",
+                        "status": "executing",
+                        "reason": "final_report_persist_pending",
+                        "batch_count": 1,
+                        "failed_count": 1,
+                        "report_ready": False,
+                        "internal_error": "provider raw url https://internal.example",
+                    }
+                ],
             }
         )
 
         self.assertEqual(safe["status"], "failed")
         self.assertEqual(safe["reason"], "one or more tool graphs did not complete")
         self.assertEqual(safe["graphs"][0]["status"], "failed")
+        self.assertEqual(
+            safe["finalized_plans"],
+            [
+                {
+                    "plan_id": "plan-drain-safe",
+                    "status": "executing",
+                    "reason": "final_report_persist_pending",
+                    "batch_count": 1,
+                    "failed_count": 1,
+                    "report_ready": False,
+                }
+            ],
+        )
         self.assertNotIn("https://", str(safe))
         self.assertNotIn("provider raw", str(safe).lower())
 
@@ -3181,6 +3252,45 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(second["plan"]["status"], ScenePlanStatus.COMPLETED.value)
         self.assertEqual(second["report"]["plan_id"], plan.plan_id)
         self.assertEqual(attempts, 2)
+
+    def test_failed_business_batches_persist_terminal_report_and_clear_execution_plan(self) -> None:
+        def failing_image_provider(_payload: dict) -> dict:
+            raise RuntimeError("provider offline")
+
+        runtime = AgentRuntime(image_resource_provider=failing_image_provider)
+        room_id = "room-worker-failed-terminal-report"
+        plan = runtime.propose_scene_plan(
+            room_id=room_id,
+            text="create a bedroom with a bed, desk, chair, and cabinet",
+            owner_agent="planner",
+        )
+        runtime.confirm_scene_plan(plan.plan_id, confirmed_by="host")
+        queued = runtime.enqueue_planned_batches(plan.plan_id, max_items_per_batch=2)
+
+        last_result: dict[str, Any] = {}
+        for _ in range(len(queued["batches"]) + 2):
+            last_result = runtime.handle_message(
+                room_id=room_id,
+                text="runtime worker drain",
+                action="worker_drain",
+                external_plan_id=plan.plan_id,
+                max_graphs=1,
+            )
+            if last_result.get("report"):
+                break
+
+        room = runtime.query_state(room_id)["room"]
+        self.assertEqual(last_result["plan"]["status"], ScenePlanStatus.FAILED.value)
+        self.assertEqual(last_result["report"]["plan_id"], plan.plan_id)
+        self.assertEqual(
+            last_result["report"]["plan_summary"]["status"],
+            ScenePlanStatus.FAILED.value,
+        )
+        self.assertEqual(room.get("active_execution_plan_id"), "")
+        self.assertFalse(room.get("latest_completed_plan_id"))
+        self.assertTrue(last_result["drain"]["finalized_plans"][0]["report_ready"])
+        self.assertNotIn("scene_plan_final_report_persist_pending", runtime.operation_log.events())
+        self.assertNotIn("latest_completed_plan_set", runtime.operation_log.events())
 
     def test_plan_finalizer_retries_missing_report_ready_event_before_clearing_execution_plan(self) -> None:
         runtime = AgentRuntime()
@@ -12889,6 +12999,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertTrue(status["latest_runtime_events"])
         self.assertTrue(all(event["batch_id"] == first_batch_id for event in status["latest_runtime_events"]))
         self.assertEqual(report["batch_id"], first_batch_id)
+        self.assertIsNone(report["scene_world_snapshot"])
+        self.assertEqual(
+            report["scene_world_consistency_audit"]["reason"],
+            "batch_scoped_report",
+        )
         self.assertEqual(report["actor_count"], len(batches[0]["requested_items"]))
         self.assertEqual(report["batch_summary"]["batch_count"], 1)
         self.assertEqual(report["batch_summary"]["batches"][0]["batch_id"], first_batch_id)
@@ -22954,6 +23069,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                     "render_ready": True,
                     "render_failed": False,
                     "gpu_build_state": "ready",
+                    "grounding_status": "not_applicable",
                     "mesh_count": 2,
                     "renderable_mesh_count": 2,
                     "invalid_mesh_count": 0,
@@ -22983,6 +23099,17 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "mesh_count must be a non-negative integer"):
             EnvironmentComponentValidator.validate_component_batches(invalid_mesh_components)
+
+        invalid_grounding_components = {
+            "batch-env": {
+                "component-1": {
+                    **valid_components["batch-env"]["component-1"],
+                    "grounding_status": "floating_somewhere",
+                }
+            }
+        }
+        with self.assertRaisesRegex(ValueError, "grounding_status is invalid"):
+            EnvironmentComponentValidator.validate_component_batches(invalid_grounding_components)
 
         unsafe_components = {
             "batch-env": {

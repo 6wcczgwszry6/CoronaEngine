@@ -16,7 +16,7 @@ from typing import Any, Mapping, Sequence
 
 
 COLLABORATION_SCHEMA_VERSION = "1.0"
-PRODUCER_ROLES = frozenset({"planning", "art", "program", "coordinator"})
+PRODUCER_ROLES = frozenset({"planning", "art", "program"})
 ARTIFACT_TYPES = frozenset(
     {
         "GameDesignBrief",
@@ -35,6 +35,16 @@ ARTIFACT_LINEAGE_IDS = MappingProxyType(
         "SceneCompositionPlan": "art.scene-composition",
         "GameplayLogicPlan": "program.gameplay-logic-plan",
         "EntityBindingPlan": "program.entity-binding-plan",
+    }
+)
+ARTIFACT_PRODUCER_ROLES = MappingProxyType(
+    {
+        "GameDesignBrief": "planning",
+        "LevelPlan": "planning",
+        "ArtDirection": "art",
+        "SceneCompositionPlan": "art",
+        "GameplayLogicPlan": "program",
+        "EntityBindingPlan": "program",
     }
 )
 RED_PROJECT_ARTIFACT_TYPES = frozenset(
@@ -324,6 +334,11 @@ class ArtifactEnvelope:
             raise ValueError(f"unsupported artifact_type: {normalized_type}")
         if normalized_role not in PRODUCER_ROLES:
             raise ValueError(f"unsupported producer_role: {normalized_role}")
+        expected_role = ARTIFACT_PRODUCER_ROLES[normalized_type]
+        if normalized_role != expected_role:
+            raise ValueError(
+                f"{normalized_type} requires producer_role {expected_role}, got {normalized_role}"
+            )
         if not normalized_task_id:
             raise ValueError("source_task_id is required")
         if int(version) <= 0:
@@ -337,6 +352,14 @@ class ArtifactEnvelope:
         if normalized_snapshot_source == "mock" and not bool(non_executable):
             raise NonExecutableArtifactError(
                 f"{normalized_artifact_id}: mock Artifact must be non_executable"
+            )
+        if not bool(non_executable) and normalized_snapshot_source != "runtime":
+            raise NonExecutableArtifactError(
+                f"{normalized_artifact_id}: executable Artifact requires runtime snapshot_source"
+            )
+        if normalized_snapshot_source == "runtime" and int(base_world_version) <= 0:
+            raise NonExecutableArtifactError(
+                f"{normalized_artifact_id}: runtime Artifact requires positive base_world_version"
             )
 
         normalized_payload = _normalized_json_value(payload)
@@ -401,6 +424,14 @@ def assert_executable(artifact: ArtifactEnvelope) -> None:
         raise NonExecutableArtifactError(f"{artifact.artifact_id}: mock Artifact cannot execute")
     if artifact.non_executable:
         raise NonExecutableArtifactError(f"{artifact.artifact_id}: Artifact is non_executable")
+    if artifact.snapshot_source != "runtime":
+        raise NonExecutableArtifactError(
+            f"{artifact.artifact_id}: executable Artifact requires runtime snapshot_source"
+        )
+    if artifact.base_world_version <= 0:
+        raise NonExecutableArtifactError(
+            f"{artifact.artifact_id}: executable Artifact requires positive base_world_version"
+        )
     if artifact.status != "validated" or not artifact.validation_result.valid:
         raise NonExecutableArtifactError(f"{artifact.artifact_id}: Artifact is not validated")
 

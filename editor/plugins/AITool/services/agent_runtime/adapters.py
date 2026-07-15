@@ -612,6 +612,19 @@ def make_engine_environment_component_import_provider(
             import_payload["source_plan_id"] = plan_id
             import_payload["source_batch_id"] = batch_id
             import_payload["source_scene_version"] = max(1, int(payload.get("scene_version") or 1))
+            normalized_component_type = component_type.strip().lower()
+            if normalized_component_type in {"room_box", "room_shell", "indoor_enclosure"}:
+                import_payload["grounding_status"] = "enclosure"
+            elif normalized_component_type in {
+                "room_floor",
+                "terrain",
+                "ground",
+                "walkable_floor",
+                "transition_zone",
+            }:
+                import_payload["grounding_status"] = "grounded"
+            elif normalized_component_type in {"sky", "skybox"}:
+                import_payload["grounding_status"] = "not_applicable"
             for field in ("position", "rotation", "scale"):
                 vector = _vector3(component.get(field))
                 if vector:
@@ -697,6 +710,7 @@ def make_engine_environment_component_import_provider(
                 "invalid_mesh_count",
                 "entity_type",
                 "semantic_role",
+                "grounding_status",
                 "size",
             ):
                 if field in update:
@@ -1209,6 +1223,19 @@ def _normalize_environment_component_import_result(
         ),
         fallback="environment_component",
     )
+    normalized_component_type = component_type.strip().lower()
+    if normalized_component_type in {"room_box", "room_shell", "indoor_enclosure"}:
+        update["grounding_status"] = "enclosure"
+    elif normalized_component_type in {
+        "room_floor",
+        "terrain",
+        "ground",
+        "walkable_floor",
+        "transition_zone",
+    }:
+        update["grounding_status"] = "grounded"
+    elif normalized_component_type in {"sky", "skybox"}:
+        update["grounding_status"] = "not_applicable"
     size = _vector3(_first_present(
         actor.get("size") if isinstance(actor, dict) else None,
         actor_data.get("size") if isinstance(actor_data, dict) else None,

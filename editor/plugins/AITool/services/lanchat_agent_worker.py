@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import logging
 import json
 import os
@@ -239,16 +240,25 @@ class LANChatAgentWorker:
 
         if getattr(self, "_runtime_ai_config_loaded", False):
             return
+        loader_namespaces: list[str] = []
         try:
-            from Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
+            from Quasar.ai_modules.three_d_generate.tools import loader as _runtime_hunyuan_loader  # noqa: F401
+
+            loader_namespaces.append("runtime")
         except Exception as exc:  # noqa: BLE001
-            try:
-                from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import loader as _hunyuan_loader  # noqa: F401
-            except Exception:
-                self._logger.debug(
-                    "AgentRuntime Hunyuan config loader unavailable: %s",
-                    type(exc).__name__,
-                )
+            self._logger.debug(
+                "AgentRuntime canonical Hunyuan config loader unavailable: %s",
+                type(exc).__name__,
+            )
+        try:
+            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import loader as _plugin_hunyuan_loader  # noqa: F401
+
+            loader_namespaces.append("plugin")
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime plugin Hunyuan config loader unavailable: %s",
+                type(exc).__name__,
+            )
         try:
             from plugins.AITool import utils as _aitool_utils  # noqa: F401
             from plugins.AITool.utils import ai_setting as _ai_setting  # noqa: F401
@@ -258,11 +268,16 @@ class LANChatAgentWorker:
                 "AgentRuntime local AI setting module unavailable: %s",
                 type(exc).__name__,
             )
+        self._logger.info(
+            "[AgentRuntimeProviderTrace] phase=config_load loaders=%s",
+            ",".join(loader_namespaces) or "none",
+        )
         self._runtime_ai_config_loaded = True
 
     def _bind_runtime_ai_config(self) -> None:
         """Bind providers to the canonical top-level Quasar configuration."""
 
+        self._synchronize_quasar_ai_settings_namespaces()
         try:
             from Quasar.ai_config.ai_config import get_ai_config
 
@@ -276,6 +291,73 @@ class LANChatAgentWorker:
         # Compatibility for old editor builds which imported Quasar only as a
         # plugin-qualified package.
         self._mirror_plugin_ai_settings_to_runtime_namespace()
+
+    def _synchronize_quasar_ai_settings_namespaces(self) -> None:
+        """Keep duplicate Quasar import namespaces on one authoritative config.
+
+        The editor historically imports Quasar both as ``Quasar`` and as
+        ``plugins.AITool.Quasar``.  Python treats their module globals as
+        separate singletons, so settings registered by ``ai_setting`` can be
+        invisible to tool discovery in the other namespace.  The top-level
+        Runtime namespace is authoritative; the plugin-qualified namespace is
+        synchronized for compatibility with old loaders and warmup code.
+        """
+
+        try:
+            from Quasar.ai_service.entrance import ai_entrance as runtime_entrance
+            from plugins.AITool.Quasar.ai_service.entrance import ai_entrance as plugin_entrance
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "AgentRuntime AI setting namespace synchronization unavailable: %s",
+                type(exc).__name__,
+            )
+            return
+
+        runtime_settings = runtime_entrance.collector.AI_SETTINGS
+        plugin_settings = plugin_entrance.collector.AI_SETTINGS
+        source_settings = runtime_settings if isinstance(runtime_settings, dict) and runtime_settings else plugin_settings
+        if not isinstance(source_settings, dict) or not source_settings:
+            return
+
+        synchronized: list[str] = []
+        for namespace, entrance in (
+            ("runtime", runtime_entrance),
+            ("plugin", plugin_entrance),
+        ):
+            collector = entrance.collector
+            try:
+                collector._ai_settings.update(copy.deepcopy(source_settings))
+                for key, value in source_settings.items():
+                    source = getattr(runtime_entrance.collector, "_setting_sources", {}).get(
+                        key,
+                        "plugins.AITool.utils.ai_setting",
+                    )
+                    collector._setting_sources[key] = source
+                    loader = collector._ai_load.get(key)
+                    normalized = loader(copy.deepcopy(value)) if loader is not None else copy.deepcopy(value)
+                    setattr(collector._ai_config, key, normalized)
+                synchronized.append(namespace)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.warning(
+                    "AgentRuntime AI setting namespace synchronization failed namespace=%s error_type=%s",
+                    namespace,
+                    type(exc).__name__,
+                )
+
+        runtime_hunyuan = getattr(runtime_entrance.collector.AIConfig, "hunyuan3d", None)
+        plugin_hunyuan = getattr(plugin_entrance.collector.AIConfig, "hunyuan3d", None)
+        runtime_enabled = bool(
+            getattr(runtime_hunyuan, "enable", runtime_hunyuan.get("enable", False) if isinstance(runtime_hunyuan, dict) else False)
+        )
+        plugin_enabled = bool(
+            getattr(plugin_hunyuan, "enable", plugin_hunyuan.get("enable", False) if isinstance(plugin_hunyuan, dict) else False)
+        )
+        self._logger.info(
+            "[AgentRuntimeProviderTrace] phase=config_namespace_sync namespaces=%s hunyuan_enabled=runtime:%s,plugin:%s",
+            ",".join(synchronized) or "none",
+            runtime_enabled,
+            plugin_enabled,
+        )
 
     def _mirror_plugin_ai_settings_to_runtime_namespace(self) -> None:
         """Bridge plugin-qualified Quasar settings into the Runtime Quasar namespace."""
@@ -623,6 +705,18 @@ class LANChatAgentWorker:
             note_provider("layout_transform", requested=True, status="unavailable", reason="missing_engine")
         if provider_diagnostics:
             kwargs["provider_diagnostics"] = provider_diagnostics
+            safe_provider_diagnostics = {
+                key: {
+                    "requested": bool(value.get("requested")),
+                    "status": str(value.get("status") or ""),
+                    "reason": str(value.get("reason") or ""),
+                }
+                for key, value in provider_diagnostics.items()
+            }
+            self._logger.info(
+                "[AgentRuntimeProviderTrace] phase=runtime_created providers=%s",
+                json.dumps(safe_provider_diagnostics, ensure_ascii=False, sort_keys=True),
+            )
         return AgentRuntime(**kwargs)
 
     def start(self) -> None:

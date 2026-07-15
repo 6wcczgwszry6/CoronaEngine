@@ -12,6 +12,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 import hashlib
+import json
 import re
 import time
 import uuid
@@ -958,6 +959,7 @@ class SyncEventValidator:
         "peer_identity_fingerprint",
     }
     _SAFE_INTEGER_FIELDS = {
+        "scene_version",
         "actor_version",
         "entity_count",
         "applied_entity_count",
@@ -3139,6 +3141,7 @@ class EnvironmentComponentValidator:
         "entity_type",
         "gpu_build_state",
         "gameplay_tags",
+        "grounding_status",
         "handler",
         "interaction_capability",
         "invalid_mesh_count",
@@ -3208,6 +3211,16 @@ class EnvironmentComponentValidator:
         "lighting_profile",
         "physics_profile",
     }
+    _ALLOWED_GROUNDING_STATUSES = {
+        "ceiling_hung",
+        "enclosure",
+        "grounded",
+        "needs_review",
+        "not_applicable",
+        "suspended",
+        "unknown",
+        "wall_mounted",
+    }
 
     @staticmethod
     def validate_component_batches(batches: Mapping[str, Any]) -> None:
@@ -3253,6 +3266,7 @@ class EnvironmentComponentValidator:
             "entity_id",
             "entity_type",
             "gpu_build_state",
+            "grounding_status",
             "handler",
             "model_ref",
             "review_status",
@@ -3294,6 +3308,10 @@ class EnvironmentComponentValidator:
             raise ValueError("environment component fact requires name")
         if "requires_engine_write" in component and not isinstance(component.get("requires_engine_write"), bool):
             raise ValueError("environment component fact requires_engine_write must be a bool")
+        if "grounding_status" in component:
+            grounding_status = str(component.get("grounding_status") or "").strip().lower()
+            if grounding_status not in EnvironmentComponentValidator._ALLOWED_GROUNDING_STATUSES:
+                raise ValueError("environment component fact grounding_status is invalid")
         for field in ("render_status_observed", "render_ready", "render_failed"):
             if field in component and not isinstance(component.get(field), bool):
                 raise ValueError(f"environment component fact {field} must be a bool")
@@ -3325,6 +3343,7 @@ class EnvironmentComponentValidator:
             "entity_id",
             "entity_type",
             "gpu_build_state",
+            "grounding_status",
             "model_ref",
             "review_status",
             "scene_name",
@@ -3427,6 +3446,8 @@ class SceneWorldSnapshotRecordValidator:
         if any(not isinstance(entity, Mapping) for entity in entities):
             raise ValueError("scene world snapshot entities must be mappings")
         entity_ids = [str(entity.get("entity_id") or "").strip() for entity in entities]
+        if any(not entity_id for entity_id in entity_ids):
+            raise ValueError("scene world snapshot entities require stable entity_id")
         non_empty_entity_ids = [entity_id for entity_id in entity_ids if entity_id]
         if len(non_empty_entity_ids) != len(set(non_empty_entity_ids)):
             raise ValueError("scene world snapshot contains duplicate entity_id")
@@ -9856,7 +9877,7 @@ class AgentRuntime:
             report_plan_id = str(report.get("plan_id") or call.args.get("plan_id") or "").strip()
             plan_summary = dict(report.get("plan_summary") or {})
             report_status = str(plan_summary.get("status") or "").strip().lower()
-            terminal_report = report_status in {
+            terminal_report = not str(report.get("batch_id") or "").strip() and report_status in {
                 ScenePlanStatus.COMPLETED.value,
                 ScenePlanStatus.FAILED.value,
                 ScenePlanStatus.CANCELLED.value,
@@ -11905,6 +11926,28 @@ class AgentRuntime:
     def _safe_drain_result_for_user(cls, drain: Mapping[str, Any] | None) -> dict[str, Any]:
         raw = dict(drain or {})
         safe_graphs = cls._safe_graphs_for_user(raw.get("graphs") if isinstance(raw.get("graphs"), list) else [])
+        safe_finalized_plans = []
+        for item in raw.get("finalized_plans") if isinstance(raw.get("finalized_plans"), list) else []:
+            if not isinstance(item, Mapping):
+                continue
+            safe_item = {
+                key: item.get(key)
+                for key in (
+                    "plan_id",
+                    "status",
+                    "reason",
+                    "batch_count",
+                    "completed_count",
+                    "partial_count",
+                    "failed_count",
+                    "scene_version",
+                    "report_ready",
+                )
+                if key in item
+            }
+            if "reason" in safe_item:
+                safe_item["reason"] = str(safe_item.get("reason") or "")[:240]
+            safe_finalized_plans.append(safe_item)
         failed_graphs = [graph for graph in safe_graphs if str(graph.get("status") or "") not in {"", "completed"}]
         status = str(raw.get("status") or "").strip().lower()
         if not status and failed_graphs:
@@ -11916,6 +11959,7 @@ class AgentRuntime:
             "room_id": str(raw.get("room_id") or ""),
             "plan_id": str(raw.get("plan_id") or ""),
             "drained_count": int(raw.get("drained_count") or 0),
+            "finalized_plans": safe_finalized_plans,
             "graphs": safe_graphs,
         }
         if status:
@@ -17189,21 +17233,25 @@ class AgentRuntime:
                 )
                 return result
             result["report_ready"] = True
-            identity_changes = {"latest_completed_plan_id": plan_id}
+            identity_changes = {}
+            if next_status == ScenePlanStatus.COMPLETED:
+                identity_changes["latest_completed_plan_id"] = plan_id
             if str(self.state.room(str(room_id)).get("active_execution_plan_id") or "") == plan_id:
                 identity_changes["active_execution_plan_id"] = ""
-            self._persist_plan_identity_changes(
-                room_id=str(room_id),
-                plan_id=plan_id,
-                changes=identity_changes,
-                reason="plan_finalizer:terminal_report_ready",
-            )
-            self.operation_log.append(
-                "latest_completed_plan_set",
-                room_id=str(room_id),
-                plan_id=plan_id,
-                payload={"latest_completed_plan_id": plan_id},
-            )
+            if identity_changes:
+                self._persist_plan_identity_changes(
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    changes=identity_changes,
+                    reason="plan_finalizer:terminal_report_ready",
+                )
+            if "latest_completed_plan_id" in identity_changes:
+                self.operation_log.append(
+                    "latest_completed_plan_set",
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    payload={"latest_completed_plan_id": plan_id},
+                )
             if "active_execution_plan_id" in identity_changes:
                 self.operation_log.append(
                     "active_execution_plan_cleared",
@@ -20888,17 +20936,34 @@ class AgentRuntime:
             }
 
         def actor_grounding_status(row: Mapping[str, Any]) -> str:
-            explicit = str(row.get("grounding_status") or row.get("grounded_status") or "").strip()
-            if explicit:
+            explicit = str(
+                row.get("grounding_status") or row.get("grounded_status") or ""
+            ).strip().lower()
+            if explicit in {
+                "grounded",
+                "wall_mounted",
+                "suspended",
+                "ceiling_hung",
+                "not_applicable",
+                "enclosure",
+            }:
                 return explicit
+            support_type = str(row.get("support_type") or "").strip().lower()
+            if not support_type or support_type == "unknown":
+                support_type = AgentRuntime._layout_support_type(row)
             bounds = bounds_from(row)
             min_value = bounds.get("min") if isinstance(bounds, Mapping) else None
-            if isinstance(min_value, (list, tuple)) and len(min_value) >= 2:
+            if (
+                support_type == "floor_supported"
+                and str(row.get("bounds_source") or "").strip().lower() == "engine_actual"
+                and isinstance(min_value, (list, tuple))
+                and len(min_value) >= 2
+            ):
                 try:
                     return "grounded" if abs(float(min_value[1])) <= 0.05 else "needs_review"
                 except (TypeError, ValueError):
                     return "unknown"
-            return "unknown"
+            return explicit or "unknown"
 
         def entity_is_game_ready(entity: Mapping[str, Any]) -> bool:
             grounding = str(entity.get("grounding_status") or "").strip().lower()
@@ -21124,6 +21189,45 @@ class AgentRuntime:
                     failures.append(safe_row)
             return failures
 
+        def merge_engine_observation(
+            base_row: Mapping[str, Any],
+            observed_row: Any,
+        ) -> dict[str, Any]:
+            merged = dict(base_row)
+            if isinstance(observed_row, Mapping):
+                observed_values = dict(observed_row)
+                observed_actual_bounds = (
+                    bool(observed_values.get("bounds_ready"))
+                    and str(observed_values.get("bounds_source") or "").strip().lower()
+                    == "engine_actual"
+                    and bool(bounds_from(observed_values))
+                )
+                observed_render_status = bool(
+                    observed_values.get("render_status_observed")
+                )
+                authoritative_keys: set[str] = set()
+                if observed_actual_bounds:
+                    authoritative_keys.update({
+                        "position", "location", "translation",
+                        "rotation", "euler", "rotator", "scale",
+                        "aabb", "bounds", "scene_aabb", "world_aabb", "world_bounds",
+                        "bounds_ready", "bounds_source",
+                        "engine_lifecycle_status", "actor_version", "entity_version", "version",
+                    })
+                if observed_render_status:
+                    authoritative_keys.update({
+                        "render_status_observed", "render_ready", "render_failed",
+                        "gpu_build_state", "mesh_count", "renderable_mesh_count",
+                        "invalid_mesh_count", "engine_lifecycle_status",
+                    })
+                for key, value in observed_values.items():
+                    if key in authoritative_keys and value not in (None, "", [], {}):
+                        merged[key] = value
+                        continue
+                    if key not in merged or merged.get(key) in (None, "", [], {}):
+                        merged[key] = value
+            return merged
+
         entities: list[dict[str, Any]] = []
         seen_entity_ids: set[str] = set()
         seen_semantic_roles: set[str] = set()
@@ -21132,11 +21236,7 @@ class AgentRuntime:
             if not isinstance(actor_row, Mapping):
                 continue
             observed_row = observed.get(actor_id, {})
-            merged = {**dict(actor_row)}
-            if isinstance(observed_row, Mapping):
-                for key, value in dict(observed_row).items():
-                    if key not in merged or merged.get(key) in (None, "", [], {}):
-                        merged[key] = value
+            merged = merge_engine_observation(actor_row, observed_row)
             asset_id = actor_asset_id(merged)
             actor_sync = actor_sync_status(merged, asset_id)
             bounds = bounds_from(merged)
@@ -21247,7 +21347,21 @@ class AgentRuntime:
             for component_id, component in sorted(components.items()):
                 if not isinstance(component, Mapping):
                     continue
+                component_actor_id = str(component.get("actor_id") or "").strip()
+                merged_component = dict(component)
+                runtime_actor = actors.get(component_actor_id, {})
+                if isinstance(runtime_actor, Mapping):
+                    merged_component = merge_engine_observation(
+                        merged_component,
+                        runtime_actor,
+                    )
+                merged_component = merge_engine_observation(
+                    merged_component,
+                    observed.get(component_actor_id, {}),
+                )
+                component = merged_component
                 component_type = str(component.get("component_type") or "environment").strip() or "environment"
+                component_type_key = component_type.lower()
                 # Environment is the stable entity domain.  Terrain, skybox,
                 # room shells, floors, and transitions remain queryable through
                 # component_type instead of fragmenting the Game-ready schema.
@@ -21255,9 +21369,9 @@ class AgentRuntime:
                 component_asset_id = stable_environment_asset_id(component, component_type)
                 component_semantic_role = str(component.get("semantic_role") or "").strip()
                 if not component_semantic_role:
-                    if component_type == "room_box":
+                    if component_type_key in {"room_box", "room_shell", "indoor_enclosure"}:
                         component_semantic_role = "indoor_enclosure"
-                    elif component_type == "room_floor":
+                    elif component_type_key in {"room_floor", "walkable_floor"}:
                         component_semantic_role = "walkable_floor"
                     else:
                         component_semantic_role = str(component.get("name") or component_id or component_type)
@@ -21275,9 +21389,11 @@ class AgentRuntime:
                 explicit_component_grounding = str(
                     component.get("grounding_status") or component.get("grounded_status") or ""
                 ).strip()
-                if explicit_component_grounding:
-                    component_grounding = explicit_component_grounding
-                elif component_type in {
+                # Component semantics are authoritative for environment support.
+                # A room shell can touch y=0 and still be an enclosure rather than
+                # a floor-supported prop, so generic AABB grounding must not
+                # overwrite these domain facts.
+                if component_type_key in {
                     "room_floor",
                     "terrain",
                     "ground",
@@ -21285,8 +21401,12 @@ class AgentRuntime:
                     "transition_zone",
                 }:
                     component_grounding = "grounded"
-                elif component_type in {"room_box", "room_shell", "indoor_enclosure"}:
+                elif component_type_key in {"room_box", "room_shell", "indoor_enclosure"}:
                     component_grounding = "enclosure"
+                elif component_type_key in {"sky", "skybox"}:
+                    component_grounding = "not_applicable"
+                elif explicit_component_grounding:
+                    component_grounding = explicit_component_grounding
                 elif component.get("requires_engine_write") is False:
                     component_grounding = "not_applicable"
                 else:
@@ -21801,11 +21921,19 @@ class AgentRuntime:
         ]
         sync_state = dict(room.get("sync_state") or {})
         peer_events = dict(sync_state.get("peer_events") or {})
+        expected_scene_version = max(0, int(scene_entity_registry.get("scene_version") or 0))
+        expected_identity_fingerprint = AgentRuntime._scene_identity_fingerprint(
+            entities,
+            plan_id=plan_id,
+            scene_version=expected_scene_version,
+        )
         peer_mirror_plan_id = str(room.get("peer_mirror_plan_id") or "").strip()
         is_peer_mirror = peer_mirror_plan_id == str(plan_id or "")
         latest_peer_acks: dict[str, dict[str, Any]] = {}
         for item in sync_events:
             if str(item.get("event_type") or "") != "scene_snapshot_peer_ack":
+                continue
+            if str(item.get("plan_id") or "").strip() != str(plan_id or "").strip():
                 continue
             peer_id = str(item.get("peer_id") or "").strip()
             if not peer_id:
@@ -21842,6 +21970,17 @@ class AgentRuntime:
             if str(entity.get("sync_status") or "").strip().lower() not in verified_sync_statuses
         ]
         acknowledged_peer_count = len(latest_peer_acks)
+        inactive_peer_statuses = {"closed", "disconnected", "left", "removed", "stopped"}
+        known_peer_ids = {
+            str(peer_id or "").strip()
+            for peer_id, peer_event in peer_events.items()
+            if str(peer_id or "").strip()
+            and str(dict(peer_event or {}).get("status") or "").strip().lower()
+            not in inactive_peer_statuses
+        }
+        known_peer_ids.update(latest_peer_acks)
+        peer_count = len(known_peer_ids)
+        unacknowledged_peer_count = max(0, peer_count - acknowledged_peer_count)
         ack_partial_count = 0
         ack_identity_drift_count = 0
         ack_version_drift_count = 0
@@ -21858,13 +21997,23 @@ class AgentRuntime:
                 identity_drift = max(0, int(ack.get("identity_drift_count") or 0))
                 version_drift = max(0, int(ack.get("version_drift_count") or 0))
                 explicit_partial = max(0, int(ack.get("partial_entity_count") or 0))
+                ack_scene_version = max(0, int(ack.get("scene_version") or 0))
+                ack_status = str(ack.get("status") or "").strip().lower()
                 if not host_fingerprint or not peer_fingerprint:
                     identity_drift += 1
                 elif host_fingerprint != peer_fingerprint:
                     identity_drift += 1
+                if host_fingerprint != expected_identity_fingerprint:
+                    identity_drift += 1
                 if host_entity_count != expected_entity_count:
                     identity_drift += 1
+                if applied_entity_count > expected_entity_count:
+                    identity_drift += 1
+                if expected_scene_version <= 0 or ack_scene_version != expected_scene_version:
+                    version_drift += 1
                 peer_verified = min(expected_entity_count, applied_entity_count)
+                if ack_status not in {"peer_confirmed", "host_peer_verified", "synced"}:
+                    peer_verified = 0
                 if identity_drift or version_drift:
                     peer_verified = 0
                 peer_partial = max(
@@ -21886,9 +22035,11 @@ class AgentRuntime:
         )
         return {
             "applicable": applicable,
-            "peer_count": acknowledged_peer_count if latest_peer_acks else len(peer_events),
+            "peer_count": peer_count,
             "acknowledged_peer_count": acknowledged_peer_count,
+            "unacknowledged_peer_count": unacknowledged_peer_count,
             "comparison_mode": "peer_snapshot_ack" if latest_peer_acks else "peer_mirror" if is_peer_mirror else "none",
+            "scene_version": expected_scene_version,
             "entity_count": len(entities),
             "verified_entity_count": verified_entity_count,
             "partial_entity_count": partial_entity_count,
@@ -21903,6 +22054,48 @@ class AgentRuntime:
                 )
             ),
         }
+
+    @staticmethod
+    def _scene_identity_fingerprint(
+        entities: Iterable[Mapping[str, Any]],
+        *,
+        plan_id: str,
+        scene_version: int,
+    ) -> str:
+        """Match LANChat's scene-id-v1 fingerprint against Runtime facts."""
+
+        normalized_plan_id = str(plan_id or "").strip()
+        normalized_scene_version = max(1, int(scene_version or 1))
+        rows: list[dict[str, Any]] = []
+        for entity in entities:
+            actor_id = str(entity.get("actor_id") or "").strip()
+            entity_id = str(entity.get("entity_id") or "").strip()
+            if not actor_id or not entity_id:
+                continue
+            rows.append({
+                "actor_guid": actor_id,
+                "entity_id": entity_id,
+                "asset_id": str(entity.get("asset_id") or "").strip(),
+                "actor_version": max(
+                    1,
+                    int(entity.get("actor_version") or entity.get("version") or 1),
+                ),
+                "source_plan_id": normalized_plan_id,
+                "source_scene_version": normalized_scene_version,
+            })
+        rows.sort(key=lambda row: (str(row["actor_guid"]), str(row["entity_id"])))
+        serialized = json.dumps(
+            rows,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        hash_value = 0
+        utf16 = serialized.encode("utf-16-le")
+        for offset in range(0, len(utf16), 2):
+            code_unit = utf16[offset] | (utf16[offset + 1] << 8)
+            hash_value = ((hash_value << 5) - hash_value + code_unit) & 0xFFFFFFFF
+        return f"scene-id-v1-{hash_value:x}-{len(utf16) // 2}"
 
     def evaluate_r3_readiness(
         self,
@@ -23104,8 +23297,13 @@ class AgentRuntime:
     def generate_report(self, room_id: str, *, plan_id: str = "", batch_id: str = "") -> dict[str, Any]:
         snapshot = self.state.snapshot(room_id)
         room = snapshot["room"]
-        active_plan_id = str(plan_id or room.get("active_plan_id") or "")
+        requested_plan_id = str(plan_id or "").strip()
+        active_plan_id = requested_plan_id or self._resolve_runtime_plan_id_from_state(
+            str(room_id),
+            allow_completed=True,
+        )
         plan = dict(room.get("scene_plans", {}).get(active_plan_id, {}) or {})
+        has_runtime_plan = bool(active_plan_id and plan)
         operation_replay_summary = self._operation_replay_summary_via_tool_graph(
             room_id=str(room_id),
             plan_id=active_plan_id,
@@ -23439,31 +23637,47 @@ class AgentRuntime:
             "business_node_count": sum(len(dict(item.get("nodes") or {})) for item in user_visible_graphs),
             "internal_node_count": sum(len(dict(item.get("nodes") or {})) for item in internal_graphs),
         }
-        scene_world_snapshot = self._scene_world_snapshot_for_plan(
-            room,
-            active_plan_id,
-            room_id=str(room_id),
-            scene_entity_registry=scene_entity_registry,
-            operation_cursor=f"op:{len(self.operation_log.entries())}",
-        )
-        engine_snapshot = latest_engine_snapshot(
-            dict(room.get("engine_scene_snapshots") or {}),
-            plan_id=active_plan_id,
-            scene_version=int(scene_world_snapshot.get("scene_version") or 0),
-        )
-        scene_world_consistency_audit = build_scene_world_consistency_audit(
-            world_snapshot=scene_world_snapshot,
-            engine_snapshot=engine_snapshot,
-        )
-        if not engine_snapshot:
-            scene_world_consistency_audit["reason"] = "engine_scene_snapshot_unavailable"
-        scene_world_snapshot = constrain_scene_world_snapshot_readiness(
-            scene_world_snapshot,
-            scene_world_consistency_audit,
-        )
-        completion_status["world_readiness"] = str(
-            scene_world_snapshot.get("world_readiness") or "blocked"
-        )
+        scene_world_snapshot: dict[str, Any] | None = None
+        if has_runtime_plan and not batch_id:
+            scene_world_snapshot = self._scene_world_snapshot_for_plan(
+                room,
+                active_plan_id,
+                room_id=str(room_id),
+                scene_entity_registry=scene_entity_registry,
+                operation_cursor=f"op:{len(self.operation_log.entries())}",
+            )
+            engine_snapshot = latest_engine_snapshot(
+                dict(room.get("engine_scene_snapshots") or {}),
+                plan_id=active_plan_id,
+                scene_version=int(scene_world_snapshot.get("scene_version") or 0),
+            )
+            scene_world_consistency_audit = build_scene_world_consistency_audit(
+                world_snapshot=scene_world_snapshot,
+                engine_snapshot=engine_snapshot,
+            )
+            if not engine_snapshot:
+                scene_world_consistency_audit["reason"] = "engine_scene_snapshot_unavailable"
+            scene_world_snapshot = constrain_scene_world_snapshot_readiness(
+                scene_world_snapshot,
+                scene_world_consistency_audit,
+            )
+            completion_status["world_readiness"] = str(
+                scene_world_snapshot.get("world_readiness") or "blocked"
+            )
+        else:
+            completion_status["pipeline_status"] = "running"
+            completion_status["engine_materialization_status"] = "partial"
+            completion_status["world_readiness"] = "blocked"
+            scene_world_consistency_audit = {
+                "status": "not_evaluated",
+                "reason": (
+                    "batch_scoped_report"
+                    if has_runtime_plan and batch_id
+                    else "runtime_scene_plan_unavailable"
+                ),
+                "plan_id": active_plan_id,
+                "scene_version": 0,
+            }
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -23758,7 +23972,7 @@ class AgentRuntime:
                     f" {scene_entity_engine_write_pending_f5_count} 个场景实体仍待引擎写入/F5确认。"
                 )
         plan_status_value = str(plan.get("status") or "")
-        report_terminal = plan_status_value in {
+        report_terminal = not batch_id and plan_status_value in {
             ScenePlanStatus.COMPLETED.value,
             ScenePlanStatus.FAILED.value,
             ScenePlanStatus.CANCELLED.value,
@@ -23786,8 +24000,8 @@ class AgentRuntime:
             progress=100 if report_terminal else 96,
             payload={
                 "status": str(plan.get("status") or ""),
-                "scene_version": int(scene_world_snapshot.get("scene_version") or 0),
-                "world_fingerprint": str(scene_world_snapshot.get("world_fingerprint") or ""),
+                "scene_version": int((scene_world_snapshot or {}).get("scene_version") or 0),
+                "world_fingerprint": str((scene_world_snapshot or {}).get("world_fingerprint") or ""),
                 "pipeline_status": completion_status["pipeline_status"],
                 "engine_materialization_status": completion_status["engine_materialization_status"],
                 "world_readiness": completion_status["world_readiness"],

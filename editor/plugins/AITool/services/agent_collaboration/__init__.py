@@ -2,6 +2,7 @@
 
 from .contracts import (
     ARTIFACT_LINEAGE_IDS,
+    ARTIFACT_PRODUCER_ROLES,
     ARTIFACT_TYPES,
     PRODUCER_ROLES,
     RED_PROJECT_ARTIFACT_TYPES,
@@ -66,6 +67,7 @@ from .task_graph import (
 
 __all__ = [
     "ARTIFACT_LINEAGE_IDS",
+    "ARTIFACT_PRODUCER_ROLES",
     "ARTIFACT_TYPES",
     "PRODUCER_ROLES",
     "RED_PROJECT_ARTIFACT_TYPES",

@@ -362,40 +362,27 @@ class ProgramAgentTests(unittest.TestCase):
         self.assertEqual(reasoner.calls, [])
 
     def test_wrong_producer_for_planning_type_is_rejected_before_reasoning(self) -> None:
-        planning_refs = self._publish_planning()
         current_version = self.projects.get("project-1").project_version
-        impostor = ArtifactEnvelope(
-            artifact_id="fixture.game-design-brief",
-            artifact_type="GameDesignBrief",
-            version=1,
-            producer_role="art",
-            source_task_id="fixture",
-            base_project_version=current_version,
-            base_world_version=0,
-            snapshot_source="none",
-            non_executable=True,
-            status="validated",
-            payload=GameDesignBrief(
-                project_goal="fixture",
-                player_experience=("inspect",),
-                core_rules=("no role impersonation",),
-                acceptance_criteria=("reject wrong producer",),
-            ),
-        )
-        self.artifacts.register(
-            project_id="project-1",
-            artifact=impostor,
-            expected_project_version=current_version,
-            patch_id="patch-register-program-impostor-input",
-            source="test",
-        )
-        self._create_program_graph(("fixture.game-design-brief@1", planning_refs[1]))
-        reasoner = FakeProgramReasoner()
-
-        with self.assertRaises(ProgramInputValidationError):
-            self._agent(reasoner).run(_program_request())
-
-        self.assertEqual(reasoner.calls, [])
+        with self.assertRaisesRegex(ValueError, "requires producer_role planning"):
+            ArtifactEnvelope(
+                artifact_id="fixture.game-design-brief",
+                artifact_type="GameDesignBrief",
+                version=1,
+                producer_role="art",
+                source_task_id="fixture",
+                base_project_version=current_version,
+                base_world_version=0,
+                snapshot_source="none",
+                non_executable=True,
+                status="validated",
+                payload=GameDesignBrief(
+                    project_goal="fixture",
+                    player_experience=("inspect",),
+                    core_rules=("no role impersonation",),
+                    acceptance_criteria=("reject wrong producer",),
+                ),
+            )
+        self.assertEqual(self.artifacts.list_versions("project-1", "fixture.game-design-brief"), ())
 
     def test_scene_composition_input_is_rejected_before_reasoning(self) -> None:
         planning_refs = self._publish_planning()
@@ -605,7 +592,6 @@ class ProgramAgentTests(unittest.TestCase):
             patch_id="patch-register-art-direction-v2",
             source="test",
         )
-        self.graphs.refresh("graph-program-1", source="test")
         reasoner = FakeProgramReasoner()
 
         with self.assertRaises(ProgramInputValidationError):
@@ -619,6 +605,14 @@ class ProgramAgentTests(unittest.TestCase):
 
     def test_snapshot_sourced_optional_art_is_rejected_before_reasoning(self) -> None:
         planning_refs = self._publish_planning()
+        current_version = self.projects.get("project-1").project_version
+        self.projects.apply_patch(ProjectStatePatch(
+            patch_id="patch-program-snapshot-world-v1",
+            project_id="project-1",
+            expected_project_version=current_version,
+            source="test",
+            changes={"scene_world_version": 1},
+        ))
         current_version = self.projects.get("project-1").project_version
         fixtures = []
         for source in ("mock", "runtime"):

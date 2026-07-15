@@ -180,6 +180,7 @@ def _dimension(
 def _snapshot_dimension(
     snapshot_result: Mapping[str, Any],
     consistency_audit: Mapping[str, Any],
+    scene_entity_registry: Mapping[str, Any],
 ) -> R3GateDimension:
     result = _stable_mapping(snapshot_result)
     snapshot = _stable_mapping(result.get("snapshot"))
@@ -197,6 +198,30 @@ def _snapshot_dimension(
     stability = str(result.get("snapshot_stability") or "")
     authority = str(result.get("snapshot_authority") or snapshot.get("snapshot_authority") or "")
     audit = _stable_mapping(consistency_audit)
+    registry = _stable_mapping(scene_entity_registry)
+    registry_entities = _stable_rows(registry.get("entities"))
+    registry_plan_id = str(registry.get("plan_id") or "")
+    registry_scene_version = max(0, _safe_int(registry.get("scene_version")))
+    registry_fingerprint = (
+        scene_world_fingerprint(
+            registry_entities,
+            plan_id=registry_plan_id,
+            scene_version=registry_scene_version,
+        )
+        if registry_plan_id and registry_scene_version > 0
+        else ""
+    )
+    registry_plan_matches = bool(plan_id and registry_plan_id == plan_id)
+    registry_version_matches = bool(
+        scene_version > 0 and registry_scene_version == scene_version
+    )
+    registry_fingerprint_matches = bool(
+        fingerprint
+        and registry_fingerprint
+        and registry_plan_matches
+        and registry_version_matches
+        and registry_fingerprint == fingerprint
+    )
     engine_available = bool(audit.get("engine_snapshot_available"))
     audit_consistent = bool(audit.get("fingerprints_match")) and str(audit.get("status") or "") == "consistent"
     missing: list[str] = []
@@ -207,6 +232,23 @@ def _snapshot_dimension(
         missing.append("world_fingerprint")
     if fingerprint and computed_fingerprint and fingerprint != computed_fingerprint:
         contradictions.append("world_fingerprint_mismatch")
+    if not registry_plan_id:
+        missing.append("scene_entity_registry_plan_id")
+    elif not registry_plan_matches:
+        contradictions.append("scene_entity_registry_plan_id_mismatch")
+    if registry_scene_version <= 0:
+        missing.append("scene_entity_registry_scene_version")
+    elif not registry_version_matches:
+        contradictions.append("scene_entity_registry_scene_version_mismatch")
+    if not registry_entities:
+        missing.append("scene_entity_registry_entities")
+    elif (
+        registry_plan_matches
+        and registry_version_matches
+        and fingerprint
+        and registry_fingerprint != fingerprint
+    ):
+        contradictions.append("scene_entity_registry_snapshot_fingerprint_mismatch")
     if authority == "local_runtime" and stability != "immutable":
         contradictions.append("snapshot_not_immutable")
     if authority == "peer_mirror" and stability != "peer_mirror":
@@ -237,6 +279,10 @@ def _snapshot_dimension(
             "snapshot_authority": authority,
             "entity_count": len(entities),
             "fingerprint_matches_payload": bool(fingerprint and fingerprint == computed_fingerprint),
+            "registry_plan_id_matches": registry_plan_matches,
+            "registry_scene_version_matches": registry_version_matches,
+            "registry_fingerprint_matches_snapshot": registry_fingerprint_matches,
+            "registry_entity_count": len(registry_entities),
             "engine_snapshot_available": engine_available,
             "engine_snapshot_plan_id_matches": bool(audit.get("plan_id_matches")),
             "engine_snapshot_scene_version_matches": bool(
@@ -428,6 +474,7 @@ def _environment_dimension(
     ready_components: set[str] = set()
     for component_type in required:
         rows = by_type.get(component_type, [])
+        component_ready = bool(rows)
         for index, row in enumerate(rows):
             row_missing = _environment_entity_missing_fields(
                 row,
@@ -443,8 +490,10 @@ def _environment_dimension(
                 "ready": not row_missing,
                 "readiness_missing_fields": row_missing,
             })
-            if not row_missing:
-                ready_components.add(component_type)
+            if row_missing:
+                component_ready = False
+        if component_ready:
+            ready_components.add(component_type)
     component_diagnostics.sort(
         key=lambda item: (
             str(item.get("component_type") or ""),
@@ -778,6 +827,8 @@ def _business_graph_dimension(
         "skipped",
     }
     terminal_node_statuses = {"succeeded", "failed", "blocked", "skipped"}
+    successful_batch_statuses = {"completed"}
+    successful_graph_statuses = {"completed"}
     node_status_counts: dict[str, int] = {}
     for batch in batch_rows:
         batch_id = str(batch.get("batch_id") or "")
@@ -802,10 +853,20 @@ def _business_graph_dimension(
             contradictions.append(f"{batch_id}:graph_batch_mismatch")
         if str(graph.get("plan_id") or "") != batch_plan_id:
             contradictions.append(f"{batch_id}:graph_plan_mismatch")
-        if str(batch.get("status") or "") not in terminal_batch_statuses:
+        batch_status = str(batch.get("status") or "").strip().lower()
+        graph_status = str(graph.get("status") or "").strip().lower()
+        if batch_status not in terminal_batch_statuses:
             contradictions.append(f"{batch_id}:batch_not_terminal")
-        if str(graph.get("status") or "") not in terminal_graph_statuses:
+        elif batch_status not in successful_batch_statuses:
+            contradictions.append(
+                f"{batch_id}:batch_terminal_unsuccessful:{batch_status}"
+            )
+        if graph_status not in terminal_graph_statuses:
             contradictions.append(f"{batch_id}:graph_not_terminal")
+        elif graph_status not in successful_graph_statuses:
+            contradictions.append(
+                f"{batch_id}:graph_terminal_unsuccessful:{graph_status}"
+            )
         nodes = graph.get("nodes")
         if not isinstance(nodes, Mapping) or not nodes:
             missing.append(f"{batch_id}:business_graph_nodes")
@@ -828,6 +889,12 @@ def _business_graph_dimension(
             contradictions.append(f"{batch_id}:business_graph_nodes_active")
         if unknown_node_count:
             contradictions.append(f"{batch_id}:business_graph_node_status_unknown")
+        if any(
+            isinstance(node, Mapping)
+            and str(node.get("status") or "").strip().lower() in {"failed", "blocked"}
+            for node in nodes.values()
+        ):
+            contradictions.append(f"{batch_id}:business_graph_nodes_unsuccessful")
     orphan_graphs = [
         str(graph.get("graph_id") or "")
         for graph in business_graphs
@@ -855,6 +922,18 @@ def _business_graph_dimension(
             "terminal_graph_count": sum(
                 1 for graph in business_graphs if str(graph.get("status") or "") in terminal_graph_statuses
             ),
+            "successful_batch_count": sum(
+                1
+                for batch in batch_rows
+                if str(batch.get("status") or "").strip().lower()
+                in successful_batch_statuses
+            ),
+            "successful_graph_count": sum(
+                1
+                for graph in business_graphs
+                if str(graph.get("status") or "").strip().lower()
+                in successful_graph_statuses
+            ),
             "business_node_count": sum(node_status_counts.values()),
             "succeeded_node_count": node_status_counts.get("succeeded", 0),
             "failed_node_count": node_status_counts.get("failed", 0),
@@ -881,6 +960,10 @@ def _multiplayer_dimension(multiplayer_evidence: Mapping[str, Any]) -> R3GateDim
     partial_count = _safe_int(evidence.get("partial_entity_count"))
     verified_count = _safe_int(evidence.get("verified_entity_count"))
     entity_count = _safe_int(evidence.get("entity_count"))
+    peer_count = _safe_int(evidence.get("peer_count"))
+    acknowledged_peer_count = _safe_int(evidence.get("acknowledged_peer_count"))
+    unacknowledged_peer_count = _safe_int(evidence.get("unacknowledged_peer_count"))
+    comparison_mode = str(evidence.get("comparison_mode") or "none")
     missing_fields_explicit = bool(evidence.get("missing_fields_explicit", True))
     contradictions: list[str] = []
     missing: list[str] = []
@@ -888,6 +971,8 @@ def _multiplayer_dimension(multiplayer_evidence: Mapping[str, Any]) -> R3GateDim
         contradictions.append("multiplayer_entity_or_version_drift")
     if partial_count and not missing_fields_explicit:
         contradictions.append("partial_peer_entities_without_missing_fields")
+    if unacknowledged_peer_count:
+        missing.append("peer_snapshot_ack")
     if not applicable:
         status = "yellow"
         missing.append("host_peer_consistency_evidence")
@@ -895,7 +980,15 @@ def _multiplayer_dimension(multiplayer_evidence: Mapping[str, Any]) -> R3GateDim
     elif contradictions:
         status = "red"
         summary = "Host and peer entity identity facts are contradictory."
-    elif entity_count > 0 and verified_count >= entity_count and partial_count == 0:
+    elif (
+        comparison_mode == "peer_snapshot_ack"
+        and peer_count > 0
+        and acknowledged_peer_count >= peer_count
+        and entity_count > 0
+        and verified_count >= entity_count
+        and partial_count == 0
+        and unacknowledged_peer_count == 0
+    ):
         status = "green"
         summary = "Host and peer entity identities and versions are consistent."
     else:
@@ -907,9 +1000,10 @@ def _multiplayer_dimension(multiplayer_evidence: Mapping[str, Any]) -> R3GateDim
         summary,
         metrics={
             "applicable": applicable,
-            "peer_count": _safe_int(evidence.get("peer_count")),
-            "acknowledged_peer_count": _safe_int(evidence.get("acknowledged_peer_count")),
-            "comparison_mode": str(evidence.get("comparison_mode") or "none"),
+            "peer_count": peer_count,
+            "acknowledged_peer_count": acknowledged_peer_count,
+            "unacknowledged_peer_count": unacknowledged_peer_count,
+            "comparison_mode": comparison_mode,
             "entity_count": entity_count,
             "verified_entity_count": verified_count,
             "partial_entity_count": partial_count,
@@ -1008,7 +1102,11 @@ def evaluate_r3_gate(
     """Build one deterministic R3GateReport from immutable fact snapshots."""
 
     dimensions = {
-        "snapshot_integrity": _snapshot_dimension(snapshot_result, consistency_audit),
+        "snapshot_integrity": _snapshot_dimension(
+            snapshot_result,
+            consistency_audit,
+            scene_entity_registry,
+        ),
         "environment_readiness": _environment_dimension(
             snapshot_result, required_environment_components
         ),

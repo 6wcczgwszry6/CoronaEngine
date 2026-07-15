@@ -318,41 +318,27 @@ class ArtAgentTests(unittest.TestCase):
         self.assertEqual(self.graphs.get("graph-art-1").task("task-art-1").status, "ready")
 
     def test_wrong_producer_for_planning_type_is_rejected_before_reasoning(self) -> None:
-        planning_refs = self._publish_planning()
         current_version = self.projects.get("project-1").project_version
-        impostor = ArtifactEnvelope(
-            artifact_id="fixture.game-design-brief",
-            artifact_type="GameDesignBrief",
-            version=1,
-            producer_role="art",
-            source_task_id="fixture",
-            base_project_version=current_version,
-            base_world_version=0,
-            snapshot_source="none",
-            non_executable=True,
-            status="validated",
-            payload=GameDesignBrief(
-                project_goal="fixture",
-                player_experience=("inspect",),
-                core_rules=("no writes",),
-                acceptance_criteria=("reject wrong producer",),
-            ),
-        )
-        self.artifacts.register(
-            project_id="project-1",
-            artifact=impostor,
-            expected_project_version=current_version,
-            patch_id="patch-register-impostor-planning-input",
-            source="test",
-        )
-        self._create_art_graph(("fixture.game-design-brief@1", planning_refs[1]))
-        reasoner = FakeArtReasoner()
-
-        with self.assertRaises(ArtInputValidationError):
-            self._agent(reasoner).run(_art_request())
-
-        self.assertEqual(reasoner.calls, [])
-        self.assertEqual(self.graphs.get("graph-art-1").task("task-art-1").status, "ready")
+        with self.assertRaisesRegex(ValueError, "requires producer_role planning"):
+            ArtifactEnvelope(
+                artifact_id="fixture.game-design-brief",
+                artifact_type="GameDesignBrief",
+                version=1,
+                producer_role="art",
+                source_task_id="fixture",
+                base_project_version=current_version,
+                base_world_version=0,
+                snapshot_source="none",
+                non_executable=True,
+                status="validated",
+                payload=GameDesignBrief(
+                    project_goal="fixture",
+                    player_experience=("inspect",),
+                    core_rules=("no writes",),
+                    acceptance_criteria=("reject wrong producer",),
+                ),
+            )
+        self.assertEqual(self.artifacts.list_versions("project-1", "fixture.game-design-brief"), ())
 
     def test_invalid_reasoner_result_fails_only_art_task(self) -> None:
         planning_refs = self._publish_planning()
@@ -513,7 +499,6 @@ class ArtAgentTests(unittest.TestCase):
             patch_id="patch-register-planning-revision",
             source="test",
         )
-        self.graphs.refresh("graph-art-1", source="test")
         reasoner = FakeArtReasoner()
 
         with self.assertRaises(ArtInputValidationError):
@@ -531,6 +516,13 @@ class ArtAgentTests(unittest.TestCase):
                     room_id="room-1",
                     source="test",
                 )
+                projects.apply_patch(ProjectStatePatch(
+                    patch_id=f"patch-world-{source}",
+                    project_id="project-1",
+                    expected_project_version=1,
+                    source="test",
+                    changes={"scene_world_version": 1},
+                ))
                 artifacts = ArtifactRegistry(projects)
                 graphs = AgentTaskGraphStore(projects, artifacts)
                 brief = ArtifactEnvelope(
@@ -539,7 +531,7 @@ class ArtAgentTests(unittest.TestCase):
                     version=1,
                     producer_role="planning",
                     source_task_id="fixture",
-                    base_project_version=1,
+                    base_project_version=2,
                     base_world_version=1,
                     snapshot_source=source,
                     non_executable=True,
@@ -557,7 +549,7 @@ class ArtAgentTests(unittest.TestCase):
                     version=1,
                     producer_role="planning",
                     source_task_id="fixture",
-                    base_project_version=1,
+                    base_project_version=2,
                     base_world_version=1,
                     dependencies=("planning.game-design-brief@1",),
                     snapshot_source=source,
@@ -573,7 +565,7 @@ class ArtAgentTests(unittest.TestCase):
                 artifacts.register_many(
                     project_id="project-1",
                     artifacts=(brief, level),
-                    expected_project_version=1,
+                    expected_project_version=2,
                     patch_id=f"patch-register-{source}",
                     source="test",
                 )

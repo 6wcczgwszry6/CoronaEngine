@@ -132,6 +132,8 @@ class LanChatNativeSyncBridgeTests(unittest.TestCase):
 
         self.assertEqual(stored["authority"], "remote_peer")
         self.assertEqual(stored["snapshot_kind"], "peer_ack")
+        self.assertEqual(stored["scene_version"], 7)
+        self.assertIsInstance(stored["scene_version"], int)
         self.assertEqual(stored["entity_count"], 8)
         self.assertEqual(stored["applied_entity_count"], 7)
         self.assertEqual(stored["version_drift_count"], 1)

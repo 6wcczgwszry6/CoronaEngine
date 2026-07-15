@@ -12,6 +12,7 @@ from editor.plugins.AITool.services.agent_collaboration import (
     ArtifactRegistry,
     GameDesignBrief,
     GameplayLogicPlan,
+    ProjectStatePatch,
     ProjectStateStore,
     TaskGraphAlreadyExistsError,
     TaskGraphValidationError,
@@ -52,6 +53,8 @@ def _artifact(
     base_project_version: int,
     dependencies: tuple[str, ...] = (),
     label: str = "v1",
+    base_world_version: int = 0,
+    snapshot_source: str = "none",
 ) -> ArtifactEnvelope:
     if artifact_type == "GameDesignBrief":
         payload = GameDesignBrief(
@@ -84,8 +87,9 @@ def _artifact(
         producer_role=role,
         source_task_id=task_id,
         base_project_version=base_project_version,
-        base_world_version=0,
+        base_world_version=base_world_version,
         dependencies=dependencies,
+        snapshot_source=snapshot_source,
         status="validated",
         payload=payload,
     )
@@ -312,6 +316,70 @@ class AgentTaskGraphTests(unittest.TestCase):
         self.assertEqual(rebound.task("task-art").attempt_count, 0)
         self.assertEqual(rebound.task("task-art").output_artifact_refs, ())
         self.assertEqual(rebound.task("task-program").status, "pending")
+
+    def test_world_version_advance_blocks_task_bound_to_old_runtime_artifact(self) -> None:
+        self.projects.apply_patch(ProjectStatePatch(
+            patch_id="patch-world-v1",
+            project_id="project-1",
+            expected_project_version=1,
+            source="test",
+            changes={"scene_world_version": 1},
+        ))
+        runtime_brief = _artifact(
+            artifact_id="brief",
+            artifact_type="GameDesignBrief",
+            role="planning",
+            task_id="fixture-runtime-brief",
+            version=1,
+            base_project_version=2,
+            base_world_version=1,
+            snapshot_source="runtime",
+        )
+        self.artifacts.register(
+            project_id="project-1",
+            artifact=runtime_brief,
+            expected_project_version=2,
+            patch_id="patch-register-runtime-brief",
+            source="test",
+        )
+        graph = self.graphs.create_graph(
+            graph_id="graph-runtime-input",
+            project_id="project-1",
+            tasks=(
+                _task(
+                    "task-art-runtime",
+                    "art",
+                    "ArtDirection",
+                    inputs=("brief@1",),
+                ),
+            ),
+            expected_project_version=3,
+            patch_id="patch-create-runtime-input-graph",
+            source="test",
+        )
+        self.assertEqual(graph.task("task-art-runtime").status, "ready")
+        self.projects.apply_patch(ProjectStatePatch(
+            patch_id="patch-world-v2",
+            project_id="project-1",
+            expected_project_version=4,
+            source="test",
+            changes={"scene_world_version": 2},
+        ))
+
+        with self.assertRaisesRegex(TaskTransitionError, "expected ready, got blocked"):
+            self.graphs.start_task("graph-runtime-input", "task-art-runtime", source="test")
+        self.assertEqual(
+            self.graphs.get("graph-runtime-input").task("task-art-runtime").attempt_count,
+            0,
+        )
+
+        refreshed = self.graphs.refresh("graph-runtime-input", source="test")
+
+        self.assertEqual(refreshed.task("task-art-runtime").status, "blocked")
+        self.assertEqual(
+            {reason.code for reason in refreshed.task("task-art-runtime").blocked_reasons},
+            {"input_artifact_not_usable"},
+        )
 
     def test_completion_requires_current_outputs_from_the_responsible_task(self) -> None:
         self._create_graph()
