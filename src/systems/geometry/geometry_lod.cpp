@@ -72,7 +72,7 @@ float GeometrySystem::compute_pixel_budget_from_pressure(float vram_ratio) {
     if (vram_ratio < 0.60f) return 1.5f;    // 正常：1.5px
     if (vram_ratio < 0.75f) return 3.0f;    // 轻度承压：2×
     if (vram_ratio < 0.85f) return 6.0f;    // 中度承压：4×
-    if (vram_ratio < 0.92f) return 12.0f;   // 中度承压：4×
+    if (vram_ratio < 0.92f) return 12.0f;   // 重度承压：8×
     return 24.0f;                           // 极限：16×，几乎总选最粗级
 }
 

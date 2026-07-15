@@ -380,6 +380,8 @@ void GeometrySystem::update() {
 
         struct PendingLoad   { Events::ActorLoadRequestedEvent evt;   float distance; };
         std::vector<PendingLoad>   pending_loads;
+        struct PendingUnload { Events::ActorUnloadRequestedEvent evt; float distance; };
+        std::vector<PendingUnload> pending_unloads;
         {
             // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
             // 持读锁时必须只读：用 find() 而非 get_or_create()，后者会 try_emplace
@@ -439,6 +441,47 @@ void GeometrySystem::update() {
                             break;
                     }
                 }
+
+                // ---- 收集卸载候选：八叉树节点级批量判定 ----
+                // 对每个节点：若其 AABB 在所有相机的 unload_distance 之外 →
+                // 整棵子树一次性收集（不逐 actor、不逐相机计数）。
+                // 与 preload 的 query_sphere（球内）对称，形成完整加载/卸载闭环。
+                //
+                // 有效卸载半径取 max(unload, preload)：确保卸载区完全在预加载区之外，
+                // 避免 actor 在边界被卸载→预加载→卸载的 ping-pong。
+                {
+                    const float effective_unload_radius = std::max(
+                        scene_state.cfg.unload_distance, scene_state.cfg.preload_distance);
+                    std::vector<ktm::fvec3> cam_positions;
+                    cam_positions.reserve(cameras.size());
+                    for (const auto& [cam_pos, _] : cameras) {
+                        cam_positions.push_back(cam_pos);
+                    }
+                    std::vector<Impl::Payload> outside_results;
+                    scene_state.tree.collect_outside_spheres(
+                        cam_positions, effective_unload_radius, outside_results);
+
+                    auto& actor_storage = SharedDataHub::instance().actor_storage();
+                    for (auto actor : outside_results) {
+                        auto state_it = scene_state.actor_load_states.find(actor);
+                        if (state_it == scene_state.actor_load_states.end()) continue;
+                        if (state_it->second != ActorLoadState::Loaded) continue;
+                        if (scene_state.loading_tasks.count(actor)) continue;
+                        if (scene_state.unloading_tasks.count(actor)) continue;
+
+                        auto actor_read = actor_storage.try_acquire_read(actor);
+                        if (actor_read.valid() && actor_read->pinned) continue;
+
+                        auto entry_it = scene_state.actor_to_entry.find(actor);
+                        if (entry_it == scene_state.actor_to_entry.end()) continue;
+                        float min_dist = std::numeric_limits<float>::max();
+                        for (const auto& [cam_pos, _] : cameras) {
+                            min_dist = std::min(min_dist,
+                                ktm::distance(entry_it->second.center(), cam_pos));
+                        }
+                        pending_unloads.push_back({{scene_handle, actor}, min_dist});
+                    }
+                }
             }
         }
 
@@ -468,6 +511,38 @@ void GeometrySystem::update() {
             }
         }
         for (const auto& p : pending_loads) {
+            if (impl_->ctx && impl_->ctx->event_bus())
+                impl_->ctx->event_bus()->publish(p.evt);
+        }
+
+        // ---- 卸载排序（远者优先）与 Phase 2 ----
+        constexpr size_t kMaxUnloadsPerFrame = 8;   //每帧最多卸载8个
+        if (pending_unloads.size() > kMaxUnloadsPerFrame) {
+            std::sort(pending_unloads.begin(), pending_unloads.end(),
+                [](const PendingUnload& a, const PendingUnload& b) {
+                    return a.distance > b.distance;  // 远者优先
+                });
+            pending_unloads.resize(kMaxUnloadsPerFrame);
+        }
+        // Phase 2: unique_lock — TOCTOU 重校验后发起卸载
+        if (!pending_unloads.empty()) {
+            std::unique_lock lock(impl_->mtx);
+            auto& scene_state = impl_->get_or_create(scene_handle);
+
+            for (auto it = pending_unloads.begin(); it != pending_unloads.end(); ) {
+                auto state_it = scene_state.actor_load_states.find(it->evt.actor);
+                if (state_it != scene_state.actor_load_states.end() &&
+                    state_it->second == ActorLoadState::Loaded) {
+                    // TOCTOU：Phase 1 和 Phase 2 之间状态可能已被其他路径改变，
+                    // 必须持写锁重新确认仍为 Loaded 再发起卸载。
+                    state_it->second = ActorLoadState::Unloading;
+                    ++it;
+                } else {
+                    it = pending_unloads.erase(it);
+                }
+            }
+        }
+        for (const auto& p : pending_unloads) {
             if (impl_->ctx && impl_->ctx->event_bus())
                 impl_->ctx->event_bus()->publish(p.evt);
         }
