@@ -244,8 +244,9 @@ struct GeometrySystem::Impl {
     //   ε = 2·budget_px·tan(fov/2)/height_px
     // 主相机用本预算 + 自身 fov/分辨率换算 ε；选级判据 geometric_error·scale / d ≤ ε，
     // 全方向有定义（相机背后物体同样选级），故未来 GI 观察者可复用同一路径。
-    // 1.5px：误差小于约 1.5 像素即视觉无感，可安全切粗级。
-    static constexpr float kLodPixelErrorBudget = 1.5f;
+    // 默认 1.5px：显存充裕时误差小于约 1.5 像素即视觉无感，可安全切粗级。
+    // 显存承压时由 compute_pixel_budget_from_pressure() 动态放宽，趋粗 LOD 自然降显存。
+    static constexpr float kLodDefaultPixelBudget = 1.5f;
 
     // ========================================
     // LRU ActorCache（M3 生产化）

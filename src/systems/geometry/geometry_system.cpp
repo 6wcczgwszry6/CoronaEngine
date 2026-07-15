@@ -2432,6 +2432,18 @@ void GeometrySystem::reconcile_lod_residency() {
     // 每个相机把「像素预算 + 自身 fov/分辨率」塌缩成单个角阈值 epsilon。选级判据
     // world_error/d ≤ epsilon 是纯球形量（与方向无关）→ 相机背后物体同样有定义，
     // 未来 GI 观察者（光源/探针）可用各自的固定 epsilon 复用同一路径与聚合逻辑。
+    //
+    // P0：像素预算由显存压力动态决定。VRAM 充裕时用默认 1.5px（视觉无损）；
+    // VRAM 承压时逐步放宽 → 更多 mesh 自然选粗 LOD → GPU 缓冲缩小 → 显存回落，
+    // 无需等到 90% 水位再暴力 evict 整个 actor。
+    const float lod_pixel_budget = [this]() {
+        const MemoryReport mr = compute_memory_report();
+        if (mr.vram.budget_bytes == 0) return Impl::kLodDefaultPixelBudget;
+        const float ratio = static_cast<float>(mr.vram.used_bytes)
+                          / static_cast<float>(mr.vram.budget_bytes);
+        return compute_pixel_budget_from_pressure(ratio);
+    }();
+
     struct Viewer { ktm::fvec3 pos; float epsilon; };
     std::vector<Viewer> viewers;
     {
@@ -2440,7 +2452,7 @@ void GeometrySystem::reconcile_lod_residency() {
             for (std::uintptr_t cam_handle : sit->camera_handles) {
                 if (auto cam = camera_storage.try_acquire_read_nowait(cam_handle)) {
                     const float eps = compute_angular_epsilon(
-                        Impl::kLodPixelErrorBudget, cam->fov,
+                        lod_pixel_budget, cam->fov,
                         static_cast<float>(cam->height));
                     viewers.push_back({cam->position, eps});
                 }

@@ -302,6 +302,11 @@ class GeometrySystem : public Kernel::SystemBase {
                                          float fov_deg,
                                          float height_px);
 
+    /// 根据 VRAM 占比动态缩放像素预算：压力越大 → 预算越宽松 → 倾向粗 LOD → 显存自然回落。
+    /// @param vram_ratio  used_bytes / budget_bytes，范围 [0,1]；budget=0 时返回默认值。
+    /// @return 缩放后的像素预算（≥ 默认值 1.5px）。
+    static float compute_pixel_budget_from_pressure(float vram_ratio);
+
     /// 屏幕空间误差选级：给定到 mesh 最近点距离 d、各级世界误差（world_errors[i] =
     /// geometric_error[i]·actor_scale，下标与 levels 对齐，level 0 误差为 0），以及相机角
     /// 预算 epsilon，返回「角误差仍 ≤ epsilon 的最粗一级」。0 = LOD0（最高精度）。
