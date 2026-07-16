@@ -552,11 +552,11 @@ const editorApiStatic = {
       call_manifest_editor_api('scratch.sendKeyEvent', [key, modifiers || '', displayKey || key]),
     sendKeyUpEvent: (key, displayKey) =>
       call_manifest_editor_api('scratch.sendKeyUpEvent', [key, displayKey || key]),
-    sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight) =>
+    sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor = '') =>
       call_manifest_editor_api('scratch.sendMouseEvent', [
         eventType, button || '', x || 0, y || 0,
         viewportX ?? x ?? 0, viewportY ?? y ?? 0,
-        viewportWidth ?? 0, viewportHeight ?? 0,
+        viewportWidth ?? 0, viewportHeight ?? 0, pickedActor || '',
       ]),
   },
   sceneTools: {
@@ -986,8 +986,10 @@ export const scriptingService = {
   /**
    * 发送鼠标事件到积木脚本
    */
-  sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight) =>
-    editorApi.scratch.sendMouseEvent(eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight),
+  sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor = '') =>
+    editorApi.scratch.sendMouseEvent(
+      eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor
+    ),
 };
 
 export const projectLauncherService = {
@@ -1008,16 +1010,30 @@ export const projectLauncherService = {
   // 创建首页联机入口使用的临时项目：{ role: 'host'|'guest' } -> { name, path, role }
   createMultiplayerProject: (projectData) =>
     editorApi.project.createMultiplayerProject(projectData),
-  // 打开项目（执行加载逻辑）
-  openProject: (projectPath) =>
-    editorApi.project.openProject(projectPath).then((result) => {
-      const success = result?.data ?? result;
-      const activeProjectPath = success?.path || projectPath;
-      if (success && activeProjectPath) {
-        window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+  // Open a project and force the active native scene to come from it.
+  openProject: async (projectPath) => {
+    const result = await editorApi.project.openProject(projectPath);
+    const success = result?.data ?? result;
+    const activeProjectPath = success?.path || projectPath;
+    if (success && activeProjectPath) {
+      window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+      try {
+        // Different projects commonly reuse Scene/default.scene. Reload the
+        // native scene so actors from the previous project cannot leak across.
+        const initResult = await editorApi.main.onInit(activeProjectPath);
+        const initData = initResult?.data ?? initResult;
+        const scenes = Array.isArray(initData?.scenes) ? initData.scenes : [];
+        const activeIndex = Number(initData?.active_index ?? 0);
+        const activeScene = scenes[activeIndex] || scenes[0];
+        if (activeScene?.path) {
+          await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath);
+        }
+      } catch (error) {
+        console.warn('Project opened, but the active scene could not be reloaded:', error);
       }
-      return result;
-    }),
+    }
+    return result;
+  },
   // 设置项目模式 (2D/3D/渲染)
   setProjectMode: (mode, settings) =>
     editorApi.project.setProjectMode(mode, settings),

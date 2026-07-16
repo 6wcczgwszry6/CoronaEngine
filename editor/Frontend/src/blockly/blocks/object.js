@@ -328,4 +328,129 @@ export const defineObjectBlocks = () => {
     addText(this, 'NAME', '重置对象', ''); addText(this, 'TRIGGER', '通过一次标识 留空为全部', ''); objectStatement(this);
   } };
 
+  Blockly.Blocks.object_tag_numbered_range = { init() {
+    this.appendDummyInput()
+      .appendField('\u6279\u91cf\u8bbe\u7f6e\u7f16\u53f7\u5bf9\u8c61 \u524d\u7f00').appendField(new Blockly.FieldTextInput('Coin'), 'PREFIX')
+      .appendField('\u4ece').appendField(new Blockly.FieldNumber(1, 0, 9999, 1), 'FIRST')
+      .appendField('\u5230').appendField(new Blockly.FieldNumber(12, 0, 9999, 1), 'LAST')
+      .appendField('\u4f4d\u6570').appendField(new Blockly.FieldNumber(2, 0, 8, 1), 'DIGITS')
+      .appendField('\u6807\u7b7e').appendField(new Blockly.FieldTextInput('coin'), 'TAG');
+    objectStatement(this, '\u7ed9 Coin01..Coin12 \u7b49\u8fde\u7eed\u7f16\u53f7\u5bf9\u8c61\u8bbe\u7f6e\u7edf\u4e00\u6807\u7b7e\u3002');
+  } };
+
+  Blockly.Blocks.object_third_person_move = { init() {
+    this.appendDummyInput()
+      .appendField('\u8ba9\u5bf9\u8c61').appendField(new Blockly.FieldTextInput('CoinHero'), 'NAME')
+      .appendField('\u6309 WASD \u76f8\u5bf9\u6444\u50cf\u673a\u79fb\u52a8 \u901f\u5ea6').appendField(new Blockly.FieldNumber(0.18, 0), 'SPEED');
+    this.appendDummyInput()
+      .appendField('\u969c\u788d\u6807\u7b7e').appendField(new Blockly.FieldTextInput('obstacle'), 'OBSTACLE_TAG')
+      .appendField('\u8303\u56f4 X').appendField(new Blockly.FieldNumber(-12), 'MIN_X').appendField('\u5230').appendField(new Blockly.FieldNumber(12), 'MAX_X')
+      .appendField('Z').appendField(new Blockly.FieldNumber(-12), 'MIN_Z').appendField('\u5230').appendField(new Blockly.FieldNumber(12), 'MAX_Z');
+    objectStatement(this, 'WASD \u6309\u6444\u50cf\u673a\u65b9\u5411\u79fb\u52a8\uff0c\u8d8a\u754c\u4f1a\u9650\u5236\uff0c\u78b0\u5230\u969c\u788d\u4f1a\u9000\u56de\u3002');
+  } };
+  Blockly.Blocks.object_arcade_jump = { init() {
+    this.appendDummyInput()
+      .appendField('\u8ba9\u5bf9\u8c61').appendField(new Blockly.FieldTextInput('CoinHero'), 'NAME')
+      .appendField('\u7a7a\u683c\u8df3\u8dc3 \u529b\u5ea6').appendField(new Blockly.FieldNumber(0.28, 0), 'POWER')
+      .appendField('\u91cd\u529b').appendField(new Blockly.FieldNumber(0.025, 0), 'GRAVITY')
+      .appendField('\u5730\u9762 Y').appendField(new Blockly.FieldNumber(0.8), 'GROUND_Y');
+    objectStatement(this, '\u68c0\u6d4b\u7a7a\u683c\u7684\u4e00\u6b21\u6309\u4e0b\uff0c\u5e94\u7528\u4e0a\u5347\u901f\u5ea6\u3001\u91cd\u529b\u548c\u843d\u5730\u3002');
+  } };
+  Blockly.Blocks.object_collect_touching_tag = { init() {
+    this.appendDummyInput()
+      .appendField('\u6536\u96c6\u78b0\u5230\u7684\u6807\u7b7e').appendField(new Blockly.FieldTextInput('coin'), 'TAG')
+      .appendField('\u6bcf\u4e2a\u52a0\u5206').appendField(new Blockly.FieldNumber(1), 'POINTS');
+    objectStatement(this, '\u5220\u9664\u4e0e\u5f53\u524d\u811a\u672c\u89d2\u8272\u91cd\u53e0\u7684\u6307\u5b9a\u6807\u7b7e\u5bf9\u8c61\uff0c\u5e76\u7d2f\u52a0\u5f97\u5206\u3002');
+  } };
+
+  Blockly.Blocks.object_breakout_reset_round = { init() {
+    this.appendDummyInput()
+      .appendField('\u91cd\u7f6e\u6253\u7816\u5757 \u7403').appendField(new Blockly.FieldTextInput('Ball'), 'BALL')
+      .appendField('\u6321\u677f').appendField(new Blockly.FieldTextInput('Paddle'), 'PADDLE')
+      .appendField('\u7816\u5757\u6807\u7b7e').appendField(new Blockly.FieldTextInput('brick'), 'BRICK_TAG');
+    this.appendDummyInput()
+      .appendField('\u7403\u4f4d\u7f6e X').appendField(new Blockly.FieldNumber(0), 'BALL_X')
+      .appendField('Y').appendField(new Blockly.FieldNumber(-3), 'BALL_Y')
+      .appendField('Z').appendField(new Blockly.FieldNumber(2.5), 'BALL_Z');
+    this.appendDummyInput()
+      .appendField('\u6321\u677f\u4f4d\u7f6e X').appendField(new Blockly.FieldNumber(0), 'PADDLE_X')
+      .appendField('Y').appendField(new Blockly.FieldNumber(-4.2), 'PADDLE_Y')
+      .appendField('Z').appendField(new Blockly.FieldNumber(2.5), 'PADDLE_Z');
+    this.appendDummyInput()
+      .appendField('\u521d\u901f\u5ea6 X').appendField(new Blockly.FieldNumber(0.16), 'SPEED_X')
+      .appendField('Y').appendField(new Blockly.FieldNumber(0.18), 'SPEED_Y')
+      .appendField('\u91cd\u7f6e\u7816\u5757').appendField(new Blockly.FieldCheckbox('FALSE'), 'RESET_BRICKS');
+    objectStatement(this, '\u91cd\u7f6e\u7403\u548c\u6321\u677f\u4f4d\u7f6e\uff0c\u53ef\u9009\u6062\u590d\u6240\u6709\u7816\u5757\u3002');
+  } };
+  Blockly.Blocks.object_breakout_paddle_control = { init() {
+    this.appendDummyInput()
+      .appendField('\u63a7\u5236\u6321\u677f').appendField(new Blockly.FieldTextInput('Paddle'), 'PADDLE')
+      .appendField('A/D \u6216\u65b9\u5411\u952e \u901f\u5ea6').appendField(new Blockly.FieldNumber(0.28, 0), 'SPEED')
+      .appendField('X \u8303\u56f4').appendField(new Blockly.FieldNumber(-5.2), 'MIN_X')
+      .appendField('\u5230').appendField(new Blockly.FieldNumber(5.2), 'MAX_X');
+    objectStatement(this, '\u6309\u952e\u63a7\u5236\u6321\u677f\u5de6\u53f3\u79fb\u52a8\u5e76\u9650\u5236\u8fb9\u754c\u3002');
+  } };
+  Blockly.Blocks.object_breakout_step = { init() {
+    this.appendDummyInput()
+      .appendField('\u66f4\u65b0\u6253\u7816\u5757 \u7403').appendField(new Blockly.FieldTextInput('Ball'), 'BALL')
+      .appendField('\u6321\u677f').appendField(new Blockly.FieldTextInput('Paddle'), 'PADDLE')
+      .appendField('\u7816\u5757\u6807\u7b7e').appendField(new Blockly.FieldTextInput('brick'), 'BRICK_TAG');
+    this.appendDummyInput()
+      .appendField('\u8fb9\u754c X').appendField(new Blockly.FieldNumber(-5.8), 'MIN_X')
+      .appendField('\u5230').appendField(new Blockly.FieldNumber(5.8), 'MAX_X')
+      .appendField('\u9876\u90e8 Y').appendField(new Blockly.FieldNumber(5.8), 'MAX_Y');
+    objectStatement(this, '\u66f4\u65b0\u7403\u7684\u8fd0\u52a8\uff0c\u5904\u7406\u5899\u3001\u6321\u677f\u548c\u7816\u5757\u78b0\u649e\u3002');
+  } };
+  Blockly.Blocks.object_first_person_move = { init() {
+    this.appendDummyInput()
+      .appendField('\u7b2c\u4e00\u4eba\u79f0\u79fb\u52a8').appendField(new Blockly.FieldTextInput('FighterPlayer'), 'NAME')
+      .appendField('\u901f\u5ea6').appendField(new Blockly.FieldNumber(0.2, 0), 'SPEED')
+      .appendField('\u969c\u788d\u6807\u7b7e').appendField(new Blockly.FieldTextInput('obstacle'), 'OBSTACLE_TAG');
+    this.appendDummyInput()
+      .appendField('\u8303\u56f4 X').appendField(new Blockly.FieldNumber(-5), 'MIN_X').appendField('\u5230').appendField(new Blockly.FieldNumber(5), 'MAX_X')
+      .appendField('Z').appendField(new Blockly.FieldNumber(-1), 'MIN_Z').appendField('\u5230').appendField(new Blockly.FieldNumber(48), 'MAX_Z');
+    objectStatement(this, 'WASD \u6309\u5f53\u524d\u89c6\u89d2\u79fb\u52a8\uff0c\u5e76\u5904\u7406\u8fb9\u754c\u548c\u969c\u788d\u3002');
+  } };
+  Blockly.Blocks.combat_set_tag_health = { init() {
+    this.appendDummyInput()
+      .appendField('\u8bbe\u7f6e\u6807\u7b7e\u654c\u4eba').appendField(new Blockly.FieldTextInput('room1'), 'TAG')
+      .appendField('\u751f\u547d\u503c').appendField(new Blockly.FieldNumber(2, 1), 'HEALTH');
+    objectStatement(this, '\u4e3a\u6307\u5b9a\u6807\u7b7e\u7684\u6bcf\u4e2a\u654c\u4eba\u521d\u59cb\u5316\u751f\u547d\u503c\u3002');
+  } };
+  Blockly.Blocks.combat_melee_attack = { init() {
+    this.appendDummyInput()
+      .appendField('\u8fd1\u6218\u653b\u51fb \u73a9\u5bb6').appendField(new Blockly.FieldTextInput('FighterPlayer'), 'PLAYER')
+      .appendField('\u654c\u4eba\u6807\u7b7e').appendField(new Blockly.FieldTextInput('room1'), 'TAG')
+      .appendField('\u8bf7\u6c42\u53d8\u91cf').appendField(new Blockly.FieldTextInput('attack_requested'), 'REQUEST');
+    this.appendDummyInput()
+      .appendField('\u8303\u56f4').appendField(new Blockly.FieldNumber(2.2, 0), 'RANGE')
+      .appendField('\u4f24\u5bb3').appendField(new Blockly.FieldNumber(1, 0), 'DAMAGE')
+      .appendField('\u51b7\u5374').appendField(new Blockly.FieldNumber(0.25, 0), 'COOLDOWN');
+    objectStatement(this, '\u6d88\u8017\u653b\u51fb\u8bf7\u6c42\uff0c\u4f24\u5bb3\u89c6\u7ebf\u524d\u65b9\u6700\u8fd1\u7684\u654c\u4eba\u3002');
+  } };
+  Blockly.Blocks.combat_enemy_chase_tag = { init() {
+    this.appendDummyInput()
+      .appendField('\u6807\u7b7e\u654c\u4eba').appendField(new Blockly.FieldTextInput('room1'), 'TAG')
+      .appendField('\u8ffd\u9010\u73a9\u5bb6').appendField(new Blockly.FieldTextInput('FighterPlayer'), 'PLAYER')
+      .appendField('\u901f\u5ea6').appendField(new Blockly.FieldNumber(0.06, 0), 'SPEED')
+      .appendField('\u505c\u6b62\u8ddd\u79bb').appendField(new Blockly.FieldNumber(1.15, 0), 'STOP_DISTANCE');
+    objectStatement(this, '\u8ba9\u5b58\u6d3b\u7684\u6807\u7b7e\u654c\u4eba\u671d\u73a9\u5bb6\u8ffd\u9010\u3002');
+  } };
+  Blockly.Blocks.combat_enemy_contact_damage = { init() {
+    this.appendDummyInput()
+      .appendField('\u6807\u7b7e\u654c\u4eba').appendField(new Blockly.FieldTextInput('room1'), 'TAG')
+      .appendField('\u78b0\u5230\u73a9\u5bb6').appendField(new Blockly.FieldTextInput('FighterPlayer'), 'PLAYER')
+      .appendField('\u4f24\u5bb3').appendField(new Blockly.FieldNumber(1, 0), 'DAMAGE')
+      .appendField('\u51b7\u5374').appendField(new Blockly.FieldNumber(0.8, 0), 'COOLDOWN');
+    objectStatement(this, '\u654c\u4eba\u8fdb\u5165\u63a5\u89e6\u8ddd\u79bb\u65f6\u6309\u51b7\u5374\u6263\u9664\u751f\u547d\u3002');
+  } };
+  Blockly.Blocks.combat_alive_count = { init() {
+    this.appendDummyInput()
+      .appendField('\u6807\u7b7e').appendField(new Blockly.FieldTextInput('room1'), 'TAG')
+      .appendField('\u5b58\u6d3b\u6570\u91cf');
+    this.setOutput(true, 'Number');
+    this.setStyle('object_blocks');
+    this.setTooltip('\u8fd4\u56de\u6307\u5b9a\u6807\u7b7e\u4e0b\u5c1a\u672a\u88ab\u51fb\u8d25\u7684\u654c\u4eba\u6570\u91cf\u3002');
+  } };
+
 };

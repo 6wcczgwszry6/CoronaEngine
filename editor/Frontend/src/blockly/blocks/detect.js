@@ -419,6 +419,14 @@ export const defineDetectBlocks = () => {
   Blockly.Blocks.detect_mouse_pick_object = { init() {
     this.appendDummyInput().appendField('最近鼠标命中的对象'); this.setOutput(true, 'String'); this.setStyle('detect_blocks');
   } };
+  Blockly.Blocks.detect_mouse_left_half = { init() {
+    this.appendDummyInput().appendField('\u9f20\u6807\u5728\u4e3b\u89c6\u53e3\u5de6\u534a\u8fb9\uff1f');
+    this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+  } };
+  Blockly.Blocks.detect_mouse_right_half = { init() {
+    this.appendDummyInput().appendField('\u9f20\u6807\u5728\u4e3b\u89c6\u53e3\u53f3\u534a\u8fb9\uff1f');
+    this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
+  } };
   Blockly.Blocks.detect_mouse_pick_hit_tag = { init() {
     this.appendValueInput('TAG').setCheck('String').appendField('最近鼠标命中的对象有标签').appendField(new Blockly.FieldTextInput('target'), 'TAG_TEXT');
     this.appendDummyInput().appendField('?'); this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');

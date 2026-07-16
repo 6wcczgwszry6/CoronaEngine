@@ -131,4 +131,21 @@ export const defineObjectGenerators = () => {
   pythonGenerator.forBlock.object_delete_mouse_pick = () => 'CoronaEngine.object_delete_mouse_pick()\n';
   pythonGenerator.forBlock.object_reset_crossed_once = (block) => `CoronaEngine.reset_crossed_once(${input(block,'NAME',"''")}, ${input(block,'TRIGGER',"''")})\n`;
 
+  pythonGenerator.forBlock.object_tag_numbered_range = (block) => `CoronaEngine.object_tag_numbered_range(${pyString(block.getFieldValue('PREFIX'))}, ${block.getFieldValue('FIRST')}, ${block.getFieldValue('LAST')}, ${block.getFieldValue('DIGITS')}, ${pyString(block.getFieldValue('TAG'))})\n`;
+
+  pythonGenerator.forBlock.object_third_person_move = (block) => `CoronaEngine.object_third_person_move(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('SPEED')}, ${pyString(block.getFieldValue('OBSTACLE_TAG'))}, ${block.getFieldValue('MIN_X')}, ${block.getFieldValue('MAX_X')}, ${block.getFieldValue('MIN_Z')}, ${block.getFieldValue('MAX_Z')})\n`;
+  pythonGenerator.forBlock.object_arcade_jump = (block) => `CoronaEngine.object_arcade_jump(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('POWER')}, ${block.getFieldValue('GRAVITY')}, ${block.getFieldValue('GROUND_Y')})\n`;
+  pythonGenerator.forBlock.object_collect_touching_tag = (block) => `CoronaEngine.object_collect_touching_tag(${pyString(block.getFieldValue('TAG'))}, ${block.getFieldValue('POINTS')})\n`;
+
+  pythonGenerator.forBlock.object_breakout_reset_round = (block) => `CoronaEngine.object_breakout_reset_round(${pyString(block.getFieldValue('BALL'))}, ${pyString(block.getFieldValue('PADDLE'))}, ${pyString(block.getFieldValue('BRICK_TAG'))}, ${block.getFieldValue('BALL_X')}, ${block.getFieldValue('BALL_Y')}, ${block.getFieldValue('BALL_Z')}, ${block.getFieldValue('PADDLE_X')}, ${block.getFieldValue('PADDLE_Y')}, ${block.getFieldValue('PADDLE_Z')}, ${block.getFieldValue('SPEED_X')}, ${block.getFieldValue('SPEED_Y')}, ${block.getFieldValue('RESET_BRICKS') === 'TRUE' ? 'True' : 'False'})\n`;
+  pythonGenerator.forBlock.object_breakout_paddle_control = (block) => `CoronaEngine.object_breakout_paddle_control(${pyString(block.getFieldValue('PADDLE'))}, ${block.getFieldValue('SPEED')}, ${block.getFieldValue('MIN_X')}, ${block.getFieldValue('MAX_X')})\n`;
+  pythonGenerator.forBlock.object_breakout_step = (block) => `CoronaEngine.object_breakout_step(${pyString(block.getFieldValue('BALL'))}, ${pyString(block.getFieldValue('PADDLE'))}, ${pyString(block.getFieldValue('BRICK_TAG'))}, ${block.getFieldValue('MIN_X')}, ${block.getFieldValue('MAX_X')}, ${block.getFieldValue('MAX_Y')})\n`;
+  pythonGenerator.forBlock.object_first_person_move = (block) => `CoronaEngine.object_first_person_move(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('SPEED')}, ${pyString(block.getFieldValue('OBSTACLE_TAG'))}, ${block.getFieldValue('MIN_X')}, ${block.getFieldValue('MAX_X')}, ${block.getFieldValue('MIN_Z')}, ${block.getFieldValue('MAX_Z')})\n`;
+  pythonGenerator.forBlock.combat_set_tag_health = (block) => `CoronaEngine.combat_set_tag_health(${pyString(block.getFieldValue('TAG'))}, ${block.getFieldValue('HEALTH')})\n`;
+  pythonGenerator.forBlock.combat_melee_attack = (block) => `CoronaEngine.combat_melee_attack(${pyString(block.getFieldValue('PLAYER'))}, ${pyString(block.getFieldValue('TAG'))}, ${block.getFieldValue('RANGE')}, ${block.getFieldValue('DAMAGE')}, ${block.getFieldValue('COOLDOWN')}, ${pyString(block.getFieldValue('REQUEST'))})\n`;
+  pythonGenerator.forBlock.combat_enemy_chase_tag = (block) => `CoronaEngine.combat_enemy_chase_tag(${pyString(block.getFieldValue('TAG'))}, ${pyString(block.getFieldValue('PLAYER'))}, ${block.getFieldValue('SPEED')}, ${block.getFieldValue('STOP_DISTANCE')})\n`;
+  pythonGenerator.forBlock.combat_enemy_contact_damage = (block) => `CoronaEngine.combat_enemy_contact_damage(${pyString(block.getFieldValue('TAG'))}, ${pyString(block.getFieldValue('PLAYER'))}, ${block.getFieldValue('DAMAGE')}, ${block.getFieldValue('COOLDOWN')})\n`;
+  pythonGenerator.forBlock.combat_alive_count = (block) => [`CoronaEngine.combat_alive_count(${pyString(block.getFieldValue('TAG'))})`, pythonGenerator.ORDER_FUNCTION_CALL];
+
+
 };
