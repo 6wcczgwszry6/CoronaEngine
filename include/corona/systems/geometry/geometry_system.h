@@ -614,6 +614,29 @@ class GeometrySystem : public Kernel::SystemBase {
     /// vertices/indices/bone_weights。每 kCpuWindowEvalInterval 帧调用一次。
     void reconcile_cpu_residency();
 
+    // ========================================
+    // LOD 级 LRU — 延迟 Cap 机制
+    // ========================================
+    // 当 VRAM 超过 soft 水位（75% 预算）时，按距离排序对远处 geometry 施加 LOD 下限，
+    // 迫使其选更粗 LOD 以释放显存。远者优先降级——保留近处精细度，牺牲远处细节。
+
+    /// 单条 LOD 预算候选项：reconcile 每 (geom,mesh) 收集一条，供 enforce_lod_budget
+    /// 在帧末尾统一按距离排序、按需施加 LOD 下限（cap）。
+    struct LodBudgetEntry {
+        std::uint64_t lod_key;        // make_lod_key(geometry_handle, mesh_index)
+        ktm::fvec3    world_center;   // mesh 世界 AABB 中心，用于距相机距离排序
+        int           current_demand; // 本帧自然需求（滞回后、cap 前），非 cap 后值
+        int           level_count;    // 该 mesh 的 LOD 总级数（= lod_cache 条目中 levels.size()）
+    };
+
+    /// 在 reconcile_lod_residency 末尾调用：扫描所有 entry，按 VRAM 压力对远处 mesh
+    /// 施加 demand 下限（lod_budget_caps），下一帧 reconcile 生效。
+    /// @param camera_positions 所有相机世界坐标（用于距离排序）
+    /// @param entries          本帧收集的所有 LodBudgetEntry
+    void enforce_lod_budget(
+        const std::vector<ktm::fvec3>& camera_positions,
+        const std::vector<LodBudgetEntry>& entries);
+
     /// 计算 mesh/texture 的 VRAM/RAM 用量 + 预算视图（线程安全，内部加锁）。
     [[nodiscard]] MemoryReport compute_memory_report() const;
 

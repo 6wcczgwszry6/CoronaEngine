@@ -380,6 +380,8 @@ void GeometrySystem::update() {
 
         struct PendingLoad   { Events::ActorLoadRequestedEvent evt;   float distance; };
         std::vector<PendingLoad>   pending_loads;
+        struct PendingUnload { Events::ActorUnloadRequestedEvent evt; float distance; };
+        std::vector<PendingUnload> pending_unloads;
         {
             // Phase 1: shared_lock — 收集候选、计算距离、决定转换（只读不写）
             // 持读锁时必须只读：用 find() 而非 get_or_create()，后者会 try_emplace
@@ -439,6 +441,47 @@ void GeometrySystem::update() {
                             break;
                     }
                 }
+
+                // ---- 收集卸载候选：八叉树节点级批量判定 ----
+                // 对每个节点：若其 AABB 在所有相机的 unload_distance 之外 →
+                // 整棵子树一次性收集（不逐 actor、不逐相机计数）。
+                // 与 preload 的 query_sphere（球内）对称，形成完整加载/卸载闭环。
+                //
+                // 有效卸载半径取 max(unload, preload)：确保卸载区完全在预加载区之外，
+                // 避免 actor 在边界被卸载→预加载→卸载的 ping-pong。
+                {
+                    const float effective_unload_radius = std::max(
+                        scene_state.cfg.unload_distance, scene_state.cfg.preload_distance);
+                    std::vector<ktm::fvec3> cam_positions;
+                    cam_positions.reserve(cameras.size());
+                    for (const auto& [cam_pos, _] : cameras) {
+                        cam_positions.push_back(cam_pos);
+                    }
+                    std::vector<Impl::Payload> outside_results;
+                    scene_state.tree.collect_outside_spheres(
+                        cam_positions, effective_unload_radius, outside_results);
+
+                    auto& actor_storage = SharedDataHub::instance().actor_storage();
+                    for (auto actor : outside_results) {
+                        auto state_it = scene_state.actor_load_states.find(actor);
+                        if (state_it == scene_state.actor_load_states.end()) continue;
+                        if (state_it->second != ActorLoadState::Loaded) continue;
+                        if (scene_state.loading_tasks.count(actor)) continue;
+                        if (scene_state.unloading_tasks.count(actor)) continue;
+
+                        auto actor_read = actor_storage.try_acquire_read(actor);
+                        if (actor_read.valid() && actor_read->pinned) continue;
+
+                        auto entry_it = scene_state.actor_to_entry.find(actor);
+                        if (entry_it == scene_state.actor_to_entry.end()) continue;
+                        float min_dist = std::numeric_limits<float>::max();
+                        for (const auto& [cam_pos, _] : cameras) {
+                            min_dist = std::min(min_dist,
+                                ktm::distance(entry_it->second.center(), cam_pos));
+                        }
+                        pending_unloads.push_back({{scene_handle, actor}, min_dist});
+                    }
+                }
             }
         }
 
@@ -468,6 +511,38 @@ void GeometrySystem::update() {
             }
         }
         for (const auto& p : pending_loads) {
+            if (impl_->ctx && impl_->ctx->event_bus())
+                impl_->ctx->event_bus()->publish(p.evt);
+        }
+
+        // ---- 卸载排序（远者优先）与 Phase 2 ----
+        constexpr size_t kMaxUnloadsPerFrame = 8;   //每帧最多卸载8个
+        if (pending_unloads.size() > kMaxUnloadsPerFrame) {
+            std::sort(pending_unloads.begin(), pending_unloads.end(),
+                [](const PendingUnload& a, const PendingUnload& b) {
+                    return a.distance > b.distance;  // 远者优先
+                });
+            pending_unloads.resize(kMaxUnloadsPerFrame);
+        }
+        // Phase 2: unique_lock — TOCTOU 重校验后发起卸载
+        if (!pending_unloads.empty()) {
+            std::unique_lock lock(impl_->mtx);
+            auto& scene_state = impl_->get_or_create(scene_handle);
+
+            for (auto it = pending_unloads.begin(); it != pending_unloads.end(); ) {
+                auto state_it = scene_state.actor_load_states.find(it->evt.actor);
+                if (state_it != scene_state.actor_load_states.end() &&
+                    state_it->second == ActorLoadState::Loaded) {
+                    // TOCTOU：Phase 1 和 Phase 2 之间状态可能已被其他路径改变，
+                    // 必须持写锁重新确认仍为 Loaded 再发起卸载。
+                    state_it->second = ActorLoadState::Unloading;
+                    ++it;
+                } else {
+                    it = pending_unloads.erase(it);
+                }
+            }
+        }
+        for (const auto& p : pending_unloads) {
             if (impl_->ctx && impl_->ctx->event_bus())
                 impl_->ctx->event_bus()->publish(p.evt);
         }
@@ -555,7 +630,8 @@ void GeometrySystem::update() {
             //  - builds/frees 若每秒成百上千 → reconcile 在 GPU churn（卡顿+LOD切换坐实）
             //  - demand_changes 高 → 选级在抖动；低但 builds 高 → 别处反复失效缓存
             if (geometry_diagnostics_enabled()) {
-                CFW_LOG_NOTICE("[GeoDiag/1s] mesh_visits={} scene_acquires={} builds={} frees={} demand_changes={} launches={} discards={} inflight={} upload_queued={} upload_published={} upload_discarded={}",
+                CFW_LOG_NOTICE("[GeoDiag/1s] mesh_visits={} scene_acquires={} builds={} frees={} demand_changes={} launches={} discards={} inflight={} upload_queued={} upload_published={} upload_discarded={}"
+                               " lod_budget_checks={} lod_budget_degraded={} lod_budget_entries={} lod_budget_est_vram={}KB",
                                impl_->diag_reconcile_mesh_visits, impl_->diag_scene_acquires,
                                impl_->diag_lod_builds, impl_->diag_lod_frees,
                                impl_->diag_demand_changes,
@@ -563,7 +639,11 @@ void GeometrySystem::update() {
                                impl_->pending_lod_builds.size(),
                                impl_->diag_geometry_upload_queued,
                                impl_->diag_geometry_upload_published,
-                               impl_->diag_geometry_upload_discarded);
+                               impl_->diag_geometry_upload_discarded,
+                               impl_->diag_lod_budget_checks,
+                               impl_->diag_lod_budget_degraded,
+                               impl_->diag_lod_budget_entries,
+                               impl_->diag_lod_budget_est_vram / 1024);
             }
             impl_->diag_reconcile_mesh_visits = 0;
             impl_->diag_scene_acquires = 0;
@@ -575,6 +655,12 @@ void GeometrySystem::update() {
             impl_->diag_geometry_upload_queued = 0;
             impl_->diag_geometry_upload_published = 0;
             impl_->diag_geometry_upload_discarded = 0;
+
+            // LOD 级 LRU 诊断计数器清零
+            impl_->diag_lod_budget_checks   = 0;
+            impl_->diag_lod_budget_degraded = 0;
+            impl_->diag_lod_budget_entries  = 0;
+            impl_->diag_lod_budget_est_vram = 0;
 
             std::shared_lock lock(impl_->mtx);
             for (auto& [scene_handle, scene_state] : impl_->scenes) {
@@ -2461,6 +2547,12 @@ void GeometrySystem::reconcile_lod_residency() {
     }
     if (viewers.empty()) return;
 
+    // 从 viewers 提取纯相机位置（enforce_lod_budget 只需要位置做距离排序，
+    // 不需要 epsilon），避免后续重复遍历 viewer 结构体。
+    std::vector<ktm::fvec3> camera_positions;
+    camera_positions.reserve(viewers.size());
+    for (const auto& v : viewers) camera_positions.push_back(v.pos);
+
     // 释放冷却（方案 A）：每帧推进一次帧计数器，作为各级 last_demand_frame 的基准。
     // 仅在确有相机（会真正评估需求级）时推进，避免无相机帧空转计数。
     const std::uint64_t this_frame = ++impl_->lod_frame_counter;
@@ -2468,6 +2560,11 @@ void GeometrySystem::reconcile_lod_residency() {
     // 先结束 Geometry storage 的只读迭代，再执行下面可能需要的 Geometry 写锁。
     // ConstIterator 持有 storage 读锁；禁止在其作用域内升级同一 storage 的写锁。
     const auto geometry_handles = GeometryInternal::snapshot_storage_handles(geom_storage);
+
+    // LOD 预算 entries 收集器。每个 (geometry, mesh) 产出 1 条，预分配为
+    // geometry 数 × 8（覆盖多数多 mesh geometry 场景，减少 vector reallocation）。
+    std::vector<GeometrySystem::LodBudgetEntry> lod_budget_entries;
+    lod_budget_entries.reserve(geometry_handles.size() * 8);
     for (const auto geom_handle : geometry_handles) {
         std::uintptr_t model_resource_handle = 0;
         std::uintptr_t transform_handle = 0;
@@ -2556,6 +2653,14 @@ void GeometrySystem::reconcile_lod_residency() {
                 world_max = local_max;
             }
 
+            // 计算 mesh 世界 AABB 中心，供 enforce_lod_budget 按距相机距离排序。
+            // 使用 world_min/max 的算术平均——与 AABB::center() 语义一致，
+            // 对细长/扁平物体也能给出合理的位置估计（不会被外接球高估距离）。
+            const ktm::fvec3 world_center = GeometryInternal::make_fvec3(
+                (world_min[0] + world_max[0]) * 0.5f,
+                (world_min[1] + world_max[1]) * 0.5f,
+                (world_min[2] + world_max[2]) * 0.5f);
+
             // 滞回带（替代旧 select_lod_with_hysteresis）：用收紧/放宽的 epsilon 各算一次
             // 聚合需求，构成死区。eps·(1+h) 偏粗（抗"变精细"），eps·(1-h) 偏精细（抗"变粗"）。
             // 仅当方向明确越过死区才切换，吸收相机微动时的边界抖动。
@@ -2596,6 +2701,41 @@ void GeometrySystem::reconcile_lod_residency() {
             }
             if (demand < 0) demand = 0;
             if (static_cast<size_t>(demand) >= level_count) demand = static_cast<int>(level_count) - 1;
+
+            // ============================================================
+            // LOD 级 LRU — 应用上一帧的 budget cap + 收集本帧 entry
+            // ============================================================
+            // Cap 是上一帧 enforce_lod_budget 写入的"最小允许 demand"（下限），
+            // 含义：demand 只能 >= cap（只能比 cap 更粗）。用 max 施加。
+            //
+            // 关键：必须附带 model_id 校验。若 lod_cache 条目已因 actor evict 而
+            // 被 erase（slot 复用场景），同步清除陈旧 cap，防止新 actor 被旧 cap
+            // 错误降级。
+            {
+                auto cap_it = impl_->lod_budget_caps.find(lod_key);
+                if (cap_it != impl_->lod_budget_caps.end()) {
+                    std::shared_lock cap_lock(impl_->lod_cache_mutex);
+                    auto cache_it = impl_->lod_cache.find(lod_key);
+                    if (cache_it == impl_->lod_cache.end()
+                        || cache_it->second.model_id != model_id) {
+                        // 条目已被 evict 或 model_id 不匹配（slot 复用）→ 清理陈旧 cap
+                        impl_->lod_budget_caps.erase(cap_it);
+                    } else {
+                        // 有效 cap：施加下限。max(demand, cap) = 强制 demand 不细于 cap
+                        demand = std::max(demand, cap_it->second);
+                        // 防御：cap 写入时的 level_count 可能与本帧不同（模型重导入后
+                        // LOD 级数变化），确保 demand 不越界
+                        if (static_cast<size_t>(demand) >= level_count)
+                            demand = static_cast<int>(level_count) - 1;
+                    }
+                }
+            }
+            // 收集 entry 供本帧 enforce_lod_budget 使用。
+            // 注意：此处记录的 demand 已是 cap 应用后的值（而非 cap 前的 natural demand）。
+            // 这样 enforce_lod_budget 计算 savings 时基于"当前实际显示的级别"，
+            // 而非"滞回自然需求的级别"，避免高估 savings、重复降级、过度牺牲画质。
+            lod_budget_entries.push_back({lod_key, world_center, demand,
+                static_cast<int>(level_count)});
 
             int shadow_demand = -1;
             int shadow_previous = -1;
@@ -2918,6 +3058,216 @@ void GeometrySystem::reconcile_lod_residency() {
             CFW_LOG_NOTICE("[LOD] evicted LOD0 from VRAM: geom={} mesh={}",
                            eviction.geometry_handle, mesh_idx);
         }
+    }
+
+    // LOD 级 LRU — 帧末尾统一计算本帧 budget caps，下帧 reconcile 生效。
+    // 调用必须在所有 mesh 循环结束后（entries 收集完整）、函数退出前。
+    // 一帧延迟有意为之——无需拆分主循环；VRAM 压力变化缓慢（数百帧尺度）。
+    enforce_lod_budget(camera_positions, lod_budget_entries);
+}
+
+// ============================================================================
+// enforce_lod_budget（LOD 级 LRU — 延迟 Cap 机制）
+// ============================================================================
+// 在 reconcile_lod_residency 末尾调用。当 VRAM 超过 soft 水位（75% 预算）时，
+// 按距相机距离排序（远者优先），对远处 mesh 施加 LOD 需求下限（cap），迫使其
+// 选更粗 LOD 以释放显存。Cap 写入 lod_budget_caps，下帧 reconcile 生效。
+//
+// 设计要点：
+//   1. soft_limit = mr.vram.budget_bytes * kLodBudgetSoftRatio(0.75)
+//      （budget_bytes 取自 compute_memory_report，已做 min(物理, 用户设置) 封顶）
+//   2. hard_limit = mr.vram.budget_bytes * kLodBudgetHardRatio(0.85)
+//      超过时开启加速降级（每步 +2 级）
+//   3. bytes_to_save 封顶为 mesh_bytes / 2（纹理无法通过 LOD 降级节省）
+//   4. kMaxDegradedPerFrame = 64，防止单帧全场景同步 pop
+// ============================================================================
+void GeometrySystem::enforce_lod_budget(
+    const std::vector<ktm::fvec3>& camera_positions,
+    const std::vector<LodBudgetEntry>& entries) {
+
+    // 清空上一帧的 caps，本帧重新计算
+    impl_->lod_budget_caps.clear();
+
+    // 获取当前 VRAM 状态，判定是否需要介入
+    const MemoryReport mr = compute_memory_report();
+
+    // 无预算 = 不限制，无需降级
+    if (mr.vram.budget_bytes == 0) return;
+
+    const std::size_t soft_limit =
+        static_cast<std::size_t>(static_cast<double>(mr.vram.budget_bytes)
+                                 * Impl::kLodBudgetSoftRatio);
+    const std::size_t hard_limit =
+        static_cast<std::size_t>(static_cast<double>(mr.vram.budget_bytes)
+                                 * Impl::kLodBudgetHardRatio);
+
+    // 当前用量未超软水位 → 无压力，直接返回
+    if (mr.vram.used_bytes <= soft_limit) return;
+
+    ++impl_->diag_lod_budget_checks;
+
+    // 无相机或空 entries → 无法排序，直接返回
+    if (camera_positions.empty() || entries.empty()) return;
+
+    // ================================================================
+    // 遍历 entries，构建候选项列表。
+    // 每个候选项附带 per-level GPU bytes 预计算数组，供后续 savings
+    // 计算使用。同时累加 total_estimated_bytes（诊断用）。
+    // ================================================================
+    struct Candidate {
+        std::uint64_t lod_key;
+        float         dist_sq;          // 到最近相机的距离平方（降序 = 远者优先）
+        int           current_demand;   // 当前需求级（滞回后、clamp 后、cap 前）
+        int           level_count;      // LOD 总级数
+        // 预计算的各级 GPU 字节：下标 = LOD 级号，值 = 该级缓冲估算字节数。
+        // LOD0 恒为 0（与 mesh_dev 共享缓冲，不占额外 VRAM）。
+        std::vector<std::size_t> level_bytes;
+    };
+
+    std::vector<Candidate> candidates;
+    candidates.reserve(entries.size());
+    std::size_t total_estimated_bytes = 0;
+
+    {
+        std::shared_lock lock(impl_->lod_cache_mutex);
+
+        for (const auto& entry : entries) {
+            // 无法降级的情况：只有 1 级或无更粗级可选
+            if (entry.level_count <= 1) continue;
+            // 已是该 mesh 的最粗级 → 无法再降
+            if (entry.current_demand >= entry.level_count - 1) continue;
+            // LOD0 降级会导致净 VRAM 增加（LOD1..N 需新建缓冲），跳过
+            if (entry.current_demand < 1) continue;
+
+            // ABA 校验：entry 在收集后可能被 evict
+            auto cache_it = impl_->lod_cache.find(entry.lod_key);
+            if (cache_it == impl_->lod_cache.end()) continue;
+            const auto& levels = cache_it->second.levels;
+            // level_count 变化（模型重导入等）→ 跳过
+            if (levels.size() != static_cast<size_t>(entry.level_count)) continue;
+
+            // 预计算各级 GPU 字节
+            std::vector<std::size_t> lvl_bytes;
+            lvl_bytes.reserve(levels.size());
+            for (size_t lvl = 0; lvl < levels.size(); ++lvl) {
+                if (lvl == 0) {
+                    // LOD0 = mesh_dev 缓冲引用，不占额外 VRAM
+                    lvl_bytes.push_back(0);
+                } else if (levels[lvl].ready) {
+                    // 已构建级：直接取账本字节
+                    lvl_bytes.push_back(levels[lvl].mesh_mem.bytes());
+                } else {
+                    // 未构建级：根据顶点/索引数估算
+                    // 公式：2 套缓冲（buffer + storage）×（顶点 + 索引）字节
+                    const std::size_t est =
+                        2u * levels[lvl].vertex_count * sizeof(Resource::Vertex)
+                        + 2u * levels[lvl].index_count * sizeof(std::uint16_t);
+                    lvl_bytes.push_back(est);
+                }
+            }
+
+            // 当前级字节（当前显示的级 = committed_demand，即 entry.current_demand）
+            const std::size_t current_bytes =
+                (static_cast<size_t>(entry.current_demand) < lvl_bytes.size())
+                    ? lvl_bytes[static_cast<size_t>(entry.current_demand)]
+                    : 0;
+            total_estimated_bytes += current_bytes;
+
+            // 距最近相机距离（平方）
+            const float dist_sq = nearest_camera_dist2(entry.world_center, camera_positions);
+
+            candidates.push_back({entry.lod_key, dist_sq,
+                                  entry.current_demand, entry.level_count,
+                                  std::move(lvl_bytes)});
+        }
+    }  // shared_lock 释放
+
+    if (candidates.empty()) return;
+
+    impl_->diag_lod_budget_entries += candidates.size();
+    impl_->diag_lod_budget_est_vram = total_estimated_bytes;
+
+    // ================================================================
+    // 按距离降序排序——远者先降级（近处保留精细度）
+    // ================================================================
+    std::sort(candidates.begin(), candidates.end(),
+              [](const Candidate& a, const Candidate& b) {
+                  return a.dist_sq > b.dist_sq;  // 远→近
+              });
+
+    // ================================================================
+    // 计算需要节省的字节数，封顶到 mesh_bytes / 2。
+    // 纹理无法通过 LOD 降级节省——若超预算全因纹理膨胀，无限降级 mesh
+    // 只会白耗画质而于事无补。
+    // ================================================================
+    std::size_t bytes_to_save = mr.vram.used_bytes - soft_limit;
+    // 封顶：至多节省 mesh 总量的一半
+    const std::size_t max_mesh_savings = mr.vram.mesh_bytes / 2;
+    if (bytes_to_save > max_mesh_savings)
+        bytes_to_save = max_mesh_savings;
+
+    // 加速模式：超过 hard_limit 时每步降 2 级以加速释放
+    const bool accelerated = (mr.vram.used_bytes > hard_limit);
+
+    // ================================================================
+    // 遍历候选项，逐步降级直到满足目标或达到单帧上限
+    // ================================================================
+    std::size_t bytes_saved = 0;
+    std::size_t degraded     = 0;
+
+    for (const auto& cand : candidates) {
+        if (bytes_saved >= bytes_to_save) break;
+        if (degraded >= Impl::kMaxDegradedPerFrame) break;
+
+        const int cur_demand = cand.current_demand;
+        if (cur_demand < 0
+            || static_cast<size_t>(cur_demand) >= cand.level_bytes.size())
+            continue;
+
+        // 加速模式：目标 = cur + 2；正常模式：cur + 1
+        int target_demand = accelerated
+            ? std::min(cur_demand + 2, cand.level_count - 1)
+            : cur_demand + 1;
+
+        // 确保 target 在有效范围内且确实比当前更粗
+        if (target_demand <= cur_demand) continue;
+        if (static_cast<size_t>(target_demand) >= cand.level_bytes.size()) continue;
+
+        // 计算 savings：当前级字节 - 目标级字节
+        const std::size_t cur_bytes = cand.level_bytes[static_cast<size_t>(cur_demand)];
+        const std::size_t tgt_bytes = cand.level_bytes[static_cast<size_t>(target_demand)];
+        // 如果目标级 > 当前级，目标级数据更小（更少的顶点），则 cur_bytes > tgt_bytes
+        // savings = 释放的 - 新分配的 = cur - tgt
+        const std::size_t savings =
+            (cur_bytes > tgt_bytes) ? (cur_bytes - tgt_bytes) : 0;
+
+        // 写入 cap：该 lod_key 的 demand 至少为 target_demand
+        impl_->lod_budget_caps[cand.lod_key] = target_demand;
+        bytes_saved += savings;
+        ++degraded;
+    }
+
+    impl_->diag_lod_budget_degraded += degraded;
+
+    // ================================================================
+    // 诊断日志（仅在确实发生了降级且有诊断开关时输出）
+    // ================================================================
+    if (geometry_diagnostics_enabled() && degraded > 0) {
+        CFW_LOG_NOTICE("[LODBudget] frame={} used={}KB budget={}KB "
+                       "soft={}KB hard={}KB need={}KB "
+                       "candidates={} degraded={} saved={}KB est_vram={}KB "
+                       "mode={}",
+                       impl_->lod_frame_counter,
+                       mr.vram.used_bytes / 1024,
+                       mr.vram.budget_bytes / 1024,
+                       soft_limit / 1024,
+                       hard_limit / 1024,
+                       bytes_to_save / 1024,
+                       candidates.size(),
+                       degraded,
+                       bytes_saved / 1024,
+                       total_estimated_bytes / 1024,
+                       accelerated ? "fast" : "normal");
     }
 }
 

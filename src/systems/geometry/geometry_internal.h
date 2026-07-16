@@ -322,6 +322,33 @@ struct GeometrySystem::Impl {
     std::size_t vram_budget_bytes = 0;
 
     // ========================================
+    // LOD 级 LRU — 延迟 Cap 机制
+    // ========================================
+    // 在 reconcile_lod_residency 末尾根据 VRAM 压力计算：对远处 geometry 的 demand
+    // 施加下限（cap），迫使其选更粗 LOD，释放显存。cap 在下一帧 reconcile 中生效，
+    // 一帧延迟有意为之——VRAM 压力变化缓慢（数百帧尺度），无需拆分主循环。
+    //
+    // Key = lod_key (make_lod_key 生成), Value = min_allowed_demand（下限；
+    // demand 只能 ≥ 此值，即只能比此更粗）。空 map 表示无压力、无限制。
+    std::unordered_map<uint64_t, int> lod_budget_caps;
+
+    // 水位常量：soft(75%) 触发降级，hard(85%) 开启加速模式（每步 +2 级）。
+    // 两个比例的分母均为 compute_memory_report().vram.budget_bytes（已做
+    // min(物理VRAM, vram_budget_bytes) 封顶），不是裸 vram_budget_bytes。
+    static constexpr float kLodBudgetSoftRatio = 0.75f;
+    static constexpr float kLodBudgetHardRatio = 0.85f;
+
+    // 单帧最多降级 mesh 数：防止 VRAM 突然承压时全场景同步 pop，
+    // 将降级分散到多帧平滑过渡。
+    static constexpr std::size_t kMaxDegradedPerFrame = 64;
+
+    // 诊断计数器（在 update() ~1Hz 块重置并输出）
+    std::uint64_t diag_lod_budget_checks   = 0;  // enforce_lod_budget 调用次数
+    std::uint64_t diag_lod_budget_degraded = 0;  // 本秒内被强制降级的 entry 数
+    std::uint64_t diag_lod_budget_entries  = 0;  // 本秒内收集的 candidate entries 数
+    std::uint64_t diag_lod_budget_est_vram = 0;  // 估算的 LOD mesh 总 VRAM（字节）
+
+    // ========================================
     // 满载淘汰水位（容量取自 SDL 系统内存 / Horizon 显存，非固定 MB）
     // ========================================
     float    evict_high_ratio = 0.90f;  // used ≥ high*capacity 时触发淘汰

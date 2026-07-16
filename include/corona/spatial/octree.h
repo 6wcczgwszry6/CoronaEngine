@@ -94,6 +94,25 @@ class Octree {
     }
 
     /**
+     * @brief 收集在所有球之外的子树 payload（八叉树估计卸载核心）
+     *
+     * 节点级判定：若节点 AABB 到**所有**球心的最近距离均 > radius，
+     * 则该节点整棵子树一次性批量收集——不逐条目、不逐相机计数。
+     * 若节点与任一球相交则递归子节点。
+     *
+     * 与 query_sphere（单个球内）对称：query_sphere 找到"该加载的"，
+     * collect_outside_spheres 找到"所有相机外、该卸载的"。
+     *
+     * @param centers  多相机位置（通常 1~4 个）
+     * @param radius   卸载距离阈值（所有相机共用同一值）
+     */
+    void collect_outside_spheres(const std::vector<ktm::fvec3>& centers, float radius,
+                                 std::vector<TPayload>& out) const {
+        if (!root_ || centers.empty()) return;
+        collect_outside_spheres_impl(root_.get(), centers, radius, out);
+    }
+
+    /**
      * @brief 收集所有可能碰撞的 payload 对（i<j，已去重）
      */
     void collect_pairs(std::vector<std::pair<TPayload, TPayload>>& out) const {
@@ -245,6 +264,58 @@ class Octree {
         }
         for (const auto& child : node->children) {
             if (child) query_if_impl(child.get(), pred, out);
+        }
+    }
+
+    /// 收集子树中所有 payload（节点已判定完全在球外时批量使用）
+    static void collect_subtree_payloads(const Node* node, std::vector<TPayload>& out) {
+        for (const auto& e : node->entries) out.push_back(e.payload);
+        for (const auto& child : node->children) {
+            if (child) collect_subtree_payloads(child.get(), out);
+        }
+    }
+
+    /// @see collect_outside_spheres
+    static void collect_outside_spheres_impl(const Node* node,
+                                             const std::vector<ktm::fvec3>& centers,
+                                             float radius, std::vector<TPayload>& out) {
+        float r2 = radius * radius;
+
+        // 节点级判定：此节点是否在所有相机球之外？
+        bool outside_all = true;
+        for (const auto& c : centers) {
+            float dx = std::max({node->bounds.min.x - c.x, 0.0f, c.x - node->bounds.max.x});
+            float dy = std::max({node->bounds.min.y - c.y, 0.0f, c.y - node->bounds.max.y});
+            float dz = std::max({node->bounds.min.z - c.z, 0.0f, c.z - node->bounds.max.z});
+            if (dx * dx + dy * dy + dz * dz <= r2) {
+                outside_all = false;
+                break;  // 在一台相机内 → 不必检查其余
+            }
+        }
+
+        if (outside_all) {
+            // 整棵子树在所有相机外 → 批量收集，不逐条目判断
+            collect_subtree_payloads(node, out);
+            return;
+        }
+
+        // 节点与至少一台相机的球相交 → 逐条目判断 + 递归子节点
+        for (const auto& e : node->entries) {
+            bool entry_outside = true;
+            for (const auto& c : centers) {
+                float dx = std::max({e.bounds.min.x - c.x, 0.0f, c.x - e.bounds.max.x});
+                float dy = std::max({e.bounds.min.y - c.y, 0.0f, c.y - e.bounds.max.y});
+                float dz = std::max({e.bounds.min.z - c.z, 0.0f, c.z - e.bounds.max.z});
+                if (dx * dx + dy * dy + dz * dz <= r2) {
+                    entry_outside = false;
+                    break;
+                }
+            }
+            if (entry_outside) out.push_back(e.payload);
+        }
+
+        for (const auto& child : node->children) {
+            if (child) collect_outside_spheres_impl(child.get(), centers, radius, out);
         }
     }
 
