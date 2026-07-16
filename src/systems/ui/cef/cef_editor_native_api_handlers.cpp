@@ -485,6 +485,16 @@ struct NativeEditorActor {
     std::unique_ptr<Corona::API::Actor> engine_actor;
 };
 
+std::string collision_shape_name(const Corona::API::Mechanics& mechanics) {
+    return mechanics.get_collision_shape();
+}
+
+std::string normalize_collision_type(std::string value) {
+    if (value == "none" || value == "box" || value == "mesh") return value;
+    CFW_LOG_WARNING("Invalid collision type '{}'; using box", value);
+    return "box";
+}
+
 struct NativeEditorScene {
     std::filesystem::path project_root;
     std::string route;
@@ -723,6 +733,8 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         if (actor.mechanics) {
             lines.push_back(key + ".mechanics.physics_enabled = " +
                             std::string(actor.mechanics->get_physics_enabled() ? "true" : "false"));
+            lines.push_back(key + ".mechanics.collision_type = " +
+                            collision_shape_name(*actor.mechanics));
         }
         lines.push_back(key + ".geometry.position = " + format_float3(actor.geometry ? actor.geometry->get_position() : actor.position));
         lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
@@ -1317,6 +1329,18 @@ void load_native_actor(NativeEditorScene& scene,
         actor.mechanics->set_physics_enabled(
             parse_bool(actors_section.at(actor_key + ".mechanics.physics_enabled"), true));
     }
+    if (actor.actor_type != "ui_image" && actor.mechanics) {
+        if (actors_section.contains(actor_key + ".mechanics.collision_type")) {
+            actor.mechanics->set_collision_shape(normalize_collision_type(
+                actors_section.at(actor_key + ".mechanics.collision_type")));
+        } else if (actors_section.contains(actor_key + ".mechanics.collision_enabled")) {
+            actor.mechanics->set_collision_shape(
+                parse_bool(actors_section.at(actor_key + ".mechanics.collision_enabled"), true)
+                    ? "box" : "none");
+        } else {
+            actor.mechanics->set_collision_shape("box");
+        }
+    }
 }
 
 NativeEditorCamera make_native_camera(NativeEditorScene& scene,
@@ -1581,7 +1605,7 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     if (actor.actor_type == "audio") {
         item["audio_resource_id"] = std::to_string(actor.audio_resource_id);
     }
-    item["collision"] = actor.mechanics ? actor.mechanics->get_collision_enabled() : true;
+    item["collision"] = actor.mechanics ? collision_shape_name(*actor.mechanics) : "box";
     item["visible"] = actor.optics ? actor.optics->get_visible() : true;
     item["script"] = "";
     item["follow_camera"] = actor.follow_camera;
@@ -2445,9 +2469,8 @@ NativeResult apply_actor_operation(NativeEditorScene& scene,
     } else if (operation == "SetPhysicsEnabled") {
         if (actor.mechanics) actor.mechanics->set_physics_enabled(json_bool_at(vector, 0, true));
     } else if (operation == "SetCollision") {
-        const auto value = json_string_at(vector, 0, "true");
-        if (actor.mechanics) actor.mechanics->set_collision_enabled(
-            value != "none" && value != "false" && value != "0");
+        const auto value = normalize_collision_type(json_string_at(vector, 0, "box"));
+        if (actor.mechanics) actor.mechanics->set_collision_shape(value);
     } else if (operation == "SetVisible") {
         if (actor.optics) actor.optics->set_visible(json_bool_at(vector, 0, true));
     } else if (operation == "SetFollowCamera") {
