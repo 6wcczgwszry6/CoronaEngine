@@ -80,6 +80,12 @@ class Mechanics:
         except Exception as e:
             raise RuntimeError(f"Mechanics.get_collision_enabled 失败: {e}") from e
 
+    def set_collision_shape(self, shape: str):
+        self.engine_obj.set_collision_shape(shape)
+
+    def get_collision_shape(self) -> str:
+        return self.engine_obj.get_collision_shape()
+
     def set_linear_lock(self, lock_x: bool, lock_y: bool, lock_z: bool):
         """设置线性运动轴锁定（平移锁定）"""
         try:
