@@ -16,9 +16,11 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 import json as _json
 import logging
+import math as _math
 import os as _os
 from pathlib import Path as _Path
 import random as _random
+import runpy as _runpy
 import threading as _threading
 import time as _time
 from typing import Callable, Optional
@@ -75,6 +77,7 @@ class ScratchRuntimeContext:
 
     stop_requested: bool = False
     key_state: dict = field(default_factory=dict)
+    key_press_until: dict = field(default_factory=dict)
     mouse_pressed: bool = False
     mouse_x: float = 0.0
     mouse_y: float = 0.0
@@ -284,9 +287,14 @@ def handle_key_event(key, mods=None, display_key=None):
     if len(display_key) == 1:
         keys_to_set.add(display_key.lower())
         keys_to_set.add(display_key.upper())
+    # Native input can deliver a very quick key-down/key-up pair in one batch.
+    # Keep the tap alive across several 50 ms node-graph ticks so a short press is
+    # reliable even while rendering or CEF work briefly delays the script thread.
+    pulse_until = _time.monotonic() + 0.18
     for ctx in _live_contexts() or [_default_context]:
         for item in keys_to_set:
             ctx.key_state[item] = True
+            ctx.key_press_until[item] = max(ctx.key_press_until.get(item, 0.0), pulse_until)
         if ctx.key_handler is None or ctx.stop_requested:
             continue
         try:
@@ -308,22 +316,31 @@ def handle_key_release(key, display_key=None):
                 ctx.key_state[display_key.upper()] = False
 
 
-def handle_mouse_event(event_type, button, x, y, viewport_x=None, viewport_y=None, viewport_width=None, viewport_height=None):
+def handle_mouse_event(event_type, button, x, y, viewport_x=None, viewport_y=None, viewport_width=None, viewport_height=None, picked_actor=""):
+    normalized_event = str(event_type or '').strip().lower()
     for ctx in _live_contexts() or [_default_context]:
-        if event_type in ("click", "mousedown"):
+        if normalized_event in ("mousedown", "pointerdown", "down"):
             ctx.mouse_pressed = True
-        elif event_type == "mouseup":
+        elif normalized_event in ("mouseup", "pointerup", "up"):
             ctx.mouse_pressed = False
         next_x = float(x)
         next_y = float(y)
-        ctx.mouse_delta_x = next_x - ctx.mouse_x
-        ctx.mouse_delta_y = next_y - ctx.mouse_y
+        # Pointer down/up/click events often arrive in the same frame after the
+        # final move event. They carry the same coordinates and must not erase
+        # the accumulated motion before a camera block can consume it.
+        if normalized_event in ('move', 'mousemove', 'pointermove'):
+            ctx.mouse_delta_x += next_x - ctx.mouse_x
+            ctx.mouse_delta_y += next_y - ctx.mouse_y
         ctx.mouse_x = next_x
         ctx.mouse_y = next_y
         ctx.mouse_viewport_x = float(next_x if viewport_x is None else viewport_x)
         ctx.mouse_viewport_y = float(next_y if viewport_y is None else viewport_y)
         ctx.mouse_viewport_width = max(0.0, float(viewport_width or 0.0))
         ctx.mouse_viewport_height = max(0.0, float(viewport_height or 0.0))
+        # The frontend resolves GPU picking asynchronously before dispatching the
+        # Blockly mouse event.  Cache that result so click blocks do not block
+        # the render thread by polling the native picker from Python.
+        ctx.last_mouse_pick_object = str(picked_actor or "")
         if ctx.mouse_handler is None or ctx.stop_requested:
             continue
         try:
@@ -509,7 +526,7 @@ class _NativeEditorActorProxy:
         self._mechanics = self
         self._last_runtime_transform_time = 0.0
 
-    def _pace_runtime_transform(self, minimum_interval=1.0 / 60.0):
+    def _pace_runtime_transform(self, minimum_interval=1.0 / 120.0):
         """Throttle native runtime transforms and yield to stop requests."""
         ctx = _current_context()
         deadline = self._last_runtime_transform_time + max(0.0, float(minimum_interval))
@@ -589,13 +606,56 @@ class _NativeEditorActorProxy:
     def set_angular_lock(self, x, y, z): return self._operation("SetAngularLock", [bool(x), bool(y), bool(z)])
 
 
+class _NativeEditorCameraProxy:
+    def __init__(self, scene, data=None):
+        self.scene = scene
+        self.scene_route = str(getattr(scene, "route", "") or "")
+        self._apply_data(data or {})
+
+    def _apply_data(self, data):
+        self.name = str(data.get("name") or "")
+        self.camera_id = str(data.get("camera_id") or data.get("id") or "")
+        self.handle = data.get("handle") or data.get("camera_handle")
+        self._position = [float(v) for v in (data.get("position") or [0.0, 0.0, -5.0])[:3]]
+        self._forward = [float(v) for v in (data.get("forward") or [0.0, 0.0, 1.0])[:3]]
+        self._world_up = [float(v) for v in (data.get("world_up") or data.get("up") or [0.0, 1.0, 0.0])[:3]]
+        self._fov = _safe_float(data.get("fov"), 45.0)
+
+    def get_position(self): return list(self._position)
+    def get_forward(self): return list(self._forward)
+    def get_world_up(self): return list(self._world_up)
+    def get_fov(self): return float(self._fov)
+    def _cache_set(self, position, forward, world_up, fov):
+        self._position = [float(v) for v in list(position)[:3]]
+        self._forward = [float(v) for v in list(forward)[:3]]
+        self._world_up = [float(v) for v in list(world_up)[:3]]
+        self._fov = float(fov)
+
+    def set(self, position, forward, world_up, fov):
+        applied = _set_native_runtime_camera(
+            self.scene_route, position, forward, world_up, fov,
+            self.camera_id or self.name or "",
+        )
+        if applied:
+            self._cache_set(position, forward, world_up, fov)
+        return applied
+
+
 class _NativeEditorSceneProxy:
-    def __init__(self, route, name, actor_payloads):
+    def __init__(self, route, name, actor_payloads, scene_payload=None):
         self.route = str(route or "")
         self.name = str(name or self.route)
         self._actors = [_NativeEditorActorProxy(self, item) for item in actor_payloads if isinstance(item, dict)]
+        payload = scene_payload if isinstance(scene_payload, dict) else {}
+        cameras = payload.get("cameras") if isinstance(payload.get("cameras"), list) else []
+        active_name = str(payload.get("active_camera_name") or "")
+        active = next((item for item in cameras if str(item.get("name") or "") == active_name), None)
+        active = active or (payload.get("camera") if isinstance(payload.get("camera"), dict) else None)
+        active = active or (cameras[0] if cameras else {})
+        self._active_camera = _NativeEditorCameraProxy(self, active) if active else None
 
     def get_actors(self): return list(self._actors)
+    def get_active_camera(self): return self._active_camera
     def find_actor(self, name):
         matches = [actor for actor in self._actors if _actor_matches(actor, name) or actor.actor_guid == str(name) or str(actor.handle) == str(name)]
         return matches[0] if len(matches) == 1 else None
@@ -607,6 +667,16 @@ class _NativeEditorSceneProxy:
         actor_payloads = payload.get("actors") if isinstance(payload.get("actors"), list) else []
         self.name = str(payload.get("scene_name") or payload.get("name") or self.name)
         self._actors = [_NativeEditorActorProxy(self, item) for item in actor_payloads if isinstance(item, dict)]
+        cameras = payload.get("cameras") if isinstance(payload.get("cameras"), list) else []
+        active_name = str(payload.get("active_camera_name") or "")
+        active = next((item for item in cameras if str(item.get("name") or "") == active_name), None)
+        active = active or (payload.get("camera") if isinstance(payload.get("camera"), dict) else None)
+        active = active or (cameras[0] if cameras else None)
+        if active:
+            if self._active_camera is None:
+                self._active_camera = _NativeEditorCameraProxy(self, active)
+            else:
+                self._active_camera._apply_data(active)
         return True
 
 
@@ -688,7 +758,7 @@ def resolve_runtime_target(target_type="actor", scene_name="", actor_name=""):
         if scene_name and not _native_scene_matches(native_payload, scene_name):
             return {"status": "error", "message": f"\u539f\u751f\u573a\u666f\u8fd4\u56de\u300c{native_route or native_name}\u300d\uff0c\u4e0e\u8bf7\u6c42\u573a\u666f\u300c{scene_name}\u300d\u4e0d\u4e00\u81f4", **base_diag}
         if len(matches) == 1:
-            scene_proxy = _NativeEditorSceneProxy(native_route, native_name, actor_payloads)
+            scene_proxy = _NativeEditorSceneProxy(native_route, native_name, actor_payloads, native_payload)
             actor_proxy = scene_proxy.find_actor(matches[0].get("actor_guid") or matches[0].get("handle") or matches[0].get("name"))
             return {"status": "ok", "target_type": "actor", "scene_name": native_route,
                     "actor_name": actor_proxy.name, "scene": scene_proxy, "actor": actor_proxy,
@@ -736,11 +806,18 @@ def capture_runtime_scene_state(scene_name="", scene=None, binding_mode=""):
                 "physics_enabled": getattr(actor, "get_physics_enabled", lambda: False)(),
             },
         })
+    resolved_scene_name = str(getattr(scene, "route", "") or scene_name or "")
+    native_payload, _native_errors = _native_scene_snapshot(resolved_scene_name)
+    camera_state = None
+    if isinstance(native_payload, dict):
+        candidate = native_payload.get("camera")
+        if isinstance(candidate, dict):
+            camera_state = dict(candidate)
     return {
         "binding_mode": "python_scene",
-        "scene_name": str(getattr(scene, "route", "") or scene_name or ""),
+        "scene_name": resolved_scene_name,
         "scene": scene,
-        "payload": {"actors": actors},
+        "payload": {"actors": actors, "camera": camera_state},
     }
 
 
@@ -759,6 +836,44 @@ def _native_restore_operation(scene_route, actor_name, operation, values):
             scene_route, actor_name, operation, list(values)
         ),
         action,
+    )
+
+
+def _set_native_runtime_camera(scene_route, position, forward, world_up, fov, camera_name=""):
+    """Update the main editor viewport camera in memory without writing the scene file."""
+    try:
+        from CoronaCore.core.corona_editor import CoronaEditor
+        engine = CoronaEditor.CoronaEngine
+        setter = getattr(engine, "set_editor_camera_transform", None) if engine is not None else None
+        if not callable(setter):
+            return False
+        payload = _native_payload(setter(
+            str(scene_route or ""),
+            str(camera_name or ""),
+            _json.dumps({
+                "position": list(position),
+                "forward": list(forward),
+                "world_up": list(world_up),
+                "fov": float(fov),
+                "persist": False,
+            }, ensure_ascii=False),
+        ))
+        return isinstance(payload, dict) and payload.get("status") not in ("error", "failed")
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] native runtime camera update failed: %s", exc)
+        return False
+
+
+def _restore_native_camera_state(scene_route, camera_data):
+    if not isinstance(camera_data, dict):
+        return False
+    return _set_native_runtime_camera(
+        scene_route,
+        camera_data.get("position") or [0.0, 0.0, -5.0],
+        camera_data.get("forward") or [0.0, 0.0, 1.0],
+        camera_data.get("world_up") or camera_data.get("up") or [0.0, 1.0, 0.0],
+        camera_data.get("fov", 45.0),
+        camera_data.get("camera_id") or camera_data.get("id") or camera_data.get("name") or "",
     )
 
 
@@ -785,7 +900,7 @@ def _restore_native_actor_state(scene_route, actor_data):
     }
     if transform:
         _native_payload_or_raise(
-            setter(scene_route, actor_name, _json.dumps(transform, ensure_ascii=False)),
+            setter(scene_route, actor_name, _json.dumps({**transform, "persist": False}, ensure_ascii=False)),
             f"Restore actor {actor_name} transform",
         )
 
@@ -955,6 +1070,11 @@ def restore_runtime_scene_state(snapshot):
     if mode == "native_editor":
         from CoronaCore.core.corona_editor import CoronaEditor
         engine = CoronaEditor.CoronaEngine
+        _logger.info(
+            "[ScratchWrapper] native scene restore begin: scene=%s actors=%d",
+            scene_route,
+            len(original),
+        )
         remover = getattr(engine, "remove_editor_actor", None) if engine is not None else None
         creator = getattr(engine, "create_editor_actor", None) if engine is not None else None
 
@@ -1023,9 +1143,11 @@ def restore_runtime_scene_state(snapshot):
             current = [item for item in refreshed.get("actors", []) if isinstance(item, dict)]
             for item in original:
                 actor_name = str(item.get("name") or item.get("route") or "")
-                if _snapshot_actor_match(current, item) is None:
+                current_actor = _snapshot_actor_match(current, item)
+                if current_actor is None:
                     raise RuntimeError(f"Actor {actor_name} is still missing after recreation")
-                _restore_native_actor_state(scene_route, item)
+                if _native_actor_state_mismatches(item, current_actor):
+                    _restore_native_actor_state(scene_route, item)
 
             # Native writes and render/physics synchronization may cross a short frame.
             # Re-read and verify; retry twice and never report restored on mismatch.
@@ -1042,6 +1164,12 @@ def restore_runtime_scene_state(snapshot):
         if verification_failures:
             raise RuntimeError("Scene restore verification failed: " + "; ".join(verification_failures))
 
+        camera_restored = _restore_native_camera_state(scene_route, payload.get("camera"))
+        _logger.info(
+            "[ScratchWrapper] native scene restore verified: scene=%s camera=%s",
+            scene_route,
+            "restored" if camera_restored else "unavailable",
+        )
         _clear_scene_runtime_state(scene_route)
         try:
             CoronaEditor.emit_editor_event("scene-tree-changed", [scene_route])
@@ -1071,12 +1199,16 @@ def restore_runtime_scene_state(snapshot):
         if actor is None:
             raise RuntimeError(f"\u65e0\u6cd5\u5728 Python \u573a\u666f\u4e2d\u91cd\u5efa\u7269\u4f53\u300c{item.get('name')}\u300d")
         geometry = item.get("geometry") or {}
+        raw_geometry = getattr(actor, "_geometry", None)
         for method_name, key in (("set_position", "position"), ("set_rotation", "rotation"), ("set_scale", "scale")):
-            method = getattr(actor, method_name, None)
+            method = getattr(raw_geometry, method_name, None) if raw_geometry is not None else None
+            if not callable(method):
+                method = getattr(actor, method_name, None)
             if callable(method) and key in geometry:
                 method(geometry[key])
         if hasattr(actor, "set_visible"):
             actor.set_visible(item.get("visible", True))
+    _restore_native_camera_state(scene_route, payload.get("camera"))
     _clear_scene_runtime_state(scene_route)
     return True
 
@@ -1434,7 +1566,7 @@ def lock_mouse():
     ctx = _current_context()
     ctx.mouse_locked = True
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
         method = getattr(_ce, 'set_mouse_locked', None)
         if callable(method):
             result = method(True)
@@ -1449,7 +1581,7 @@ def unlock_mouse():
     ctx = _current_context()
     ctx.mouse_locked = False
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
         method = getattr(_ce, 'set_mouse_locked', None)
         if callable(method):
             result = method(False)
@@ -1460,27 +1592,33 @@ def unlock_mouse():
 
 
 def mouse_dx():
-    """获取本帧鼠标 X 位移量"""
+    """Return and consume horizontal pointer motion accumulated for the script."""
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
         if hasattr(_ce, 'get_mouse_delta'):
             dx, _dy = _ce.get_mouse_delta()
             return float(dx)
     except Exception:
         pass
-    return float(_current_context().mouse_delta_x)
+    ctx = _current_context()
+    value = float(ctx.mouse_delta_x)
+    ctx.mouse_delta_x = 0.0
+    return value
 
 
 def mouse_dy():
-    """获取本帧鼠标 Y 位移量"""
+    """Return and consume vertical pointer motion accumulated for the script."""
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
         if hasattr(_ce, 'get_mouse_delta'):
             _dx, dy = _ce.get_mouse_delta()
             return float(dy)
     except Exception:
         pass
-    return float(_current_context().mouse_delta_y)
+    ctx = _current_context()
+    value = float(ctx.mouse_delta_y)
+    ctx.mouse_delta_y = 0.0
+    return value
 
 
 def set_fov(fov_degrees):
@@ -1543,6 +1681,25 @@ def _camera_fov(camera, fallback=45.0):
         return float(fallback)
 
 
+def _apply_runtime_camera(camera, scene, position, forward, world_up, fov):
+    """Apply a camera pose once to native viewports and keep proxy/Python state in sync."""
+    scene_route = str(getattr(scene, 'route', '') or _current_context().scene_name or '')
+    if isinstance(camera, _NativeEditorCameraProxy):
+        return camera.set(position, forward, world_up, fov) is not False
+
+    applied = _set_native_runtime_camera(scene_route, position, forward, world_up, fov)
+    try:
+        if hasattr(camera, 'set'):
+            local_applied = camera.set(position, forward, world_up, fov) is not False
+            return bool(applied or local_applied)
+        if scene is not None and hasattr(scene, 'set_camera'):
+            local_applied = scene.set_camera(position, forward, world_up, fov) is not False
+            return bool(applied or local_applied)
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] runtime camera apply failed: %s", exc)
+    return bool(applied)
+
+
 def camera_follow_object(name, ox, oy, oz):
     """Move active camera to object position plus offset; call once per update."""
     actor = _resolve_actor(name)
@@ -1562,22 +1719,41 @@ def camera_follow_object(name, ox, oy, oz):
     forward = _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0])
     up = _camera_vec(camera, 'get_world_up', [0.0, 1.0, 0.0])
     fov = _camera_fov(camera)
-    try:
-        if scene is not None and hasattr(scene, 'set_camera'):
-            result = scene.set_camera(new_pos, forward, up, fov)
-            return result is not False
-    except Exception as exc:
-        _logger.debug("[ScratchWrapper] scene.set_camera failed: %s", exc)
-    try:
-        if hasattr(camera, 'set'):
-            result = camera.set(new_pos, forward, up, fov)
-            return result is not False
-        if hasattr(camera, 'set_position'):
-            result = camera.set_position(new_pos)
-            return result is not False
-    except Exception as exc:
-        _logger.debug("[ScratchWrapper] camera_follow_object failed: %s", exc)
-    return False
+    return _apply_runtime_camera(camera, scene, new_pos, forward, up, fov)
+
+
+def camera_third_person_orbit(name, distance=7.0, height=2.4, sensitivity=0.18):
+    """Orbit the active camera around an object and keep looking at it."""
+    actor = _resolve_actor(name)
+    target = _actor_position(actor)
+    camera, scene = _active_camera_with_scene()
+    if actor is None or target is None or camera is None:
+        return False
+
+    ctx = _current_context()
+    key = f"third_person_camera::{_actor_identity(actor)}"
+    state = ctx.variables.setdefault(key, {'yaw': 0.0, 'pitch': 0.18})
+    sensitivity = _safe_float(sensitivity, 0.18)
+    # Mouse-right should turn the view to the right. Camera orbit position
+    # moves in the opposite angular direction to the view's look direction.
+    state['yaw'] = _safe_float(state.get('yaw')) - _math.radians(mouse_dx() * sensitivity)
+    state['pitch'] = max(-0.18, min(0.72, _safe_float(state.get('pitch'), 0.18) + _math.radians(mouse_dy() * sensitivity)))
+
+    distance = max(1.0, _safe_float(distance, 7.0))
+    height = _safe_float(height, 2.4)
+    horizontal = distance * _math.cos(state['pitch'])
+    camera_pos = [
+        target[0] + _math.sin(state['yaw']) * horizontal,
+        target[1] + height + _math.sin(state['pitch']) * distance,
+        target[2] - _math.cos(state['yaw']) * horizontal,
+    ]
+    look_target = [target[0], target[1] + max(0.35, height * 0.35), target[2]]
+    forward = [look_target[i] - camera_pos[i] for i in range(3)]
+    length = _math.sqrt(sum(value * value for value in forward)) or 1.0
+    forward = [value / length for value in forward]
+    up = [0.0, 1.0, 0.0]
+    fov = _camera_fov(camera, 55.0)
+    return _apply_runtime_camera(camera, scene, camera_pos, forward, up, fov)
 
 
 def camera_raycast(max_dist):
@@ -2236,12 +2412,12 @@ def _set_actor_position(actor, pos):
     if previous is not None:
         _current_context().previous_actor_positions[_actor_identity(actor)] = list(previous)
     try:
+        geom = getattr(actor, '_geometry', None)
+        if geom is not None and geom is not actor and hasattr(geom, 'set_position'):
+            geom.set_position(pos)
+            return True
         if hasattr(actor, 'set_position'):
             actor.set_position(pos)
-            return True
-        geom = getattr(actor, '_geometry', None)
-        if geom is not None and hasattr(geom, 'set_position'):
-            geom.set_position(pos)
             return True
     except Exception as exc:
         _logger.debug("[ScratchWrapper] set actor position failed: %s", exc)
@@ -2470,42 +2646,124 @@ def object_show(name):
 
 
 def object_delete(name):
+    """Remove an object from gameplay without deleting it from the saved scene."""
     actor = _resolve_actor(name)
     actor_name = _object_name(actor) if actor is not None else str(name or '').strip()
     if not actor_name:
         return False
-    native_deleted = False
-    scene = _runtime_scene()
-    try:
-        from CoronaCore.core.corona_editor import CoronaEditor
-        remove_actor = getattr(CoronaEditor.CoronaEngine, 'remove_editor_actor', None)
-        if callable(remove_actor) and scene is not None:
-            raw = remove_actor(getattr(scene, 'route', ''), actor_name)
-            result = _json.loads(raw) if isinstance(raw, str) else raw
-            native_deleted = not isinstance(result, dict) or result.get('status') in ('success', 'ok')
-            if not native_deleted:
-                _logger.warning("[ScratchWrapper] native delete rejected %s: %r", actor_name, result)
-    except Exception as exc:
-        _logger.warning("[ScratchWrapper] native delete failed for %s: %s", actor_name, exc)
-
     _mark_deleted(actor, actor_name)
-    if actor is not None:
-        try:
-            if hasattr(actor, 'set_visible'):
-                actor.set_visible(False)
-        except Exception:
-            pass
-    if scene is not None and native_deleted and hasattr(scene, '_notify_scene_tree_changed'):
-        try:
-            scene._notify_scene_tree_changed()
-        except Exception:
-            pass
-    return bool(native_deleted or actor is not None)
+    if actor is None:
+        return False
+    try:
+        if hasattr(actor, 'set_visible'):
+            actor.set_visible(False)
+            return True
+    except Exception as exc:
+        _logger.debug("[ScratchWrapper] runtime delete/hide failed for %s: %s", actor_name, exc)
+    return True
 
 
 def object_delete_last_touched():
     name = last_touch_object()
     return object_delete(name) if name else False
+
+
+def _runtime_step_scale(state, reference_interval=0.05):
+    """Return a bounded frame scale while preserving legacy 20 Hz tuning."""
+    now = _time.monotonic()
+    previous = state.get('last_update_time')
+    state['last_update_time'] = now
+    if previous is None:
+        return 1.0
+    elapsed = max(0.001, now - _safe_float(previous, now))
+    return max(0.1, min(2.0, elapsed / max(0.001, reference_interval)))
+
+
+def object_third_person_move(name, speed=0.18, obstacle_tag='obstacle', min_x=-12, max_x=12, min_z=-12, max_z=12):
+    """Move an object with WASD relative to the active camera and block obstacles."""
+    actor = _resolve_actor(name)
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    ctx = _current_context()
+    timing_key = f"third_person_move::{_actor_identity(actor)}"
+    timing = ctx.variables.setdefault(timing_key, {})
+    frame_scale = _runtime_step_scale(timing)
+    camera, _scene = _active_camera_with_scene()
+    forward = _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0])
+    forward[1] = 0.0
+    length = _math.sqrt(forward[0] * forward[0] + forward[2] * forward[2]) or 1.0
+    forward[0], forward[2] = forward[0] / length, forward[2] / length
+    right = [forward[2], 0.0, -forward[0]]
+    fb = (1 if keyboard('W') else 0) - (1 if keyboard('S') else 0)
+    lr = (1 if keyboard('D') else 0) - (1 if keyboard('A') else 0)
+    if not fb and not lr:
+        return False
+    move_x = forward[0] * fb + right[0] * lr
+    move_z = forward[2] * fb + right[2] * lr
+    move_length = _math.sqrt(move_x * move_x + move_z * move_z) or 1.0
+    step = max(0.0, _safe_float(speed, 0.18)) * frame_scale
+    new_pos = [
+        max(_safe_float(min_x), min(_safe_float(max_x), pos[0] + move_x / move_length * step)),
+        pos[1],
+        max(_safe_float(min_z), min(_safe_float(max_z), pos[2] + move_z / move_length * step)),
+    ]
+    if not _set_actor_position(actor, new_pos):
+        return False
+    for obstacle in _iter_known_actors():
+        if obstacle is actor or not _actor_matches_tag(obstacle, obstacle_tag):
+            continue
+        if _actors_touch(actor, obstacle):
+            _set_actor_position(actor, pos)
+            _remember_collision(actor, obstacle)
+            return False
+    return True
+
+
+def object_arcade_jump(name, power=0.28, gravity=0.025, ground_y=0.8):
+    """Apply a frame-rate-independent Space-key jump and gravity."""
+    actor = _resolve_actor(name)
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    ctx = _current_context()
+    key = f"arcade_jump::{_actor_identity(actor)}"
+    state = ctx.variables.setdefault(key, {'velocity': 0.0, 'space_latch': False})
+    frame_scale = _runtime_step_scale(state)
+    pressed = bool(keyboard('Space'))
+    ground_y = _safe_float(ground_y, 0.8)
+    velocity = _safe_float(state.get('velocity'))
+    if pressed and not state.get('space_latch') and pos[1] <= ground_y + 0.06:
+        velocity = max(0.0, _safe_float(power, 0.28))
+    state['space_latch'] = pressed
+    if pos[1] <= ground_y + 0.001 and velocity <= 0.0 and not pressed:
+        state['velocity'] = 0.0
+        return False
+    velocity -= max(0.0, _safe_float(gravity, 0.025)) * frame_scale
+    pos[1] += velocity * frame_scale
+    if pos[1] <= ground_y:
+        pos[1] = ground_y
+        velocity = 0.0
+    state['velocity'] = velocity
+    return _set_actor_position(actor, pos)
+
+
+def object_collect_touching_tag(tag='coin', points=1):
+    """Delete every tagged object touching the current actor and add score."""
+    source = _current_actor()
+    if source is None:
+        return 0
+    collected = 0
+    for actor in list(_iter_known_actors()):
+        if actor is source or not _actor_matches_tag(actor, tag):
+            continue
+        if _actors_touch(source, actor):
+            _remember_collision(source, actor)
+            if object_delete(_object_name(actor)):
+                collected += 1
+    if collected:
+        add_score(collected * _safe_float(points, 1))
+    return collected
 
 
 def object_set_position(name, x, y, z):
@@ -2560,8 +2818,49 @@ def object_set_tag(name, tag):
     shared_tags[_norm_name(actor_name)] = str(tag or "")
 
 
+def object_tag_numbered_range(prefix, first, last, digits=2, tag='tag'):
+    """Assign one runtime tag to numbered scene objects such as Coin01..Coin12.
+
+    The editor's native scene snapshot can briefly omit actors while a project is
+    finishing its first render.  Keep the explicit numbered declarations in the
+    shared tag registry even during that window so node-graph conditions do not
+    incorrectly observe an empty group and jump straight to a win state.
+    """
+    prefix = str(prefix or '')
+    first, last = _safe_int(first), _safe_int(last)
+    digits = max(0, min(8, _safe_int(digits, 2)))
+    if first > last:
+        first, last = last, first
+    tagged = 0
+    for index in range(first, last + 1):
+        suffix = str(index).zfill(digits) if digits else str(index)
+        name = f"{prefix}{suffix}"
+        object_set_tag(name, tag)
+        tagged += 1
+    return tagged
+
+
 def object_count_tag(tag):
-    return sum(1 for actor in _iter_known_actors() if _actor_matches_tag(actor, tag))
+    tag_norm = _norm_name(tag)
+    if not tag_norm:
+        return 0
+    ctx = _current_context()
+    deleted = _deleted_names(ctx)
+    matched_names = set()
+    for actor in _iter_known_actors():
+        if _actor_matches_tag(actor, tag):
+            name = _norm_name(_object_name(actor))
+            if name and name not in deleted:
+                matched_names.add(name)
+    # Include explicit tag declarations.  Both original-case and normalized keys
+    # are stored, so a set is required to avoid double counting.
+    for mapping in (ctx.object_tags, _shared_object_tags(ctx)):
+        for name, assigned_tag in mapping.items():
+            normalized_name = _norm_name(name)
+            if (normalized_name and normalized_name not in deleted
+                    and _norm_name(assigned_tag) == tag_norm):
+                matched_names.add(normalized_name)
+    return len(matched_names)
 
 
 def _unique_object_name(base):
@@ -2944,11 +3243,19 @@ def ask(question):
 
 
 def keyboard(key):
-    return _current_context().key_state.get(key, False)
+    ctx = _current_context()
+    if ctx.key_state.get(key, False):
+        return True
+    deadline = ctx.key_press_until.get(key, 0.0)
+    if deadline > _time.monotonic():
+        return True
+    if deadline:
+        ctx.key_press_until.pop(key, None)
+    return False
 
 
 def keyboard0(key):
-    return not _current_context().key_state.get(key, False)
+    return not keyboard(key)
 
 
 def mouse1():
@@ -2996,7 +3303,7 @@ def raycast_hit(origin, direction, max_dist=100.0):
     """执行射线检测，返回是否命中。结果缓存供 raycast_distance 等查询。"""
     cache = _get_raycast_cache()
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
         if hasattr(_ce, 'ray_cast'):
             result = _ce.ray_cast(origin, direction, float(max_dist))
             cache['hit'] = bool(result.hit)
@@ -4068,6 +4375,31 @@ def reset_cooldown(name):
     return True
 
 
+def start_cooldown(name, seconds):
+    """Start or restart a named one-shot timer used by node-graph transitions."""
+    ctx = _current_context()
+    key = str(name or '').strip() or 'default'
+    ctx.cooldowns[key] = _time.monotonic() + max(0.0, _safe_float(seconds))
+    return True
+
+
+def mouse_viewport_x_ratio():
+    """Return the mouse X position normalized to the active viewport (0..1)."""
+    ctx = _current_context()
+    width = max(0.0, _safe_float(ctx.mouse_viewport_width))
+    if width <= 0.0:
+        return 0.5
+    return max(0.0, min(1.0, _safe_float(ctx.mouse_viewport_x) / width))
+
+
+def mouse_left_half():
+    return mouse_viewport_x_ratio() < 0.5
+
+
+def mouse_right_half():
+    return mouse_viewport_x_ratio() >= 0.5
+
+
 def position_near(name, x, y, z, tolerance=0.1):
     actor = _resolve_actor(name) if str(name or '').strip() else _current_actor()
     position = _actor_position(actor)
@@ -4108,9 +4440,146 @@ def _mouse_pick_native():
     return name
 
 
+def _mouse_pick_projected_tagged_actor():
+    """Resolve a visible tagged actor under the cursor from the active camera.
+
+    Native GPU picking can legitimately return a large environment mesh even
+    when a small gameplay prop is rendered in front of it (for example, meshes
+    without pick geometry).  Blockly's ``mouse_pick_hit_tag`` block should still
+    be able to address the visible tagged prop.  This projection fallback is
+    generic: it only considers actors explicitly tagged by blocks at runtime.
+    """
+    ctx = _current_context()
+    width = max(0.0, _safe_float(ctx.mouse_viewport_width))
+    height = max(0.0, _safe_float(ctx.mouse_viewport_height))
+    if width <= 0.0 or height <= 0.0:
+        return ''
+
+    scene_name = str(ctx.scene_name or ctx.target_scene_name
+                     or getattr(ctx.scene, 'route', '') or '')
+    payload, _errors = _native_scene_snapshot(scene_name)
+    if not isinstance(payload, dict):
+        return ''
+    camera = payload.get('camera')
+    cameras = payload.get('cameras')
+    # A detached CameraView renders its own camera without changing the scene's
+    # active editor camera.  Prefer the sole open CameraView camera so the
+    # generic projection fallback matches the viewport that emitted the event.
+    if isinstance(cameras, list):
+        open_cameras = [item for item in cameras
+                        if isinstance(item, dict) and bool(item.get('view_open'))]
+        if len(open_cameras) == 1:
+            camera = open_cameras[0]
+    actors = payload.get('actors')
+    if not isinstance(camera, dict) or not isinstance(actors, list):
+        return ''
+
+    def vec3(value, fallback):
+        value = value if isinstance(value, (list, tuple)) else fallback
+        values = [_safe_float(value[i], fallback[i]) if i < len(value)
+                  else fallback[i] for i in range(3)]
+        return values
+
+    def sub(a, b):
+        return [a[i] - b[i] for i in range(3)]
+
+    def dot(a, b):
+        return sum(a[i] * b[i] for i in range(3))
+
+    def cross(a, b):
+        return [a[1] * b[2] - a[2] * b[1],
+                a[2] * b[0] - a[0] * b[2],
+                a[0] * b[1] - a[1] * b[0]]
+
+    def normalized(value, fallback):
+        length = _math.sqrt(max(0.0, dot(value, value)))
+        if length <= 1e-6:
+            return list(fallback)
+        return [component / length for component in value]
+
+    camera_position = vec3(camera.get('position'), [0.0, 0.0, -5.0])
+    forward = normalized(vec3(camera.get('forward'), [0.0, 0.0, 1.0]),
+                         [0.0, 0.0, 1.0])
+    world_up = normalized(vec3(camera.get('world_up'), [0.0, 1.0, 0.0]),
+                          [0.0, 1.0, 0.0])
+    right = normalized(cross(world_up, forward), [1.0, 0.0, 0.0])
+    camera_up = normalized(cross(forward, right), world_up)
+    tan_half_fov = _math.tan(_math.radians(
+        max(1.0, min(179.0, _safe_float(camera.get('fov'), 45.0))) * 0.5))
+    aspect = width / height
+    cursor_x = _safe_float(ctx.mouse_viewport_x)
+    cursor_y = _safe_float(ctx.mouse_viewport_y)
+
+    tags = dict(_shared_object_tags(ctx))
+    tags.update(ctx.object_tags)
+    candidates = []
+    for actor_data in actors:
+        if not isinstance(actor_data, dict) or not bool(actor_data.get('visible', True)):
+            continue
+        name = str(actor_data.get('name') or actor_data.get('route') or '')
+        if not name:
+            continue
+        tag = tags.get(name) or tags.get(_norm_name(name))
+        if not str(tag or '').strip():
+            continue
+        geometry = actor_data.get('geometry') if isinstance(actor_data.get('geometry'), dict) else {}
+        position = vec3(geometry.get('position'), [0.0, 0.0, 0.0])
+        relative = sub(position, camera_position)
+        depth = dot(relative, forward)
+        if depth <= 0.01:
+            continue
+        ndc_x = dot(relative, right) / max(1e-6, depth * tan_half_fov * aspect)
+        ndc_y = dot(relative, camera_up) / max(1e-6, depth * tan_half_fov)
+        screen_x = (ndc_x + 1.0) * 0.5 * width
+        screen_y = (1.0 - ndc_y) * 0.5 * height
+
+        size = actor_data.get('size') if isinstance(actor_data.get('size'), (list, tuple)) else []
+        if len(size) >= 2:
+            world_radius = max(abs(_safe_float(size[0])), abs(_safe_float(size[1]))) * 0.5
+        else:
+            scale = vec3(geometry.get('scale'), [1.0, 1.0, 1.0])
+            world_radius = max(abs(scale[0]), abs(scale[1]), abs(scale[2])) * 0.5
+        world_radius = max(0.2, world_radius)
+        pixel_radius = max(14.0, (height * 0.5) * world_radius /
+                           max(1e-6, depth * tan_half_fov))
+        distance_sq = (cursor_x - screen_x) ** 2 + (cursor_y - screen_y) ** 2
+        _logger.debug(
+            "[ScratchPick] actor=%s tag=%s cursor=(%.1f,%.1f)/(%0.1f,%0.1f) "
+            "screen=(%.1f,%.1f) radius=%.1f depth=%.2f distance=%.1f",
+            name, tag, cursor_x, cursor_y, width, height,
+            screen_x, screen_y, pixel_radius, depth, _math.sqrt(distance_sq))
+        if distance_sq <= pixel_radius ** 2:
+            candidates.append((depth, distance_sq, name))
+
+    if not candidates:
+        _logger.debug("[ScratchPick] no tagged actor under cursor")
+        return ''
+    # Overlapping concentric props use the front-most actor, matching normal
+    # depth-tested picking; distance is the secondary tie-breaker.
+    candidates.sort(key=lambda item: (item[0], item[1], _norm_name(item[2])))
+    return candidates[0][2]
+
+
 def mouse_pick_object():
     ctx = _current_context()
+    if ctx.last_mouse_pick_object:
+        picked_actor = _resolve_actor(ctx.last_mouse_pick_object)
+        picked_name = _object_name(picked_actor) if picked_actor is not None else ''
+        explicit_tag = (ctx.object_tags.get(picked_name)
+                        or ctx.object_tags.get(_norm_name(picked_name))
+                        or _shared_object_tags(ctx).get(picked_name)
+                        or _shared_object_tags(ctx).get(_norm_name(picked_name)))
+        if explicit_tag:
+            return ctx.last_mouse_pick_object
+        projected = _mouse_pick_projected_tagged_actor()
+        if projected:
+            ctx.last_mouse_pick_object = projected
+        return ctx.last_mouse_pick_object
     if isinstance(_runtime_scene(), _NativeEditorSceneProxy):
+        projected = _mouse_pick_projected_tagged_actor()
+        if projected:
+            ctx.last_mouse_pick_object = projected
+            return projected
         return _mouse_pick_native()
     hit = raycast_hit_object()
     ctx.last_mouse_pick_object = str(hit or '')
@@ -4120,7 +4589,9 @@ def mouse_pick_object():
 def mouse_pick_hit_tag(tag):
     name = mouse_pick_object()
     actor = _resolve_actor(name)
-    return bool(actor is not None and _actor_matches_tag(actor, tag))
+    matched = bool(actor is not None and _actor_matches_tag(actor, tag))
+    _logger.debug("[ScratchPick] requested_tag=%s picked=%s matched=%s", tag, name, matched)
+    return matched
 
 
 def object_randomize_mouse_pick(cx, cy, cz, sx, sy, sz):
@@ -4133,7 +4604,328 @@ def object_delete_mouse_pick():
     return bool(name) and object_delete(name)
 
 
+def run_project_script(script_path):
+    """Load a Python file inside the active project and call its run() entry point."""
+    check_stop()
+    try:
+        from utils.settings import settings_manager
+        project_root = settings_manager.active_project_path
+    except Exception as exc:
+        raise RuntimeError("\u65e0\u6cd5\u53d6\u5f97\u5f53\u524d\u9879\u76ee\u8def\u5f84") from exc
+    if not project_root:
+        raise RuntimeError("\u6ca1\u6709\u6253\u5f00\u7684\u9879\u76ee\uff0c\u65e0\u6cd5\u8fd0\u884c\u9879\u76ee\u811a\u672c")
+
+    root = _Path(project_root).resolve()
+    target = (root / str(script_path or '')).resolve()
+    try:
+        target.relative_to(root)
+    except ValueError as exc:
+        raise RuntimeError(f"\u9879\u76ee\u811a\u672c\u5fc5\u987b\u4f4d\u4e8e\u5f53\u524d\u9879\u76ee\u76ee\u5f55\u5185: {script_path}") from exc
+    if target.suffix.lower() != '.py' or not target.is_file():
+        raise RuntimeError(f"\u627e\u4e0d\u5230\u9879\u76ee Python \u811a\u672c: {script_path}")
+
+    namespace = _runpy.run_path(str(target))
+    entry = namespace.get('run')
+    if not callable(entry):
+        raise RuntimeError(f"\u9879\u76ee\u811a\u672c\u7f3a\u5c11 run() \u5165\u53e3: {script_path}")
+    result = entry()
+    check_stop()
+    return result
+
+
 # ── Audio ──
+
+
+# Reusable game-mechanics blocks: Breakout and first-person combat.
+def _raw_actor_candidates():
+    """Return scene actors even when gameplay has temporarily marked them deleted."""
+    ctx = _current_context()
+    result = list(_iter_scene_actors(_runtime_scene()))
+    result.extend(getattr(ctx, 'virtual_objects', {}).values())
+    result.extend(_shared_virtual_objects(ctx).values())
+    deduped, seen = [], set()
+    for actor in result:
+        if actor is None:
+            continue
+        key = _norm_name(_object_name(actor)) or str(id(actor))
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(actor)
+    return deduped
+
+
+def _raw_actor_matches_tag(actor, tag):
+    tag_norm = _norm_name(tag)
+    if not tag_norm or actor is None:
+        return False
+    ctx = _current_context()
+    name = _object_name(actor)
+    shared_tags = _shared_object_tags(ctx)
+    explicit = (ctx.object_tags.get(name) or ctx.object_tags.get(_norm_name(name))
+                or shared_tags.get(name) or shared_tags.get(_norm_name(name))
+                or getattr(actor, 'tag', None))
+    return _norm_name(explicit) == tag_norm if explicit is not None else _norm_name(name).startswith(tag_norm)
+
+
+def _restore_tag_objects(tag):
+    ctx, restored = _current_context(), 0
+    for actor in _raw_actor_candidates():
+        if not _raw_actor_matches_tag(actor, tag):
+            continue
+        name = _norm_name(_object_name(actor))
+        if name:
+            ctx.deleted_objects.discard(name)
+            _shared_deleted_objects(ctx).discard(name)
+        try:
+            if hasattr(actor, 'set_visible'):
+                actor.set_visible(True)
+        except Exception:
+            pass
+        restored += 1
+    return restored
+
+
+def object_breakout_reset_round(ball, paddle, brick_tag='brick', ball_x=0, ball_y=-3, ball_z=2.5,
+                                  paddle_x=0, paddle_y=-4.2, paddle_z=2.5,
+                                  speed_x=0.16, speed_y=0.18, reset_bricks=False):
+    if bool(reset_bricks):
+        _restore_tag_objects(brick_tag)
+    ball_actor, paddle_actor = _resolve_actor(ball), _resolve_actor(paddle)
+    if ball_actor is not None:
+        _set_actor_position(ball_actor, [_safe_float(ball_x), _safe_float(ball_y), _safe_float(ball_z)])
+        try:
+            if hasattr(ball_actor, 'set_visible'):
+                ball_actor.set_visible(True)
+        except Exception:
+            pass
+    if paddle_actor is not None:
+        _set_actor_position(paddle_actor, [_safe_float(paddle_x), _safe_float(paddle_y), _safe_float(paddle_z)])
+    _current_context().variables[f"breakout::{_norm_name(ball)}"] = {
+        'vx': _safe_float(speed_x, 0.16), 'vy': abs(_safe_float(speed_y, 0.18)) or 0.18,
+    }
+    return ball_actor is not None and paddle_actor is not None
+
+
+def object_breakout_paddle_control(paddle, speed=0.28, min_x=-5.2, max_x=5.2):
+    actor = _resolve_actor(paddle)
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    left = keyboard('A') or keyboard('a') or keyboard('KeyA') or keyboard('ArrowLeft')
+    right = keyboard('D') or keyboard('d') or keyboard('KeyD') or keyboard('ArrowRight')
+    direction = (1 if right else 0) - (1 if left else 0)
+    if not direction:
+        return False
+    lo, hi = sorted((_safe_float(min_x, -5.2), _safe_float(max_x, 5.2)))
+    pos[0] = max(lo, min(hi, pos[0] + direction * max(0.0, _safe_float(speed, 0.28))))
+    return _set_actor_position(actor, pos)
+
+
+def object_breakout_step(ball, paddle, brick_tag='brick', min_x=-5.8, max_x=5.8, max_y=5.8):
+    ball_actor, paddle_actor = _resolve_actor(ball), _resolve_actor(paddle)
+    pos = _actor_position(ball_actor)
+    if ball_actor is None or paddle_actor is None or pos is None:
+        return False
+    key = f"breakout::{_norm_name(ball)}"
+    state = _current_context().variables.setdefault(key, {'vx': 0.16, 'vy': 0.18})
+    vx, vy = _safe_float(state.get('vx'), 0.16), _safe_float(state.get('vy'), 0.18)
+    next_pos = [pos[0] + vx, pos[1] + vy, pos[2]]
+    lo, hi = sorted((_safe_float(min_x, -5.8), _safe_float(max_x, 5.8)))
+    top = _safe_float(max_y, 5.8)
+    if next_pos[0] <= lo:
+        next_pos[0], vx = lo, abs(vx)
+    elif next_pos[0] >= hi:
+        next_pos[0], vx = hi, -abs(vx)
+    if next_pos[1] >= top:
+        next_pos[1], vy = top, -abs(vy)
+    _set_actor_position(ball_actor, next_pos)
+    if vy < 0 and _actors_touch(ball_actor, paddle_actor):
+        paddle_pos = _actor_position(paddle_actor) or [0.0, 0.0, 0.0]
+        paddle_aabb = _actor_aabb(paddle_actor)
+        half_width = max(0.5, ((paddle_aabb[3] - paddle_aabb[0]) * 0.5) if paddle_aabb else 1.5)
+        offset = max(-1.0, min(1.0, (next_pos[0] - paddle_pos[0]) / half_width))
+        vy, vx = abs(vy), max(-0.26, min(0.26, vx + offset * 0.08))
+        next_pos[1] = max(next_pos[1], paddle_pos[1] + 0.5)
+        _set_actor_position(ball_actor, next_pos)
+    for brick in _iter_known_actors():
+        if _actor_matches_tag(brick, brick_tag) and _actors_touch(ball_actor, brick):
+            brick_pos = _actor_position(brick) or next_pos
+            if abs(pos[0] - brick_pos[0]) > abs(pos[1] - brick_pos[1]):
+                vx = -vx
+            else:
+                vy = -vy
+            object_delete(_object_name(brick))
+            add_score(1)
+            break
+    state['vx'], state['vy'] = vx, vy
+    return True
+
+
+def object_first_person_move(name, speed=0.2, obstacle_tag='obstacle', min_x=-5, max_x=5, min_z=-1, max_z=48):
+    actor = _resolve_actor(name)
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    camera, _scene = _active_camera_with_scene()
+    forward = _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0])
+    forward[1] = 0.0
+    length = _math.sqrt(forward[0] ** 2 + forward[2] ** 2) or 1.0
+    forward = [forward[0] / length, 0.0, forward[2] / length]
+    right = [forward[2], 0.0, -forward[0]]
+    fb = (1 if (keyboard('W') or keyboard('w') or keyboard('KeyW')) else 0) - (1 if (keyboard('S') or keyboard('s') or keyboard('KeyS')) else 0)
+    lr = (1 if (keyboard('D') or keyboard('d') or keyboard('KeyD')) else 0) - (1 if (keyboard('A') or keyboard('a') or keyboard('KeyA')) else 0)
+    if not fb and not lr:
+        return False
+    dx, dz = forward[0] * fb + right[0] * lr, forward[2] * fb + right[2] * lr
+    move_length = _math.sqrt(dx * dx + dz * dz) or 1.0
+    step = max(0.0, _safe_float(speed, 0.2))
+    lo_x, hi_x = sorted((_safe_float(min_x, -5), _safe_float(max_x, 5)))
+    lo_z, hi_z = sorted((_safe_float(min_z, -1), _safe_float(max_z, 48)))
+    candidate = [max(lo_x, min(hi_x, pos[0] + dx / move_length * step)), pos[1], max(lo_z, min(hi_z, pos[2] + dz / move_length * step))]
+    if not _set_actor_position(actor, candidate):
+        return False
+    for obstacle in _iter_known_actors():
+        if obstacle is actor or not _actor_matches_tag(obstacle, obstacle_tag):
+            continue
+        if _actors_touch(actor, obstacle):
+            _set_actor_position(actor, pos)
+            _remember_collision(actor, obstacle)
+            return False
+    return True
+
+
+def camera_first_person_follow(name, height=1.55, sensitivity=0.16, weapon=''):
+    actor = _resolve_actor(name)
+    target = _actor_position(actor)
+    camera, scene = _active_camera_with_scene()
+    if actor is None or target is None or camera is None:
+        return False
+    ctx = _current_context()
+    key = f"first_person_camera::{_actor_identity(actor)}"
+    state = ctx.variables.setdefault(key, {'yaw': 0.0, 'pitch': 0.0})
+    state['yaw'] = _safe_float(state.get('yaw')) + _math.radians(mouse_dx() * _safe_float(sensitivity, 0.16))
+    state['pitch'] = max(-0.75, min(0.75, _safe_float(state.get('pitch')) - _math.radians(mouse_dy() * _safe_float(sensitivity, 0.16))))
+    cp = _math.cos(state['pitch'])
+    forward = [_math.sin(state['yaw']) * cp, _math.sin(state['pitch']), _math.cos(state['yaw']) * cp]
+    camera_pos = [target[0], target[1] + _safe_float(height, 1.55), target[2]]
+    up, fov = [0.0, 1.0, 0.0], _camera_fov(camera, 68.0)
+    applied = _apply_runtime_camera(camera, scene, camera_pos, forward, up, fov)
+    weapon_actor = _resolve_actor(weapon) if str(weapon or '').strip() else None
+    if weapon_actor is not None:
+        right = [forward[2], 0.0, -forward[0]]
+        _set_actor_position(weapon_actor, [camera_pos[0] + forward[0] * 0.85 + right[0] * 0.38,
+                                            camera_pos[1] + forward[1] * 0.85 - 0.42,
+                                            camera_pos[2] + forward[2] * 0.85 + right[2] * 0.38])
+    return applied
+
+
+def _combat_health_store():
+    return _current_context().variables.setdefault('combat_health', {})
+
+
+def combat_set_tag_health(tag, health=2):
+    store, count = _combat_health_store(), 0
+    value = max(1.0, _safe_float(health, 2))
+    for actor in _raw_actor_candidates():
+        if not _raw_actor_matches_tag(actor, tag):
+            continue
+        store[_actor_identity(actor)] = value
+        name = _norm_name(_object_name(actor))
+        if name:
+            _current_context().deleted_objects.discard(name)
+            _shared_deleted_objects().discard(name)
+        try:
+            if hasattr(actor, 'set_visible'):
+                actor.set_visible(True)
+        except Exception:
+            pass
+        count += 1
+    return count
+
+
+def combat_melee_attack(player, tag, attack_range=2.2, damage=1, cooldown=0.25, request_variable='attack_requested'):
+    request_key = str(request_variable or 'attack_requested').strip()
+    if not bool(data_get('SCENE', request_key, False)):
+        return False
+    if not cooldown_ready(f"melee::{_norm_name(tag)}", cooldown, True):
+        return False
+    data_set('SCENE', request_key, False)
+    player_actor, camera = _resolve_actor(player), _active_camera_with_scene()[0]
+    player_pos = _actor_position(player_actor)
+    forward = _camera_vec(camera, 'get_forward', [0.0, 0.0, 1.0])
+    flat_length = _math.sqrt(forward[0] ** 2 + forward[2] ** 2) or 1.0
+    forward = [forward[0] / flat_length, 0.0, forward[2] / flat_length]
+    if player_actor is None or player_pos is None:
+        return False
+    best = None
+    for enemy in _iter_known_actors():
+        if not _actor_matches_tag(enemy, tag):
+            continue
+        enemy_pos = _actor_position(enemy)
+        if enemy_pos is None:
+            continue
+        dx, dz = enemy_pos[0] - player_pos[0], enemy_pos[2] - player_pos[2]
+        distance_value = _math.sqrt(dx * dx + dz * dz)
+        if distance_value > max(0.1, _safe_float(attack_range, 2.2)):
+            continue
+        dot = (dx * forward[0] + dz * forward[2]) / (distance_value or 1.0)
+        if dot >= 0.15 and (best is None or distance_value < best[0]):
+            best = (distance_value, enemy)
+    if best is None:
+        return False
+    enemy = best[1]
+    store, identity = _combat_health_store(), _actor_identity(enemy)
+    store[identity] = _safe_float(store.get(identity, 1.0)) - max(0.0, _safe_float(damage, 1))
+    if store[identity] <= 0:
+        object_delete(_object_name(enemy))
+        add_score(5)
+    return True
+
+
+def combat_enemy_chase_tag(tag, player, speed=0.06, stop_distance=1.15):
+    player_actor, moved = _resolve_actor(player), 0
+    player_pos = _actor_position(player_actor)
+    if player_actor is None or player_pos is None:
+        return 0
+    step, stop = max(0.0, _safe_float(speed, 0.06)), max(0.1, _safe_float(stop_distance, 1.15))
+    for enemy in _iter_known_actors():
+        if not _actor_matches_tag(enemy, tag):
+            continue
+        pos = _actor_position(enemy)
+        if pos is None:
+            continue
+        dx, dz = player_pos[0] - pos[0], player_pos[2] - pos[2]
+        distance_value = _math.sqrt(dx * dx + dz * dz)
+        if distance_value <= stop or distance_value <= 1e-6:
+            continue
+        pos[0] += dx / distance_value * step
+        pos[2] += dz / distance_value * step
+        if _set_actor_position(enemy, pos):
+            moved += 1
+    return moved
+
+
+def combat_enemy_contact_damage(tag, player, damage=1, cooldown=0.8):
+    player_actor = _resolve_actor(player)
+    player_pos = _actor_position(player_actor)
+    if player_actor is None or player_pos is None:
+        return False
+    for enemy in _iter_known_actors():
+        if not _actor_matches_tag(enemy, tag):
+            continue
+        enemy_pos = _actor_position(enemy)
+        if enemy_pos is None:
+            continue
+        dx, dz = enemy_pos[0] - player_pos[0], enemy_pos[2] - player_pos[2]
+        if _math.sqrt(dx * dx + dz * dz) <= 1.25 and cooldown_ready('combat_player_damage', cooldown, True):
+            add_lives(-max(0.0, _safe_float(damage, 1)))
+            return True
+    return False
+
+
+def combat_alive_count(tag):
+    return sum(1 for actor in _iter_known_actors() if _actor_matches_tag(actor, tag))
 
 _audio_cache = {}  # name → resource_id (str)
 
@@ -4162,7 +4954,7 @@ def _ensure_audio(name):
         for suffix in suffixes:
             candidates.append(root / f"{key}{suffix}")
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
         for path in candidates:
             if path.is_file():
                 media = _ce.import_media(str(path))
@@ -4182,7 +4974,7 @@ def play_sound(name):
     rid = _ensure_audio(name)
     if rid is not None:
         try:
-            import corona_engine as _ce
+            import CoronaEngine as _ce
             _ce.play_audio(rid, loop=False)
             return True
         except Exception as exc:
@@ -4195,7 +4987,7 @@ def loop_sound(name):
     rid = _ensure_audio(name)
     if rid is not None:
         try:
-            import corona_engine as _ce
+            import CoronaEngine as _ce
             _ce.play_audio(rid, loop=True)
             return True
         except Exception as exc:
@@ -4208,7 +5000,7 @@ def stop_sound(name):
     rid = _audio_cache.get(name)
     if rid is not None:
         try:
-            import corona_engine as _ce
+            import CoronaEngine as _ce
             _ce.stop_audio(rid)
             return True
         except Exception as exc:
@@ -4220,7 +5012,7 @@ def stop_all_sounds():
     """停止当前运行时已加载的全部音效。"""
     stopped = 0
     try:
-        import corona_engine as _ce
+        import CoronaEngine as _ce
     except Exception:
         return False
     for rid in list(_audio_cache.values()):

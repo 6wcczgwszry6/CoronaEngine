@@ -1,6 +1,19 @@
 import * as Blockly from 'blockly/core';
 
 export const defineControlBlocks = () => {
+  Blockly.Blocks['control_run_project_script'] = {
+    init: function () {
+      this.appendDummyInput()
+        .appendField('运行项目脚本')
+        .appendField(new Blockly.FieldTextInput('Scripts/shooting_game.py'), 'PATH');
+      this.setPreviousStatement(true, null);
+      this.setNextStatement(true, null);
+      this.setStyle('control_blocks');
+      this.setTooltip('运行当前项目目录中的 Python 脚本，并调用脚本内的 run() 入口');
+      this.setHelpUrl('');
+    },
+  };
+
   Blockly.Blocks['control_wait'] = {
     init: function () {
       this.appendDummyInput()
@@ -204,6 +217,12 @@ export const defineControlBlocks = () => {
   Blockly.Blocks.control_reset_cooldown = { init() {
     this.appendValueInput('NAME').setCheck('String').appendField('\u91cd\u7f6e\u51b7\u5374');
     this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('control_blocks');
+  } };
+  Blockly.Blocks.control_start_cooldown = { init() {
+    this.appendValueInput('NAME').setCheck('String').appendField('\u542f\u52a8\u8ba1\u65f6\u5668');
+    this.appendValueInput('SECONDS').setCheck('Number').appendField('\u6301\u7eed\u79d2\u6570').appendField(new Blockly.FieldNumber(1, 0), 'SECONDS_NUMBER');
+    this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('control_blocks');
+    this.setTooltip('\u542f\u52a8\u6216\u91cd\u65b0\u542f\u52a8\u547d\u540d\u8ba1\u65f6\u5668\uff0c\u7528\u4e8e\u8282\u70b9\u8df3\u8f6c\u6761\u4ef6');
   } };
 
 };

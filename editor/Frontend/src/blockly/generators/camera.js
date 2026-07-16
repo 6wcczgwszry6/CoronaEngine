@@ -40,4 +40,14 @@ export const defineCameraGenerators = () => {
     return ['CoronaEngine.camera_raycast_object()', pythonGenerator.ORDER_FUNCTION_CALL];
   };
 
+  pythonGenerator.forBlock['camera_third_person_orbit'] = function (block) {
+    const name = pyString(block.getFieldValue('NAME'));
+    return `CoronaEngine.camera_third_person_orbit(${name}, ${block.getFieldValue('DISTANCE')}, ${block.getFieldValue('HEIGHT')}, ${block.getFieldValue('SENSITIVITY')})\n`;
+  };
+
+  pythonGenerator.forBlock['camera_first_person_follow'] = function (block) {
+    return `CoronaEngine.camera_first_person_follow(${pyString(block.getFieldValue('NAME'))}, ${block.getFieldValue('HEIGHT')}, ${block.getFieldValue('SENSITIVITY')}, ${pyString(block.getFieldValue('WEAPON'))})\n`;
+  };
+
+
 };
