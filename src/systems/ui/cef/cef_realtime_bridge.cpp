@@ -1008,7 +1008,8 @@ bool handle_property_fast(const CefRefPtr<CefProcessMessage>& message) {
             case 4:  // CollisionEnabled
                 if (profile->mechanics_handle != 0) {
                     if (auto mech = hub.mechanics_storage().try_acquire_write(profile->mechanics_handle)) {
-                        mech->bEnableCollision = (value != 0.0);
+                        mech->collision_shape = (value != 0.0)
+                            ? CollisionShape::Box : CollisionShape::None;
                     }
                 }
                 break;
@@ -1016,6 +1017,15 @@ bool handle_property_fast(const CefRefPtr<CefProcessMessage>& message) {
                 if (profile->mechanics_handle != 0) {
                     if (auto mech = hub.mechanics_storage().try_acquire_write(profile->mechanics_handle)) {
                         mech->physics_enabled = (value != 0.0);
+                    }
+                }
+                break;
+            case 8:  // CollisionShape: 0=None, 1=Box, 2=Mesh
+                if (profile->mechanics_handle != 0) {
+                    if (auto mech = hub.mechanics_storage().try_acquire_write(profile->mechanics_handle)) {
+                        const int shape = static_cast<int>(value);
+                        mech->collision_shape = shape == 0 ? CollisionShape::None
+                            : (shape == 2 ? CollisionShape::Mesh : CollisionShape::Box);
                     }
                 }
                 break;

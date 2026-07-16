@@ -1425,16 +1425,42 @@ void Corona::API::Mechanics::set_collision_enabled(bool enabled) {
         return;
     }
     if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
-        accessor->bEnableCollision = enabled;  // 设置碰撞检测开关
+        accessor->collision_shape = enabled ? CollisionShape::Box : CollisionShape::None;
     }
 }
 
 bool Corona::API::Mechanics::get_collision_enabled() const {
     if (handle_ == 0) return true;
     if (auto accessor = SharedDataHub::instance().mechanics_storage().try_acquire_read(handle_)) {
-        return accessor->bEnableCollision;  // 读取碰撞检测开关状态
+        return accessor->collision_shape != CollisionShape::None;
     }
     return true;
+}
+
+void Corona::API::Mechanics::set_collision_shape(std::string_view shape) {
+    if (handle_ == 0) return;
+    CollisionShape value = CollisionShape::Box;
+    if (shape == "none") value = CollisionShape::None;
+    else if (shape == "mesh") value = CollisionShape::Mesh;
+    else if (shape != "box") {
+        CFW_LOG_WARNING("[Mechanics::set_collision_shape] Invalid shape '{}'; using box", shape);
+    }
+    if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
+        accessor->collision_shape = value;
+    }
+}
+
+std::string Corona::API::Mechanics::get_collision_shape() const {
+    if (handle_ != 0) {
+        if (auto accessor = SharedDataHub::instance().mechanics_storage().try_acquire_read(handle_)) {
+            switch (accessor->collision_shape) {
+                case CollisionShape::None: return "none";
+                case CollisionShape::Mesh: return "mesh";
+                case CollisionShape::Box: return "box";
+            }
+        }
+    }
+    return "box";
 }
 
 void Corona::API::Mechanics::set_linear_lock(bool lock_x, bool lock_y, bool lock_z) {

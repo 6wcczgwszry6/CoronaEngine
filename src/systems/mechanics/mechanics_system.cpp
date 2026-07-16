@@ -104,7 +104,7 @@ inline Corona::Resource::Vertex skin_one_vertex(
 
 }  // namespace
 
-void MechanicsSystem::update_physics() {
+void MechanicsSystem::update_physics(float fixed_dt) {
     // 如果正在关闭，不再处理新的物理更新
     if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
         return;
@@ -120,8 +120,6 @@ void MechanicsSystem::update_physics() {
     // 常量：时间步、摩擦、休眠、惯量下限等（可按手感调参）
     const float floor_eps = 0.01f;                                       // 地板碰撞容差
     const float low_vel_threshold = 0.05f;                               // 低速衰减阈值
-    const float min_valid_dt = 1.0f / 120.0f;                            // 最小有效时间步
-    const float max_valid_dt = 1.0f / 30.0f;                             // 最大有效时间步
     const float zero_vel_threshold = 0.01f;                              // 速度归零阈值
     const float friction_coeff = 0.35f;                                  // 统一摩擦系数
     const float sleep_threshold = 0.05f;                                 // 休眠速度阈值
@@ -143,7 +141,6 @@ void MechanicsSystem::update_physics() {
     auto& profile_storage = SharedDataHub::instance().profile_storage();          // actor→mechanics 映射
     auto& environment_storage = SharedDataHub::instance().environment_storage();  // 全局 dt/重力等
 
-    float fixed_dt = 1.0f / 60.0f;                       // 积分步长秒；可被 environment 覆盖
     ktm::fvec3 gravity = make_fvec3(0.0f, -9.8f, 0.0f);  // m/s²
     float floor_restitution = 0.6f;                      // 地板法向弹性系数 0..1
     float floor_y = 0.0f;                                // 无穷大水平面高度
@@ -172,8 +169,6 @@ void MechanicsSystem::update_physics() {
                 gravity = env->gravity;
                 floor_y = env->floor_y;
                 floor_restitution = env->floor_restitution;
-                // 限制时间步范围，防止外部传入异常值导致抖动
-                fixed_dt = std::clamp(env->fixed_dt, min_valid_dt, max_valid_dt);
             }
         }
 
@@ -227,7 +222,8 @@ void MechanicsSystem::update_physics() {
                                 params.mass = m_acc->mass;
                                 params.damping = m_acc->damping;
                                 params.restitution = m_acc->restitution;
-                                params.collision_enabled = m_acc->bEnableCollision;  // 缓存碰撞开关
+                                params.collision_shape = m_acc->collision_shape;
+                                params.collision_enabled = m_acc->collision_shape != CollisionShape::None;
                                 new_linear = m_acc->linear_lock_mask;
                                 new_angular = m_acc->angular_lock_mask;
                                 body.linear_lock = new_linear;    // 缓存线性轴锁
@@ -419,7 +415,10 @@ void MechanicsSystem::update_physics() {
         // 蒙皮物体跳过三角网格：其网格随动画每帧变形，静态绑定姿态三角网格已失真，
         // 且窄相一旦双方都有网格就走三角 SAT，会绕开我们要的动态 AABB 碰撞（P4）。
         if (entry.is_skinned) continue;
-        if (entry.model_id != 0) {
+        const auto params_it = frame_params.find(entry.handle);
+        if (params_it != frame_params.end() &&
+            params_it->second.collision_shape == CollisionShape::Mesh &&
+            entry.model_id != 0) {
             ensure_collision_mesh(entry.model_id, impl_->collision_mesh_cache);
         }
     }
@@ -620,7 +619,10 @@ void MechanicsSystem::update_physics() {
                 // ===== 三角形窄相精化（可选）=====
                 // 当双方都有碰撞网格且三角形数在限制内时，用三角形级 SAT 替换 AABB/OBB 的法线和穿透
 #if CORONA_MECHANICS_USE_TRIANGLE_NARROWPHASE
-                if (a.model_id != 0 && b.model_id != 0) {
+                const bool both_mesh =
+                    frame_params.at(ha).collision_shape == CollisionShape::Mesh &&
+                    frame_params.at(hb).collision_shape == CollisionShape::Mesh;
+                if (both_mesh && a.model_id != 0 && b.model_id != 0) {
                     auto it_mesh_a = impl_->collision_mesh_cache.find(a.model_id);
                     auto it_mesh_b = impl_->collision_mesh_cache.find(b.model_id);
                     if (it_mesh_a != impl_->collision_mesh_cache.end() &&
@@ -1167,7 +1169,7 @@ void MechanicsSystem::update_physics() {
         // =============================================================
     }
 
-    // 帧末统一同步执行延迟的 on_move 回调
+    // Python binding 将调用投递给解释器 pending-call 队列；这里不会获取 GIL 或写盘。
     for (auto& cb : impl_->deferred_move_callbacks) {
         if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
             break;
@@ -1182,7 +1184,7 @@ void MechanicsSystem::update_physics() {
     }
     impl_->deferred_move_callbacks.clear();
 
-    // 帧末统一同步执行延迟的碰撞回调（在 Storage 锁外执行，避免死锁）
+    // 碰撞回调 binding 同样只投递 pending call，保持 enter/exit 顺序且不丢事件。
     for (auto& cb : impl_->deferred_collision_callbacks) {
         if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
             break;

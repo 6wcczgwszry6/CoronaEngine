@@ -122,6 +122,15 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     add_test(NAME UiSurfaceLifecycleTests
              COMMAND corona_ui_surface_lifecycle_tests)
 
+    add_executable(corona_camera_viewport_manager_tests
+        tests/test_camera_viewport_manager.cpp
+    )
+    target_include_directories(corona_camera_viewport_manager_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME CameraViewportManagerTests
+             COMMAND corona_camera_viewport_manager_tests)
+
     add_executable(corona_vision_actor_material_bridge_tests
         tests/test_vision_actor_material_bridge.cpp
         cef/vision_actor_material_bridge.cpp

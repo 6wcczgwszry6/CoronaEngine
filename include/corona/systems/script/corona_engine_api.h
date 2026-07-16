@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -98,6 +99,8 @@ class Mechanics {
     // 碰撞检测开关：false 时物体不参与碰撞检测（不与其他物体或地面碰撞）
     void set_collision_enabled(bool enabled);
     [[nodiscard]] bool get_collision_enabled() const;
+    void set_collision_shape(std::string_view shape);
+    [[nodiscard]] std::string get_collision_shape() const;
 
     // 轴锁定：锁定指定轴上的线性运动（平移）
     void set_linear_lock(bool lock_x, bool lock_y, bool lock_z);

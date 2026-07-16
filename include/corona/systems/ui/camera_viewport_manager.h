@@ -9,6 +9,17 @@
 
 namespace Corona::Systems::UI {
 
+enum class DetachedWindowCloseAction {
+    CloseTab,
+    Redock,
+};
+
+[[nodiscard]] constexpr DetachedWindowCloseAction detached_window_close_action(
+    bool camera_view) noexcept {
+    return camera_view ? DetachedWindowCloseAction::CloseTab
+                       : DetachedWindowCloseAction::Redock;
+}
+
 struct CameraViewportRecord {
     std::string scene_id;
     std::string camera_id;

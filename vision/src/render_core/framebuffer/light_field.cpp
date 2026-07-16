@@ -507,6 +507,8 @@ public:
         // Treat GUI resolution change as the final pixel resolution.
         lenticular_.res_w = static_cast<float>(res.x);
         lenticular_.res_h = static_cast<float>(res.y);
+        // The focal plane must match the final interlaced output/display panel.
+        geometry_.aspect = lightfield_aspect_from_resolution(res);
         compute_derived_params();
 
         // Let base class reset all built-in buffers according to the new size.
