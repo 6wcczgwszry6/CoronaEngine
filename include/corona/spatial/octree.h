@@ -40,6 +40,13 @@ class Octree {
         AABB     bounds;
     };
 
+    // 八叉树分块 preload — 节点仅作为当帧的 actor 分组容器，不跨帧持久化
+    struct NodeInRange {
+        AABB                bounds;            // 节点世界 AABB
+        float               min_cam_distance;  // 到最近相机的最近点距离（非中心点）
+        std::vector<TPayload> actors;          // 该节点子树内满足 predicate 的 actor
+    };
+
     explicit Octree(OctreeConfig cfg = {}) : cfg_(cfg) {}
 
     void clear() noexcept {
@@ -110,6 +117,28 @@ class Octree {
                                  std::vector<TPayload>& out) const {
         if (!root_ || centers.empty()) return;
         collect_outside_spheres_impl(root_.get(), centers, radius, out);
+    }
+
+    // ============================================================
+    // 八叉树分块 preload — 自适应深度节点收集
+    // ============================================================
+    // 递归八叉树，收集所有"完全在 preload 范围内"的节点。
+    // 节点 AABB 完全在半径内 → 收集该节点（不再递归）；
+    // 节点 AABB 部分在内 → 递归子节点；完全在外 → 跳过整棵子树。
+    //
+    /// @param cam_positions 所有相机世界位置
+    /// @param radius        范围半径（= preload_distance）
+    /// @param predicate     过滤谓词 bool(TPayload) — 只收集返回 true 的 actor
+    /// @param out           输出：范围内节点的信息
+    template <typename Predicate>
+    void collect_nodes_in_range(
+        const std::vector<ktm::fvec3>& cam_positions,
+        float radius,
+        Predicate&& predicate,
+        std::vector<NodeInRange>& out) const {
+        if (!root_ || cam_positions.empty()) return;
+        const float r2 = radius * radius;
+        collect_nodes_in_range_impl(root_.get(), cam_positions, r2, predicate, out);
     }
 
     /**
@@ -267,11 +296,58 @@ class Octree {
         }
     }
 
+    /// 点到 AABB 最近点的距离平方。相机在 AABB 内部 → 返回 0。
+    /// 复用 collect_outside_spheres_impl 中已有的同等逻辑。
+    static float point_aabb_dist_sq(const ktm::fvec3& p, const AABB& box) {
+        float dx = std::max({box.min.x - p.x, 0.0f, p.x - box.max.x});
+        float dy = std::max({box.min.y - p.y, 0.0f, p.y - box.max.y});
+        float dz = std::max({box.min.z - p.z, 0.0f, p.z - box.max.z});
+        return dx*dx + dy*dy + dz*dz;
+    }
+
+    /// 判定 AABB 是否完全在**任意一台**相机的 preload 球内。
+    /// AABB 最远角点 = 逐轴取离相机远的端点，farthest² = Σ max(Δmin², Δmax²)
+    static bool aabb_fully_in_any_range(const AABB& box,
+                                        const std::vector<ktm::fvec3>& cam_positions,
+                                        float radius_sq) {
+        for (const auto& cam : cam_positions) {
+            float farthest_sq = 0.0f;
+            float d;
+
+            d = box.min.x - cam.x;  d *= d;
+            { float e = box.max.x - cam.x;  e *= e;  if (e > d) d = e; }
+            farthest_sq += d;
+
+            d = box.min.y - cam.y;  d *= d;
+            { float e = box.max.y - cam.y;  e *= e;  if (e > d) d = e; }
+            farthest_sq += d;
+
+            d = box.min.z - cam.z;  d *= d;
+            { float e = box.max.z - cam.z;  e *= e;  if (e > d) d = e; }
+            farthest_sq += d;
+
+            if (farthest_sq <= radius_sq) return true;  // 这台相机完全覆盖 AABB → 收集
+        }
+        return false;  // 没有一台相机完全覆盖 → 需要递归
+    }
+
     /// 收集子树中所有 payload（节点已判定完全在球外时批量使用）
     static void collect_subtree_payloads(const Node* node, std::vector<TPayload>& out) {
         for (const auto& e : node->entries) out.push_back(e.payload);
         for (const auto& child : node->children) {
             if (child) collect_subtree_payloads(child.get(), out);
+        }
+    }
+
+    /// predicate 过滤版 collect_subtree_payloads
+    template <typename Predicate>
+    static void collect_subtree_payloads_if(const Node* node, Predicate&& pred,
+                                            std::vector<TPayload>& out) {
+        for (const auto& e : node->entries) {
+            if (pred(e.payload)) out.push_back(e.payload);
+        }
+        for (const auto& child : node->children) {
+            if (child) collect_subtree_payloads_if(child.get(), pred, out);
         }
     }
 
@@ -316,6 +392,52 @@ class Octree {
 
         for (const auto& child : node->children) {
             if (child) collect_outside_spheres_impl(child.get(), centers, radius, out);
+        }
+    }
+
+    // ============================================================
+    // collect_nodes_in_range 递归实现
+    // ============================================================
+    template <typename Predicate>
+    static void collect_nodes_in_range_impl(const Node* node,
+                                            const std::vector<ktm::fvec3>& cam_positions,
+                                            float radius_sq, Predicate&& pred,
+                                            std::vector<NodeInRange>& out) {
+        // ① 最近距离剪枝：节点 AABB 到所有相机均 > radius → 整棵子树跳过
+        // 用第一台相机的距离作初始值，避免依赖 <limits>
+        float min_dist_sq = point_aabb_dist_sq(cam_positions[0], node->bounds);
+        for (size_t i = 1; i < cam_positions.size(); ++i) {
+            float d_sq = point_aabb_dist_sq(cam_positions[i], node->bounds);
+            if (d_sq < min_dist_sq) min_dist_sq = d_sq;
+        }
+        if (min_dist_sq > radius_sq) return;  // 完全在范围外
+
+        // ② 判定节点是否"完全在范围内"（最远角点也在球内）
+        if (aabb_fully_in_any_range(node->bounds, cam_positions, radius_sq)) {
+            // 整棵子树在范围内 → 收集满足 predicate 的 actor → 不再递归
+            NodeInRange info;
+            info.bounds           = node->bounds;
+            info.min_cam_distance = std::sqrt(min_dist_sq);
+            collect_subtree_payloads_if(node, pred, info.actors);
+            if (!info.actors.empty()) out.push_back(std::move(info));
+            return;
+        }
+
+        // ③ 部分在范围内 → 递归子节点
+        if (!node->is_leaf) {
+            for (const auto& child : node->children) {
+                if (child) collect_nodes_in_range_impl(
+                    child.get(), cam_positions, radius_sq, pred, out);
+            }
+        } else {
+            // 叶节点且部分在范围内 → 逐 entry 判断后收集
+            NodeInRange info;
+            info.bounds           = node->bounds;
+            info.min_cam_distance = std::sqrt(min_dist_sq);
+            for (const auto& e : node->entries) {
+                if (pred(e.payload)) info.actors.push_back(e.payload);
+            }
+            if (!info.actors.empty()) out.push_back(std::move(info));
         }
     }
 

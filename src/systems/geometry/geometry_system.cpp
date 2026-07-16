@@ -393,52 +393,44 @@ void GeometrySystem::update() {
             if (scene_state_it != impl_->scenes.end()
                 && scene_state_it->second.cfg.enable_distance_culling && !cameras.empty()) {
                 auto& scene_state = scene_state_it->second;
-                std::unordered_set<Impl::Payload> candidates;
 
-                //仅收集预加载范围内的物体
+                // 统一提取相机位置（preload + unload 共用）
+                std::vector<ktm::fvec3> cam_positions;
+                cam_positions.reserve(cameras.size());
                 for (const auto& [cam_pos, _] : cameras) {
-                    std::vector<Impl::Payload> sphere_results;
-                    scene_state.tree.query_sphere(cam_pos, scene_state.cfg.preload_distance, sphere_results);
-                    for (auto actor : sphere_results) {
-                        candidates.insert(actor);
-                    }
+                    cam_positions.push_back(cam_pos);
                 }
 
-                //保留所有非Unloaded状态的物体
-                for (const auto& [actor,state] : scene_state.actor_load_states) {
-                    if (state != ActorLoadState::Unloaded) {
-                        candidates.insert(actor);
+                // ============================================================
+                // 八叉树自适应分块 preload
+                // 替代 query_sphere → 逐 actor 中心距离 → 4 个/帧。
+                // 节点 AABB 完全在 radius 内 → 收集其所有 Unloaded actor；
+                // 部分在内 → 递归子节点；完全在外 → 跳过。
+                // ============================================================
+                std::vector<Spatial::Octree<Impl::Payload>::NodeInRange> nodes_in_range;
+                scene_state.tree.collect_nodes_in_range(
+                    cam_positions,
+                    scene_state.cfg.preload_distance,
+                    [&scene_state](Impl::Payload actor) {
+                        auto it = scene_state.actor_load_states.find(actor);
+                        return it != scene_state.actor_load_states.end()
+                            && it->second == ActorLoadState::Unloaded;
+                    },
+                    nodes_in_range);
+
+                // 保留非 Unloaded 的 actor（已在范围内、维持状态不变）
+                std::unordered_set<Impl::Payload> in_range_actors;
+                for (auto& node : nodes_in_range) {
+                    for (auto actor : node.actors) {
+                        in_range_actors.insert(actor);
+                        pending_loads.push_back(
+                            {{scene_handle, actor}, node.min_cam_distance});
                     }
                 }
-
-                //仅处理候选物体
-                for (auto actor : candidates) {
-                    auto entry_it = scene_state.actor_to_entry.find(actor);
-                    if (entry_it == scene_state.actor_to_entry.end()) continue;
-
-                    const auto& aabb = entry_it->second;
-                    auto state_it = scene_state.actor_load_states.find(actor);
-                    if (state_it == scene_state.actor_load_states.end()) continue;
-                    ActorLoadState state = state_it->second;  // 值拷贝，只读
-
-                    // 计算物体到最近相机的欧氏距离
-                    ktm::fvec3 center = aabb.center();
-                    float min_distance = std::numeric_limits<float>::max();
-                    for (const auto& [cam_pos,_] : cameras) {
-                        min_distance = std::min(min_distance,ktm::distance(center,cam_pos));
-                    }
-
-                    // 状态机转换（只记录决策，不修改状态 — 由 Phase 2 统一应用）
-                    switch (state) {
-                        case ActorLoadState::Unloaded:
-                            if (min_distance < scene_state.cfg.preload_distance) {
-                                pending_loads.push_back({{scene_handle, actor}, min_distance});
-                            }
-                            break;
-
-                        default:
-                            // 过渡状态不做任何操作，等待资源系统的完成事件
-                            break;
+                // 补充：已在场景中非 Unloaded 的 actor 也纳入（防止被"未候选"误判）
+                for (const auto& [actor, state] : scene_state.actor_load_states) {
+                    if (state != ActorLoadState::Unloaded && !in_range_actors.count(actor)) {
+                        in_range_actors.insert(actor);
                     }
                 }
 
@@ -452,11 +444,6 @@ void GeometrySystem::update() {
                 {
                     const float effective_unload_radius = std::max(
                         scene_state.cfg.unload_distance, scene_state.cfg.preload_distance);
-                    std::vector<ktm::fvec3> cam_positions;
-                    cam_positions.reserve(cameras.size());
-                    for (const auto& [cam_pos, _] : cameras) {
-                        cam_positions.push_back(cam_pos);
-                    }
                     std::vector<Impl::Payload> outside_results;
                     scene_state.tree.collect_outside_spheres(
                         cam_positions, effective_unload_radius, outside_results);
@@ -485,14 +472,14 @@ void GeometrySystem::update() {
             }
         }
 
-        // 按距离排序：加载近者优先。限制每帧数量防止线程池过载。
-        constexpr size_t kMaxLoadsPerFrame   = 4;
-        if (pending_loads.size() > kMaxLoadsPerFrame) {
+        // 按距离排序加载近者优先。每帧 actor 总量限制（替代旧的 4 个/帧）
+        constexpr size_t kMaxActorsPerFrame  = 256;
+        if (pending_loads.size() > kMaxActorsPerFrame) {
             std::sort(pending_loads.begin(), pending_loads.end(),
                 [](const PendingLoad& a, const PendingLoad& b) {
                     return a.distance < b.distance;  // 近的优先
                 });
-            pending_loads.resize(kMaxLoadsPerFrame);
+            pending_loads.resize(kMaxActorsPerFrame);
         }
         // Phase 2: unique_lock — 应用状态转换（带 TOCTOU 重校验）
         if (!pending_loads.empty()) {
