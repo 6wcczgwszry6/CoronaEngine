@@ -326,8 +326,7 @@
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
       @pointerleave="handleViewportPointerLeave"
-      @mousedown.left="handleViewportPick"
-      @click="sendScratchPointerEvent('click', $event)"
+      @click="handleViewportScratchClick"
       @wheel.prevent="handleWheel"
     ></div>
 
@@ -971,6 +970,8 @@ const applySceneSnapshot = (sceneId, payload) => {
         ? Number(activeCamera.fov)
         : cameraState.value.fov,
     };
+    // Keep the editor main viewport aligned with the scene's active camera on load.
+    scheduleCameraUpdate();
   }
 };
 
@@ -1004,7 +1005,7 @@ const restoreCameraViews = async (sceneId) => {
 };
 
 const scratchMouseButton = (button) => ({ 0: 'LeftButton', 1: 'MiddleButton', 2: 'RightButton' }[button] || '');
-const sendScratchPointerEvent = (type, event) => {
+const sendScratchPointerEvent = (type, event, pickedActor = '') => {
   const renderRect = getViewportRenderRect();
   const localX = Number(event.clientX || 0) - Number(renderRect.left || 0);
   const localY = Number(event.clientY || 0) - Number(renderRect.top || 0);
@@ -1016,7 +1017,8 @@ const sendScratchPointerEvent = (type, event) => {
     localX,
     localY,
     renderRect.width || 0,
-    renderRect.height || 0
+    renderRect.height || 0,
+    pickedActor || ''
   ).catch(() => {});
 };
 const handleWheel = (event) => {
@@ -1052,11 +1054,15 @@ const handleKeyDown = (event) => {
     event.shiftKey ? 'Shift' : '',
     event.metaKey ? 'Meta' : '',
   ].filter(Boolean).join(',');
-  scriptingService.sendKeyEvent(
-    event.code || event.key || '',
-    modifiers,
-    event.key || event.code || ''
-  ).catch(() => {});
+  // Native SDL is authoritative in the editor; this is browser-dev fallback.
+  if (!window.coronaBridge && !event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyEvent(
+      event.code || event.key || '',
+      modifiers,
+      event.key || event.code || ''
+    ).catch(() => {});
+  }
   if (isGamePreviewInputLocked()) {
     resetRealtimeCameraInput();
     return;
@@ -1073,10 +1079,13 @@ const handleKeyDown = (event) => {
 const handleKeyUp = (event) => {
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
-  scriptingService.sendKeyUpEvent(
-    event.code || event.key || '',
-    event.key || event.code || ''
-  ).catch(() => {});
+  if (!window.coronaBridge && !event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyUpEvent(
+      event.code || event.key || '',
+      event.key || event.code || ''
+    ).catch(() => {});
+  }
   if (isGamePreviewInputLocked()) {
     resetRealtimeCameraInput();
     return;
@@ -1391,8 +1400,50 @@ const handleViewportPointerLeave = () => {
   viewportUiPointerController.hide();
 };
 
-const handleViewportPick = (event) => {
-  viewportPickController.pickAt(event);
+let pendingScratchClick = null;
+
+const finishPendingScratchClick = (pickedActor = '') => {
+  const pending = pendingScratchClick;
+  if (!pending) return;
+  pendingScratchClick = null;
+  if (pending.timer != null) window.clearTimeout(pending.timer);
+  sendScratchPointerEvent('click', pending.event, pickedActor);
+};
+
+const handleViewportScratchClick = (event) => {
+  // Preserve rapid click gameplay even though the native picker tracks one
+  // outstanding request at a time. The previous click falls back to an empty
+  // pick, which is exactly what whole-viewport click blocks need.
+  if (pendingScratchClick) finishPendingScratchClick('');
+
+  const eventSnapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  const requestId = viewportPickController.pickAt(event);
+  if (!requestId) {
+    sendScratchPointerEvent('click', eventSnapshot, '');
+    return;
+  }
+
+  pendingScratchClick = {
+    requestId,
+    event: eventSnapshot,
+    timer: window.setTimeout(() => finishPendingScratchClick(''), 220),
+  };
+};
+
+const finishScratchClickFromPick = (payload, result) => {
+  if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
+  if (result?.status === 'pending' || result?.status === 'stale') return;
+  const pickedActor =
+    result?.actor?.name ||
+    payload?.actorName ||
+    payload?.name ||
+    payload?.actor?.name ||
+    '';
+  finishPendingScratchClick(pickedActor);
 };
 
 const onMouseDown = (event) => {
@@ -1482,15 +1533,19 @@ const handleActorPickResult = (payload) => {
   const result = viewportPickController.handlePickResult(payload);
   if (result.status !== 'unknown' || !payload?.sceneId) {
     applyActorPickResult(result, payload);
+    finishScratchClickFromPick(payload, result);
     return;
   }
 
   refreshActorPickIndex(payload.sceneId)
     .then(() => {
-      applyActorPickResult(viewportPickController.handlePickResult(payload), payload);
+      const refreshedResult = viewportPickController.handlePickResult(payload);
+      applyActorPickResult(refreshedResult, payload);
+      finishScratchClickFromPick(payload, refreshedResult);
     })
     .catch((error) => {
       logError('Actor pick index refresh failed', error);
+      finishScratchClickFromPick(payload, result);
     });
 };
 

@@ -124,11 +124,37 @@ class ScratchTool:
     # ------------------------------------------------------------------
     @classmethod
     def _active_project_path(cls) -> Path:
+        # The native project launcher updates CoronaEditor.ini immediately, but
+        # this long-lived Python settings singleton can still point at the
+        # project that was active when the editor process started. Refresh the
+        # launcher setting before every Blockly load/save/run operation.
+        try:
+            settings_manager.load()
+            latest_project = settings_manager.config.get(
+                "General", "last_project", fallback=""
+            ).strip()
+            if latest_project:
+                latest_path = Path(latest_project).resolve()
+                current = settings_manager.active_project_path
+                current_path = Path(current).resolve() if current else None
+                if (
+                    (latest_path / "project.ini").is_file()
+                    and current_path != latest_path
+                ):
+                    settings_manager.set_active_project(str(latest_path))
+        except Exception:
+            logger.exception(
+                "[ScratchTool] failed to refresh active project "
+                "from launcher settings"
+            )
+
         project_path = settings_manager.active_project_path
         if not project_path and CoronaEditor.CoronaEngine is not None:
-            project_path = getattr(CoronaEditor.CoronaEngine, "active_project_path", None)
+            project_path = getattr(
+                CoronaEditor.CoronaEngine, "active_project_path", None
+            )
         if not project_path:
-            raise RuntimeError("没有打开的项目，无法保存或运行积木")
+            raise RuntimeError("No project is open; Blockly cannot be saved or run")
         return Path(project_path)
 
     @classmethod
@@ -1456,9 +1482,10 @@ class ScratchTool:
         try:
             while True:
                 outcome = cls._run_code_file(code_path, target, single_exec=False)
-                if outcome == "stop_restore":
-                    # Reuse the exact global stop button flow. It runs restoration
-                    # on a separate coordinator thread and stops every preview target.
+                if outcome in ("stop_restore", "game_end"):
+                    # Reuse the exact global stop button flow. Game-over/win exits
+                    # must also restore the editor scene automatically; otherwise the
+                    # pre-run snapshot remains active and the viewport stays in-game.
                     cls.stop_game_preview()
                     break
                 if outcome == "restart":
@@ -1505,7 +1532,7 @@ class ScratchTool:
                 if result is not None:
                     if outcome == "error":
                         result["status"] = "error"
-                    elif outcome in ("stopped", "restart", "stop_restore"):
+                    elif outcome in ("stopped", "restart", "stop_restore", "game_end"):
                         result["status"] = "stopped"
                     else:
                         result["status"] = "completed"
@@ -1568,6 +1595,9 @@ class ScratchTool:
             elif requested_state == "restart":
                 outcome = "restart"
                 logger.info("[ScratchTool] level restart requested: %s", context_id)
+            elif requested_state in ("win", "over"):
+                outcome = "game_end"
+                logger.info("[ScratchTool] game ended (%s): %s", requested_state, context_id)
             elif ctx.stop_requested:
                 outcome = "stopped"
                 logger.info("[ScratchTool] script stopped: %s", context_id)
@@ -1579,6 +1609,9 @@ class ScratchTool:
             elif requested_state == "stop_restore":
                 outcome = "stop_restore"
                 logger.info("[ScratchTool] stop-and-restore requested: %s", context_id)
+            elif requested_state in ("win", "over"):
+                outcome = "game_end"
+                logger.info("[ScratchTool] game ended (%s): %s", requested_state, context_id)
             else:
                 outcome = "stopped"
                 logger.info("[ScratchTool] script stopped: %s", context_id)
@@ -1661,11 +1694,13 @@ class ScratchTool:
         viewport_y: float | None = None,
         viewport_width: float | None = None,
         viewport_height: float | None = None,
+        picked_actor: str = "",
     ) -> dict:
         from CoronaCore.utils import corona_engine_scratch
 
         corona_engine_scratch.handle_mouse_event(
             event_type, button, x, y,
             viewport_x, viewport_y, viewport_width, viewport_height,
+            picked_actor,
         )
         return {"status": "ok"}

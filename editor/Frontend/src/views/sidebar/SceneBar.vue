@@ -47,7 +47,7 @@
           :title="scenePreviewButtonTitle"
           data-testid="scene-global-run-button"
           @pointerdown.stop
-          @click.stop.prevent="toggleSceneScripts"
+          @click.stop.prevent="toggleSceneScripts($event)"
         >
           {{ scenePreviewButtonLabel }}
         </button>
@@ -533,7 +533,7 @@
           </div>
 
           <!-- 对象列表 -->
-          <div v-show="actorsExpanded" class="pl-2">
+          <div v-show="actorsExpanded" class="pl-2 pb-8">
             <div
               v-for="scene in sceneImages"
               :key="scene.name"
@@ -970,7 +970,10 @@ const refreshPreviewStateSoon = () => {
   window.setTimeout(requestViewportControlsState, 900);
 };
 
-const toggleSceneScripts = async () => {
+const toggleSceneScripts = async (event = null) => {
+  // Remove button focus immediately so the game's Space input cannot retrigger
+  // the preview button after global execution starts.
+  event?.currentTarget?.blur?.();
   if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return;
   const controls = getEditorControls();
   window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;

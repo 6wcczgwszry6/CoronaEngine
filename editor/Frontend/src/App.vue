@@ -5,6 +5,7 @@ import { useDockStore } from '@/stores/dockStore.js';
 import { getPluginManifest } from '@/config/pluginManifest.js';
 import DockLayout from '@/components/dock/DockLayout.vue';
 import DockPanel from '@/components/dock/DockPanel.vue';
+import { scriptingService } from '@/utils/bridge.js';
 import '@/utils/eventBus.js'; // init window.__coronaEmit
 
 const route = useRoute();
@@ -26,6 +27,7 @@ const standaloneResizeHandles = [
 ];
 
 let gcTimer = null;
+const SCRATCH_KEY_FORWARDED = '__coronaScratchKeyForwarded';
 
 function isEscapeKey(event) {
   const modifierKeys = new Set([
@@ -49,7 +51,58 @@ function isEditableTarget(target) {
   );
 }
 
+function forwardScratchKey(event, released = false) {
+  // Inside the native editor SDL already feeds the engine input queue.
+  // Forwarding the same DOM event would duplicate every gameplay input.
+  if (window.coronaBridge) return;
+  if (event[SCRATCH_KEY_FORWARDED]) return;
+  if (!released && isEditableTarget(event.target)) return;
+
+  const code = event.code || event.key || '';
+  const displayKey = event.key || event.code || '';
+  if (!code) return;
+
+  event[SCRATCH_KEY_FORWARDED] = true;
+  if (released) {
+    scriptingService.sendKeyUpEvent(code, displayKey).catch(() => {});
+    return;
+  }
+  const modifiers = [
+    event.ctrlKey || event.metaKey ? 'Ctrl' : '',
+    event.shiftKey ? 'Shift' : '',
+    event.altKey ? 'Alt' : '',
+  ].filter(Boolean).join(',');
+  scriptingService.sendKeyEvent(code, modifiers, displayKey).catch(() => {});
+}
+
+function isGamePreviewActive() {
+  const preview = window.__coronaGamePreviewState || {};
+  return ['starting', 'running', 'stopping'].includes(preview.status)
+    || Number(preview.runningCount ?? preview.running_count ?? 0) > 0
+    || Boolean(preview.hasSnapshot ?? preview.has_snapshot);
+}
+
+function isGameplayKey(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey) return false;
+  const code = event.code || '';
+  return code === 'Space'
+    || code === 'KeyW' || code === 'KeyA' || code === 'KeyS' || code === 'KeyD'
+    || code === 'ArrowUp' || code === 'ArrowDown'
+    || code === 'ArrowLeft' || code === 'ArrowRight';
+}
+
+function consumeNativeGameplayDomEvent(event) {
+  if (!isGamePreviewActive() || isEditableTarget(event.target) || !isGameplayKey(event)) return;
+  // The native SDL event still reaches Scratch. Suppress only the mirrored DOM
+  // event so Space cannot click the still-focused preview button and WASD does
+  // not trigger editor/browser shortcuts while a game is running.
+  event.preventDefault();
+  event.stopPropagation();
+}
+
 function onGlobalKeyDown(event) {
+  consumeNativeGameplayDomEvent(event);
+  forwardScratchKey(event, false);
   if (event.defaultPrevented) return;
   if (!isEditorRoute.value || !isEscapeKey(event)) return;
 
@@ -59,6 +112,11 @@ function onGlobalKeyDown(event) {
   event.preventDefault();
   event.stopPropagation();
   dockStore.togglePanel('EditorSettings');
+}
+
+function onGlobalKeyUp(event) {
+  consumeNativeGameplayDomEvent(event);
+  forwardScratchKey(event, true);
 }
 
 onMounted(() => {
@@ -71,6 +129,7 @@ onMounted(() => {
   }, 60000);
 
   document.addEventListener('keydown', onGlobalKeyDown, true);
+  document.addEventListener('keyup', onGlobalKeyUp, true);
 });
 
 onUnmounted(() => {
@@ -79,6 +138,7 @@ onUnmounted(() => {
     gcTimer = null;
   }
   document.removeEventListener('keydown', onGlobalKeyDown, true);
+  document.removeEventListener('keyup', onGlobalKeyUp, true);
 });
 </script>
 

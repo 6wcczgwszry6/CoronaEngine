@@ -114,7 +114,7 @@
       @mousedown="beginLook"
       @mousemove="updateLook"
       @mouseup="endLook"
-      @click="forwardScratchMouse('click', $event)"
+      @click="handleScratchClick"
       @wheel="forwardScratchMouse('wheel', $event)"
       @contextmenu.prevent="forwardScratchMouse('contextmenu', $event)"
     />
@@ -144,9 +144,10 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
-import { appService, projectService, sceneService, scriptingService } from '@/utils/bridge.js';
+import { appService, editorApi, projectService, sceneService, scriptingService } from '@/utils/bridge.js';
 import { buildDragRegions, dragRegionsSignature } from '@/utils/cameraDragRegions.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
+import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
   createViewportUiCalibrationStore,
   createViewportUiModeStore,
@@ -184,6 +185,9 @@ let borderlessTogglePending = false;
 let previewHudTimer = 0;
 let scratchMouseMoveFrame = 0;
 let pendingScratchMouseMove = null;
+let actorPickIndex = new Map();
+let actorPickResultCallbackToken = null;
+let pendingScratchClick = null;
 
 const outputModes = [
   { value: 'final_color', label: 'Final' },
@@ -369,6 +373,26 @@ const viewportUiPointerController = createViewportUiPointerController({
   getHitRect: getCameraViewHitRect,
   getRenderRect: getCameraRenderRect,
 });
+
+const cameraViewPickController = createViewportPickController({
+  retryDelayMs: 60,
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => ({
+    sceneId,
+    cameraHandle: camera.value?.handle,
+  }),
+  getHitRect: getCameraViewHitRect,
+  getRenderRect: getCameraRenderRect,
+  getActorIndex: () => actorPickIndex,
+});
+
+const refreshCameraViewActorPickIndex = async () => {
+  if (!sceneId) return false;
+  const result = await sceneService.listSceneTree(sceneId);
+  const snapshot = unwrap(result);
+  actorPickIndex = indexActorsByHandle(Array.isArray(snapshot?.actors) ? snapshot.actors : []);
+  return actorPickIndex.size > 0;
+};
 
 const applyViewportUiCalibration = (calibration) => {
   viewportUiCalibrationStore.applyToBridge({
@@ -667,11 +691,14 @@ const onKeyDown = (event) => {
     return;
   }
   if (isTextInputEvent(event)) return;
-  scriptingService.sendKeyEvent(
-    event.code || event.key || '',
-    keyModifiers(event),
-    event.key || event.code || '',
-  ).catch(() => {});
+  if (!event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyEvent(
+      event.code || event.key || '',
+      keyModifiers(event),
+      event.key || event.code || '',
+    ).catch(() => {});
+  }
   if (isEditorInputLocked()) {
     keys.clear();
     event.preventDefault();
@@ -694,34 +721,166 @@ const onKeyDown = (event) => {
 const onKeyUp = (event) => {
   if (isTextInputEvent(event)) return;
   keys.delete(movementCode(event));
-  scriptingService.sendKeyUpEvent(
-    event.code || event.key || '',
-    event.key || event.code || '',
-  ).catch(() => {});
+  if (!event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyUpEvent(
+      event.code || event.key || '',
+      event.key || event.code || '',
+    ).catch(() => {});
+  }
 };
 const scratchMouseButton = (button) => ({
   0: 'LeftButton',
   1: 'MiddleButton',
   2: 'RightButton',
 }[button] || '');
-const sendScratchMouse = (eventType, button, x, y) => {
-  scriptingService.sendMouseEvent(eventType, button, x, y).catch(() => {});
+const sendScratchMouse = (
+  eventType,
+  button,
+  x,
+  y,
+  viewportX,
+  viewportY,
+  viewportWidth,
+  viewportHeight,
+  pickedActor = '',
+) => {
+  scriptingService.sendMouseEvent(
+    eventType,
+    button,
+    x,
+    y,
+    viewportX,
+    viewportY,
+    viewportWidth,
+    viewportHeight,
+    pickedActor,
+  ).catch(() => {});
 };
-const forwardScratchMouse = (eventType, event) => {
-  const button = scratchMouseButton(event.button);
-  const x = event.clientX || 0;
-  const y = event.clientY || 0;
-  if (eventType !== 'move') {
-    sendScratchMouse(eventType, button, x, y);
+const finishPendingScratchClick = (pickedActor = '') => {
+  const pending = pendingScratchClick;
+  if (!pending) return;
+  pendingScratchClick = null;
+  if (pending.timer != null) window.clearTimeout(pending.timer);
+  sendScratchMouse(
+    'click',
+    pending.button,
+    pending.x,
+    pending.y,
+    pending.viewportX,
+    pending.viewportY,
+    pending.viewportWidth,
+    pending.viewportHeight,
+    pickedActor,
+  );
+};
+
+const handleScratchClick = (event) => {
+  if (pendingScratchClick) finishPendingScratchClick('');
+
+  const rect = getCameraRenderRect();
+  const snapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  pendingScratchClick = {
+    button: scratchMouseButton(snapshot.button),
+    x: snapshot.clientX,
+    y: snapshot.clientY,
+    viewportX: snapshot.clientX - Number(rect.left || 0),
+    viewportY: snapshot.clientY - Number(rect.top || 0),
+    viewportWidth: Number(rect.width || 0),
+    viewportHeight: Number(rect.height || 0),
+    timer: null,
+    requestId: '',
+  };
+
+  const requestId = cameraViewPickController.pickAt(snapshot);
+  if (!requestId) {
+    finishPendingScratchClick('');
     return;
   }
-  pendingScratchMouseMove = { button, x, y };
+  pendingScratchClick.requestId = requestId;
+  pendingScratchClick.timer = window.setTimeout(() => finishPendingScratchClick(''), 220);
+};
+
+const finishCameraViewClickFromPick = (payload, result) => {
+  if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
+  if (result?.status === 'pending' || result?.status === 'stale') return;
+  const pickedActor =
+    result?.actor?.name ||
+    payload?.actorName ||
+    payload?.name ||
+    payload?.actor?.name ||
+    '';
+  finishPendingScratchClick(pickedActor);
+};
+
+const handleCameraViewActorPickResult = (payload) => {
+  const result = cameraViewPickController.handlePickResult(payload);
+  if (result.status !== 'unknown' || !payload?.sceneId) {
+    finishCameraViewClickFromPick(payload, result);
+    return;
+  }
+  refreshCameraViewActorPickIndex()
+    .then(() => finishCameraViewClickFromPick(payload, cameraViewPickController.handlePickResult(payload)))
+    .catch(() => finishCameraViewClickFromPick(payload, result));
+};
+
+const forwardScratchMouse = (eventType, event) => {
+  const button = scratchMouseButton(event.button);
+  const x = Number(event.clientX || 0);
+  const y = Number(event.clientY || 0);
+  // Native CameraView renders behind the 34px toolbar across the whole
+  // browser surface. The input layer only starts below that toolbar, so using
+  // its bounds shifts projected picking upward. Keep event capture on the
+  // input layer, but express Scratch coordinates in the full render surface.
+  const rect = getCameraRenderRect();
+  const viewportX = x - Number(rect.left || 0);
+  const viewportY = y - Number(rect.top || 0);
+  const viewportWidth = Number(rect.width || 0);
+  const viewportHeight = Number(rect.height || 0);
+  const scratchEvent = {
+    button,
+    x,
+    y,
+    viewportX,
+    viewportY,
+    viewportWidth,
+    viewportHeight,
+  };
+  if (eventType !== 'move') {
+    sendScratchMouse(
+      eventType,
+      scratchEvent.button,
+      scratchEvent.x,
+      scratchEvent.y,
+      scratchEvent.viewportX,
+      scratchEvent.viewportY,
+      scratchEvent.viewportWidth,
+      scratchEvent.viewportHeight,
+    );
+    return;
+  }
+  pendingScratchMouseMove = scratchEvent;
   if (scratchMouseMoveFrame) return;
   scratchMouseMoveFrame = window.requestAnimationFrame(() => {
     scratchMouseMoveFrame = 0;
     const pending = pendingScratchMouseMove;
     pendingScratchMouseMove = null;
-    if (pending) sendScratchMouse('move', pending.button, pending.x, pending.y);
+    if (pending) {
+      sendScratchMouse(
+        'move',
+        pending.button,
+        pending.x,
+        pending.y,
+        pending.viewportX,
+        pending.viewportY,
+        pending.viewportWidth,
+        pending.viewportHeight,
+      );
+    }
   });
 };
 const beginLook = (event) => {
@@ -850,6 +1009,8 @@ onMounted(async () => {
   await syncDragRegions({ force: true });
   try {
     await loadCamera();
+    await refreshCameraViewActorPickIndex().catch(() => false);
+    actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleCameraViewActorPickResult);
     syncViewportUiMode();
     await syncWindowSize(true);
   } catch (error) {
@@ -872,6 +1033,13 @@ onBeforeUnmount(() => {
   if (scratchMouseMoveFrame) window.cancelAnimationFrame(scratchMouseMoveFrame);
   scratchMouseMoveFrame = 0;
   pendingScratchMouseMove = null;
+  if (pendingScratchClick?.timer != null) window.clearTimeout(pendingScratchClick.timer);
+  pendingScratchClick = null;
+  cameraViewPickController.dispose();
+  if (actorPickResultCallbackToken) {
+    editorApi.off(actorPickResultCallbackToken).catch(() => {});
+    actorPickResultCallbackToken = null;
+  }
   window.clearTimeout(resizeTimer);
   window.clearInterval(previewHudTimer);
   window.removeEventListener('resize', scheduleWindowSizeSync);

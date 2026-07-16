@@ -21,6 +21,15 @@ def _safe_project_dir_name(name, fallback):
     return safe_name or "project"
 
 
+def _is_path_within(path, root):
+    try:
+        normalized_path = os.path.normcase(os.path.abspath(path))
+        normalized_root = os.path.normcase(os.path.abspath(root))
+        return os.path.commonpath([normalized_path, normalized_root]) == normalized_root
+    except ValueError:
+        return False
+
+
 def _ensure_vision_camera_defaults(scene_config):
     if 'camera' not in scene_config:
         scene_config['camera'] = {}
@@ -92,6 +101,13 @@ class ProjectCopy:
 
         data_dir = os.path.join(str(core_path.repo_root), "data")
         os.makedirs(data_dir, exist_ok=True)
+
+        # Projects already stored in the editor data directory are runtime
+        # projects, not external saves. Opening them must not create another
+        # display-name-based copy such as "Project_1" on every launch.
+        if _is_path_within(source_dir, data_dir):
+            normalize_project_runtime_paths(source_dir)
+            return {"name": os.path.basename(source_dir), "path": source_dir}
 
         base_name = _safe_project_dir_name(project_name, os.path.basename(source_dir))
         target_path = os.path.join(data_dir, base_name)
