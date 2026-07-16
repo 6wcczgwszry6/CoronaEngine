@@ -49,6 +49,9 @@ std::string get_editor_scene_snapshot_from_python(const std::string& scene_name)
 std::string set_editor_actor_transform_from_python(const std::string& scene_name,
                                                    const std::string& actor_name,
                                                    const std::string& transform_json);
+std::string set_editor_camera_transform_from_python(const std::string& scene_name,
+                                                    const std::string& camera_name,
+                                                    const std::string& camera_data_json);
 std::string capture_editor_camera_view_from_python(const std::string& scene_name,
                                                    const std::string& camera_name,
                                                    const std::string& camera_data_json,
@@ -957,6 +960,18 @@ void BindAll(nanobind::module_& m) {
             nb::arg("actor_name"),
             nb::arg("transform_json"),
             "Set a native editor actor transform, persist it, and return actor JSON.");
+
+    m.def("set_editor_camera_transform",
+            [](const std::string& scene_name,
+               const std::string& camera_name,
+               const std::string& camera_data_json) {
+               return Corona::Systems::UI::set_editor_camera_transform_from_python(
+                   scene_name, camera_name, camera_data_json);
+            },
+            nb::arg("scene_name"),
+            nb::arg("camera_name") = "",
+            nb::arg("camera_data_json") = "{}",
+            "Set the active native editor camera transform; pass persist=false for runtime preview updates.");
 
     m.def("capture_editor_camera_view",
             [](const std::string& scene_name,

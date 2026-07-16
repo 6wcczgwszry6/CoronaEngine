@@ -3040,8 +3040,12 @@ void OpticsSystem::update() {
         }
     }
     apply_pending_camera_moves();
-    apply_pending_camera_viewport_updates();
+    // Scene loading/restoration can enqueue persisted camera size/view state in the
+    // same frame as the editor publishes the live viewport rectangle. Apply the
+    // persisted state first so the actual editor/CameraView surface remains the
+    // final authority for render size, placement, and actor-pick coordinates.
     apply_pending_camera_state_updates();
+    apply_pending_camera_viewport_updates();
     apply_pending_camera_releases();
 
     // 延迟获取 GeometrySystem 指针（不能在 initialize() 中获取，会死锁）
@@ -4244,6 +4248,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 }
 
                 if (actor_pick_request && !diag.skip_deferred_compute) {
+                    // Actor picking reads back a one-element GPU buffer immediately after
+                    // the visibility dispatch. Wait for this submission only on an actual
+                    // click so the read cannot observe the previous frame's zero value.
+                    hardware_->executor.wait_idle(latest_submit_receipt);
                     complete_actor_pick(*actor_pick_request, sceneBatch.actorHandles);
                 }
 

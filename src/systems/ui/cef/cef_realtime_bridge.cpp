@@ -162,6 +162,11 @@ bool restore_windowed_placement(HWND hwnd) {
 
 // ── drain_input_events: 消费所有积攒的输入事件 ──
 // 开放给 ScriptSystem 调用（通过头文件声明），每帧由 Python show_log_on_js 消费
+void enqueue_input_event(InputEvent event) {
+    std::lock_guard<std::mutex> lock(s_input_mutex);
+    s_input_queue.push_back(std::move(event));
+}
+
 std::vector<InputEvent> drain_input_events() {
     std::lock_guard<std::mutex> lock(s_input_mutex);
     std::vector<InputEvent> events;
@@ -787,8 +792,8 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
     pick->pending = true;
     pick->result_ready = false;
     emit("pending", 0, pick_x, pick_y);
-    CFW_LOG_DEBUG("ViewportPick pending: camera={} scene='{}' request={} pos=({},{}) -> cam_px=({},{})",
-                  camera_handle, scene_id, request_id, x, y, pick_x, pick_y);
+    CFW_LOG_DEBUG("ViewportPick pending: camera={} scene='{}' request={} pos=({},{}) vp={}x{} cam={}x{} -> cam_px=({},{})",
+                  camera_handle, scene_id, request_id, x, y, vp_w, vp_h, cam_w, cam_h, pick_x, pick_y);
 
     return true;
 }
@@ -1090,11 +1095,7 @@ bool handle_input_inject(const CefRefPtr<CefProcessMessage>& message) {
             return true;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(s_input_mutex);
-        s_input_queue.push_back(std::move(evt));
-    }
-
+    enqueue_input_event(std::move(evt));
     return true;
 }
 
@@ -1833,12 +1834,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             const int y = command.value("y", 120);
             const int w = command.value("width", 0);
             const int h = command.value("height", 0);
+            const bool maximized = command.value("maximized", false);
 
             // Desired-state only: flip Docked -> Detaching on the UI thread. The frame runner's
             // reconcile step does the actual window create + surface register next frame. All
             // mutation of detach_state goes through enqueue_main_thread_task so the field stays
             // single-threaded (UI thread), needing no lock. See Phase 7d design notes.
-            bm.enqueue_main_thread_task([tab_id, x, y, w, h] {
+            bm.enqueue_main_thread_task([tab_id, x, y, w, h, maximized] {
                 auto* tab = BrowserManager::instance().get_tab(tab_id);
                 if (!tab || tab->detach_state != BrowserTab::DetachState::Docked) {
                     return;  // unknown tab or mid-transition: reject (guards ABA / double-detach)
@@ -1847,6 +1849,7 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                 tab->detach_y = y;
                 tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
                 tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
+                tab->detach_maximized = maximized;
                 tab->detach_state = BrowserTab::DetachState::Detaching;
             });
 
