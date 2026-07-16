@@ -7,6 +7,8 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <span>
 
 namespace Corona::Systems::OpticsDetail {
 
@@ -16,6 +18,17 @@ struct ShadowCascadeView {
     float orthographic_width = 0.0f;
     float orthographic_height = 0.0f;
     float world_units_per_texel = 0.0f;
+};
+
+struct ShadowCasterBoundsSnapshot {
+    Spatial::AABB world_bounds{};
+    bool valid = false;
+};
+
+struct ShadowSceneBounds {
+    bool valid = false;
+    ktm::fvec3 min_world{0.0f, 0.0f, 0.0f};
+    ktm::fvec3 max_world{0.0f, 0.0f, 0.0f};
 };
 
 [[nodiscard]] inline ShadowCascadeView make_shadow_cascade_view(
@@ -47,6 +60,54 @@ struct ShadowCascadeView {
         return true;
     }
     return frustum.intersects(world_bounds);
+}
+
+[[nodiscard]] inline std::uint32_t shadow_cascade_visibility_mask(
+    const ShadowCasterBoundsSnapshot& caster,
+    std::span<const ShadowCascadeView> cascades,
+    std::uint32_t enabled_mask) noexcept {
+    std::uint32_t visible_mask = 0;
+    const std::size_t count = std::min<std::size_t>(cascades.size(), 32);
+    for (std::size_t cascade = 0; cascade < count; ++cascade) {
+        const std::uint32_t bit = 1u << cascade;
+        if ((enabled_mask & bit) == 0u) continue;
+        if (shadow_caster_visible(cascades[cascade].frustum,
+                                  caster.world_bounds,
+                                  caster.valid)) {
+            visible_mask |= bit;
+        }
+    }
+    return visible_mask;
+}
+
+inline void include_shadow_scene_bounds(
+    ShadowSceneBounds& scene,
+    const ShadowCasterBoundsSnapshot& caster) noexcept {
+    if (!caster.valid || !caster.world_bounds.valid()) return;
+    if (!scene.valid) {
+        scene.min_world = caster.world_bounds.min;
+        scene.max_world = caster.world_bounds.max;
+        scene.valid = true;
+        return;
+    }
+    scene.min_world.x = std::min(scene.min_world.x, caster.world_bounds.min.x);
+    scene.min_world.y = std::min(scene.min_world.y, caster.world_bounds.min.y);
+    scene.min_world.z = std::min(scene.min_world.z, caster.world_bounds.min.z);
+    scene.max_world.x = std::max(scene.max_world.x, caster.world_bounds.max.x);
+    scene.max_world.y = std::max(scene.max_world.y, caster.world_bounds.max.y);
+    scene.max_world.z = std::max(scene.max_world.z, caster.world_bounds.max.z);
+}
+
+template <typename Callback>
+inline void for_each_enabled_shadow_cascade(std::uint32_t enabled_mask,
+                                            std::size_t cascade_count,
+                                            Callback&& callback) {
+    const std::size_t count = std::min<std::size_t>(cascade_count, 32);
+    for (std::size_t cascade = 0; cascade < count; ++cascade) {
+        if ((enabled_mask & (1u << cascade)) != 0u) {
+            callback(static_cast<std::uint32_t>(cascade));
+        }
+    }
 }
 
 [[nodiscard]] inline int select_shadow_lod_level(

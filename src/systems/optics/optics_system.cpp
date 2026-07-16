@@ -38,6 +38,8 @@
 #include <utility>
 #include <vector>
 
+#include <oneapi/tbb/task_group.h>
+
 #include "hardware.h"
 #include "native_diagnostics.h"
 #include "optics_debug_labels.h"
@@ -108,6 +110,7 @@ struct OpticsDiagConfig {
     bool disable_albedo_sample = false;
     bool force_solid_material = false;
     bool profile = false;
+    bool debug_labels = false;
     std::optional<std::uintptr_t> only_actor;
     std::optional<std::uintptr_t> only_geometry;
     std::optional<std::uint32_t> only_mesh;
@@ -125,6 +128,7 @@ struct OpticsDiagConfig {
         c.disable_albedo_sample = env_flag_enabled("CORONA_OPTICS_DIAG_DISABLE_ALBEDO_SAMPLE");
         c.force_solid_material = env_flag_enabled("CORONA_OPTICS_DIAG_FORCE_SOLID_MATERIAL");
         c.profile = env_flag_enabled("CORONA_OPTICS_DIAG_PROFILE");
+        c.debug_labels = env_flag_enabled("CORONA_OPTICS_DIAG_DEBUG_LABELS");
         if (auto v = env_u64("CORONA_OPTICS_DIAG_ONLY_ACTOR")) {
             c.only_actor = static_cast<std::uintptr_t>(*v);
         }
@@ -145,15 +149,17 @@ struct OpticsDiagConfig {
                 kShadowCascadeCount);
         if (c.skip_scene_visibility || c.skip_shadows || c.skip_deferred_compute ||
             c.disable_textures || c.disable_albedo_sample || c.force_solid_material || c.profile ||
+            c.debug_labels ||
             c.only_actor || c.only_geometry || c.only_mesh ||
             c.draw_limit != std::numeric_limits<std::uint32_t>::max() ||
             c.shadow_cascade_mask != ((1u << kShadowCascadeCount) - 1u)) {
             CFW_LOG_WARNING("OpticsSystem: diagnostic mode enabled "
                             "(skip_visibility={}, skip_shadows={}, skip_deferred={}, disable_textures={}, "
-                            "disable_albedo_sample={}, force_solid={}, profile={}, only_actor={}, only_geometry={}, "
+                            "disable_albedo_sample={}, force_solid={}, profile={}, debug_labels={}, only_actor={}, only_geometry={}, "
                             "only_mesh={}, draw_limit={}, shadow_cascade_mask=0x{:x})",
                             c.skip_scene_visibility, c.skip_shadows, c.skip_deferred_compute,
                             c.disable_textures, c.disable_albedo_sample, c.force_solid_material, c.profile,
+                            c.debug_labels,
                             c.only_actor.value_or(0), c.only_geometry.value_or(0),
                             c.only_mesh.value_or(std::numeric_limits<std::uint32_t>::max()),
                             c.draw_limit, c.shadow_cascade_mask);
@@ -191,7 +197,8 @@ struct OpticsDiagConfig {
                                                  std::uint32_t vertex_count,
                                                  std::uint32_t index_count,
                                                  std::uint32_t max_index) {
-    if (!Corona::Systems::OpticsDetail::debug_labels_enabled(optics_diag_config().profile)) {
+    if (!Corona::Systems::OpticsDetail::debug_labels_enabled(
+            optics_diag_config().profile, optics_diag_config().debug_labels)) {
         return {};
     }
     std::ostringstream out;
@@ -217,7 +224,8 @@ struct OpticsDiagConfig {
                                                      std::uint32_t materials,
                                                      std::uint32_t width,
                                                      std::uint32_t height) {
-    if (!Corona::Systems::OpticsDetail::debug_labels_enabled(optics_diag_config().profile)) {
+    if (!Corona::Systems::OpticsDetail::debug_labels_enabled(
+            optics_diag_config().profile, optics_diag_config().debug_labels)) {
         return {};
     }
     std::ostringstream out;
@@ -354,11 +362,7 @@ struct RenderInstanceBatch {
     }
 };
 
-struct ShadowSceneBounds {
-    bool valid = false;
-    ktm::fvec3 min_world{0.0f, 0.0f, 0.0f};
-    ktm::fvec3 max_world{0.0f, 0.0f, 0.0f};
-};
+using ShadowSceneBounds = Corona::Systems::OpticsDetail::ShadowSceneBounds;
 
 struct UVec2Upload {
     uint32_t x;
@@ -408,7 +412,7 @@ void record_optics_native_perf(
     }
     const auto stats = window.snapshot();
     CFW_LOG_INFO(
-        "OpticsNativePerf samples={} avg_total_ms={:.2f} max_total_ms={:.2f} "
+        "OpticsNativePerf samples={} avg_total_ms={:.2f} p95_total_ms={:.2f} max_total_ms={:.2f} "
         "avg_throttle_wait_ms={:.2f} max_throttle_wait_ms={:.2f} "
         "avg_collect_ms={:.2f} avg_submit_ms={:.2f} max_submit_ms={:.2f} "
         "avg_shadow_record_ms={:.2f} max_shadow_record_ms={:.2f} "
@@ -420,6 +424,7 @@ void record_optics_native_perf(
         "sky_ambient={} sky_sh_updates={}",
         stats.samples,
         stats.avg_total_ms,
+        stats.p95_total_ms,
         stats.max_total_ms,
         stats.avg_throttle_wait_ms,
         stats.max_throttle_wait_ms,
@@ -2030,6 +2035,27 @@ void bind_pipeline_scene_gpu_resource(
     }
 }
 
+[[nodiscard]] std::string vision_framebuffer_type_from_project_data(
+    const vision::DataWrap& data) {
+    if (!data.contains("pipeline") || !data["pipeline"].is_object()) {
+        return "<missing>";
+    }
+    const auto& pipeline = data["pipeline"];
+    if (!pipeline.contains("param") || !pipeline["param"].is_object()) {
+        return "<missing>";
+    }
+    const auto& pipeline_param = pipeline["param"];
+    if (!pipeline_param.contains("frame_buffer") ||
+        !pipeline_param["frame_buffer"].is_object()) {
+        return "<missing>";
+    }
+    const auto& frame_buffer = pipeline_param["frame_buffer"];
+    if (!frame_buffer.contains("type") || !frame_buffer["type"].is_string()) {
+        return "<missing>";
+    }
+    return frame_buffer["type"].get<std::string>();
+}
+
 // Loads a Vision scene description and brings it to a renderable state,
 // mirroring the reference snippet (ProjectDesc -> init -> prepare).
 // Resolves relative texture/mesh references against base_dir.
@@ -2042,7 +2068,17 @@ void bind_pipeline_scene_gpu_resource(
                                                     scene_resource,
                                                 Corona::Systems::Vision::VisionPipelineSource source)
     -> ocarina::SP<vision::Pipeline> {
+    const auto source_framebuffer_type =
+        vision_framebuffer_type_from_project_data(project_data);
     Corona::Systems::Vision::configure_vision_scene_for_mode(project_data, mode);
+    const auto configured_framebuffer_type =
+        vision_framebuffer_type_from_project_data(project_data);
+    CFW_LOG_INFO(
+        "OpticsSystem: Vision framebuffer config (scene={}, mode={}, source={}, configured={})",
+        scene_label,
+        std::string(Corona::Systems::Vision::vision_render_mode_name(mode)),
+        source_framebuffer_type,
+        configured_framebuffer_type);
 
     vision::Global::instance().set_scene_path(base_dir);
 
@@ -2069,6 +2105,11 @@ void bind_pipeline_scene_gpu_resource(
     // prepare() does not create FrameBuffer::view_texture_; the render path tone
     // maps into it and we later read it back, so create it explicitly here.
     pipeline->frame_buffer()->prepare_view_texture();
+    CFW_LOG_INFO(
+        "OpticsSystem: Vision framebuffer realized (scene={}, configured={}, lightfield={})",
+        scene_label,
+        configured_framebuffer_type,
+        dynamic_cast<const vision::ILightFieldFrameBuffer*>(pipeline->frame_buffer()) != nullptr);
     return pipeline;
 }
 
@@ -2615,7 +2656,10 @@ bool OpticsSystem::initialize_render_pipelines() {
     try {
         hardware_->visibilityPipeline.emplace(make_visibility_pipeline_desc());
         hardware_->uiVisibilityPipeline.emplace(make_visibility_pipeline_desc());
-        hardware_->shadowPipeline.emplace(make_shadow_pipeline_desc());
+        const auto shadow_desc = make_shadow_pipeline_desc();
+        for (auto& shadow_pipeline : hardware_->shadowPipelines) {
+            shadow_pipeline.emplace(shadow_desc);
+        }
         hardware_->ssaoPipeline.emplace(ssao_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->ssaoBlurPipeline.emplace(ssao_blur_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->lightingPipeline.emplace(lighting_comp_glsl, ktm::uvec3(8, 8, 1));
@@ -3045,8 +3089,11 @@ void OpticsSystem::update() {
     }
 #endif
 
+    const bool shadow_pipelines_ready = std::all_of(
+        hardware_->shadowPipelines.begin(), hardware_->shadowPipelines.end(),
+        [](const auto& pipeline) { return pipeline.has_value(); });
     if (!hardware_->shaderHasInit || !hardware_->lightingPipeline ||
-        !hardware_->shadowPipeline ||
+        !shadow_pipelines_ready ||
         !hardware_->ssaoPipeline || !hardware_->ssaoBlurPipeline ||
         !hardware_->skyPipeline || !hardware_->tonemapPipeline ||
         !hardware_->skySHProjectPipeline ||
@@ -3070,7 +3117,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
     drain_viewport_ui_pointer_commands();
 
     auto& lighting = *hardware_->lightingPipeline;
-    auto& shadow = *hardware_->shadowPipeline;
+    auto& shadow_pipelines = hardware_->shadowPipelines;
     auto& ssao = *hardware_->ssaoPipeline;
     auto& ssaoBlur = *hardware_->ssaoBlurPipeline;
     auto& sky = *hardware_->skyPipeline;
@@ -3120,7 +3167,9 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 std::array<uint32_t, kShadowCascadeCount> native_cascade_draws{};
                 std::array<uint64_t, kShadowCascadeCount> native_cascade_indices{};
                 bool native_shadows_enabled = false;
-                bool native_debug_mode = false;
+                const bool is_debug_mode =
+                    camera->output_mode != CameraOutputMode::FinalColor;
+                bool native_debug_mode = is_debug_mode;
 
                 SurfaceRenderTarget* target_ptr = nullptr;
                 try {
@@ -3469,103 +3518,134 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     return has_instances;
                 };
 
-                auto compute_shadow_scene_bounds = [&]() {
-                    ShadowSceneBounds bounds;
+                struct ShadowCasterSnapshot {
+                    std::uintptr_t actor_handle = 0;
+                    std::uintptr_t profile_handle = 0;
+                    std::uintptr_t geometry_handle = 0;
+                    ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
+                    Corona::Systems::OpticsDetail::ShadowCasterBoundsSnapshot bounds{};
+                    float max_abs_scale = 1.0f;
+                    std::uint32_t cascade_visibility_mask = 0;
+                    std::array<std::vector<GeometrySystem::ShadowMeshSlot>,
+                               kShadowCascadeCount> cascade_slots{};
+                };
+
+                ShadowSceneBounds shadow_scene_bounds;
+                std::vector<ShadowCasterSnapshot> shadow_casters;
+                auto build_shadow_caster_snapshots = [&]() {
+                    std::unordered_set<std::uintptr_t> resident_snapshot;
+                    {
+                        std::shared_lock lock(residency_mtx_);
+                        resident_snapshot = resident_actors_;
+                    }
+                    shadow_casters.reserve(scene.actor_handles.size());
                     for (auto actor_handle : scene.actor_handles) {
                         auto actor = actor_storage.try_acquire_read(actor_handle);
-                        if (!actor || actor->follow_camera) {
+                        if (!actor || actor->follow_camera ||
+                            !diag_actor_allowed(actor_handle) ||
+                            !resident_snapshot.contains(actor_handle)) {
                             continue;
                         }
-
                         for (auto profile_handle : actor->profile_handles) {
                             auto profile = profile_storage.try_acquire_read(profile_handle);
                             if (!profile || profile->optics_handle == 0 ||
                                 profile->mechanics_handle == 0) {
                                 continue;
                             }
-
-                            auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
-                            if (!optics_acc || !optics_acc->visible) {
-                                continue;
-                            }
-
-                            auto geom = geom_storage.try_acquire_read(optics_acc->geometry_handle);
-                            if (!geom || geom->transform_handle == 0) {
-                                continue;
-                            }
-
-                            auto transform =
-                                transform_storage.try_acquire_read(geom->transform_handle);
-                            if (!transform) {
-                                continue;
-                            }
-
-                            auto mech =
-                                SharedDataHub::instance().mechanics_storage().try_acquire_read(
-                                    profile->mechanics_handle);
-                            if (!mech) {
-                                continue;
-                            }
-
-                            ktm::fmat4x4 model_matrix = transform->compute_matrix();
-                            model_matrix = apply_native_local_correction(model_matrix, *geom);
-                            include_shadow_bounds(
-                                bounds, model_matrix, mech->min_xyz, mech->max_xyz);
-                        }
-                    }
-                    return bounds;
-                };
-
-                struct ShadowCasterBounds {
-                    Corona::Spatial::AABB world_bounds{};
-                    bool valid = false;
-                };
-                std::array<Corona::Systems::OpticsDetail::ShadowCascadeView,
-                           kShadowCascadeCount> shadow_cascade_views{};
-                std::unordered_map<std::uintptr_t, ShadowCasterBounds> shadow_caster_bounds;
-                bool shadow_caster_bounds_built = false;
-                auto build_shadow_caster_bounds = [&]() {
-                    if (shadow_caster_bounds_built) return;
-                    shadow_caster_bounds_built = true;
-                    for (auto actor_handle : scene.actor_handles) {
-                        auto actor = actor_storage.try_acquire_read(actor_handle);
-                        if (!actor || actor->follow_camera || !diag_actor_allowed(actor_handle)) continue;
-                        {
-                            std::shared_lock lock(residency_mtx_);
-                            if (!resident_actors_.count(actor_handle)) continue;
-                        }
-                        for (auto profile_handle : actor->profile_handles) {
-                            auto profile = profile_storage.try_acquire_read(profile_handle);
-                            if (!profile || profile->optics_handle == 0) continue;
                             auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
                             if (!optics_acc || !optics_acc->visible ||
-                                !diag_geometry_allowed(optics_acc->geometry_handle)) continue;
+                                !diag_geometry_allowed(optics_acc->geometry_handle)) {
+                                continue;
+                            }
                             auto geom = geom_storage.try_acquire_read(optics_acc->geometry_handle);
                             if (!geom || geom->transform_handle == 0) continue;
-                            auto transform = transform_storage.try_acquire_read(geom->transform_handle);
-                            auto mech = SharedDataHub::instance().mechanics_storage().try_acquire_read(
-                                profile->mechanics_handle);
+                            auto transform =
+                                transform_storage.try_acquire_read(geom->transform_handle);
+                            auto mech = SharedDataHub::instance()
+                                            .mechanics_storage()
+                                            .try_acquire_read(profile->mechanics_handle);
                             if (!transform || !mech) continue;
-                            const auto model_matrix = apply_native_local_correction(
+
+                            ShadowCasterSnapshot snapshot;
+                            snapshot.actor_handle = actor_handle;
+                            snapshot.profile_handle = profile_handle;
+                            snapshot.geometry_handle = optics_acc->geometry_handle;
+                            snapshot.model_matrix = apply_native_local_correction(
                                 transform->compute_matrix(), *geom);
-                            ShadowCasterBounds entry;
-                            for (const auto& corner : bounds_corners(mech->min_xyz, mech->max_xyz)) {
-                                const auto point = transform_point(model_matrix, corner);
-                                if (!entry.valid) {
-                                    entry.world_bounds.min = point;
-                                    entry.world_bounds.max = point;
-                                    entry.valid = true;
+                            snapshot.max_abs_scale = std::max({
+                                std::abs(transform->scale.x),
+                                std::abs(transform->scale.y),
+                                std::abs(transform->scale.z),
+                                std::abs(geom->native_local_correction_scale),
+                                1.0e-6f});
+
+                            for (const auto& corner :
+                                 bounds_corners(mech->min_xyz, mech->max_xyz)) {
+                                const auto point = transform_point(snapshot.model_matrix, corner);
+                                if (!snapshot.bounds.valid) {
+                                    snapshot.bounds.world_bounds.min = point;
+                                    snapshot.bounds.world_bounds.max = point;
+                                    snapshot.bounds.valid = true;
                                 } else {
-                                    entry.world_bounds.min.x = std::min(entry.world_bounds.min.x, point.x);
-                                    entry.world_bounds.min.y = std::min(entry.world_bounds.min.y, point.y);
-                                    entry.world_bounds.min.z = std::min(entry.world_bounds.min.z, point.z);
-                                    entry.world_bounds.max.x = std::max(entry.world_bounds.max.x, point.x);
-                                    entry.world_bounds.max.y = std::max(entry.world_bounds.max.y, point.y);
-                                    entry.world_bounds.max.z = std::max(entry.world_bounds.max.z, point.z);
+                                    snapshot.bounds.world_bounds.min.x = std::min(
+                                        snapshot.bounds.world_bounds.min.x, point.x);
+                                    snapshot.bounds.world_bounds.min.y = std::min(
+                                        snapshot.bounds.world_bounds.min.y, point.y);
+                                    snapshot.bounds.world_bounds.min.z = std::min(
+                                        snapshot.bounds.world_bounds.min.z, point.z);
+                                    snapshot.bounds.world_bounds.max.x = std::max(
+                                        snapshot.bounds.world_bounds.max.x, point.x);
+                                    snapshot.bounds.world_bounds.max.y = std::max(
+                                        snapshot.bounds.world_bounds.max.y, point.y);
+                                    snapshot.bounds.world_bounds.max.z = std::max(
+                                        snapshot.bounds.world_bounds.max.z, point.z);
                                 }
                             }
-                            entry.valid = entry.valid && entry.world_bounds.valid();
-                            shadow_caster_bounds.insert_or_assign(profile_handle, entry);
+                            snapshot.bounds.valid = snapshot.bounds.valid &&
+                                                    snapshot.bounds.world_bounds.valid();
+                            Corona::Systems::OpticsDetail::include_shadow_scene_bounds(
+                                shadow_scene_bounds, snapshot.bounds);
+                            shadow_casters.push_back(std::move(snapshot));
+                        }
+                    }
+                };
+                build_shadow_caster_snapshots();
+
+                std::array<Corona::Systems::OpticsDetail::ShadowCascadeView,
+                           kShadowCascadeCount> shadow_cascade_views{};
+
+                auto prepare_shadow_caster_meshes = [&]() {
+                    const std::uint32_t enabled_mask =
+                        (!is_debug_mode && !diag.skip_shadows && native_shadows_enabled)
+                            ? diag.shadow_cascade_mask
+                            : 0u;
+                    for (auto& caster : shadow_casters) {
+                        caster.cascade_visibility_mask =
+                            Corona::Systems::OpticsDetail::shadow_cascade_visibility_mask(
+                                caster.bounds, shadow_cascade_views, enabled_mask);
+                        if (caster.cascade_visibility_mask == 0u) continue;
+
+                        if (geometry_system_) {
+                            std::array<GeometrySystem::ShadowLodQuery,
+                                       kShadowCascadeCount> queries{};
+                            for (std::uint32_t cascade = 0;
+                                 cascade < kShadowCascadeCount;
+                                 ++cascade) {
+                                queries[cascade].enabled =
+                                    (caster.cascade_visibility_mask & (1u << cascade)) != 0u;
+                                queries[cascade].world_units_per_texel =
+                                    shadow_cascade_views[cascade].world_units_per_texel;
+                            }
+                            auto slots = geometry_system_->query_shadow_mesh_slots_batch(
+                                caster.geometry_handle,
+                                queries,
+                                caster.max_abs_scale,
+                                frame_index);
+                            for (std::size_t cascade = 0;
+                                 cascade < std::min(slots.size(), caster.cascade_slots.size());
+                                 ++cascade) {
+                                caster.cascade_slots[cascade] = std::move(slots[cascade]);
+                            }
                         }
                     }
                 };
@@ -3574,126 +3654,43 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     [&](const ktm::fmat4x4& light_view_proj,
                         Horizon::HardwareImage& shadow_depth,
                         uint32_t cascade_index) {
+                    auto& shadow = *shadow_pipelines[cascade_index];
                     shadow.clear_records();
                     shadow.bind_render_target(0, hardware_->shadowColorImage);
                     shadow.bind_depth_target(shadow_depth);
                     uint32_t shadow_draws = 0;
-                    build_shadow_caster_bounds();
-
-                    for (auto actor_handle : scene.actor_handles) {
-                        auto actor = actor_storage.try_acquire_read(actor_handle);
-                        if (!actor || actor->follow_camera) {
+                    for (const auto& caster : shadow_casters) {
+                        if ((caster.cascade_visibility_mask & (1u << cascade_index)) == 0u) {
                             continue;
                         }
-                        if (!diag_actor_allowed(actor_handle)) {
-                            continue;
-                        }
+                        for (const auto& slot : caster.cascade_slots[cascade_index]) {
+                            if (!diag_mesh_allowed(slot.mesh_index)) continue;
+                            if (shadow_draws >= diag.draw_limit) return;
+                            if (!slot.valid) continue;
 
-                        for (auto profile_handle : actor->profile_handles) {
-                            auto profile = profile_storage.try_acquire_read(profile_handle);
-                            if (!profile || profile->optics_handle == 0) continue;
-
-                            const auto bounds_it = shadow_caster_bounds.find(profile_handle);
-                            if (bounds_it == shadow_caster_bounds.end() ||
-                                !Corona::Systems::OpticsDetail::shadow_caster_visible(
-                                    shadow_cascade_views[cascade_index].frustum,
-                                    bounds_it->second.world_bounds,
-                                    bounds_it->second.valid)) {
-                                continue;
-                            }
-
-                            auto optics_acc = optics_storage.try_acquire_read(profile->optics_handle);
-                            if (!optics_acc || !optics_acc->visible) continue;
-                            if (!diag_geometry_allowed(optics_acc->geometry_handle)) continue;
-
-                            // ---- 提取几何变换信息（读锁）----
-                            std::uintptr_t transform_handle_c = 0;
-                            float          nlc_scale_c  = 1.0f;
-                            ktm::fvec3     nlc_offset_c = {0.0f, 0.0f, 0.0f};
-                            if (auto geom_r = geom_storage.try_acquire_read(optics_acc->geometry_handle)) {
-                                transform_handle_c = geom_r->transform_handle;
-                                nlc_scale_c        = geom_r->native_local_correction_scale;
-                                nlc_offset_c       = geom_r->native_local_correction_offset;
-                            }
-
-                            ktm::fmat4x4 model_matrix{ktm::fmat4x4::from_eye()};
-                            ktm::fvec3   world_center{0.0f, 0.0f, 0.0f};
-                            float shadow_scale_c = 1.0f;
-                            if (auto transform = transform_storage.try_acquire_read(transform_handle_c)) {
-                                model_matrix = transform->compute_matrix();
-                                world_center = transform->position;
-                                shadow_scale_c = std::max({std::abs(transform->scale.x),
-                                                           std::abs(transform->scale.y),
-                                                           std::abs(transform->scale.z),
-                                                           std::abs(nlc_scale_c), 1.0e-6f});
-                                if (std::abs(nlc_scale_c - 1.0f) > 1e-6f ||
-                                    std::abs(nlc_offset_c.x) > 1e-6f ||
-                                    std::abs(nlc_offset_c.y) > 1e-6f ||
-                                    std::abs(nlc_offset_c.z) > 1e-6f) {
-                                    ktm::fmat4x4 correction = ktm::fmat4x4::from_eye();
-                                    correction[0][0] = nlc_scale_c;
-                                    correction[1][1] = nlc_scale_c;
-                                    correction[2][2] = nlc_scale_c;
-                                    correction[3][0] = nlc_offset_c.x;
-                                    correction[3][1] = nlc_offset_c.y;
-                                    correction[3][2] = nlc_offset_c.z;
-                                    model_matrix = multiply_ktm_mat4(model_matrix, correction);
-                                }
-                            }
-
-                            float bounding_radius = 1.0f;
-                            bool  have_bounds_c   = false;
-                            if (geometry_system_) {
-                                auto& ms = SharedDataHub::instance().mechanics_storage();
-                                if (auto mech = ms.try_acquire_read(profile->mechanics_handle)) {
-                                    const float dx = mech->max_xyz.x - mech->min_xyz.x;
-                                    const float dy = mech->max_xyz.y - mech->min_xyz.y;
-                                    const float dz = mech->max_xyz.z - mech->min_xyz.z;
-                                    bounding_radius = std::sqrt(dx * dx + dy * dy + dz * dz) * 0.5f;
-                                    have_bounds_c = true;
-                                }
-                            }
-
-                            // ---- query_mesh_slots（阴影pass无需 texture/material）----
-                            const auto shadow_slots = (geometry_system_ && have_bounds_c)
-                                ? geometry_system_->query_shadow_mesh_slots(
-                                      optics_acc->geometry_handle,
-                                      shadow_cascade_views[cascade_index].world_units_per_texel,
-                                      shadow_scale_c,
-                                      frame_index)
-                                : (geometry_system_
-                                      ? geometry_system_->query_mesh_slots(optics_acc->geometry_handle)
-                                      : std::vector<GeometrySystem::MeshSlot>{});
-
-                            for (const auto& ss : shadow_slots) {
-                                if (!diag_mesh_allowed(ss.mesh_index)) continue;
-                                if (shadow_draws >= diag.draw_limit) return;
-                                if (!ss.valid) continue;
-
-                                const ktm::fmat4x4 clip_matrix =
-                                    multiply_ktm_mat4(light_view_proj, model_matrix);
-                                shadow[shadow_vert_glsl_t::pushConsts::lightViewProjModel] =
-                                    upload_value(clip_matrix);
-                                Horizon::DrawIndexedParams draw_params;
-                                draw_params.debug_label = make_optics_draw_label(
-                                    "shadow",
-                                    actor_handle,
-                                    optics_acc->geometry_handle,
-                                    ss.mesh_index,
-                                    static_cast<std::uint32_t>(frame_index),
-                                    0u,
-                                    0u,
-                                    0u,
-                                    0u,
-                                    0u,
-                                    ss.vertex_count,
-                                    ss.index_count,
-                                    ss.max_index);
-                                shadow.record(ss.geo.index, ss.geo.vertex, draw_params);
-                                ++shadow_draws;
-                                ++native_cascade_draws[cascade_index];
-                                native_cascade_indices[cascade_index] += ss.index_count;
-                            }
+                            const ktm::fmat4x4 clip_matrix = multiply_ktm_mat4(
+                                light_view_proj, caster.model_matrix);
+                            shadow[shadow_vert_glsl_t::pushConsts::lightViewProjModel] =
+                                upload_value(clip_matrix);
+                            Horizon::DrawIndexedParams draw_params;
+                            draw_params.debug_label = make_optics_draw_label(
+                                "shadow",
+                                caster.actor_handle,
+                                caster.geometry_handle,
+                                slot.mesh_index,
+                                static_cast<std::uint32_t>(frame_index),
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                0u,
+                                slot.vertex_count,
+                                slot.index_count,
+                                slot.max_index);
+                            shadow.record(slot.geo.index, slot.geo.vertex, draw_params);
+                            ++shadow_draws;
+                            ++native_cascade_draws[cascade_index];
+                            native_cascade_indices[cascade_index] += slot.index_count;
                         }
                     }
                 };
@@ -3780,7 +3777,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 }
                 sun_dir = ktm::normalize(sun_dir);
 
-                const ShadowSceneBounds shadow_scene_bounds = compute_shadow_scene_bounds();
                 const ktm::fvec3 shadow_min_world =
                     shadow_scene_bounds.valid ? shadow_scene_bounds.min_world : scene.min_world;
                 const ktm::fvec3 shadow_max_world =
@@ -3812,6 +3808,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     (!diag.skip_shadows && diag.shadow_cascade_mask != 0u &&
                      sun_intensity > 0.0f) ? 1u : 0u;
                 native_shadows_enabled = hardware_->shadowInfoBufferObjects.shadowEnabled != 0u;
+                prepare_shadow_caster_meshes();
                 (void)write_object_bytes(sceneShadowBuffer,
                                          hardware_->shadowInfoBufferObjects);
 
@@ -3970,8 +3967,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // ================================================================
                 // 8. GPU sync & dispatch
                 // ================================================================
-                const bool is_debug_mode = camera->output_mode != CameraOutputMode::FinalColor;
-                native_debug_mode = is_debug_mode;
                 const uint32_t dispatchX = hardware_->gbufferSize.x;
                 const uint32_t dispatchY = hardware_->gbufferSize.y;
                 const auto actor_pick_request = take_pending_actor_pick(cam_handle);
@@ -4034,6 +4029,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 {
                     const auto native_submit_start = PerfClock::now();
                     auto stream = hardware_->executor.stream();
+                    bool native_submission_cancelled = false;
                     if (is_debug_mode) {
                         // ============================================================
                         // Debug path: visibility + debug_resolve only (skip lighting/sky/tonemap)
@@ -4064,7 +4060,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 break;
                         }
 
-                        stream << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+                        visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+                        stream.append_consuming(visibility);
                         if (!diag.skip_deferred_compute) {
                             if (debugMode == 5u) {
                                 stream << ssao(dispatchX, dispatchY, 1)
@@ -4129,19 +4126,65 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                         // ============================================================
                         // Normal rendering path: full pipeline
                         // ============================================================
-                        stream << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+                        visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+                        stream.append_consuming(visibility);
                         if (!diag.skip_shadows &&
                             hardware_->shadowInfoBufferObjects.shadowEnabled != 0u) {
                             const auto native_shadow_start = PerfClock::now();
-                            for (uint32_t cascade = 0; cascade < kShadowCascadeCount; ++cascade) {
-                                if ((diag.shadow_cascade_mask & (1u << cascade)) == 0u) {
-                                    continue;
-                                }
-                                record_shadow_cascade(
-                                    hardware_->shadowInfoBufferObjects.lightViewProj[cascade],
-                                    hardware_->shadowCascadeImages[cascade],
-                                    cascade);
-                                stream << shadow(kShadowMapSize, kShadowMapSize);
+                            std::array<std::exception_ptr, kShadowCascadeCount>
+                                cascade_errors{};
+                            oneapi::tbb::task_group cascade_tasks;
+                            Corona::Systems::OpticsDetail::for_each_enabled_shadow_cascade(
+                                diag.shadow_cascade_mask,
+                                kShadowCascadeCount,
+                                [&](std::uint32_t cascade) {
+                                    cascade_tasks.run([&, cascade] {
+                                        try {
+                                            record_shadow_cascade(
+                                                hardware_->shadowInfoBufferObjects
+                                                    .lightViewProj[cascade],
+                                                hardware_->shadowCascadeImages[cascade],
+                                                cascade);
+                                        } catch (...) {
+                                            cascade_errors[cascade] =
+                                                std::current_exception();
+                                        }
+                                    });
+                                });
+                            cascade_tasks.wait();
+
+                            Corona::Systems::OpticsDetail::for_each_enabled_shadow_cascade(
+                                diag.shadow_cascade_mask,
+                                kShadowCascadeCount,
+                                [&](std::uint32_t cascade) {
+                                    if (!cascade_errors[cascade]) return;
+                                    native_submission_cancelled = true;
+                                    try {
+                                        std::rethrow_exception(cascade_errors[cascade]);
+                                    } catch (const std::exception& error) {
+                                        CFW_LOG_ERROR(
+                                            "OpticsSystem: shadow cascade recording failed "
+                                            "(cascade={}, error={}); cancelling Native frame",
+                                            cascade,
+                                            error.what());
+                                    } catch (...) {
+                                        CFW_LOG_ERROR(
+                                            "OpticsSystem: shadow cascade recording failed "
+                                            "(cascade={}, unknown error); cancelling Native frame",
+                                            cascade);
+                                    }
+                                });
+
+                            if (!native_submission_cancelled) {
+                                Corona::Systems::OpticsDetail::for_each_enabled_shadow_cascade(
+                                    diag.shadow_cascade_mask,
+                                    kShadowCascadeCount,
+                                    [&](std::uint32_t cascade) {
+                                        auto& cascade_pipeline =
+                                            *shadow_pipelines[cascade];
+                                        cascade_pipeline(kShadowMapSize, kShadowMapSize);
+                                        stream.append_consuming(cascade_pipeline);
+                                    });
                             }
                             native_shadow_ms =
                                 elapsed_ms(native_shadow_start, PerfClock::now());
@@ -4158,6 +4201,10 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                    << sky(dispatchX, dispatchY, 1)
                                    << tonemap(dispatchX, dispatchY, 1);
                         }
+                    }
+
+                    if (native_submission_cancelled) {
+                        continue;
                     }
 
                     if (actor_pick_request && !diag.skip_deferred_compute) {
@@ -4720,12 +4767,12 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
     actor_pick.pushConsts.outputBufferIndex = hardware_->actorPickBuffer.storeDescriptor();
     actor_pick.bind_storage_image(0, hardware_->visibilityImage);
 
+    auto actor_pick_stream = hardware_->executor.stream();
+    actor_pick_stream << Horizon::keep_alive(scene_batch.resource_keep_alive);
+    visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+    actor_pick_stream.append_consuming(visibility);
     const Horizon::SubmitReceipt actor_pick_receipt =
-        hardware_->executor.stream()
-            << Horizon::keep_alive(scene_batch.resource_keep_alive)
-            << visibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y)
-            << actor_pick(1, 1, 1)
-            << Horizon::commit();
+        actor_pick_stream << actor_pick(1, 1, 1) << Horizon::commit();
     hardware_->executor.wait_idle(actor_pick_receipt);
 
     complete_actor_pick(*actor_pick_request, scene_batch.actorHandles);

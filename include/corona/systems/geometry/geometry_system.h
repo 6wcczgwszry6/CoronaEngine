@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -355,6 +356,23 @@ class GeometrySystem : public Kernel::SystemBase {
         std::uint32_t          max_index = 0;
     };
 
+    struct ShadowLodQuery {
+        bool enabled = false;
+        float world_units_per_texel = 0.0f;
+    };
+
+    /// Minimal immutable shadow-pass snapshot. Shadow rendering does not sample
+    /// the material texture, so keeping those handles out of the hot path avoids
+    /// four cascades worth of unnecessary ref-counted copies.
+    struct ShadowMeshSlot {
+        uint32_t          mesh_index = 0;
+        RenderMeshBuffers geo;
+        bool              valid = false;
+        std::uint32_t     vertex_count = 0;
+        std::uint32_t     index_count = 0;
+        std::uint32_t     max_index = 0;
+    };
+
     /// 查询一个 geometry 的所有 MeshSlot（常驻路由，无相机上下文）。
     ///
     /// 适用：V-buffer 收集、Vision BVH 构建、MechanicsSystem 蒙皮、无相机的通用遍历。
@@ -380,6 +398,15 @@ class GeometrySystem : public Kernel::SystemBase {
     [[nodiscard]] std::vector<MeshSlot> query_shadow_mesh_slots(
         std::uintptr_t geometry_handle,
         float world_units_per_texel,
+        float max_abs_scale,
+        std::uint64_t frame = 0) const;
+
+    /// Batch shadow routing for all cascades. Acquires Geometry Storage and the
+    /// LOD cache once, aggregates demand once per mesh, and returns one slot
+    /// vector per input cascade. Disabled cascades return an empty vector.
+    [[nodiscard]] std::vector<std::vector<ShadowMeshSlot>> query_shadow_mesh_slots_batch(
+        std::uintptr_t geometry_handle,
+        std::span<const ShadowLodQuery> cascades,
         float max_abs_scale,
         std::uint64_t frame = 0) const;
 

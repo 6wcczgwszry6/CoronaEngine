@@ -152,7 +152,7 @@ struct Hardware {
     bool shaderHasInit = false;
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> visibilityPipeline;
     std::optional<Corona::Horizon::RasterizerPipeline<visibility_vert_glsl_t, visibility_frag_glsl_t>> uiVisibilityPipeline;
-    std::optional<Corona::Horizon::RasterizerPipeline<shadow_vert_glsl_t, shadow_frag_glsl_t>> shadowPipeline;
+    std::array<std::optional<Corona::Horizon::RasterizerPipeline<shadow_vert_glsl_t, shadow_frag_glsl_t>>, 4> shadowPipelines;
     std::optional<Corona::Horizon::ComputePipeline<ssao_comp_glsl_t>> ssaoPipeline;
     std::optional<Corona::Horizon::ComputePipeline<ssao_blur_comp_glsl_t>> ssaoBlurPipeline;
     std::optional<Corona::Horizon::ComputePipeline<lighting_comp_glsl_t>> lightingPipeline;
