@@ -17,6 +17,9 @@ list(APPEND CMAKE_MODULE_PATH
 
 set_property(GLOBAL PROPERTY USE_FOLDERS ON)
 
+include(corona_dev_bootstrap)
+corona_dev_bootstrap()
+
 # ------------------------------------------------------------------------------
 # Project Declaration
 # ------------------------------------------------------------------------------
@@ -32,9 +35,9 @@ project(
 # ------------------------------------------------------------------------------
 include(corona_options)             # Global build options (editor/examples/runtime switches)
 include(corona_python)              # Embedded Python discovery and dependency checks
+include(corona_compile_config)      # Compiler settings, standards, and shared definitions
 include(corona_third_party)         # Conan-provided external dependency targets
 include(corona_tbb)                 # Engine-owned TBB discovery and runtime copy helpers
-include(corona_compile_config)      # Compiler settings, standards, and shared definitions
 include(corona_add_system)          # Helper for adding system modules
 include(corona_runtime_deps)        # Runtime dependency collection and copy helpers
 include(corona_editor)              # Editor asset packaging helpers

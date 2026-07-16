@@ -29,13 +29,6 @@ class CoronaEngineConan(ConanFile):
         "with_vision": True,
         "with_oidn": False,
         "with_cef": True,
-        "horizon/*:shared": False,
-        "horizon/*:with_tools": True,
-        "horizon/*:with_examples": False,
-        "horizon/*:with_tests": False,
-        "horizon/*:with_ocarina": True,
-        "horizon/*:with_cuda": True,
-        "horizon/*:with_vision_hotfix": True,
         "sdl/*:shared": False,
         "glfw/*:shared": False,
         "volk/*:shared": False,
@@ -48,14 +41,22 @@ class CoronaEngineConan(ConanFile):
     }
 
     def layout(self):
-        cmake_layout(self, build_folder="build/conan")
+        configuration = str(self.settings.build_type).lower()
+        cmake_layout(self, build_folder=f"build/conan/{configuration}")
 
     def set_version(self):
         self.version = os.environ.get("CORONAENGINE_CONAN_VERSION", "0.5.0")
 
     def requirements(self):
-        self.requires("horizon/0.5.0", transitive_headers=True, transitive_libs=True)
         self.requires("ktm/0.2.14", transitive_headers=True)
+        self.requires("pfr/1.91.0", transitive_headers=True)
+        self.requires("spirv-cross/1.4.350.0", transitive_headers=True, transitive_libs=True)
+        self.requires("spirv-tools/1.4.350.0", transitive_headers=True, transitive_libs=True)
+        self.requires("volk/1.4.350.0", transitive_headers=True, transitive_libs=True)
+        self.requires("vulkan-headers/1.4.350.0", transitive_headers=True)
+        self.requires("vulkan-memory-allocator/3.4.0", transitive_headers=True)
+        self.requires("quill/11.0.2", transitive_headers=True, transitive_libs=True)
+        self.requires("slang/2026.10", transitive_headers=True, transitive_libs=True)
         self.requires("assimp/5.4.3", transitive_headers=True, transitive_libs=True)
         self.requires("stb/cci.20230920", transitive_headers=True)
         self.requires("nanobind/2.9.2", transitive_headers=True, transitive_libs=True)
@@ -74,6 +75,9 @@ class CoronaEngineConan(ConanFile):
                           transitive_headers=True, transitive_libs=True)
 
         if bool(self.options.with_vision):
+            self.requires("fmt/12.1.0", transitive_headers=True, transitive_libs=True)
+            self.requires("spdlog/1.17.0", transitive_headers=True, transitive_libs=True)
+            self.requires("xxhash/0.8.3", transitive_headers=True, transitive_libs=True)
             self.requires("cxxopts/3.2.0", transitive_headers=True)
             self.requires("glfw/3.4", transitive_headers=True, transitive_libs=True)
             if bool(self.options.with_oidn):
@@ -84,18 +88,18 @@ class CoronaEngineConan(ConanFile):
         deps.generate()
 
         toolchain = CMakeToolchain(self)
-        cache_variables = toolchain.cache_variables
-        cache_variables["BUILD_SHARED_LIBS"] = bool(self.options.shared)
-        cache_variables["BUILD_CORONA_EDITOR"] = bool(self.options.with_editor)
-        cache_variables["BUILD_CORONA_EXAMPLES"] = bool(self.options.with_examples)
-        cache_variables["BUILD_CORONA_TESTING"] = bool(self.options.with_tests)
-        cache_variables["CORONA_BUILD_VISION"] = bool(self.options.with_vision)
-        cache_variables["VISION_BUILD_OIDN"] = bool(self.options.with_oidn)
-        cache_variables["CORONA_ENABLE_CEF"] = bool(self.options.with_cef)
+        variables = toolchain.variables
+        variables["BUILD_SHARED_LIBS"] = bool(self.options.shared)
+        variables["BUILD_CORONA_EDITOR"] = bool(self.options.with_editor)
+        variables["BUILD_CORONA_EXAMPLES"] = bool(self.options.with_examples)
+        variables["BUILD_CORONA_TESTING"] = bool(self.options.with_tests)
+        variables["CORONA_BUILD_VISION"] = bool(self.options.with_vision)
+        variables["VISION_BUILD_OIDN"] = bool(self.options.with_oidn)
+        variables["CORONA_ENABLE_CEF"] = bool(self.options.with_cef)
 
         if bool(self.options.with_cef):
             cef_dep = self.dependencies["cef-binary"]
-            cache_variables["CORONA_CEF_ROOT"] = cef_dep.package_folder.replace("\\", "/")
+            variables["CORONA_CEF_ROOT"] = cef_dep.package_folder.replace("\\", "/")
 
         toolchain.generate()
 

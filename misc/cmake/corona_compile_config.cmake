@@ -94,24 +94,9 @@ endif()
 # ------------------------------------------------------------------------------
 # Unified UTF-8 policy
 #
-# Effective scope (directory COMPILE_OPTIONS are snapshotted into a target at
-# add_library/add_executable time, and into child directories at
-# add_subdirectory time):
-#
-#   COVERED (created in or under the root scope AFTER this file is included):
-#     - modules/corona_resource
-#     - src/  (engine library + systems)
-#     - vision/  (when CORONA_BUILD_VISION=ON)
-#     - examples/
-#
-#   NOT COVERED (created BEFORE this file is included, by corona_third_party):
-#     - Horizon's Helicon target (uses its own long-form
-#       /source-charset:utf-8 /execution-charset:utf-8 PUBLIC; we strip the
-#       INTERFACE side in corona_third_party.cmake to avoid D8016 in our
-#       consumers, while Helicon's own TU compilation keeps the long form).
-#     - SDL, glfw, volk, assimp, Vulkan-Headers, VMA, etc. — these manage
-#       their own encoding policy via upstream CMake.
-#     - imgui — removed (no longer a dependency); Vision bundles its own copy
+# This file is included before Horizon is added, so the workspace source tree
+# and all CoronaEngine subdirectories inherit the same policy. Horizon's legacy
+# long-form charset options are normalized in corona_third_party.cmake.
 #
 # We deliberately use the shortcut /utf-8 (== /source-charset:utf-8 +
 # /execution-charset:utf-8) because OpenUSD also injects /utf-8 on every pxr

@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "url": "https://github.com/CoronaEngine/Horizon.git",
+  "ref": "conan-migration",
+  "commit": "a11b3af4fe6f012b9babc73f146269379a3de92a"
+}

@@ -16,9 +16,16 @@ if(NOT CORONA_ENABLE_CEF)
 endif()
 
 if(NOT DEFINED CORONA_CEF_ROOT OR CORONA_CEF_ROOT STREQUAL "")
+    find_package(cef-binary CONFIG REQUIRED)
+    if(DEFINED cef-binary_INCLUDE_DIR AND NOT cef-binary_INCLUDE_DIR STREQUAL "")
+        get_filename_component(CORONA_CEF_ROOT "${cef-binary_INCLUDE_DIR}" DIRECTORY)
+    endif()
+endif()
+
+if(NOT DEFINED CORONA_CEF_ROOT OR CORONA_CEF_ROOT STREQUAL "")
     message(FATAL_ERROR
         "CEF is enabled but CORONA_CEF_ROOT is not set. "
-        "Run Conan install/configure through tools/dev.ps1 so cef-binary provides it.")
+        "Run 'uv run python tools/dev.py configure' so cef-binary provides it.")
 endif()
 
 get_filename_component(CEF_ROOT "${CORONA_CEF_ROOT}" ABSOLUTE)

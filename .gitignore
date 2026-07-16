@@ -6,6 +6,10 @@
 /dist/
 /cmake-build-*/
 
+# Managed source workspaces. Keep lock files tracked.
+/.workspace/*
+!/.workspace/horizon.lock.json
+
 # CMake intermediate files
 CMakeUserPresets.json
 CMakeCache.txt
@@ -20,6 +24,7 @@ Makefile
 .vscode/
 .idea/
 .vs/
+.venv/
 .claude/
 codex.md
 AGENTS.md
