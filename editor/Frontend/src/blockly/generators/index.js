@@ -16,7 +16,6 @@ import { defineObjectGenerators } from './object';
 import { defineUiGenerators } from './ui';
 import { defineMathGenerators } from './math';
 import { defineVariableGenerators } from './variable';
-import { registerDataNamesFromState } from '../blocks/variable';
 
 // 注册所有分类的生成器（幂等）
 try { defineAppearanceGenerators?.(); } catch {}
@@ -368,15 +367,6 @@ export function nodeGraphToCode(rawGraph) {
   const graph = rawGraph && typeof rawGraph === 'object' ? rawGraph : {};
   const nodes = Array.isArray(graph.nodes) ? graph.nodes : [];
   const edges = Array.isArray(graph.edges) ? graph.edges : [];
-
-  // Serialized workspaces can reference data names that are not in the default
-  // dropdown yet. Register every graph workspace before Blockly deserializes any
-  // block so code generation is deterministic and does not silently fall back
-  // to another variable/list name based on which node the user last opened.
-  registerDataNamesFromState(graph.globalVariablesWorkspace || {});
-  for (const node of nodes) registerDataNamesFromState(node?.workspace || {});
-  for (const edge of edges) registerDataNamesFromState(edge?.conditionWorkspace || {});
-
   validateNodeGraph(graph);
   const startNode = nodes.find((node) => node?.nodeType === 'start');
 
@@ -544,11 +534,7 @@ export function nodeGraphToCode(rawGraph) {
     } else {
       parts.push(`                CoronaEngine.node_graph_waiting('', ${pythonString('\u7b49\u5f85\u8282\u70b9\u51fa\u7ebf')})`);
     }
-    const requestedTickInterval = Number(node?.tickInterval);
-    const tickInterval = Number.isFinite(requestedTickInterval)
-      ? Math.max(0.005, Math.min(0.5, requestedTickInterval))
-      : 0.05;
-    parts.push(`                CoronaEngine.wait(${tickInterval})`);
+    parts.push('                CoronaEngine.wait(0.05)');
     parts.push('            CoronaEngine.wait(0.01)');
   });
   parts.push('        else:');

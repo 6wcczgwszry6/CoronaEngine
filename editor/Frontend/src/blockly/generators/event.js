@@ -74,7 +74,7 @@ export const defineEventGenerators = () => {
     let branch = pythonGenerator.statementToCode(block, 'DO');
     if (!branch) branch = pythonGenerator.INDENT + 'pass\n';
     return (
-      `if str(_event_type or '').strip().lower() == 'click' and str(_button or '').strip().lower() in ('${String(buttonMap[button] || button).toLowerCase()}', '${String(button || '').toLowerCase()}', '0' if '${button}' == 'left' else ''):\n` +
+      `if _event_type == 'click' and _button == '${buttonMap[button] || button}':\n` +
       indent(branch)
     );
   };

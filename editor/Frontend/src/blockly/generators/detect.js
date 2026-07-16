@@ -175,8 +175,6 @@ export const defineDetectGenerators = () => {
     pythonGenerator.ORDER_FUNCTION_CALL,
   ];
   pythonGenerator.forBlock.detect_mouse_pick_object = () => ['CoronaEngine.mouse_pick_object()', pythonGenerator.ORDER_FUNCTION_CALL];
-  pythonGenerator.forBlock.detect_mouse_left_half = () => ['CoronaEngine.mouse_left_half()', pythonGenerator.ORDER_FUNCTION_CALL];
-  pythonGenerator.forBlock.detect_mouse_right_half = () => ['CoronaEngine.mouse_right_half()', pythonGenerator.ORDER_FUNCTION_CALL];
   pythonGenerator.forBlock.detect_mouse_pick_hit_tag = (block) => [`CoronaEngine.mouse_pick_hit_tag(${valueOrText(block,'TAG')})`, pythonGenerator.ORDER_FUNCTION_CALL];
 
 };

@@ -232,7 +232,6 @@ let sharedStore = null;
 
 let loadedActorKey = '';
 let loadedTargetInfo = null;
-const targetEnabledByKey = new Map();
 let currentActorNameVar = '';
 let pollTimer = null;
 let autoSaveTimer = null;
@@ -295,8 +294,6 @@ let scriptKeyUpHandler = null;
 
 function setupScriptKeyForwarding() {
   scriptKeyHandler = (e) => {
-    // Native SDL is authoritative in CEF; retain this only for browser development.
-    if (window.coronaBridge || e.__coronaScratchKeyForwarded) return;
     // 焦点在输入框时跳过（不干扰文字输入）
     const activeEl = document.activeElement;
     if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
@@ -305,7 +302,6 @@ function setupScriptKeyForwarding() {
 
     const code = e.code || e.key;
     const displayKey = e.key || code;
-    e.__coronaScratchKeyForwarded = true;
     const mods = [];
     if (e.ctrlKey || e.metaKey) mods.push('Ctrl');
     if (e.shiftKey) mods.push('Shift');
@@ -321,16 +317,18 @@ function setupScriptKeyForwarding() {
   };
 
   scriptKeyUpHandler = (e) => {
-    if (window.coronaBridge || e.__coronaScratchKeyForwarded) return;
-    e.__coronaScratchKeyForwarded = true;
-    // Key-up is always forwarded so a key cannot remain stuck after focus moves.
+    const activeEl = document.activeElement;
+    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
+      return;
+    }
+    // ── 快速通道：coronaBridge.injectInput → CEF ProcessMessage → 队列 → Python 批量消费 ──
     const bridge = window.coronaBridge;
     if (bridge && typeof bridge.injectInput === 'function') {
       try { bridge.injectInput(1, e.code || e.key, e.key || e.code); return; } catch (e) {}
     }
+    // ── 慢通道：cefQuery 回退 ──
     scriptingService.sendKeyUpEvent(e.code || e.key, e.key || e.code).catch(() => {});
   };
-
 
   document.addEventListener('keydown', scriptKeyHandler, true);
   document.addEventListener('keyup', scriptKeyUpHandler, true);
@@ -528,16 +526,13 @@ function saveCurrentWorkspace() {
     updateGeneratedCode();
     const state = BlocklyLib.serialization.workspaces.save(workspace);
     const target = loadedTargetInfo || getCurrentTarget();
-    const hasBlocks = Array.isArray(state?.blocks?.blocks) && state.blocks.blocks.length > 0;
-    const wasEnabled = targetEnabledByKey.get(getTargetKey(target));
     latestBlocklySavePromise = scriptingService.saveBlocklyTarget({
       target_type: target.targetType,
       scene_name: target.scene,
       actor_name: target.actor,
       workspace: state,
       code: generatedCode.value || '',
-      enabled: hasBlocks && wasEnabled !== false,
-      runnable: hasBlocks,
+      enabled: true,
     }).catch((e) => {
       console.warn('[Blockly] 保存项目积木镜像失败:', e);
       return false;
@@ -630,9 +625,6 @@ async function loadWorkspaceStateFromProject(target) {
   if (payload?.status === 'error') {
     throw new Error(payload.message || t('blockly.loadFailed'));
   }
-  const key = getTargetKey(target);
-  if (payload?.status === 'loaded') targetEnabledByKey.set(key, payload.target?.enabled !== false);
-  else targetEnabledByKey.delete(key);
   return payload?.workspace && typeof payload.workspace === 'object'
     ? payload.workspace
     : {};

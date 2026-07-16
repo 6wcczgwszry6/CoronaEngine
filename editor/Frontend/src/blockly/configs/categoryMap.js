@@ -98,7 +98,6 @@ export const BLOCK_CATEGORY_MAP = {
   event_mouse_contextmenu: '事件',
 
   // ── 控制 (13 自定义 + 8 标准逻辑 + 6 标准循环 = 27) ──
-  control_run_project_script: '控制',
   control_wait: '控制',
   control_for: '控制',
   control_forX: '控制',
@@ -252,7 +251,6 @@ export const BLOCK_CATEGORY_MAP = {
   object_restore_checkpoint: '\u5bf9\u8c61',
   object_move_to_lane: '\u5bf9\u8c61',
   object_lane_index: '\u5bf9\u8c61',
-  object_tag_numbered_range: '\u5bf9\u8c61',
   object_set_random_position: '\u5bf9\u8c61',
   object_spawn_random_box: '\u5bf9\u8c61',
   object_scatter_tag: '\u5bf9\u8c61',
@@ -267,7 +265,6 @@ export const BLOCK_CATEGORY_MAP = {
   node_when_exit: '\u4e8b\u4ef6',
   control_cooldown_ready: '\u63a7\u5236',
   control_reset_cooldown: '\u63a7\u5236',
-  control_start_cooldown: '\u63a7\u5236',
   detect_touch_started: '\u4fa6\u6d4b',
   detect_touch_tag_started: '\u4fa6\u6d4b',
   detect_crossed_x_once: '\u4fa6\u6d4b',
@@ -303,18 +300,6 @@ export const BLOCK_CATEGORY_MAP = {
   object_reset_crossed_once: '对象',
   detect_position_near: '侦测',
   detect_mouse_pick_object: '侦测',
-  detect_mouse_left_half: '侦测',
-  detect_mouse_right_half: '侦测',
   detect_mouse_pick_hit_tag: '侦测',
 
-  camera_first_person_follow: '\u6444\u50cf\u673a',
-  object_breakout_reset_round: '\u5bf9\u8c61',
-  object_breakout_paddle_control: '\u5bf9\u8c61',
-  object_breakout_step: '\u5bf9\u8c61',
-  object_first_person_move: '\u5bf9\u8c61',
-  combat_set_tag_health: '\u5bf9\u8c61',
-  combat_melee_attack: '\u5bf9\u8c61',
-  combat_enemy_chase_tag: '\u5bf9\u8c61',
-  combat_enemy_contact_damage: '\u5bf9\u8c61',
-  combat_alive_count: '\u5bf9\u8c61',
 };

@@ -95,39 +95,4 @@ export const defineCameraBlocks = () => {
     },
   };
 
-  Blockly.Blocks['camera_third_person_orbit'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('\u7b2c\u4e09\u4eba\u79f0\u6444\u50cf\u673a\u8ddf\u968f')
-        .appendField(new Blockly.FieldTextInput('CoinHero'), 'NAME')
-        .appendField('\u8ddd\u79bb')
-        .appendField(new Blockly.FieldNumber(7, 1), 'DISTANCE')
-        .appendField('\u9ad8\u5ea6')
-        .appendField(new Blockly.FieldNumber(2.4), 'HEIGHT')
-        .appendField('\u9f20\u6807\u7075\u654f\u5ea6')
-        .appendField(new Blockly.FieldNumber(0.18, 0.01), 'SENSITIVITY');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('camera_blocks');
-      this.setTooltip('\u9501\u5b9a\u9f20\u6807\u540e\uff0c\u56f4\u7ed5\u89d2\u8272\u65cb\u8f6c\u4e3b\u6444\u50cf\u673a\u5e76\u6301\u7eed\u671d\u5411\u89d2\u8272\u3002');
-    },
-  };
-
-  Blockly.Blocks['camera_first_person_follow'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('\u7b2c\u4e00\u4eba\u79f0\u6444\u50cf\u673a\u8ddf\u968f')
-        .appendField(new Blockly.FieldTextInput('FighterPlayer'), 'NAME')
-        .appendField('\u9ad8\u5ea6').appendField(new Blockly.FieldNumber(1.55), 'HEIGHT')
-        .appendField('\u7075\u654f\u5ea6').appendField(new Blockly.FieldNumber(0.16, 0.01), 'SENSITIVITY')
-        .appendField('\u6b66\u5668').appendField(new Blockly.FieldTextInput('Sword'), 'WEAPON');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('camera_blocks');
-      this.setTooltip('\u9501\u5b9a\u9f20\u6807\u540e\uff0c\u6444\u50cf\u673a\u8d34\u8fd1\u89d2\u8272\u89c6\u89d2\uff0c\u9f20\u6807\u63a7\u5236\u671d\u5411\u5e76\u540c\u6b65\u6b66\u5668\u4f4d\u7f6e\u3002');
-    },
-  };
-
 };

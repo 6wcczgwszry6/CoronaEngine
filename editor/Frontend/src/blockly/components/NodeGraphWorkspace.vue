@@ -1,9 +1,7 @@
 <template>
-  <Teleport to="body" :disabled="!isFullscreen">
   <div
     ref="workspaceRootRef"
     class="node-graph-workspace"
-    :class="{ fullscreen: isFullscreen }"
     :style="layoutStyle"
   >
     <div class="ng-toolbar">
@@ -24,16 +22,6 @@
           {{ codeRunning ? '停止' : '运行' }}
         </button>
         <span v-if="runStatus" class="ng-run-status" :title="runDetail || runStatus" @click="toggleRunDetail">{{ runStatus }}</span>
-        <button
-          type="button"
-          class="ng-mode fullscreen-toggle"
-          :class="{ active: isFullscreen }"
-          :disabled="fullscreenTransitionBusy"
-          :title="isFullscreen ? '退出全屏编辑（Esc）' : '全屏编辑节点图'"
-          @click.stop="toggleFullscreen"
-        >
-          {{ isFullscreen ? '退出全屏' : '全屏编辑' }}
-        </button>
         <button class="ng-mode" :class="{ active: mode === 'select' }" @click="setMode('select')">
           选择
         </button>
@@ -81,11 +69,10 @@
       <div class="ng-splitter vertical" title="拖动调整工具箱宽度" @pointerdown="beginLayoutResize($event, 'toolbox')"></div>
       <main
         ref="canvasRef"
-        class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive, panning: isCanvasPanning }"
+        class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive }"
         @dragover.prevent
         @drop.prevent="handleCanvasDrop"
         @wheel.prevent="handleCanvasWheel"
-        @pointerdown="beginCanvasPan"
         @pointermove="handleCanvasPointerMove"
         @pointerleave="handleCanvasPointerLeave"
         @click="handleCanvasClick"
@@ -93,7 +80,6 @@
         <div class="ng-canvas-head">
           <div>
             <strong>节点编辑区</strong>
-            <small class="ng-canvas-hint">空白处按住拖动画布 · 中键拖动 · 滚轮缩放</small>
           </div>
           <div class="ng-canvas-actions">
             <span class="ng-pill">{{ nodes.length }} 节点 / {{ edges.length }} 连线</span>
@@ -172,9 +158,15 @@
             <span class="ng-node-type-badge">{{ nodeTypeLabel(node.nodeType) }}</span>
           </div>
           <div class="ng-node-display-name">{{ displayNodeName(node) }}</div>
-          <template v-for="port in visiblePorts(node)" :key="`${node.id}-${port.side}-${port.index}`">
+          <template
+            v-if="
+              (selectedKind === 'node' && selectedId === node.id) ||
+              Boolean(pendingPort)
+            "
+          >
             <button
-              v-if="shouldShowPort(node, port)"
+              v-for="port in visiblePorts(node)"
+              :key="`${node.id}-${port.side}-${port.index}`"
               type="button"
               class="ng-port"
               :class="[
@@ -294,7 +286,6 @@
       {{ externalDrag.label }}
     </div>
   </div>
-  </Teleport>
 </template>
 
 <script setup>
@@ -302,7 +293,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { appService, scriptingService, sceneService } from '@/utils/bridge.js';
+import { scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 
@@ -315,12 +306,7 @@ const { error: logError } = useErrorHandler('NodeGraphWorkspace');
 const NODE_WIDTH = 170,
   NODE_BASE_HEIGHT = 98,
   NODE_PORT_GAP = 20,
-  CANVAS_WORLD_WIDTH = 4800,
-  CANVAS_WORLD_HEIGHT = 3200,
-  CANVAS_OVERSCROLL = 180,
   SAVE_DELAY = 900;
-const isFullscreen = ref(false);
-const fullscreenTransitionBusy = ref(false);
 const mode = ref('select'),
   selectedKind = ref(''),
   selectedId = ref(''),
@@ -332,9 +318,8 @@ const workspaceRootRef = ref(null),
   variablesBlocklyRef = ref(null),
   activeBlocklyRef = ref(null),
   edgeNameInputRef = ref(null);
-const canvasSize = reactive({ width: CANVAS_WORLD_WIDTH, height: CANVAS_WORLD_HEIGHT });
+const canvasSize = reactive({ width: 900, height: 520 });
 const viewport = reactive({ scale: 1, offsetX: 0, offsetY: 0 });
-const isCanvasPanning = ref(false);
 const connectionPointer = reactive({ active: false, x: 0, y: 0 });
 const graph = reactive({ version: 1, nodes: [], edges: [], globalVariablesWorkspace: {} });
 const codeRunning = ref(false);
@@ -383,57 +368,6 @@ const layoutStyle = computed(() => ({
   '--inspector-width': `${layout.inspectorWidth}px`,
   '--variables-height': `${layout.variablesHeight}px`,
 }));
-async function toggleFullscreen() {
-  if (fullscreenTransitionBusy.value) return;
-  const next = !isFullscreen.value;
-  fullscreenTransitionBusy.value = true;
-
-  // SceneDatas runs in an independent CEF surface. A CSS overlay cannot grow beyond
-  // that surface, so detach the whole panel first and let the node editor fill the
-  // resulting native window. Explicit desired-state commands avoid reversing a
-  // still-pending detach transition.
-  const screenWidth = Number(window.screen?.availWidth || window.screen?.width || 1368);
-  const screenHeight = Number(window.screen?.availHeight || window.screen?.height || 768);
-  // SDL expects physical pixels while the browser exposes screen dimensions in CSS pixels.
-  // Scale the requested detached window geometry so fullscreen stays fullscreen on high-DPI
-  // displays instead of shrinking to roughly 1 / devicePixelRatio of the desktop.
-  const deviceScale = Math.max(1, Number(window.devicePixelRatio || 1));
-  const marginX = 16;
-  const marginTop = 16;
-  const marginBottom = 56;
-  const availableWidth = Math.max(1100, Math.round((screenWidth - marginX * 2) * deviceScale));
-  const availableHeight = Math.max(700, Math.round((screenHeight - marginTop - marginBottom) * deviceScale));
-  try {
-    if (next) {
-      await appService.detachPanel({
-        x: Math.round(marginX * deviceScale),
-        y: Math.round(marginTop * deviceScale),
-        width: availableWidth,
-        height: availableHeight,
-        maximized: true,
-      });
-    } else {
-      await appService.redockPanel();
-    }
-    isFullscreen.value = next;
-  } catch (error) {
-    logError(next ? '全屏编辑节点图失败' : '退出全屏编辑失败', error);
-  } finally {
-    window.setTimeout(() => {
-      fullscreenTransitionBusy.value = false;
-      nextTick(() => {
-        updateCanvasSize();
-        resizeEmbeddedWorkspaces();
-      });
-    }, 180);
-  }
-}
-function handleFullscreenKey(event) {
-  if (event.key === 'Escape' && isFullscreen.value) {
-    event.preventDefault();
-    toggleFullscreen();
-  }
-}
 const zoomText = computed(() => `${Math.round(viewport.scale * 100)}%`);
 const dragGhostStyle = computed(() => ({
   left: `${externalDrag.clientX + 14}px`,
@@ -449,14 +383,11 @@ let isLoading = false,
   saveTimer = null,
   resizeObserver = null,
   dragState = null,
-  panState = null,
-  suppressCanvasClick = false,
   macroPointerDrag = null,
   layoutResizeState = null,
   runPollTimer = null,
   gamePreviewGuardTimer = null,
   startedRunForTarget = false;
-const targetEnabledByKey = new Map();
 const targetKey = computed(
   () => `${props.targetType || 'actor'}:${props.sceneName || ''}:${props.actorName || ''}`
 );
@@ -691,16 +622,6 @@ function screenToWorld(clientX, clientY) {
     y: (clientY - r.top - viewport.offsetY) / viewport.scale,
   };
 }
-function clampViewport() {
-  const r = canvasRef.value?.getBoundingClientRect?.();
-  if (!r) return;
-  const scaledWidth = canvasSize.width * viewport.scale;
-  const scaledHeight = canvasSize.height * viewport.scale;
-  const minX = Math.min(CANVAS_OVERSCROLL, r.width - scaledWidth - CANVAS_OVERSCROLL);
-  const minY = Math.min(CANVAS_OVERSCROLL, r.height - scaledHeight - CANVAS_OVERSCROLL);
-  viewport.offsetX = Math.min(CANVAS_OVERSCROLL, Math.max(minX, viewport.offsetX));
-  viewport.offsetY = Math.min(CANVAS_OVERSCROLL, Math.max(minY, viewport.offsetY));
-}
 function handleCanvasWheel(e) {
   if (!canvasRef.value) return;
   const r = canvasRef.value.getBoundingClientRect();
@@ -713,42 +634,6 @@ function handleCanvasWheel(e) {
   viewport.scale = nextScale;
   viewport.offsetX = localX - world.x * nextScale;
   viewport.offsetY = localY - world.y * nextScale;
-  clampViewport();
-}
-function beginCanvasPan(e) {
-  if (e.button !== 0 && e.button !== 1) return;
-  if (e.button === 0 && e.target?.closest?.('.ng-node,.ng-port,.ng-condition-block,.ng-canvas-head,.ng-edge-hit,.ng-edge-line,button,input,textarea,select,.blocklySvg')) return;
-  e.preventDefault();
-  panState = {
-    pointerId: e.pointerId,
-    startX: e.clientX,
-    startY: e.clientY,
-    originX: viewport.offsetX,
-    originY: viewport.offsetY,
-    moved: false,
-  };
-  isCanvasPanning.value = true;
-  window.addEventListener('pointermove', moveCanvasPan);
-  window.addEventListener('pointerup', endCanvasPan, { once: true });
-  window.addEventListener('pointercancel', endCanvasPan, { once: true });
-}
-function moveCanvasPan(e) {
-  if (!panState || e.pointerId !== panState.pointerId) return;
-  const dx = e.clientX - panState.startX;
-  const dy = e.clientY - panState.startY;
-  if (Math.abs(dx) + Math.abs(dy) > 4) panState.moved = true;
-  viewport.offsetX = panState.originX + dx;
-  viewport.offsetY = panState.originY + dy;
-  clampViewport();
-}
-function endCanvasPan(e) {
-  if (!panState || (e?.pointerId != null && e.pointerId !== panState.pointerId)) return;
-  suppressCanvasClick = Boolean(panState.moved);
-  panState = null;
-  isCanvasPanning.value = false;
-  window.removeEventListener('pointermove', moveCanvasPan);
-  window.removeEventListener('pointerup', endCanvasPan);
-  window.removeEventListener('pointercancel', endCanvasPan);
 }
 function persistLayout() {
   try {
@@ -840,7 +725,6 @@ function resetZoom() {
   viewport.scale = 1;
   viewport.offsetX = 0;
   viewport.offsetY = 0;
-  clampViewport();
 }
 function handleCanvasDrop(e) {
   const raw = e.dataTransfer?.getData('application/x-corona-nodegraph');
@@ -864,10 +748,6 @@ function handleCanvasPointerLeave() {
   connectionPointer.active = false;
 }
 function handleCanvasClick() {
-  if (suppressCanvasClick) {
-    suppressCanvasClick = false;
-    return;
-  }
   if (mode.value !== 'delete') {
     pendingPort.value = null;
     connectionPointer.active = false;
@@ -1062,13 +942,6 @@ function isPortUsed(id, p) {
       (e.target.nodeId === id && e.target.side === p.side && (e.target.index || 0) === p.index)
   );
 }
-function shouldShowPort(node, port) {
-  return (
-    isPortUsed(node.id, port) ||
-    (selectedKind.value === 'node' && selectedId.value === node.id) ||
-    Boolean(pendingPort.value)
-  );
-}
 function portStyle(node, p) {
   const pt = portPoint(node, p);
   return { left: `${pt.x - node.x - 6}px`, top: `${pt.y - node.y - 6}px` };
@@ -1233,47 +1106,12 @@ function graphSnapshot() {
     return { version: 1, nodes: [], edges: [], globalVariablesWorkspace: {} };
   }
 }
-const PORT_SIDES = ['left', 'right', 'bottom'];
 function normalizeEndpoint(e) {
-  const rawIndex = Number(e?.index);
   return {
-    nodeId: e?.nodeId || '',
-    side: PORT_SIDES.includes(e?.side) ? e.side : 'right',
-    index: Number.isFinite(rawIndex) ? Math.max(0, Math.trunc(rawIndex)) : 0,
+    nodeId: e.nodeId || '',
+    side: ['left', 'right', 'bottom'].includes(e.side) ? e.side : 'right',
+    index: Number.isFinite(Number(e.index)) ? Number(e.index) : 0,
   };
-}
-function endpointPortKey(endpoint) {
-  return `${endpoint.nodeId}:${endpoint.side}:${endpoint.index}`;
-}
-function redistributeDuplicatePorts(edges) {
-  const reserved = new Set();
-  for (const edge of edges) {
-    reserved.add(endpointPortKey(edge.source));
-    reserved.add(endpointPortKey(edge.target));
-  }
-
-  const seen = new Map();
-  let changed = false;
-  for (const edge of edges) {
-    for (const role of ['source', 'target']) {
-      const endpoint = edge[role];
-      const originalKey = endpointPortKey(endpoint);
-      const occurrence = seen.get(originalKey) || 0;
-      seen.set(originalKey, occurrence + 1);
-      if (occurrence === 0) continue;
-
-      let nextIndex = 0;
-      let nextKey = `${endpoint.nodeId}:${endpoint.side}:${nextIndex}`;
-      while (reserved.has(nextKey)) {
-        nextIndex += 1;
-        nextKey = `${endpoint.nodeId}:${endpoint.side}:${nextIndex}`;
-      }
-      endpoint.index = nextIndex;
-      reserved.add(nextKey);
-      changed = true;
-    }
-  }
-  return changed;
 }
 function normalizeGraph(raw) {
   const n = raw && typeof raw === 'object' ? raw : {};
@@ -1332,16 +1170,13 @@ function getNodeFrom(list, id) {
 function applyGraph(next) {
   graph.version = 1;
   graph.nodes = next.nodes;
-  const validEdges = next.edges.filter(
+  graph.edges = next.edges.filter(
     (e) => getNodeFrom(next.nodes, e.source.nodeId) && getNodeFrom(next.nodes, e.target.nodeId)
   );
-  const portsRedistributed = redistributeDuplicatePorts(validEdges);
-  graph.edges = validEdges;
   graph.globalVariablesWorkspace = next.globalVariablesWorkspace || {};
   selectedKind.value = graph.nodes.length ? 'node' : '';
   selectedId.value = graph.nodes[0]?.id || '';
   pendingPort.value = null;
-  return portsRedistributed;
 }
 function scheduleSave() {
   if (isLoading || !props.actorName) return;
@@ -1394,7 +1229,7 @@ async function saveNow(targetOverride = null) {
       script_kind: 'node_graph',
       workspace: snapshot,
       code,
-      enabled: targetEnabledByKey.get(storageKeyForTarget(target)) ?? true,
+      enabled: true,
       runnable,
       validation_errors: validationErrors,
     }));
@@ -1428,22 +1263,20 @@ async function loadGraphForCurrentTarget() {
     }));
     if (response?.status === 'error') throw new Error(response.message || '节点图加载失败');
     if (response?.status === 'loaded') {
-      targetEnabledByKey.set(storageKeyForTarget(target), response.target?.enabled !== false);
-      shouldMigrateLocal = applyGraph(normalizeGraph(response.workspace || {}));
+      applyGraph(normalizeGraph(response.workspace || {}));
       saveLabel.value = '项目节点图已加载';
     } else {
-      targetEnabledByKey.set(storageKeyForTarget(target), true);
       const raw = window.localStorage?.getItem(storageKeyForTarget(target));
-      const portsRedistributed = applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
-      shouldMigrateLocal = Boolean(raw) || portsRedistributed;
+      applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
+      shouldMigrateLocal = Boolean(raw);
       saveLabel.value = raw ? '已加载本地节点图，正在迁移...' : '新节点图';
     }
   } catch (error) {
     logError('加载项目节点图失败', error);
     try {
       const raw = window.localStorage?.getItem(storageKeyForTarget(currentTarget()));
-      const portsRedistributed = applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
-      shouldMigrateLocal = Boolean(raw) || portsRedistributed;
+      applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
+      shouldMigrateLocal = Boolean(raw);
       saveLabel.value = raw ? '项目加载失败，已使用本地副本' : '节点图加载失败';
     } catch (_) {
       applyGraph(normalizeGraph({}));
@@ -1725,9 +1558,8 @@ async function refreshSceneActorOptions() {
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
   if (!r) return;
-  canvasSize.width = Math.max(CANVAS_WORLD_WIDTH, Math.ceil(r.width / 0.4));
-  canvasSize.height = Math.max(CANVAS_WORLD_HEIGHT, Math.ceil(r.height / 0.4));
-  clampViewport();
+  canvasSize.width = Math.max(900, r.width);
+  canvasSize.height = Math.max(980, r.height);
 }
 watch(
   () => [props.sceneName, props.actorName, props.targetType],
@@ -1768,7 +1600,6 @@ function unregisterNodeGraphFlusher() {
 }
 onMounted(() => {
   window.addEventListener('corona-game-preview-status', onGamePreviewStatus);
-  window.addEventListener('keydown', handleFullscreenKey);
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
   if (window.__coronaGamePreviewState) {
     applyGamePreviewGuard(window.__coronaGamePreviewState);
@@ -1783,11 +1614,6 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   window.removeEventListener('corona-game-preview-status', onGamePreviewStatus);
-  window.removeEventListener('keydown', handleFullscreenKey);
-  if (isFullscreen.value) {
-    appService.redockPanel().catch(() => {});
-    isFullscreen.value = false;
-  }
   coronaEventBus.off('viewport-controls-state', onViewportControlsState);
   if (gamePreviewGuardTimer) {
     window.clearInterval(gamePreviewGuardTimer);
@@ -1800,7 +1626,6 @@ onBeforeUnmount(() => {
   clearRunPoll();
   clearExternalDrag();
   cancelMacroPointerDrag();
-  endCanvasPan();
   if (startedRunForTarget || codeRunning.value) scriptingService.stopScriptExecution(false).catch(() => {});
   setNodeGraphInputLocked(false);
   window.removeEventListener('mousemove', onDragMove);
@@ -1821,25 +1646,7 @@ onBeforeUnmount(() => {
   border: 1px solid #273244;
   border-radius: 12px;
 }
-.node-graph-workspace.fullscreen {
-  position: fixed;
-  inset: 12px;
-  z-index: 2147483000;
-  width: auto;
-  height: auto;
-  min-height: 0;
-  border-radius: 10px;
-  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.72);
-}
-.node-graph-workspace.fullscreen::before {
-  content: '';
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background: rgba(2, 6, 12, 0.82);
-}
 .ng-toolbar {
-  position: relative;
   height: 42px;
   flex: 0 0 auto;
   display: flex;
@@ -1877,20 +1684,6 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding-right: 82px;
-}
-.fullscreen-toggle {
-  position: absolute;
-  top: 7px;
-  right: 8px;
-  z-index: 20;
-  min-width: 72px;
-  border-color: #38bdf8 !important;
-  color: #bae6fd !important;
-}
-.fullscreen-toggle.active {
-  background: #0369a1 !important;
-  color: #fff !important;
 }
 .ng-run {
   height: 28px;
@@ -2094,13 +1887,8 @@ onBeforeUnmount(() => {
 .ng-canvas {
   position: relative;
   overflow: hidden;
-  cursor: grab;
   background: #0d131b;
   transition: box-shadow 120ms ease, border-color 120ms ease;
-}
-.ng-canvas.panning {
-  cursor: grabbing;
-  user-select: none;
 }
 .ng-canvas.drop-active {
   border-color: #60a5fa;
@@ -2155,13 +1943,6 @@ onBeforeUnmount(() => {
   color: #94a3b8;
   font-size: 11px;
   margin-top: 2px;
-}
-.ng-canvas-hint {
-  display: block;
-  margin-top: 3px;
-  color: #7f8ea3;
-  font-size: 11px;
-  font-weight: 500;
 }
 .ng-canvas-actions {
   display: flex;
@@ -2238,7 +2019,6 @@ onBeforeUnmount(() => {
   stroke: #fb7185;
 }
 .ng-node {
-  cursor: move;
   position: absolute;
   z-index: 3;
   padding: 10px 11px;

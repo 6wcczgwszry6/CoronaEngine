@@ -1,11 +1,6 @@
 import { pythonGenerator } from 'blockly/python';
 
 export const defineControlGenerators = () => {
-  pythonGenerator.forBlock['control_run_project_script'] = function (block) {
-    const scriptPath = String(block.getFieldValue('PATH') || '').trim();
-    return `CoronaEngine.run_project_script(${JSON.stringify(scriptPath)})\n`;
-  };
-
   pythonGenerator.forBlock['control_wait'] = function (block) {
     const seconds = block.getFieldValue('SECONDS');
     return `CoronaEngine.wait(${seconds})\n`;
@@ -126,10 +121,5 @@ export const defineControlGenerators = () => {
     return [`CoronaEngine.cooldown_ready(${name}, ${seconds}, ${consume})`, pythonGenerator.ORDER_FUNCTION_CALL];
   };
   pythonGenerator.forBlock.control_reset_cooldown = (block) => `CoronaEngine.reset_cooldown(${pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''"})\n`;
-  pythonGenerator.forBlock.control_start_cooldown = (block) => {
-    const name = pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''";
-    const seconds = pythonGenerator.valueToCode(block, 'SECONDS', pythonGenerator.ORDER_NONE) || block.getFieldValue('SECONDS_NUMBER') || '0';
-    return `CoronaEngine.start_cooldown(${name}, ${seconds})\n`;
-  };
 
 };
