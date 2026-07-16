@@ -1346,6 +1346,11 @@ const debounced = (key, fn, delay = 200) => {
   _debounceTimers[key] = setTimeout(fn, delay);
 };
 
+const normalizeCollisionType = (value) => {
+  if (value === 'none' || value === 'box' || value === 'mesh') return value;
+  return value === false ? 'none' : 'box';
+};
+
 // ========== 路由参数 ==========
 const route = useRoute();
 
@@ -1969,7 +1974,7 @@ const loadActorData = async (sceneId, actorId) => {
         actorData.value.hasGeometry = false;
       }
 
-      actorData.value.collision.type = data.collision || 'none';
+      actorData.value.collision.type = normalizeCollisionType(data.collision);
       actorData.value.script.path = data.script || '';
 
       // 相机锁定数据
@@ -2074,6 +2079,7 @@ const PROPERTY = {
   PhysicsEnabled: 5,
   LinearLockMask: 6,
   AngularLockMask: 7,
+  CollisionShape: 8,
 };
 
 const applyAxisOverride = (vector, axis, value) => {
@@ -2346,20 +2352,23 @@ const updateActorCollisionFast = () => {
   const bridge = window.coronaBridge;
   if (!bridge || typeof bridge.setProperty !== 'function') return;
   if (!actorData.value.handle) return;
-  const value = actorData.value.collision.type !== 'none' ? 1 : 0;
-  try { bridge.setProperty(actorData.value.handle, PROPERTY.CollisionEnabled, value); } catch (e) {}
+  const value = { none: 0, box: 1, mesh: 2 }[actorData.value.collision.type] ?? 1;
+  try { bridge.setProperty(actorData.value.handle, PROPERTY.CollisionShape, value); } catch (e) {}
 };
 
 // 更新单位碰撞类型 — 慢通道：触发 Python 写盘 + 设置
 const updateActorCollision = () => {
   if (!currentActorFile.value || !actorData.value.parentScene) return;
+  const scene = actorData.value.parentScene;
+  const actor = currentActorFile.value;
+  const collisionType = actorData.value.collision.type;
   debounced('actor_collision', async () => {
     try {
       await sceneService.actorOperation(
-        actorData.value.parentScene,
-        currentActorFile.value,
+        scene,
+        actor,
         'SetCollision',
-        [actorData.value.collision.type]
+        [collisionType]
       );
     } catch (e) {
       logError('更新单位碰撞类型失败', e);
@@ -2572,20 +2581,23 @@ const updateModelCollisionFast = () => {
   const bridge = window.coronaBridge;
   if (!bridge || typeof bridge.setProperty !== 'function') return;
   if (!modelData.value.handle) return;
-  const value = modelData.value.collision.type !== 'none' ? 1 : 0;
-  try { bridge.setProperty(modelData.value.handle, PROPERTY.CollisionEnabled, value); } catch (e) {}
+  const value = { none: 0, box: 1, mesh: 2 }[modelData.value.collision.type] ?? 1;
+  try { bridge.setProperty(modelData.value.handle, PROPERTY.CollisionShape, value); } catch (e) {}
 };
 
 // 更新模型碰撞类型
 const updateModelCollision = () => {
   if (!currentModelFile.value || !modelData.value.targetScene) return;
+  const scene = modelData.value.targetScene;
+  const actor = currentModelFile.value;
+  const collisionType = modelData.value.collision.type;
   debounced('model_collision', async () => {
     try {
       await sceneService.actorOperation(
-        modelData.value.targetScene,
-        currentModelFile.value,
+        scene,
+        actor,
         'SetCollision',
-        [modelData.value.collision.type]
+        [collisionType]
       );
     } catch (e) {
       logError('更新模型碰撞类型失败', e);

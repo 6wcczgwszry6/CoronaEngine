@@ -62,7 +62,7 @@ class MechanicsSystem : public Kernel::SystemBase {
 
    private:
     // 力学系统私有成员
-    void update_physics();
+    void update_physics(float fixed_dt);
 
     /// 骨骼动画 CPU 蒙皮（P2，自 GeometrySystem 迁入）。每真实帧遍历所有 GeometryDevice，
     /// 对蒙皮模型（Scene::skeleton 有值）：推进 anim_time → compute_pose 算 final 骨骼矩阵
