@@ -13,3 +13,29 @@ path = Scripts/scene_script.py
 [terrain]
 type =
 path =
+
+[grid]
+enabled = true
+
+[camera]
+count = 1
+active_id = Scene/default.scene#camera0
+camera0.id = Scene/default.scene#camera0
+camera0.name = MainCamera
+camera0.deletable = false
+camera0.position = 0, 2.8, -6.5
+camera0.forward = 0, -0.16, 0.987
+camera0.world_up = 0, 1, 0
+camera0.fov = 50.000000
+camera0.output_mode = final_color
+camera0.ssao_enabled = false
+camera0.render_backend = native
+camera0.vision_render_mode = path_tracing
+camera0.width = 1368
+camera0.height = 761
+camera0.move_speed = 1.000000
+camera0.view_open = false
+camera0.view_x = 120
+camera0.view_y = 120
+camera0.view_width = 960
+camera0.view_height = 540
