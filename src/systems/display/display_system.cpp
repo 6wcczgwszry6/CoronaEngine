@@ -877,7 +877,7 @@ bool DisplaySystem::ensure_composite_resources(CompositeResources& resources,
                                                uint32_t height) {
     if (!composite_pipeline_ready_) {
         if (!composite_pipeline_) {
-            composite_pipeline_.emplace(composite_comp_glsl, ktm::uvec3(8, 8, 1));
+            composite_pipeline_.emplace(composite_comp_glsl);
         }
         composite_pipeline_ready_ = composite_pipeline_->getComputePipelineID() != 0;
         if (!composite_pipeline_ready_) {
@@ -973,8 +973,7 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
     composite_pipeline.bind_storage_image(1, ui_image);
     composite_pipeline.bind_storage_image(2, resources.output);
 
-    const uint32_t dispatch_x = (output_width + 7u) / 8u;
-    const uint32_t dispatch_y = (output_height + 7u) / 8u;
+    const auto [dispatch_x, dispatch_y] = composite_pipeline.dispatch_groups(output_width, output_height);
     {
         std::ostringstream label;
         label << "Display/composite"
