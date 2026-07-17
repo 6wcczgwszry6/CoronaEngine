@@ -20,6 +20,7 @@ set(UI_SYSTEM_SOURCES
     cef/cef_editor_api.cpp
     cef/cef_editor_native_api_registry.cpp
     cef/cef_editor_native_api_handlers.cpp
+    cef/scene_folder.cpp
     cef/vision_actor_material_bridge.cpp
     cef/vision_actor_transform_bridge.cpp
     cef/cef_query_bridge.cpp
@@ -39,6 +40,7 @@ set(UI_SYSTEM_SOURCES
     cef/cef_bridge_helpers.h
     cef/cef_client.h
     cef/cef_editor_native_api_registry.h
+    cef/scene_folder.h
     cef/vision_actor_material_bridge.h
     cef/vision_actor_transform_bridge.h
     cef/cef_renderer_bridge.h
@@ -70,6 +72,7 @@ corona_add_system(ui
         psapi
         version
         winmm
+        bcrypt
         Python::Python
         nanobind-static
         corona::resource::manager
@@ -88,6 +91,21 @@ helicon_compile_shaders(corona_ui_system
 )
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_scene_folder_tests
+        tests/test_scene_folder.cpp
+        cef/scene_folder.cpp
+    )
+    target_include_directories(corona_scene_folder_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_scene_folder_tests
+        PRIVATE nlohmann_json::nlohmann_json bcrypt
+    )
+    if(MSVC)
+        target_compile_options(corona_scene_folder_tests PRIVATE /EHsc)
+    endif()
+    add_test(NAME SceneFolderTests COMMAND corona_scene_folder_tests)
+
     add_executable(corona_cef_app_tests
         tests/test_cef_app.cpp
     )

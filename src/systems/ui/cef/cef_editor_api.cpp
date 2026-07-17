@@ -378,7 +378,7 @@ constexpr std::array<EditorApiParamSpec, 4> kScratchMouseEventParams = {{
 #define EDITOR_API_METHOD_SCHEMA(module, function, params_array, return_type) \
     EDITOR_API_METHOD_SCHEMA_WRAPPED(module, function, params_array, "", "", return_type)
 
-constexpr std::array<EditorApiMethodSpec, 135> kEditorApiMethods = {{
+constexpr std::array<EditorApiMethodSpec, 137> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, submit_request, kObjectPayloadParam, "ai.submitRequest", "ai.submit_request", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, generate_hint, kAiToolGenerateHintParams, "ai.generateHint", "ai.generate_hint", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, read_local_file_as_base64, kPathParam, "ai.readLocalFileAsBase64", "ai.read_local_file_as_base64", EditorApiValueType::Any),
@@ -438,12 +438,14 @@ constexpr std::array<EditorApiMethodSpec, 135> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, start_session, kNetworkStartSessionParams, "network.startSession", "network.start_session", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(Network, stop_session, kNoParams, "network.stopSession", "network.stop_session", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, browse_folder, kPathOptionalParam, EditorApiValueType::String),
+    EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, choose_portable_scene_target, "project.choosePortableSceneTarget", "project.choose_portable_scene_target", EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_multiplayer_project, kObjectPayloadParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_project, kObjectPayloadParam, EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_world_project, kObjectPayloadParam, EditorApiValueType::Object),
     EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version, "project.getAppVersion", "project.get_app_version", EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_default_project_path, kNoParams, EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_recent_projects, kNoParams, EditorApiValueType::Array),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ProjectLauncher, migrate_legacy_scene, kObjectPayloadParam, "project.migrateLegacyScene", "project.migrate_legacy_scene", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kPathParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project_file, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, set_project_mode, kObjectPayloadParam, EditorApiValueType::Boolean),

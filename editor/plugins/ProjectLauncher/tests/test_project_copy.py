@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 from plugins.ProjectLauncher import main as project_launcher
 from plugins.ProjectLauncher.utils import project_copy
+from utils.settings import CoronaSettings
 
 
 class ProjectCopyTests(unittest.TestCase):
@@ -77,6 +78,56 @@ class ProjectCopyTests(unittest.TestCase):
         source = Path(project_launcher.__file__).read_text(encoding="utf-8")
         self.assertNotIn("ProjectCopy", source)
         self.assertNotIn("vision_import", source)
+
+    def test_settings_accepts_portable_scene_folder_without_project_ini(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scene = root / "Portable"
+            scene.mkdir()
+            (scene / "scene.ini").write_text(
+                "[format]\ntype = corona_scene_folder\nversion = 1\n"
+                "[scene]\nname = Portable Name\n",
+                encoding="utf-8",
+            )
+            config_path = root / "CoronaEditor.ini"
+            config_path.write_text(
+                "[General]\nlast_project =\n"
+                "[History]\nrecent_projects = []\n",
+                encoding="utf-8",
+            )
+            settings = CoronaSettings(str(config_path))
+
+            self.assertTrue(settings.set_active_project(str(scene)))
+            self.assertEqual(settings.active_project_path, str(scene))
+            self.assertEqual(settings.active_project_config.get("scene", "name"), "Portable Name")
+            recent = settings.get_recent_projects()
+            self.assertEqual(recent[0]["name"], "Portable Name")
+            self.assertTrue(recent[0]["if_exists"])
+
+    def test_portable_settings_save_updates_scene_ini_without_creating_project_ini(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scene = root / "Portable"
+            scene.mkdir()
+            scene_ini = scene / "scene.ini"
+            scene_ini.write_text(
+                "[format]\ntype = corona_scene_folder\nversion = 1\n"
+                "[scene]\nname = Portable\n",
+                encoding="utf-8",
+            )
+            config_path = root / "CoronaEditor.ini"
+            config_path.write_text(
+                "[General]\nlast_project =\n"
+                "[History]\nrecent_projects = []\n",
+                encoding="utf-8",
+            )
+            settings = CoronaSettings(str(config_path))
+            self.assertTrue(settings.set_active_project(str(scene)))
+            self.assertTrue(settings.save_active_project_info())
+            self.assertFalse((scene / "project.ini").exists())
+            saved = configparser.ConfigParser()
+            saved.read(scene_ini, encoding="utf-8")
+            self.assertTrue(saved.get("scene", "last_opened"))
 
 
 if __name__ == "__main__":

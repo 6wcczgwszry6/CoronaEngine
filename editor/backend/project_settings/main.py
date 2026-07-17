@@ -24,8 +24,8 @@ class ProjectSettings:
         try:
             # 直接调用 settings_manager 的方法
             full_info = settings_manager.get_active_project_info()
-            # 提取 Project 节
-            project_info = full_info.get('Project', {})
+            portable = full_info.get('format', {}).get('type') == 'corona_scene_folder'
+            project_info = full_info.get('scene' if portable else 'Project', {})
 
             # 确保必需字段存在
             defaults = {
@@ -61,20 +61,24 @@ class ProjectSettings:
             if config is None:
                 # 如果内存中没有，尝试从文件加载（正常情况下应该存在）
                 import configparser
-                ini_path = os.path.join(settings_manager.active_project_path, "project.ini")
+                ini_path = settings_manager._project_config_path(
+                    settings_manager.active_project_path)
                 config = configparser.ConfigParser()
-                if os.path.exists(ini_path):
+                if ini_path and os.path.exists(ini_path):
                     config.read(ini_path, encoding='utf-8')
                 settings_manager.active_project_config = config
 
-            if not config.has_section('Project'):
-                config.add_section('Project')
+            portable = config.get('format', 'type', fallback='') == 'corona_scene_folder'
+            section = 'scene' if portable else 'Project'
+            if not config.has_section(section):
+                config.add_section(section)
 
             # 更新允许修改的字段
-            allowed_keys = ['name', 'mode', 'entrance_scene', 'core_version']
+            allowed_keys = ['name', 'core_version'] if portable else [
+                'name', 'mode', 'entrance_scene', 'core_version']
             for key in allowed_keys:
                 if key in settings and settings[key]:
-                    config.set('Project', key, str(settings[key]))
+                    config.set(section, key, str(settings[key]))
 
             # 调用 settings_manager 的方法写入文件并更新 last_opened
             success = settings_manager.save_active_project_info()

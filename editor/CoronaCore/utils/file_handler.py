@@ -188,6 +188,27 @@ class FileHandler:
         return directory
 
     @staticmethod
+    def choose_new_directory(caption="选择新目录", default_dir=None,
+                             default_name="NewScene"):
+        """选择一个尚不存在的目录路径，不创建目录。"""
+        if default_dir is None:
+            default_dir = os.getcwd()
+
+        root = FileHandler.init_tkinter()
+        try:
+            path = filedialog.asksaveasfilename(
+                title=caption,
+                initialdir=default_dir,
+                initialfile=default_name,
+                filetypes=[("场景文件夹", "*")],
+                parent=root,
+            )
+        finally:
+            root.destroy()
+
+        return os.path.abspath(path) if path else ""
+
+    @staticmethod
     def _parse_file_types(file_param):
         """
         解析文件类型参数，支持多种格式：

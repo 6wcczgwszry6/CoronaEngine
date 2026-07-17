@@ -520,9 +520,13 @@ const editorApiStatic = {
       call_manifest_editor_api('project.createProject', [projectData || {}]),
     createWorldProject: (worldData) =>
       call_manifest_editor_api('project.createWorldProject', [worldData || {}]),
+    choosePortableSceneTarget: () =>
+      call_manifest_editor_api('project.choosePortableSceneTarget', []),
     getAppVersion: () => call_manifest_editor_api('project.getAppVersion', []),
     getDefaultProjectPath: () => call_manifest_editor_api('project.getDefaultProjectPath', []),
     getRecentProjects: () => call_manifest_editor_api('project.getRecentProjects', []),
+    migrateLegacyScene: (payload) =>
+      call_manifest_editor_api('project.migrateLegacyScene', [payload || {}]),
     openProject: (projectPath) => call_manifest_editor_api('project.openProject', [projectPath]),
     openProjectFile: () => call_manifest_editor_api('project.openProjectFile', []),
     setProjectMode: (mode, settings) =>
@@ -978,6 +982,17 @@ export const projectLauncherService = {
   // 浏览文件夹
   browseFolder: (default_path) =>
     editorApi.project.browseFolder(default_path),
+  choosePortableSceneTarget: () =>
+    editorApi.project.choosePortableSceneTarget(),
+  migrateLegacyScene: (payload) =>
+    editorApi.project.migrateLegacyScene(payload).then((result) => {
+      const migrated = result?.data ?? result;
+      if (migrated?.ok && migrated?.path) {
+        window.localStorage?.setItem('corona.activeProjectPath', migrated.path);
+        window.localStorage?.setItem('corona.activeProjectLegacy', 'false');
+      }
+      return result;
+    }),
   // 浏览并选择项目文件 (.ini)
   openProjectFile: () => editorApi.project.openProjectFile(),
   // 创建项目
@@ -997,6 +1012,7 @@ export const projectLauncherService = {
       const activeProjectPath = success?.path || projectPath;
       if (success && activeProjectPath) {
         window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+        window.localStorage?.setItem('corona.activeProjectLegacy', success?.legacy ? 'true' : 'false');
       }
       return result;
     }),

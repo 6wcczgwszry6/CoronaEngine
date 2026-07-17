@@ -300,6 +300,12 @@ class Scene:
         # save_data 会由装饰器自动调用
         return True
 
+    def _is_portable_scene_folder(self) -> bool:
+        return (
+            self.file_data.get('format', 'type', fallback='') == 'corona_scene_folder'
+            and self.file_data.getint('format', 'version', fallback=0) == 1
+        )
+
     def read_data(self):
         previous_enabled = self._begin_bulk_scene_load()
         try:
@@ -352,6 +358,10 @@ class Scene:
 
         if os.path.exists(data_path):
             self.file_data.read(data_path, encoding='utf-8')
+            if self._is_portable_scene_folder():
+                self.name = self.file_data.get('scene', 'name', fallback=self.name)
+            else:
+                self.name = self.file_data.get('base', 'name', fallback=self.name)
 
             # 读取太阳设置
             if 'sun' in self.file_data:
@@ -512,12 +522,16 @@ class Scene:
 
         # 确保必要的 section 存在。actors 由 C++ native scene 持久化，
         # Python save_data 只保留磁盘上的当前 actors section，不重新生成。
-        for section in ('base', 'sun', 'grid', 'scripts', 'terrain'):
+        metadata_section = 'scene' if self._is_portable_scene_folder() else 'base'
+        for section in (metadata_section, 'sun', 'grid', 'scripts', 'terrain'):
             if section not in self.file_data:
                 self.file_data[section] = {}
 
+        if metadata_section == 'scene' and 'base' in self.file_data:
+            self.file_data.remove_section('base')
+
         # 基础信息
-        self.file_data['base']['name'] = self.name
+        self.file_data[metadata_section]['name'] = self.name
 
         # 太阳设置
         env = self.get_environment()

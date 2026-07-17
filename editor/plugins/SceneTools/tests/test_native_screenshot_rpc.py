@@ -3077,6 +3077,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("create_embedded_vision_document", create_body)
         self.assertIn("persist_vision_proxy_actors_from_document", create_body)
         self.assertIn("replace_ini_section_from_map", create_body)
+        self.assertIn("create_scene_folder", create_body)
+        self.assertIn("scene.ini", create_body)
+        self.assertNotIn("create_project_from_template_native", create_body)
         self.assertNotIn('"source_path"', create_body)
 
     def test_embedded_vision_source_loads_from_memory_without_runtime_json(self):
@@ -3689,6 +3692,90 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         on_move_start = actor_source.index("    def on_move(self):")
         on_move_end = actor_source.index("\n    def enable_collision_callback", on_move_start)
         self.assertNotIn("self.save_data()", actor_source[on_move_start:on_move_end])
+
+    def test_portable_scene_folder_is_wired_through_project_and_frontend_apis(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        api_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_api.cpp"
+        ).read_text(encoding="utf-8")
+        bridge_source = (
+            repo_root / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
+        ).read_text(encoding="utf-8")
+        launcher_source = (
+            repo_root / "editor" / "plugins" / "ProjectLauncher" / "main.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('#include "scene_folder.h"', handler_source)
+        self.assertIn('detect_scene_folder(project_dir)', handler_source)
+        self.assertIn('{"migrate_legacy_scene"', handler_source)
+        self.assertIn('migrate_legacy_scene({source_path, target_path, scene_name})', handler_source)
+        self.assertIn('ProjectLauncher, choose_portable_scene_target', api_source)
+        self.assertIn('ProjectLauncher, migrate_legacy_scene', api_source)
+        self.assertIn("project.choosePortableSceneTarget", bridge_source)
+        self.assertIn("project.migrateLegacyScene", bridge_source)
+        self.assertIn("def choose_portable_scene_target", launcher_source)
+        self.assertIn("*.ini *.scene *.json", launcher_source)
+        open_start = handler_source.index("std::filesystem::path open_project_native")
+        open_end = handler_source.index("nlohmann::json recent_projects_native", open_start)
+        open_body = handler_source[open_start:open_end]
+        self.assertIn('ext == ".scene"', open_body)
+        self.assertIn('candidate / "project.ini"', open_body)
+        self.assertIn("Legacy projects are read-only", handler_source)
+
+    def test_new_project_creation_uses_portable_scene_folder_without_mode(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        create_start = handler_source.index('{"create_project"')
+        create_end = handler_source.index('{"create_world_project"', create_start)
+        create_body = handler_source[create_start:create_end]
+        self.assertIn("create_scene_folder(target, name)", create_body)
+        self.assertNotIn('data.value("mode"', create_body)
+        self.assertNotIn("create_project_from_template_native", create_body)
+        portable_info_start = handler_source.index("if (const auto portable = detect_scene_folder(project_root))")
+        portable_info_end = handler_source.index("const auto project_ini", portable_info_start)
+        self.assertNotIn('{"mode"', handler_source[portable_info_start:portable_info_end])
+
+    def test_legacy_scene_migration_has_prompt_and_permanent_file_manager_action(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        launcher_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue"
+        ).read_text(encoding="utf-8")
+        file_manager_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "FileManager.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('{"legacy", !detect_scene_folder(opened).has_value()}', handler_source)
+        self.assertIn("corona.legacyMigrationPrompted", launcher_source)
+        self.assertIn("另存为便携场景", launcher_source)
+        self.assertIn("migrateLegacyScene", launcher_source)
+        self.assertIn("migrateLegacyScene", file_manager_source)
+        self.assertIn("另存为便携场景", file_manager_source)
+
+    def test_project_settings_does_not_write_project_section_into_portable_scene(self):
+        repo_root = self._repo_root()
+        settings_source = (
+            repo_root / "editor" / "backend" / "project_settings" / "main.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("portable = config.get('format', 'type'", settings_source)
+        self.assertIn("section = 'scene' if portable else 'Project'", settings_source)
+        self.assertIn("allowed_keys = ['name', 'core_version'] if portable", settings_source)
+
+    def test_python_scene_save_preserves_portable_scene_metadata_without_base_section(self):
+        repo_root = self._repo_root()
+        scene_source = (
+            repo_root / "editor" / "CoronaCore" / "core" / "entities" / "scene.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def _is_portable_scene_folder", scene_source)
+        self.assertIn("metadata_section = 'scene' if self._is_portable_scene_folder() else 'base'", scene_source)
+        self.assertIn("self.file_data.remove_section('base')", scene_source)
 
 
 if __name__ == "__main__":

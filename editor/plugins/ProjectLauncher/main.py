@@ -28,6 +28,15 @@ class ProjectLauncher(PluginBase):
         return path if path else ""
 
     @staticmethod
+    def choose_portable_scene_target() -> str:
+        """选择另存为便携场景的新目录路径。"""
+        return FileHandler.choose_new_directory(
+            caption="另存为便携场景",
+            default_dir=settings_manager.get_default_path(),
+            default_name="PortableScene",
+        )
+
+    @staticmethod
     def get_recent_projects() -> list:
         """前端初始化时调用，获取历史记录"""
         return settings_manager.get_recent_projects()
@@ -64,14 +73,14 @@ class ProjectLauncher(PluginBase):
     @staticmethod
     def open_project_file() -> dict:
         """
-        弹出文件选择框，可选 project.ini 项目，或 Vision 场景 .json。
+        弹出文件选择框，可选旧 project.ini、新 scene.ini 或 Vision 场景 .json。
         Python 侧只负责文件对话框。返回的 path 交给 C++ ProjectLauncher.open_project
         处理 .ini 复制、目录打开或 Vision .json 导入。
         """
         # 1. 弹出对话框：项目 .ini 或 Vision 场景 .json
         _, file_path = FileHandler.open_file(
             caption="打开项目或 Vision 场景",
-            file_types="项目或 Vision 场景 (*.ini *.json)",
+            file_types="场景、旧项目或 Vision 场景 (*.ini *.scene *.json)",
             default_dir=settings_manager.get_default_path(),
             read_content=False
         )

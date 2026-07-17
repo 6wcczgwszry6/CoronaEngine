@@ -13,6 +13,7 @@
 #include "cef_client.h"
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
+#include "scene_folder.h"
 #include "vision_actor_material_bridge.h"
 #include "vision_actor_transform_bridge.h"
 
@@ -39,6 +40,7 @@
 #include <map>
 #include <memory>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -49,6 +51,11 @@
 namespace Corona::Systems::UI {
 
 namespace {
+
+using SceneFolders::create_scene_folder;
+using SceneFolders::detect_scene_folder;
+using SceneFolders::migrate_legacy_scene;
+using SceneFolders::SceneAssetStore;
 
 constexpr const char* VISION_DOCUMENT_ENCODING = "zlib_base64_json";
 constexpr const char* VISION_DOCUMENT_VERSION = "1";
@@ -1004,6 +1011,23 @@ void persist_native_scene_vision_document(const NativeEditorScene& scene) {
 }
 
 void persist_native_scene_common(const NativeEditorScene& scene) {
+    if (detect_scene_folder(scene.project_root)) {
+        SceneFolders::SceneAssetStore store(scene.project_root);
+        const auto diagnostics = store.validate_manifest();
+        if (!diagnostics.empty()) {
+            throw std::runtime_error("Portable scene asset validation failed: " +
+                                     diagnostics.front().message + " (" +
+                                     path_to_utf8(diagnostics.front().path) + ")");
+        }
+        for (const auto& actor : scene.actors) {
+            if (!SceneFolders::is_valid_asset_route(actor.route) || !store.contains_route(actor.route)) {
+                throw std::runtime_error("Portable scene actor has untrusted asset route: " + actor.route);
+            }
+        }
+    } else {
+        throw std::runtime_error(
+            "Legacy projects are read-only; use Save as Portable Scene before editing");
+    }
     const auto scene_file = resolve_project_path(scene.project_root, scene.route);
     persist_native_scene_actors(scene);
     persist_native_scene_environment(scene);
@@ -1397,7 +1421,8 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     auto scene = std::make_unique<NativeEditorScene>();
     scene->project_root = project_root;
     scene->route = scene_route;
-    scene->name = ini_value(scene_ini, "base", "name", stem_utf8(scene_route));
+    scene->name = ini_value(scene_ini, "scene", "name",
+                            ini_value(scene_ini, "base", "name", stem_utf8(scene_route)));
     scene->script_path = ini_value(scene_ini, "scripts", "path");
     scene->terrain_type = ini_value(scene_ini, "terrain", "type");
     scene->terrain_path = ini_value(scene_ini, "terrain", "path");
@@ -1496,8 +1521,10 @@ NativeEditorScene* ensure_native_editor_scene(const std::string& project_path_ar
         throw std::runtime_error("No active project path for native editor initialization");
     }
     const auto project_root = path_from_utf8(project_path);
-    const auto project_ini = read_ini_file(project_root / "project.ini");
-    const auto scene_route = choose_single_scene_route(project_root, project_ini);
+    const auto portable = detect_scene_folder(project_root);
+    const auto project_ini = portable ? IniFile{} : read_ini_file(project_root / "project.ini");
+    const auto scene_route = portable ? std::string{"scene.ini"}
+                                      : choose_single_scene_route(project_root, project_ini);
     if (scene_route.empty()) {
         throw std::runtime_error("No entrance scene found in project.ini");
     }
@@ -1520,10 +1547,13 @@ NativeEditorScene* reload_native_editor_scene(const std::string& project_path_ar
     }
 
     const auto project_root = path_from_utf8(project_path);
-    const auto project_ini = read_ini_file(project_root / "project.ini");
+    const auto portable = detect_scene_folder(project_root);
+    const auto project_ini = portable ? IniFile{} : read_ini_file(project_root / "project.ini");
     auto scene_route = normalize_route(scene_route_arg);
     if (scene_route.empty()) {
-        scene_route = state.scene ? state.scene->route : choose_single_scene_route(project_root, project_ini);
+        scene_route = state.scene ? state.scene->route
+                                  : (portable ? std::string{"scene.ini"}
+                                              : choose_single_scene_route(project_root, project_ini));
     }
     if (scene_route.empty()) {
         throw std::runtime_error("No scene route for native editor reload");
@@ -2200,7 +2230,45 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
 
     NativeEditorActor item;
     item.actor_type = actor_type;
-    item.route = route_for_project_storage(scene->project_root, source_path);
+    std::optional<SceneFolders::SceneAssetStore> portable_store;
+    if (detect_scene_folder(scene->project_root)) {
+        portable_store.emplace(scene->project_root);
+        const auto source = resolve_project_path(scene->project_root, source_path);
+        SceneFolders::ImportResult imported;
+        if (item.actor_type == "ui_image") {
+            imported = portable_store->import_file(source, "Images");
+        } else if (item.actor_type == "actor" &&
+                   to_lower_ascii(source.extension().string()) == ".actor") {
+            const auto actor_ini = read_ini_file(source);
+            const auto model_route = ini_value(actor_ini, "base", "path");
+            auto model_source = path_from_utf8(model_route);
+            if (!model_source.is_absolute()) {
+                const auto beside_actor = source.parent_path() / model_source;
+                model_source = std::filesystem::is_regular_file(beside_actor)
+                                   ? beside_actor
+                                   : scene->project_root / model_source;
+            }
+            imported = portable_store->import_actor(source, model_source);
+        } else {
+            imported = portable_store->import_model(source);
+        }
+        if (!imported.ok()) {
+            const auto& diagnostic = imported.diagnostics.front();
+            return native_failure("Portable asset import failed: " + diagnostic.message +
+                                  " (" + path_to_utf8(diagnostic.path) + ")", 2);
+        }
+        item.route = imported.main_route;
+        if (!portable_store->write_manifest()) {
+            return native_failure("Portable asset manifest update failed", 2);
+        }
+        const auto validation = portable_store->validate_manifest();
+        if (!validation.empty()) {
+            return native_failure("Portable asset manifest validation failed: " +
+                                  validation.front().message, 2);
+        }
+    } else {
+        item.route = route_for_project_storage(scene->project_root, source_path);
+    }
     const auto preferred_name = json_string_value(
         actor_data, {"actor_name", "name", "alias", "model_name", "object_id", "target"});
     const auto preferred_guid = json_string_value(actor_data, {"actor_guid", "guid"});
@@ -2570,7 +2638,8 @@ std::filesystem::path absolute_normalized_path(const std::filesystem::path& path
 bool is_valid_project_dir(const std::filesystem::path& project_dir) {
     std::error_code ec;
     return std::filesystem::is_directory(project_dir, ec) &&
-           std::filesystem::is_regular_file(project_dir / "project.ini", ec);
+           (std::filesystem::is_regular_file(project_dir / "project.ini", ec) ||
+            detect_scene_folder(project_dir).has_value());
 }
 
 std::filesystem::path canonical_project_dir_for_settings(const std::filesystem::path& project_dir) {
@@ -3989,18 +4058,71 @@ void rewrite_vision_resource_paths_for_project_archive(nlohmann::json& value,
     }
 }
 
+bool is_vision_model_asset(const std::filesystem::path& path) {
+    static const std::set<std::string> extensions{
+        ".actor", ".dae", ".fbx", ".glb", ".gltf", ".obj", ".usd", ".usda", ".usdc"};
+    return extensions.contains(to_lower_ascii(path.extension().string()));
+}
+
+void import_vision_resource_paths(nlohmann::json& value,
+                                  const std::filesystem::path& source_dir,
+                                  SceneAssetStore& store) {
+    if (value.is_object()) {
+        for (auto& item : value.items()) {
+            auto& child = item.value();
+            if (is_vision_resource_path_key(item.key()) && child.is_string()) {
+                const auto text = trim_ascii(child.get<std::string>());
+                if (!text.empty() && !is_external_resource_reference(text)) {
+                    const auto candidate = path_from_utf8(text);
+                    const auto source = candidate.is_absolute() ? candidate : source_dir / candidate;
+                    if (!std::filesystem::is_regular_file(source)) {
+                        throw std::runtime_error("Vision resource is missing: " + path_to_utf8(source));
+                    }
+                    const auto imported = is_vision_model_asset(source)
+                                              ? store.import_model(source)
+                                              : store.import_file(source, "Vision");
+                    if (!imported.ok()) {
+                        throw std::runtime_error(
+                            imported.diagnostics.empty()
+                                ? "Unable to archive Vision resource: " + path_to_utf8(source)
+                                : imported.diagnostics.front().message);
+                    }
+                    child = imported.main_route;
+                    continue;
+                }
+            }
+            import_vision_resource_paths(child, source_dir, store);
+        }
+        return;
+    }
+    if (value.is_array()) {
+        for (auto& child : value) {
+            import_vision_resource_paths(child, source_dir, store);
+        }
+    }
+}
+
 EmbeddedVisionDocument create_embedded_vision_document(const std::filesystem::path& project_dir,
                                                        const std::filesystem::path& json_path,
                                                        const nlohmann::json& source_document) {
     const auto raw = read_text_file(json_path);
     const auto import_id = safe_project_dir_name(path_to_utf8(json_path.stem()), "vision") +
                          "_" + fnv1a_hex12(raw.empty() ? path_to_utf8(json_path) : raw);
-    const auto asset_root = std::filesystem::path("Resource") / "vision_imports" / import_id;
-    std::filesystem::create_directories(project_dir / asset_root);
-
     auto embedded_document = source_document;
-    rewrite_vision_resource_paths_for_project_archive(
-        embedded_document, json_path.parent_path(), project_dir, asset_root);
+    std::filesystem::path asset_root;
+    if (detect_scene_folder(project_dir)) {
+        SceneAssetStore store(project_dir);
+        import_vision_resource_paths(embedded_document, json_path.parent_path(), store);
+        if (!store.write_manifest()) {
+            throw std::runtime_error("Unable to write Vision asset manifest");
+        }
+        asset_root = "Assets";
+    } else {
+        asset_root = std::filesystem::path("Resource") / "vision_imports" / import_id;
+        std::filesystem::create_directories(project_dir / asset_root);
+        rewrite_vision_resource_paths_for_project_archive(
+            embedded_document, json_path.parent_path(), project_dir, asset_root);
+    }
     ensure_vision_shape_guids(embedded_document);
 
     return EmbeddedVisionDocument{
@@ -4015,6 +4137,11 @@ void persist_vision_proxy_actors_from_document(const std::filesystem::path& proj
                                                const nlohmann::json& document,
                                                const std::filesystem::path& source_dir) {
     const auto scene_data = extract_scene_data(document);
+    const bool portable = detect_scene_folder(project_dir).has_value();
+    std::optional<SceneAssetStore> portable_store;
+    if (portable) {
+        portable_store.emplace(project_dir);
+    }
     std::map<std::string, std::string> actors;
     size_t imported = 0;
     const auto shapes = scene_data.contains("shapes") ? scene_data["shapes"] : nlohmann::json::array();
@@ -4030,11 +4157,36 @@ void persist_vision_proxy_actors_from_document(const std::filesystem::path& proj
             if (source_model.empty() || !std::filesystem::is_regular_file(source_model)) {
                 return;
             }
-            route = copy_vision_model_into_project(project_dir, source_model);
+            if (portable) {
+                std::error_code rel_ec;
+                const auto relative = std::filesystem::relative(source_model, project_dir, rel_ec);
+                const auto existing_route = rel_ec ? std::string{} : normalize_route(path_to_utf8(relative));
+                if (!existing_route.empty() && portable_store->contains_route(existing_route)) {
+                    route = relative;
+                } else {
+                    const auto imported = portable_store->import_model(source_model);
+                    if (!imported.ok()) {
+                        throw std::runtime_error("Unable to archive Vision model proxy");
+                    }
+                    route = path_from_utf8(imported.main_route);
+                }
+            } else {
+                route = copy_vision_model_into_project(project_dir, source_model);
+            }
         } else if (shape_type == "quad" || shape_type == "cube" || shape_type == "sphere") {
             route = write_vision_primitive_proxy(project_dir, shape, shape_type, index);
             if (route.empty()) {
                 return;
+            }
+            if (portable) {
+                const auto temporary_proxy = project_dir / route;
+                const auto imported = portable_store->import_model(temporary_proxy);
+                std::error_code remove_ec;
+                std::filesystem::remove(temporary_proxy, remove_ec);
+                if (!imported.ok()) {
+                    throw std::runtime_error("Unable to archive Vision primitive proxy");
+                }
+                route = path_from_utf8(imported.main_route);
             }
         } else {
             return;
@@ -4082,6 +4234,9 @@ void persist_vision_proxy_actors_from_document(const std::filesystem::path& proj
         }
     }
     replace_ini_section_from_map(scene_file, "actors", actors);
+    if (portable && !portable_store->write_manifest()) {
+        throw std::runtime_error("Unable to write Vision proxy asset manifest");
+    }
 }
 
 void apply_vision_json_to_scene_native(const std::filesystem::path& project_dir,
@@ -4117,26 +4272,78 @@ std::filesystem::path create_vision_project_native(const std::filesystem::path& 
     const auto project_name = path_to_utf8(json_path.stem());
     const auto target = unique_project_target(base_dir, project_name);
     const auto final_name = path_to_utf8(target.filename());
-    const auto project_ini = create_project_from_template_native(target, final_name, "3d");
-    const auto project = read_ini_file(project_ini);
-    const auto entrance = ini_value(project, "Project", "entrance_scene", "Scene/default.scene");
-    const auto scene_file = resolve_project_path(target, entrance);
-    const auto embedded = create_embedded_vision_document(target, json_path, document);
-    remove_ini_section(scene_file, "vision_bindings");
-    remove_ini_section(scene_file, "vision_unsupported_shapes");
-    replace_ini_section_from_map(scene_file, "camera", vision_camera_section(embedded.document));
-    persist_vision_proxy_actors_from_document(target, scene_file, embedded.document, target);
-    replace_ini_section_from_map(scene_file,
-                                 "vision",
-                                 {{"storage", "embedded"},
-                                  {"import_mode", "external"}});
-    replace_ini_section_from_map(scene_file,
-                                 "vision_document",
-                                 {{"version", VISION_DOCUMENT_VERSION},
-                                  {"encoding", VISION_DOCUMENT_ENCODING},
-                                  {"asset_root", embedded.asset_root},
-                                  {"data", embedded.data}});
-    return target;
+    const auto created = create_scene_folder(target, final_name);
+    if (!created) {
+        throw std::runtime_error("Unable to create portable Vision scene folder");
+    }
+    try {
+        const auto scene_file = target / "scene.ini";
+        const auto embedded = create_embedded_vision_document(target, json_path, document);
+        remove_ini_section(scene_file, "vision_bindings");
+        remove_ini_section(scene_file, "vision_unsupported_shapes");
+        replace_ini_section_from_map(scene_file, "camera", vision_camera_section(embedded.document));
+        persist_vision_proxy_actors_from_document(target, scene_file, embedded.document, target);
+        replace_ini_section_from_map(scene_file,
+                                     "vision",
+                                     {{"storage", "embedded"},
+                                      {"import_mode", "external"}});
+        replace_ini_section_from_map(scene_file,
+                                     "vision_document",
+                                     {{"version", VISION_DOCUMENT_VERSION},
+                                      {"encoding", VISION_DOCUMENT_ENCODING},
+                                      {"asset_root", embedded.asset_root},
+                                      {"data", embedded.data}});
+        return target;
+    } catch (...) {
+        std::error_code cleanup_ec;
+        std::filesystem::remove_all(target, cleanup_ec);
+        throw;
+    }
+}
+
+void migrate_legacy_embedded_vision_document(const std::filesystem::path& source_path,
+                                             const std::filesystem::path& portable_root) {
+    auto source = source_path;
+    if (std::filesystem::is_directory(source)) source /= "project.ini";
+    std::filesystem::path project_root;
+    std::filesystem::path scene_file;
+    if (source.filename() == "project.ini") {
+        project_root = source.parent_path();
+        const auto project = read_ini_file(source);
+        const auto route = choose_single_scene_route(project_root, project);
+        if (route.empty()) return;
+        scene_file = resolve_project_path(project_root, route);
+    } else if (to_lower_ascii(source.extension().string()) == ".scene") {
+        scene_file = source;
+        project_root = source.parent_path();
+        while (!project_root.empty() && !std::filesystem::is_regular_file(project_root / "project.ini")) {
+            const auto parent = project_root.parent_path();
+            if (parent == project_root) break;
+            project_root = parent;
+        }
+    } else {
+        return;
+    }
+
+    const auto legacy_scene = read_ini_file(scene_file);
+    const auto encoded = ini_value(legacy_scene, "vision_document", "data");
+    if (encoded.empty()) return;
+    auto document = decode_vision_document_data(encoded);
+    SceneAssetStore store(portable_root);
+    import_vision_resource_paths(document, project_root, store);
+    if (!store.write_manifest()) {
+        throw std::runtime_error("Unable to write migrated Vision asset manifest");
+    }
+    const auto diagnostics = store.validate_manifest();
+    if (!diagnostics.empty()) {
+        throw std::runtime_error("Migrated Vision assets are invalid: " + diagnostics.front().message);
+    }
+    replace_ini_section_from_map(
+        portable_root / "scene.ini", "vision_document",
+        {{"version", ini_value(legacy_scene, "vision_document", "version", VISION_DOCUMENT_VERSION)},
+         {"encoding", VISION_DOCUMENT_ENCODING},
+         {"asset_root", "Assets"},
+         {"data", encode_vision_document_data(document)}});
 }
 
 std::filesystem::path copy_existing_project_to_data_native(const std::filesystem::path& source_ini) {
@@ -4159,18 +4366,37 @@ std::filesystem::path open_project_native(const std::filesystem::path& raw_path)
     const auto ext = to_lower_ascii(raw_path.extension().string());
     if (ext == ".json") {
         project_dir = create_vision_project_native(raw_path);
+    } else if (raw_path.filename() == "scene.ini") {
+        project_dir = raw_path.parent_path();
+    } else if (ext == ".scene") {
+        auto candidate = raw_path.parent_path();
+        while (!candidate.empty() && !std::filesystem::is_regular_file(candidate / "project.ini")) {
+            const auto parent = candidate.parent_path();
+            if (parent == candidate) break;
+            candidate = parent;
+        }
+        if (!std::filesystem::is_regular_file(candidate / "project.ini")) {
+            throw std::runtime_error("Legacy scene has no owning project.ini: " + path_to_utf8(raw_path));
+        }
+        project_dir = copy_existing_project_to_data_native(candidate / "project.ini");
     } else if (ext == ".ini") {
         project_dir = copy_existing_project_to_data_native(raw_path);
     } else {
         project_dir = raw_path;
     }
     project_dir = canonical_project_dir_for_settings(project_dir);
-    if (!std::filesystem::is_directory(project_dir) ||
-        !std::filesystem::is_regular_file(project_dir / "project.ini")) {
+    if (!is_valid_project_dir(project_dir)) {
         throw std::runtime_error("Invalid project path: " + path_to_utf8(project_dir));
     }
-    normalize_project_runtime_paths_native(project_dir);
-    update_project_ini_native(project_dir / "project.ini", {}, true);
+    if (detect_scene_folder(project_dir)) {
+        SceneFolders::SceneAssetStore store(project_dir);
+        const auto diagnostics = store.validate_manifest();
+        if (!diagnostics.empty()) {
+            throw std::runtime_error("Invalid portable scene assets: " +
+                                     diagnostics.front().message + " (" +
+                                     path_to_utf8(diagnostics.front().path) + ")");
+        }
+    }
     update_editor_settings_section("General", {{"last_project", path_to_utf8(project_dir)}});
     add_recent_project_native(project_dir);
     native_editor_state().project_path = path_to_utf8(project_dir);
@@ -4195,8 +4421,11 @@ nlohmann::json recent_projects_native() {
         const auto project_ini = project_dir / "project.ini";
         const bool exists = is_valid_project_dir(project_dir);
         auto ini = exists ? read_ini_file(project_ini) : IniFile{};
+        const auto portable = exists ? detect_scene_folder(project_dir) : std::nullopt;
         result.push_back({
-            {"name", exists ? ini_value(ini, "Project", "name", path_to_utf8(project_dir.filename())) : path_to_utf8(project_dir.filename())},
+            {"name", portable ? portable->scene_name
+                               : (exists ? ini_value(ini, "Project", "name", path_to_utf8(project_dir.filename()))
+                                         : path_to_utf8(project_dir.filename()))},
             {"path", path_to_utf8(project_dir)},
             {"if_exists", exists},
             {"last_edited", exists ? ini_value(ini, "Project", "last_opened", "-") : "-"},
@@ -4215,6 +4444,17 @@ nlohmann::json active_project_info_json() {
     }
 
     const auto project_root = path_from_utf8(project_path);
+    if (const auto portable = detect_scene_folder(project_root)) {
+        const auto scene_ini = read_ini_file(portable->scene_file);
+        return {
+            {"name", portable->scene_name},
+            {"entrance_scene", "scene.ini"},
+            {"core_version", ini_value(scene_ini, "scene", "core_version")},
+            {"create_time", ini_value(scene_ini, "scene", "create_time")},
+            {"last_opened", ini_value(scene_ini, "scene", "last_opened")},
+            {"project_path", path_to_utf8(project_root)},
+        };
+    }
     const auto project_ini = read_ini_file(project_root / "project.ini");
     const auto project = project_ini.contains("project") ? project_ini.at("project") : IniSection{};
     const auto value = [&](const std::string& key, const std::string& fallback = {}) {
@@ -4885,17 +5125,18 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
                 "path",
                 settings_value("General", "default_path", path_to_utf8(runtime_data_dir())));
             const auto base_dir = path_from_utf8(base_text);
-            const auto mode = data.value("mode", std::string{"3d"});
             const auto target = base_dir / path_from_utf8(name);
-            create_project_from_template_native(target, name, mode);
+            if (!create_scene_folder(target, name)) {
+                throw std::runtime_error("Unable to create portable scene folder: " + path_to_utf8(target));
+            }
             update_editor_settings_section("General", {{"default_path", path_to_utf8(base_dir)}});
             return native_success(path_to_utf8(target));
         }},
         {"create_world_project", [](const NativeRequest& request, const NativeContext&) {
             const auto data = arg_object(request.args, 0);
-            const auto mode = data.value("mode", std::string{"creative"});
+            const auto world_type = data.value("mode", std::string{"creative"});
             const auto prompt = data.value("prompt", std::string{});
-            const bool story = mode == "story";
+            const bool story = world_type == "story";
             const std::string display_base = story ? "剧情世界" : "创造世界";
             const std::string dir_base = story ? "story_world" : "creative_world";
             const auto base_dir = runtime_data_dir();
@@ -4906,13 +5147,11 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
                 target = base_dir / (dir_base + "_" + std::to_string(index++));
             } while (std::filesystem::exists(target));
             const auto display_name = display_base + "_" + std::to_string(index - 1);
-            const auto project_ini = create_project_from_template_native(target, display_name, mode);
-            if (!prompt.empty()) {
-                auto ini = read_ini_file(project_ini);
-                std::map<std::string, std::string> values(ini["project"].begin(), ini["project"].end());
-                values["world_prompt"] = prompt;
-                replace_ini_section_from_map(project_ini, "Project", values);
+            if (!create_scene_folder(target, display_name)) {
+                throw std::runtime_error("Unable to create portable world scene: " + path_to_utf8(target));
             }
+            replace_ini_section_from_map(target / "scene.ini", "world",
+                                         {{"type", world_type}, {"prompt", prompt}});
             return native_success({{"name", display_name}, {"path", path_to_utf8(target)}});
         }},
         {"create_multiplayer_project", [](const NativeRequest& request, const NativeContext&) {
@@ -4928,11 +5167,10 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
                 target = base_dir / (dir_base + "_" + std::to_string(index++));
             } while (std::filesystem::exists(target));
             const auto display_name = display_base + "_" + std::to_string(index - 1);
-            const auto project_ini = create_project_from_template_native(target, display_name, "3d");
-            auto ini = read_ini_file(project_ini);
-            std::map<std::string, std::string> values(ini["project"].begin(), ini["project"].end());
-            values["multiplayer_role"] = role;
-            replace_ini_section_from_map(project_ini, "Project", values);
+            if (!create_scene_folder(target, display_name)) {
+                throw std::runtime_error("Unable to create portable multiplayer scene: " + path_to_utf8(target));
+            }
+            replace_ini_section_from_map(target / "scene.ini", "multiplayer", {{"role", role}});
             return native_success({{"name", display_name}, {"path", path_to_utf8(target)}, {"role", role}});
         }},
         {"open_project", [](const NativeRequest& request, const NativeContext&) {
@@ -4944,9 +5182,49 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             const auto opened = open_project_native(path_from_utf8(path));
             CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}'", path_to_utf8(opened));
             emit_editor_api_event("ProjectLauncher.projectOpened", {{"path", path_to_utf8(opened)}});
-            return native_success({{"ok", true}, {"path", path_to_utf8(opened)}});
+            return native_success({{"ok", true}, {"path", path_to_utf8(opened)},
+                                   {"legacy", !detect_scene_folder(opened).has_value()}});
         }},
         {"open_project_file", script_method},
+        {"choose_portable_scene_target", script_method},
+        {"migrate_legacy_scene", [](const NativeRequest& request, const NativeContext&) {
+            const auto data = arg_object(request.args, 0);
+            const auto source_path = path_from_utf8(
+                data.value("sourcePath", data.value("source_path", std::string{})));
+            const auto target_path = path_from_utf8(
+                data.value("targetPath", data.value("target_path", std::string{})));
+            const auto scene_name = data.value("sceneName", data.value("scene_name", std::string{}));
+            const auto migrated = migrate_legacy_scene({source_path, target_path, scene_name});
+            nlohmann::json diagnostics = nlohmann::json::array();
+            for (const auto& diagnostic : migrated.diagnostics) {
+                diagnostics.push_back({
+                    {"code", diagnostic.code},
+                    {"message", diagnostic.message},
+                    {"path", path_to_utf8(diagnostic.path)},
+                    {"actor", diagnostic.actor},
+                });
+            }
+            if (!migrated.ok()) {
+                return native_success({{"ok", false}, {"path", std::string{}},
+                                       {"diagnostics", std::move(diagnostics)}});
+            }
+            try {
+                migrate_legacy_embedded_vision_document(source_path, migrated.root);
+            } catch (const std::exception& error) {
+                std::error_code cleanup_ec;
+                std::filesystem::remove_all(migrated.root, cleanup_ec);
+                diagnostics.push_back({{"code", "vision_migration_failed"},
+                                       {"message", error.what()},
+                                       {"path", path_to_utf8(source_path)},
+                                       {"actor", std::string{}}});
+                return native_success({{"ok", false}, {"path", std::string{}},
+                                       {"diagnostics", std::move(diagnostics)}});
+            }
+            const auto opened = open_project_native(migrated.root);
+            emit_editor_api_event("ProjectLauncher.projectOpened", {{"path", path_to_utf8(opened)}});
+            return native_success({{"ok", true}, {"path", path_to_utf8(opened)},
+                                   {"diagnostics", std::move(diagnostics)}});
+        }},
         {"set_project_mode", [](const NativeRequest&, const NativeContext&) {
             return native_success(true);
         }},

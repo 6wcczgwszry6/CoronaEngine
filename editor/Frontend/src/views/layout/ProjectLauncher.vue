@@ -90,25 +90,6 @@
             </div>
           </div>
 
-          <div class="space-y-4">
-            <label class="text-sm text-gray-400">项目类型</label>
-            <div class="grid grid-cols-3 gap-4">
-              <div
-                v-for="mode in modes"
-                :key="mode.id"
-                :class="[
-                  'p-4 border rounded-lg cursor-pointer transition-all flex flex-col items-center gap-2',
-                  selectedMode === mode.id
-                    ? 'border-[#84a65b] bg-[#84a65b]/10'
-                    : 'border-[#333] hover:border-[#666]',
-                ]"
-                @click="selectedMode = mode.id"
-              >
-                <span class="text-2xl">{{ mode.icon }}</span>
-                <span class="font-medium text-sm">{{ mode.label }}</span>
-              </div>
-            </div>
-          </div>
         </div>
 
         <div class="mt-auto pt-10 flex justify-end gap-4">
@@ -132,7 +113,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted, watch } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService } from '@/utils/bridge';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
@@ -142,21 +123,9 @@ const router = useRouter();
 // --- 状态数据 ---
 const projectName = ref('New_Corona_Project');
 const projectPath = ref('');
-const selectedMode = ref('3d');
 const appVersion = ref('V1.0.0');
 const recentProjects = ref([]);
 
-const modes = [
-  { id: '2d', label: '2D 平面设计', icon: '🎨' },
-  { id: '3d', label: '3D 场景渲染', icon: '🧊' },
-  { id: 'render', label: '高质量离线渲染', icon: '📸' },
-];
-
-// 默认设置
-const modeSettings = ref({
-  defaultScene: 'basic',
-  realTimeRender: false,
-});
 
 // --- 初始化加载 ---
 onMounted(async () => {
@@ -193,8 +162,6 @@ const handleCreateProject = async () => {
     const projectData = {
       name: projectName.value,
       path: projectPath.value,
-      mode: selectedMode.value,
-      settings: modeSettings.value,
     };
 
     const result = await projectLauncherService.createProject(projectData);
@@ -213,11 +180,33 @@ const handleCreateProject = async () => {
 // 打开指定项目
 const handleOpenProject = async (path) => {
   try {
-    // 切换模式
-    await projectLauncherService.setProjectMode(selectedMode.value, modeSettings.value);
-    // 执行打开
-    const success = await projectLauncherService.openProject(path);
-    if (success.data) {
+    const result = await projectLauncherService.openProject(path);
+    const opened = result?.data ?? result;
+    if (opened?.legacy) {
+      const promptKey = `corona.legacyMigrationPrompted:${opened.path}`;
+      if (!window.localStorage?.getItem(promptKey)) {
+        window.localStorage?.setItem(promptKey, 'true');
+        if (window.confirm('这是旧格式存档。是否另存为便携场景文件夹？')) {
+          const selected = await projectLauncherService.choosePortableSceneTarget();
+          const targetPath = selected?.data ?? selected;
+          if (targetPath) {
+            const migrated = await projectLauncherService.migrateLegacyScene({
+              sourcePath: opened.path,
+              targetPath,
+              sceneName: projectName.value || 'PortableScene',
+            });
+            const migration = migrated?.data ?? migrated;
+            if (!migration?.ok) {
+              const details = (migration?.diagnostics || [])
+                .map((item) => `${item.actor || 'scene'}: ${item.path} — ${item.message}`)
+                .join('\n');
+              alert(`迁移失败：\n${details}`);
+            }
+          }
+        }
+      }
+    }
+    if (opened?.ok) {
       router.push('/');
     }
   } catch (error) {
@@ -239,16 +228,6 @@ const closeFloat = async () => {
   window.close();
 };
 
-// 监听模式切换以更新默认设置
-watch(selectedMode, (newMode) => {
-  if (newMode === 'render') {
-    modeSettings.value.realTimeRender = true;
-    modeSettings.value.defaultScene = 'studio';
-  } else {
-    modeSettings.value.realTimeRender = false;
-    modeSettings.value.defaultScene = 'basic';
-  }
-});
 </script>
 
 <style scoped>

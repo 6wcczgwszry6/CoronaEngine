@@ -79,6 +79,18 @@ class CoronaSettings:
     def active_project_path(self, value):
         self._active_project_path = value
 
+    @staticmethod
+    def _project_config_path(project_path):
+        scene_ini = os.path.join(project_path, "scene.ini")
+        if os.path.isfile(scene_ini):
+            config = configparser.ConfigParser()
+            config.read(scene_ini, encoding='utf-8')
+            if (config.get('format', 'type', fallback='') == 'corona_scene_folder' and
+                    config.getint('format', 'version', fallback=0) == 1):
+                return scene_ini
+        project_ini = os.path.join(project_path, "project.ini")
+        return project_ini if os.path.isfile(project_ini) else ""
+
     def _ensure_file_exists(self):
         if not os.path.exists(self.config_path):
             template_path = os.path.join(self.project_path, "CoronaEditor.ini")
@@ -105,8 +117,8 @@ class CoronaSettings:
             if not project_path:
                 return False
             project_path = os.path.abspath(project_path)
-            ini_path = os.path.join(project_path, "project.ini")
-            if not os.path.isdir(project_path) or not os.path.exists(ini_path):
+            ini_path = self._project_config_path(project_path)
+            if not os.path.isdir(project_path) or not ini_path:
                 return False
 
             proj_cfg = configparser.ConfigParser()
@@ -147,14 +159,16 @@ class CoronaSettings:
 
         refined_projects = []
         for raw_path in path_list:
-            ini_path = os.path.join(raw_path, "project.ini")
+            ini_path = self._project_config_path(raw_path)
             project_name = os.path.basename(raw_path)
-            if os.path.exists(ini_path):
+            if ini_path:
                 try:
                     proj_cfg = configparser.ConfigParser()
                     proj_cfg.read(ini_path, encoding='utf-8')
-                    project_name = proj_cfg.get('Project', 'name', fallback=project_name)
-                    last_edited = proj_cfg.get('Project', 'last_opened', fallback='')
+                    portable = os.path.basename(ini_path).lower() == 'scene.ini'
+                    section = 'scene' if portable else 'Project'
+                    project_name = proj_cfg.get(section, 'name', fallback=project_name)
+                    last_edited = proj_cfg.get(section, 'last_opened', fallback='')
                 except Exception as e:
                     logger.warning(f"Failed to read project info at {ini_path}: {e}")
                     last_edited = ''
@@ -201,9 +215,9 @@ class CoronaSettings:
             logger.error(f"Project path does not exist: {project_path}")
             return False
 
-        ini_path = os.path.join(project_path, "project.ini")
-        if not os.path.exists(ini_path):
-            logger.error(f"project.ini not found in {project_path}")
+        ini_path = self._project_config_path(project_path)
+        if not ini_path:
+            logger.error(f"No project.ini or portable scene.ini found in {project_path}")
             return False
 
         try:
@@ -237,9 +251,15 @@ class CoronaSettings:
         if not self.active_project_path:
             logger.error("未激活任何项目，无法保存配置")
             return False
-        self.active_project_config.set('Project', 'last_opened',
+        ini_path = self._project_config_path(self.active_project_path)
+        if not ini_path:
+            logger.error("活动存档配置文件不存在")
+            return False
+        section = 'scene' if os.path.basename(ini_path).lower() == 'scene.ini' else 'Project'
+        if not self.active_project_config.has_section(section):
+            self.active_project_config.add_section(section)
+        self.active_project_config.set(section, 'last_opened',
                                        datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        ini_path = os.path.join(self.active_project_path, "project.ini")
         try:
             with open(ini_path, 'w', encoding='utf-8') as f:
                 self.active_project_config.write(f)
