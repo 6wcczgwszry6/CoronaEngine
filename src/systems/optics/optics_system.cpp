@@ -2660,21 +2660,21 @@ bool OpticsSystem::initialize_render_pipelines() {
         for (auto& shadow_pipeline : hardware_->shadowPipelines) {
             shadow_pipeline.emplace(shadow_desc);
         }
-        hardware_->ssaoPipeline.emplace(ssao_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->ssaoBlurPipeline.emplace(ssao_blur_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->lightingPipeline.emplace(lighting_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->skyPipeline.emplace(sky_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->skySHProjectPipeline.emplace(sky_sh_project_comp_glsl, ktm::uvec3(64, 1, 1));
-        hardware_->tonemapPipeline.emplace(tonemap_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->debugResolvePipeline.emplace(debug_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->visibilityDebugResolvePipeline.emplace(visibility_debug_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->actorPickPipeline.emplace(actor_pick_comp_glsl, ktm::uvec3(1, 1, 1));
-        hardware_->opticsOverlayPipeline.emplace(optics_overlay_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->opticsCursorPipeline.emplace(optics_cursor_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->opticsUiWarpPipeline.emplace(optics_ui_warp_comp_glsl, ktm::uvec3(8, 8, 1));
-        hardware_->opticsCompositePipeline.emplace(optics_composite_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->ssaoPipeline.emplace(ssao_comp_glsl);
+        hardware_->ssaoBlurPipeline.emplace(ssao_blur_comp_glsl);
+        hardware_->lightingPipeline.emplace(lighting_comp_glsl);
+        hardware_->skyPipeline.emplace(sky_comp_glsl);
+        hardware_->skySHProjectPipeline.emplace(sky_sh_project_comp_glsl);
+        hardware_->tonemapPipeline.emplace(tonemap_comp_glsl);
+        hardware_->debugResolvePipeline.emplace(debug_resolve_comp_glsl);
+        hardware_->visibilityDebugResolvePipeline.emplace(visibility_debug_resolve_comp_glsl);
+        hardware_->actorPickPipeline.emplace(actor_pick_comp_glsl);
+        hardware_->opticsOverlayPipeline.emplace(optics_overlay_comp_glsl);
+        hardware_->opticsCursorPipeline.emplace(optics_cursor_comp_glsl);
+        hardware_->opticsUiWarpPipeline.emplace(optics_ui_warp_comp_glsl);
+        hardware_->opticsCompositePipeline.emplace(optics_composite_comp_glsl);
 #ifdef CORONA_ENABLE_VISION
-        hardware_->visionResolvePipeline.emplace(vision_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->visionResolvePipeline.emplace(vision_resolve_comp_glsl);
 #endif
         hardware_->shaderHasInit = true;
     } catch (const std::exception& e) {
@@ -4382,8 +4382,8 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     auto& opticsUiWarp = *hardware_->opticsUiWarpPipeline;
     auto& opticsComposite = *hardware_->opticsCompositePipeline;
 
-    const uint32_t dispatchX = (hardware_->gbufferSize.x + 7u) / 8u;
-    const uint32_t dispatchY = (hardware_->gbufferSize.y + 7u) / 8u;
+    const auto [dispatchX, dispatchY] = opticsComposite.dispatch_groups(
+        hardware_->gbufferSize.x, hardware_->gbufferSize.y);
     uint32_t cursorDispatchX = dispatchX;
     uint32_t cursorDispatchY = dispatchY;
 
@@ -4571,8 +4571,9 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
             static_cast<std::uint32_t>(uiBatch.materials.size()),
             hardware_->gbufferSize.x,
             hardware_->gbufferSize.y));
-        cursorDispatchX = (cursor_width + 7u) / 8u;
-        cursorDispatchY = (cursor_height + 7u) / 8u;
+        const auto [cw, ch] = opticsCursor.dispatch_groups(cursor_width, cursor_height);
+        cursorDispatchX = cw;
+        cursorDispatchY = ch;
     }
 
     uint32_t compositeOverlayDescriptor = overlayDescriptor;
@@ -6358,8 +6359,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     visionResolve.pushConsts.exposure = 1.0f;
                     visionResolve.bind_storage_image(0, target.final_output);
 
-                    const uint32_t dispatchX = (w + 7u) / 8u;
-                    const uint32_t dispatchY = (h + 7u) / 8u;
+                    const auto [dispatchX, dispatchY] = visionResolve.dispatch_groups(w, h);
                     // 不在此 commit：UI overlay pass 紧随其后读 final_output 作为背景，
                     // 整帧在同一 executor 上按程序序记录、末尾统一提交一次。
                     stream << visionResolve(dispatchX, dispatchY, 1);
