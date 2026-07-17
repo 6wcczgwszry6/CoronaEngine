@@ -74,7 +74,7 @@ export const defineEventGenerators = () => {
     let branch = pythonGenerator.statementToCode(block, 'DO');
     if (!branch) branch = pythonGenerator.INDENT + 'pass\n';
     return (
-      `if _event_type == 'click' and _button == '${buttonMap[button] || button}':\n` +
+      `if str(_event_type or '').strip().lower() == 'click' and str(_button or '').strip().lower() in ('${String(buttonMap[button] || button).toLowerCase()}', '${String(button || '').toLowerCase()}', '0' if '${button}' == 'left' else ''):\n` +
       indent(branch)
     );
   };
@@ -99,4 +99,13 @@ export const defineEventGenerators = () => {
     if (!branch) branch = pythonGenerator.INDENT + 'pass\n';
     return `if _event_type == 'contextmenu':\n` + indent(branch);
   };
+
+  const lifecycleCode = (block) => {
+    const branch = pythonGenerator.statementToCode(block, 'DO');
+    return branch || '';
+  };
+  pythonGenerator.forBlock.node_when_enter = lifecycleCode;
+  pythonGenerator.forBlock.node_while_active = lifecycleCode;
+  pythonGenerator.forBlock.node_when_exit = lifecycleCode;
+
 };

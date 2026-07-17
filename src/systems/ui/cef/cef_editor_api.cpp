@@ -342,6 +342,10 @@ constexpr std::array<EditorApiParamSpec, 5> kScratchExecutePythonCodeParams = {{
     param("target_type", EditorApiValueType::String, true),
 }};
 
+constexpr std::array<EditorApiParamSpec, 1> kScratchStopScriptParams = {{
+    param("restore_state", EditorApiValueType::Boolean, true),
+}};
+
 constexpr std::array<EditorApiParamSpec, 3> kScratchKeyEventParams = {{
     param("key", EditorApiValueType::String),
     param("modifiers", EditorApiValueType::String, true),
@@ -353,11 +357,16 @@ constexpr std::array<EditorApiParamSpec, 2> kScratchKeyReleaseParams = {{
     param("display_key", EditorApiValueType::String, true),
 }};
 
-constexpr std::array<EditorApiParamSpec, 4> kScratchMouseEventParams = {{
+constexpr std::array<EditorApiParamSpec, 9> kScratchMouseEventParams = {{
     param("event_type", EditorApiValueType::String),
     param("button", EditorApiValueType::String, true),
     param("x", EditorApiValueType::Number),
     param("y", EditorApiValueType::Number),
+    param("viewport_x", EditorApiValueType::Number, true),
+    param("viewport_y", EditorApiValueType::Number, true),
+    param("viewport_width", EditorApiValueType::Number, true),
+    param("viewport_height", EditorApiValueType::Number, true),
+    param("picked_actor", EditorApiValueType::String, true),
 }};
 
 #define EDITOR_API_METHOD0_WRAPPED(module, function, js_path, python_path, return_type) \
@@ -458,9 +467,9 @@ constexpr std::array<EditorApiMethodSpec, 135> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA(ResourceSearch, mark_index_dirty, kResourceSearchMarkIndexDirtyParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ResourceSearch, prepare_index, kCallerParam, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ResourceSearch, rebuild_index, kCallerParam, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneDatas, actor_operation, kSceneDatasActorOperationParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneDatas, get_actor, kSceneActorParams, EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(SceneDatas, get_scene, kSceneNameOptionalParam, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneDatas, actor_operation, kSceneDatasActorOperationParams, "", "scene_datas.actor_operation", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneDatas, get_actor, kSceneActorParams, "", "scene_datas.get_actor", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneDatas, get_scene, kSceneNameOptionalParam, "", "scene_datas.get_scene", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneDatas, save_actor, kSceneActorParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(SceneDatas, select_model_file, kSceneDatasSelectModelFileParams, EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, actor_play_audio, kSceneToolsActorPlayAudioParams, "sceneTools.actorPlayAudio", "scene_tools.actor_play_audio", EditorApiValueType::Object),
@@ -513,7 +522,7 @@ constexpr std::array<EditorApiMethodSpec, 135> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, save_blockly_target, kObjectPayloadParam, "scratch.saveBlocklyTarget", "scratch.save_blockly_target", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, start_game_preview, kObjectPayloadParam, "scratch.startGamePreview", "scratch.start_game_preview", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, stop_game_preview, kNoParams, "scratch.stopGamePreview", "scratch.stop_game_preview", EditorApiValueType::Any),
-    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, stop_script_execution, kNoParams, "scratch.stopScriptExecution", "scratch.stop_script_execution", EditorApiValueType::Any),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(ScratchTool, stop_script_execution, kScratchStopScriptParams, "scratch.stopScriptExecution", "scratch.stop_script_execution", EditorApiValueType::Any),
 }};
 
 #undef EDITOR_API_METHOD_SCHEMA
