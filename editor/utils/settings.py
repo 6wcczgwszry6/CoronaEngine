@@ -64,7 +64,7 @@ class CoronaSettings:
         else:
             self.config_path = config_path
 
-        self.config = configparser.ConfigParser()
+        self.config = configparser.ConfigParser(strict=False)
         self._active_project_path = None
         self.active_project_config = None
         self._ensure_file_exists()
@@ -106,7 +106,7 @@ class CoronaSettings:
 
     def load(self):
         try:
-            self.config.read(self.config_path, encoding='utf-8')
+            self.config.read(self.config_path, encoding='utf-8-sig')
         except Exception as e:
             logger.error(f"Failed to load config: {e}")
 

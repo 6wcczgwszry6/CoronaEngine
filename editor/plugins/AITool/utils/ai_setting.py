@@ -80,7 +80,7 @@ try:
             "enable_pbr": True,
             "model": "3.0",
             "generate_type": "Normal",
-            "face_count": 500000,
+            "face_count": 20000,
             "request_timeout": 300.0,
             "poll_interval": 3.0,
             "poll_timeout": 600.0,

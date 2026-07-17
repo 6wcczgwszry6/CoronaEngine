@@ -114,7 +114,29 @@
       @mousedown="beginLook"
       @mousemove="updateLook"
       @mouseup="endLook"
+      @click="handleScratchClick"
+      @wheel="forwardScratchMouse('wheel', $event)"
+      @contextmenu.prevent="forwardScratchMouse('contextmenu', $event)"
     />
+    <div v-if="previewHudStates.length" class="preview-hud">
+      <section v-for="state in previewHudStates" :key="state.context_id" class="preview-hud-card">
+        <div class="preview-hud-title">{{ state.actor_name || '项目全局' }}</div>
+        <div class="preview-hud-stats">
+          <span>分数 <b>{{ formatHudValue(state.score) }}</b></span>
+          <span>生命 <b>{{ formatHudValue(state.lives) }}</b></span>
+          <span v-if="state.countdown_active">倒计时 <b>{{ formatCountdown(state.countdown) }}</b></span>
+        </div>
+        <div v-if="state.game_state" class="preview-hud-state" :class="`state-${state.game_state}`">
+          {{ gameStateLabel(state.game_state) }}
+        </div>
+        <div v-for="([name, value]) in objectEntries(state.variables)" :key="`v-${name}`" class="preview-hud-row">
+          <span>{{ name }}</span><b>{{ formatHudValue(value) }}</b>
+        </div>
+        <div v-for="([name, value]) in objectEntries(state.lists)" :key="`l-${name}`" class="preview-hud-row list">
+          <span>{{ name }}</span><b>{{ formatHudValue(value) }}</b>
+        </div>
+      </section>
+    </div>
     <div v-if="errorText" class="error">{{ errorText }}</div>
   </div>
 </template>
@@ -122,9 +144,10 @@
 <script setup>
 import { nextTick, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRoute } from 'vue-router';
-import { appService, projectService, sceneService } from '@/utils/bridge.js';
+import { appService, editorApi, projectService, sceneService, scriptingService } from '@/utils/bridge.js';
 import { buildDragRegions, dragRegionsSignature } from '@/utils/cameraDragRegions.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
+import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
   createViewportUiCalibrationStore,
   createViewportUiModeStore,
@@ -149,6 +172,9 @@ const renderHeight = ref(540);
 const viewportUiMode = ref('flat2d');
 const visionAvailable = ref(false);
 const errorText = ref('');
+const previewHudStates = ref([]);
+const nodeGraphInputLocked = ref(false);
+const gamePreviewInputLocked = ref(false);
 const toolbarRef = ref(null);
 const inputLayerRef = ref(null);
 const backendMenuOpen = ref(false);
@@ -156,6 +182,12 @@ const visionModeMenuOpen = ref(false);
 const outputMenuOpen = ref(false);
 const borderlessFullscreen = ref(false);
 let borderlessTogglePending = false;
+let previewHudTimer = 0;
+let scratchMouseMoveFrame = 0;
+let pendingScratchMouseMove = null;
+let actorPickIndex = new Map();
+let actorPickResultCallbackToken = null;
+let pendingScratchClick = null;
 
 const outputModes = [
   { value: 'final_color', label: 'Final' },
@@ -342,6 +374,26 @@ const viewportUiPointerController = createViewportUiPointerController({
   getRenderRect: getCameraRenderRect,
 });
 
+const cameraViewPickController = createViewportPickController({
+  retryDelayMs: 60,
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => ({
+    sceneId,
+    cameraHandle: camera.value?.handle,
+  }),
+  getHitRect: getCameraViewHitRect,
+  getRenderRect: getCameraRenderRect,
+  getActorIndex: () => actorPickIndex,
+});
+
+const refreshCameraViewActorPickIndex = async () => {
+  if (!sceneId) return false;
+  const result = await sceneService.listSceneTree(sceneId);
+  const snapshot = unwrap(result);
+  actorPickIndex = indexActorsByHandle(Array.isArray(snapshot?.actors) ? snapshot.actors : []);
+  return actorPickIndex.size > 0;
+};
+
 const applyViewportUiCalibration = (calibration) => {
   viewportUiCalibrationStore.applyToBridge({
     bridge: window.coronaBridge,
@@ -522,6 +574,9 @@ const cross = (a, b) => [
 ];
 
 const publishPose = () => {
+  // Keep Scratch input active, but never publish an editor-controlled camera
+  // pose while a node graph/game preview owns keyboard and mouse input.
+  if (isEditorInputLocked()) return;
   const item = camera.value;
   const bridge = window.coronaBridge;
   if (!item || !bridge || typeof bridge.cameraMove !== 'function') return;
@@ -575,11 +630,28 @@ const rotateCamera = (dt) => {
   publishPose();
 };
 
+const isEditorInputLocked = () => {
+  const locks = window.__coronaEditorInputLocks;
+  return Boolean(
+    window.__coronaGamePreviewInputLocked ||
+    gamePreviewInputLocked.value ||
+    (locks instanceof Set && locks.size > 0) ||
+    nodeGraphInputLocked.value
+  );
+};
+const resetCameraInput = () => {
+  keys.clear();
+  looking = false;
+};
 const movementFrame = (time) => {
   const dt = previousTime ? Math.min((time - previousTime) / 1000, 0.05) : 0;
   previousTime = time;
-  moveCamera(dt);
-  rotateCamera(dt);
+  if (!isEditorInputLocked()) {
+    moveCamera(dt);
+    rotateCamera(dt);
+  } else {
+    resetCameraInput();
+  }
   animationFrame = requestAnimationFrame(movementFrame);
 };
 
@@ -600,12 +672,36 @@ const movementCode = (event) => {
   }[key] || '';
 };
 
+const keyModifiers = (event) => [
+  event.ctrlKey ? 'Ctrl' : '',
+  event.altKey ? 'Alt' : '',
+  event.shiftKey ? 'Shift' : '',
+  event.metaKey ? 'Meta' : '',
+].filter(Boolean).join(',');
+const isTextInputEvent = (event) => {
+  const target = event.target;
+  return Boolean(target?.closest?.('input, textarea, select, [contenteditable="true"]'));
+};
 const onKeyDown = (event) => {
   if (event.key === 'F11' || event.code === 'F11') {
     event.preventDefault();
     if (!event.repeat) {
       toggleBorderlessFullscreen();
     }
+    return;
+  }
+  if (isTextInputEvent(event)) return;
+  if (!event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyEvent(
+      event.code || event.key || '',
+      keyModifiers(event),
+      event.key || event.code || '',
+    ).catch(() => {});
+  }
+  if (isEditorInputLocked()) {
+    keys.clear();
+    event.preventDefault();
     return;
   }
   const code = movementCode(event);
@@ -622,14 +718,186 @@ const onKeyDown = (event) => {
     event.preventDefault();
   }
 };
-const onKeyUp = (event) => keys.delete(movementCode(event));
+const onKeyUp = (event) => {
+  if (isTextInputEvent(event)) return;
+  keys.delete(movementCode(event));
+  if (!event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyUpEvent(
+      event.code || event.key || '',
+      event.key || event.code || '',
+    ).catch(() => {});
+  }
+};
+const scratchMouseButton = (button) => ({
+  0: 'LeftButton',
+  1: 'MiddleButton',
+  2: 'RightButton',
+}[button] || '');
+const sendScratchMouse = (
+  eventType,
+  button,
+  x,
+  y,
+  viewportX,
+  viewportY,
+  viewportWidth,
+  viewportHeight,
+  pickedActor = '',
+) => {
+  scriptingService.sendMouseEvent(
+    eventType,
+    button,
+    x,
+    y,
+    viewportX,
+    viewportY,
+    viewportWidth,
+    viewportHeight,
+    pickedActor,
+  ).catch(() => {});
+};
+const finishPendingScratchClick = (pickedActor = '') => {
+  const pending = pendingScratchClick;
+  if (!pending) return;
+  pendingScratchClick = null;
+  if (pending.timer != null) window.clearTimeout(pending.timer);
+  sendScratchMouse(
+    'click',
+    pending.button,
+    pending.x,
+    pending.y,
+    pending.viewportX,
+    pending.viewportY,
+    pending.viewportWidth,
+    pending.viewportHeight,
+    pickedActor,
+  );
+};
+
+const handleScratchClick = (event) => {
+  if (pendingScratchClick) finishPendingScratchClick('');
+
+  const rect = getCameraRenderRect();
+  const snapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  pendingScratchClick = {
+    button: scratchMouseButton(snapshot.button),
+    x: snapshot.clientX,
+    y: snapshot.clientY,
+    viewportX: snapshot.clientX - Number(rect.left || 0),
+    viewportY: snapshot.clientY - Number(rect.top || 0),
+    viewportWidth: Number(rect.width || 0),
+    viewportHeight: Number(rect.height || 0),
+    timer: null,
+    requestId: '',
+  };
+
+  const requestId = cameraViewPickController.pickAt(snapshot);
+  if (!requestId) {
+    finishPendingScratchClick('');
+    return;
+  }
+  pendingScratchClick.requestId = requestId;
+  pendingScratchClick.timer = window.setTimeout(() => finishPendingScratchClick(''), 220);
+};
+
+const finishCameraViewClickFromPick = (payload, result) => {
+  if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
+  if (result?.status === 'pending' || result?.status === 'stale') return;
+  const pickedActor =
+    result?.actor?.name ||
+    payload?.actorName ||
+    payload?.name ||
+    payload?.actor?.name ||
+    '';
+  finishPendingScratchClick(pickedActor);
+};
+
+const handleCameraViewActorPickResult = (payload) => {
+  const result = cameraViewPickController.handlePickResult(payload);
+  if (result.status !== 'unknown' || !payload?.sceneId) {
+    finishCameraViewClickFromPick(payload, result);
+    return;
+  }
+  refreshCameraViewActorPickIndex()
+    .then(() => finishCameraViewClickFromPick(payload, cameraViewPickController.handlePickResult(payload)))
+    .catch(() => finishCameraViewClickFromPick(payload, result));
+};
+
+const forwardScratchMouse = (eventType, event) => {
+  const button = scratchMouseButton(event.button);
+  const x = Number(event.clientX || 0);
+  const y = Number(event.clientY || 0);
+  // Native CameraView renders behind the 34px toolbar across the whole
+  // browser surface. The input layer only starts below that toolbar, so using
+  // its bounds shifts projected picking upward. Keep event capture on the
+  // input layer, but express Scratch coordinates in the full render surface.
+  const rect = getCameraRenderRect();
+  const viewportX = x - Number(rect.left || 0);
+  const viewportY = y - Number(rect.top || 0);
+  const viewportWidth = Number(rect.width || 0);
+  const viewportHeight = Number(rect.height || 0);
+  const scratchEvent = {
+    button,
+    x,
+    y,
+    viewportX,
+    viewportY,
+    viewportWidth,
+    viewportHeight,
+  };
+  if (eventType !== 'move') {
+    sendScratchMouse(
+      eventType,
+      scratchEvent.button,
+      scratchEvent.x,
+      scratchEvent.y,
+      scratchEvent.viewportX,
+      scratchEvent.viewportY,
+      scratchEvent.viewportWidth,
+      scratchEvent.viewportHeight,
+    );
+    return;
+  }
+  pendingScratchMouseMove = scratchEvent;
+  if (scratchMouseMoveFrame) return;
+  scratchMouseMoveFrame = window.requestAnimationFrame(() => {
+    scratchMouseMoveFrame = 0;
+    const pending = pendingScratchMouseMove;
+    pendingScratchMouseMove = null;
+    if (pending) {
+      sendScratchMouse(
+        'move',
+        pending.button,
+        pending.x,
+        pending.y,
+        pending.viewportX,
+        pending.viewportY,
+        pending.viewportWidth,
+        pending.viewportHeight,
+      );
+    }
+  });
+};
 const beginLook = (event) => {
+  forwardScratchMouse('mousedown', event);
+  if (isEditorInputLocked()) {
+    looking = false;
+    return;
+  }
   if (event.button !== 2) return;
   looking = true;
   lastMouseX = event.clientX;
   lastMouseY = event.clientY;
 };
-const endLook = () => { looking = false; };
+const endLook = (event) => {
+  looking = false;
+  forwardScratchMouse('mouseup', event);
+};
 
 const viewportCursorShape = () => (looking ? 'grabbing' : 'arrow');
 
@@ -650,6 +918,11 @@ const handleViewportPointerLeave = () => {
 };
 
 const updateLook = (event) => {
+  forwardScratchMouse('move', event);
+  if (isEditorInputLocked()) {
+    looking = false;
+    return;
+  }
   if (!looking || !camera.value) return;
   const dx = event.clientX - lastMouseX;
   const dy = event.clientY - lastMouseY;
@@ -698,12 +971,46 @@ const scheduleDragRegionSync = () => {
   });
 };
 
+const objectEntries = (value) => Object.entries(value || {});
+const formatHudValue = (value) => {
+  if (Array.isArray(value)) return `[${value.join(', ')}]`;
+  if (typeof value === 'number') return Number.isInteger(value) ? String(value) : value.toFixed(1);
+  if (value && typeof value === 'object') return JSON.stringify(value);
+  return String(value ?? '');
+};
+const formatCountdown = (value) => `${Math.max(0, Number(value) || 0).toFixed(1)}s`;
+const gameStateLabel = (state) => ({
+  win: '游戏胜利',
+  over: '游戏失败',
+  restart: '正在重新开始',
+}[state] || state);
+const pollPreviewHud = async () => {
+  try {
+    const payload = unwrap(await scriptingService.getGamePreviewStatus()) || {};
+    previewHudStates.value = payload.has_snapshot ? (payload.runtime_states || []) : [];
+    gamePreviewInputLocked.value = Boolean(payload.input_locked ?? payload.inputLocked);
+    if (gamePreviewInputLocked.value) resetCameraInput();
+  } catch {
+    previewHudStates.value = [];
+    gamePreviewInputLocked.value = false;
+  }
+  try {
+    const scriptStatus = unwrap(await scriptingService.getScriptStatus()) || {};
+    nodeGraphInputLocked.value = Boolean(scriptStatus.inputLocked);
+    if (nodeGraphInputLocked.value) resetCameraInput();
+  } catch {
+    nodeGraphInputLocked.value = false;
+  }
+};
+
 onMounted(async () => {
   document.documentElement.style.background = 'transparent';
   document.body.style.background = 'transparent';
   await syncDragRegions({ force: true });
   try {
     await loadCamera();
+    await refreshCameraViewActorPickIndex().catch(() => false);
+    actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleCameraViewActorPickResult);
     syncViewportUiMode();
     await syncWindowSize(true);
   } catch (error) {
@@ -716,12 +1023,25 @@ onMounted(async () => {
   window.addEventListener('storage', handleViewportUiCalibrationStorage);
   coronaEventBus.on('viewport-ui-calibration-changed', handleViewportUiCalibrationChanged);
   animationFrame = requestAnimationFrame(movementFrame);
+  await pollPreviewHud();
+  previewHudTimer = window.setInterval(pollPreviewHud, 250);
 });
 
 onBeforeUnmount(() => {
   cancelAnimationFrame(animationFrame);
   if (dragRegionFrame) window.cancelAnimationFrame(dragRegionFrame);
+  if (scratchMouseMoveFrame) window.cancelAnimationFrame(scratchMouseMoveFrame);
+  scratchMouseMoveFrame = 0;
+  pendingScratchMouseMove = null;
+  if (pendingScratchClick?.timer != null) window.clearTimeout(pendingScratchClick.timer);
+  pendingScratchClick = null;
+  cameraViewPickController.dispose();
+  if (actorPickResultCallbackToken) {
+    editorApi.off(actorPickResultCallbackToken).catch(() => {});
+    actorPickResultCallbackToken = null;
+  }
   window.clearTimeout(resizeTimer);
+  window.clearInterval(previewHudTimer);
   window.removeEventListener('resize', scheduleWindowSizeSync);
   window.removeEventListener('resize', scheduleDragRegionSync);
   window.removeEventListener('keydown', onKeyDown);
@@ -866,6 +1186,64 @@ onBeforeUnmount(() => {
 .window-action { width: 24px; cursor: pointer; }
 .maximize { margin-left: auto; }
 .close { color: #ffb4b4; }
+.preview-hud {
+  position: absolute;
+  z-index: 3;
+  top: 76px;
+  right: 12px;
+  width: min(280px, 42vw);
+  display: grid;
+  gap: 8px;
+  pointer-events: none;
+}
+.camera-overlay.borderless .preview-hud { top: 44px; }
+.preview-hud-card {
+  padding: 10px 12px;
+  border: 1px solid rgba(147, 197, 253, 0.38);
+  border-radius: 8px;
+  background: rgba(9, 16, 27, 0.78);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  backdrop-filter: blur(5px);
+}
+.preview-hud-title {
+  margin-bottom: 7px;
+  color: #bfdbfe;
+  font-size: 12px;
+  font-weight: 800;
+}
+.preview-hud-stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 12px;
+}
+.preview-hud-stats b { color: #fef08a; font-size: 15px; }
+.preview-hud-state {
+  margin-top: 8px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  background: rgba(59, 130, 246, 0.35);
+  text-align: center;
+  font-weight: 800;
+}
+.preview-hud-state.state-win { background: rgba(22, 163, 74, 0.48); }
+.preview-hud-state.state-over { background: rgba(185, 28, 28, 0.55); }
+.preview-hud-state.state-restart { background: rgba(217, 119, 6, 0.5); }
+.preview-hud-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 5px;
+  color: #cbd5e1;
+  font-size: 11px;
+}
+.preview-hud-row b {
+  max-width: 65%;
+  overflow: hidden;
+  color: #fff;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .error {
   position: absolute;
   z-index: 3;
