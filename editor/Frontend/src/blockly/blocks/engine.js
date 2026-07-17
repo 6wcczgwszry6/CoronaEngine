@@ -132,90 +132,6 @@ export const defineEngineBlocks = () => {
     },
   };
 
-  Blockly.Blocks['engine_Xset'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('将 X 坐标设为')
-        .appendField(new Blockly.FieldNumber(0), 'X');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('直接设置角色的 X 坐标');
-      this.setHelpUrl('');
-    },
-  };
-
-  Blockly.Blocks['engine_Yset'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('将 Y 坐标设为')
-        .appendField(new Blockly.FieldNumber(0), 'Y');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('直接设置角色的 Y 坐标');
-      this.setHelpUrl('');
-    },
-  };
-
-  Blockly.Blocks['engine_Zset'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('将 Z 坐标设为')
-        .appendField(new Blockly.FieldNumber(0), 'Z');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('直接设置角色的 Z 坐标');
-      this.setHelpUrl('');
-    },
-  };
-
-  Blockly.Blocks['engine_Xadd'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('将 X 坐标增加')
-        .appendField(new Blockly.FieldNumber(10), 'DX');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('在当前位置基础上增加 X 坐标');
-      this.setHelpUrl('');
-    },
-  };
-
-  Blockly.Blocks['engine_Yadd'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('将 Y 坐标增加')
-        .appendField(new Blockly.FieldNumber(10), 'DY');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('在当前位置基础上增加 Y 坐标');
-      this.setHelpUrl('');
-    },
-  };
-
-  Blockly.Blocks['engine_Zadd'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('将 Z 坐标增加')
-        .appendField(new Blockly.FieldNumber(10), 'DZ');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('在当前位置基础上增加 Z 坐标');
-      this.setHelpUrl('');
-    },
-  };
-
   Blockly.Blocks['engine_X'] = {
     init: function () {
       this.appendDummyInput().appendField('X');
@@ -243,41 +159,20 @@ export const defineEngineBlocks = () => {
     },
   };
 
+  const rotationReporter = (type, axis) => {
+    Blockly.Blocks[type] = { init() {
+      this.appendDummyInput().appendField(`\u65cb\u8f6c ${axis}`);
+      this.setOutput(true, 'Number');
+      this.setStyle('motion_blocks');
+      this.setTooltip(`\u8bfb\u53d6\u5f53\u524d\u5bf9\u8c61 ${axis} \u8f74\u65cb\u8f6c\u89d2\u5ea6`);
+    } };
+  };
+  rotationReporter('engine_rotationX', 'X');
+  rotationReporter('engine_rotationY', 'Y');
+  rotationReporter('engine_rotationZ', 'Z');
+
+
   // ── 物理扩展：速度与冲量 ──
-
-  Blockly.Blocks['engine_set_velocity'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('设置速度 X')
-        .appendField(new Blockly.FieldNumber(0), 'VX')
-        .appendField('Y')
-        .appendField(new Blockly.FieldNumber(0), 'VY')
-        .appendField('Z')
-        .appendField(new Blockly.FieldNumber(0), 'VZ');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('设置物体当前线速度（单位/秒），用于移动靶运动控制');
-    },
-  };
-
-  Blockly.Blocks['engine_apply_impulse'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('施加冲量 X')
-        .appendField(new Blockly.FieldNumber(0), 'IX')
-        .appendField('Y')
-        .appendField(new Blockly.FieldNumber(0), 'IY')
-        .appendField('Z')
-        .appendField(new Blockly.FieldNumber(0), 'IZ');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('施加瞬时冲量（N·s），用于子弹命中反馈/爆炸推开效果');
-    },
-  };
 
   Blockly.Blocks['engine_get_velocity'] = {
     init: function () {
@@ -306,18 +201,6 @@ export const defineEngineBlocks = () => {
       this.setTooltip('设置当前脚本运行时重力；无原生物理接口时用 Python 速度缓存降级模拟');
     },
   };
-  Blockly.Blocks['engine_jump'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('向上跳 力度')
-        .appendField(new Blockly.FieldNumber(8), 'POWER');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('给当前对象施加向上的跳跃冲量；无原生接口时更新速度缓存');
-    },
-  };
   Blockly.Blocks['engine_bounce_axis'] = {
     init: function () {
       this.appendDummyInput()
@@ -330,18 +213,6 @@ export const defineEngineBlocks = () => {
       this.setNextStatement(true, null);
       this.setStyle('engine_blocks');
       this.setTooltip('按指定轴反转当前速度并乘以系数，用于打砖块/弹跳/滚动天空');
-    },
-  };
-  Blockly.Blocks['engine_set_game_speed'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('设置游戏速度')
-        .appendField(new Blockly.FieldNumber(1), 'VALUE');
-      this.setInputsInline(true);
-      this.setPreviousStatement(true, null);
-      this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
-      this.setTooltip('把 demo 逻辑用游戏速度保存到当前运行时变量');
     },
   };
   Blockly.Blocks['engine_get_game_speed'] = {

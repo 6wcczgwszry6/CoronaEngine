@@ -24,6 +24,17 @@
           {{ codeRunning ? '停止' : '运行' }}
         </button>
         <span v-if="runStatus" class="ng-run-status" :title="runDetail || runStatus" @click="toggleRunDetail">{{ runStatus }}</span>
+
+        <button
+          v-if="isProjectTarget"
+          type="button"
+          class="ng-mode"
+          :disabled="xmlBusy"
+          title="导入 Gemini / AI 生成的节点积木 XML"
+          @click.stop="handleImportBlocksDocument"
+        >
+          导入
+        </button>
         <button
           type="button"
           class="ng-mode fullscreen-toggle"
@@ -46,7 +57,7 @@
         </button>
       </div>
     </div>
-    <div v-if="!actorName" class="ng-empty">请先选中一个物体</div>
+    <div v-if="!targetReady" class="ng-empty">请先选中一个物体</div>
     <div v-else class="ng-body">
       <aside class="ng-panel ng-toolbox">
         <div class="ng-section-title">
@@ -342,6 +353,7 @@ const runBusy = ref(false);
 const globalPreviewActive = ref(false);
 const globalPreviewScope = ref('');
 const runStatus = ref('');
+const xmlBusy = ref(false);
 const runDetail = ref('');
 const runDetailVisible = ref(false);
 const currentRunNodeId = ref('');
@@ -457,11 +469,18 @@ let isLoading = false,
   gamePreviewGuardTimer = null,
   startedRunForTarget = false;
 const targetEnabledByKey = new Map();
+const normalizedTargetType = computed(() => (props.targetType === 'model' ? 'actor' : props.targetType || 'actor'));
+const isProjectTarget = computed(() => normalizedTargetType.value === 'project');
+const targetReady = computed(() => isProjectTarget.value || Boolean(props.actorName));
 const targetKey = computed(
-  () => `${props.targetType || 'actor'}:${props.sceneName || ''}:${props.actorName || ''}`
+  () => `${normalizedTargetType.value}:${isProjectTarget.value ? '' : props.sceneName || ''}:${isProjectTarget.value ? '' : props.actorName || ''}`
 );
 const targetLabel = computed(() =>
-  props.actorName ? `${props.actorName} [${props.sceneName || '未命名场景'}]` : '未选择目标'
+  isProjectTarget.value
+    ? '项目常驻节点图'
+    : props.actorName
+      ? `${props.actorName} [${props.sceneName || '未命名场景'}]`
+      : '未选择目标'
 );
 const nodes = computed(() => graph.nodes),
   edges = computed(() => graph.edges);
@@ -1344,7 +1363,7 @@ function applyGraph(next) {
   return portsRedistributed;
 }
 function scheduleSave() {
-  if (isLoading || !props.actorName) return;
+  if (isLoading || !targetReady.value) return;
   saveLabel.value = '未保存';
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
@@ -1357,15 +1376,16 @@ function storageKeyForTarget(target) {
 }
 function currentTarget() {
   return {
-    targetType: props.targetType || 'actor',
-    sceneName: props.sceneName || '',
-    actorName: props.actorName || '',
+    targetType: normalizedTargetType.value,
+    sceneName: isProjectTarget.value ? '' : props.sceneName || '',
+    actorName: isProjectTarget.value ? '' : props.actorName || '',
   };
 }
 async function saveNow(targetOverride = null) {
   if (isLoading) return false;
   const target = targetOverride || currentTarget();
-  if (!target.actorName) return false;
+  const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
+  if (!isProject && !target.actorName) return false;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -1389,8 +1409,8 @@ async function saveNow(targetOverride = null) {
   try {
     const response = bridgeResult(await scriptingService.saveBlocklyTarget({
       target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
-      scene_name: target.sceneName || '',
-      actor_name: target.actorName || '',
+      scene_name: isProject ? '' : target.sceneName || '',
+      actor_name: isProject ? '' : target.actorName || '',
       script_kind: 'node_graph',
       workspace: snapshot,
       code,
@@ -1411,7 +1431,7 @@ async function saveNow(targetOverride = null) {
 }
 async function loadGraphForCurrentTarget() {
   resetZoom();
-  if (!props.actorName) {
+  if (!targetReady.value) {
     applyGraph(normalizeGraph({}));
     return;
   }
@@ -1420,10 +1440,11 @@ async function loadGraphForCurrentTarget() {
   let shouldMigrateLocal = false;
   try {
     const target = currentTarget();
+    const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
     const response = bridgeResult(await scriptingService.loadBlocklyTarget({
       target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
-      scene_name: target.sceneName || '',
-      actor_name: target.actorName || '',
+      scene_name: isProject ? '' : target.sceneName || '',
+      actor_name: isProject ? '' : target.actorName || '',
       script_kind: 'node_graph',
     }));
     if (response?.status === 'error') throw new Error(response.message || '节点图加载失败');
@@ -1460,6 +1481,37 @@ async function loadGraphForCurrentTarget() {
 }
 function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
+}
+
+
+function handleImportBlocksDocument() {
+  if (!isProjectTarget.value || xmlBusy.value) return;
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = '.corona-blocks.xml,.xml,text/xml,application/xml';
+  input.onchange = async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+    xmlBusy.value = true;
+    try {
+      const xml = await file.text();
+      const response = bridgeResult(await scriptingService.importBlocksDocument({ xml }));
+      if (response?.status === 'error' || response?.success === false) {
+        throw new Error(response?.message || '导入节点积木 XML 失败');
+      }
+      await loadGraphForCurrentTarget();
+      const warningText = Array.isArray(response.warnings) && response.warnings.length
+        ? `（${response.warnings[0]}）`
+        : '';
+      saveLabel.value = `节点积木 XML 已导入${warningText}`;
+    } catch (error) {
+      logError('导入节点积木 XML 失败', error);
+      saveLabel.value = `导入失败：${error?.message || error}`;
+    } finally {
+      xmlBusy.value = false;
+    }
+  };
+  input.click();
 }
 function clearRunPoll() {
   if (runPollTimer) window.clearInterval(runPollTimer);
@@ -1623,7 +1675,7 @@ async function handleToggleRun() {
       await stopNodeGraphRun('已停止', true);
       return;
     }
-    if (!props.actorName) {
+    if (!targetReady.value) {
       runStatus.value = '请先选择运行目标';
       return;
     }
@@ -1660,9 +1712,9 @@ async function handleToggleRun() {
       await scriptingService.executePythonCode(
         code,
         0,
-        props.sceneName || '',
-        props.actorName,
-        props.targetType === 'model' ? 'actor' : props.targetType || 'actor'
+        isProjectTarget.value ? '' : props.sceneName || '',
+        isProjectTarget.value ? '' : props.actorName,
+        normalizedTargetType.value
       )
     );
     if (response?.outcome === 'preview_running') {
@@ -1740,7 +1792,7 @@ watch(
     if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('已停止');
     clearExternalDrag();
     cancelMacroPointerDrag();
-    if (oldTarget.actorName && !isLoading) await saveNow(oldTarget);
+    if ((oldTarget.targetType === 'project' || oldTarget.actorName) && !isLoading) await saveNow(oldTarget);
     runStatus.value = '';
     currentRunNodeId.value = '';
     runWarnings.value = [];

@@ -233,6 +233,12 @@
             </div>
 
             <!-- 场景 - 脚本 -->
+            <!-- 场景 - 项目常驻节点图 -->
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
+              <NodeGraphWorkspace targetType="project" />
+            </div>
+
+            <!-- 场景 - 脚本 -->
             <div v-show="ActiveSubTab === 'Script'" class="space-y-2 text-xs">
               <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-blue-600">
                 <div class="flex items-center space-x-2">
@@ -1387,6 +1393,7 @@ const ActiveSubTab = ref('Basic');
 const sceneTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Terrain', label: '地形' },
+  { id: 'NodeGraph', label: '节点' },
   { id: 'Script', label: '脚本' },
 ];
 

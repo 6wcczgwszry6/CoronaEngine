@@ -12,6 +12,9 @@ function darker(hex, pct) {
 // ── 统一定义：每种分类色同时用于 blockStyle 和 categoryStyle ──
 const COLOURS = {
   engine:     '#5631E4',
+  motion:     '#4C6FFF',
+  physics:    '#3F8F5F',
+  gameplay:   '#A66A00',
   camera:     '#4A90D9',
   appearance: '#C501F6',
   event:      '#FFDE59',
@@ -66,6 +69,9 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
   blockStyles: {
     // ── CoronaEngine 自定义分类 ──
     engine_blocks:     bs(COLOURS.engine),
+    motion_blocks:     bs(COLOURS.motion),
+    physics_blocks:    bs(COLOURS.physics),
+    gameplay_blocks:   bs(COLOURS.gameplay),
     camera_blocks:     bs(COLOURS.camera),
     appearance_blocks: bs(COLOURS.appearance),
     event_blocks:      bs(COLOURS.event),
@@ -91,6 +97,9 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
   // ── 工具箱分类样式（categoryStyles）──
   categoryStyles: {
     engine_category:     { colour: COLOURS.engine },
+    motion_category:     { colour: COLOURS.motion },
+    physics_category:    { colour: COLOURS.physics },
+    gameplay_category:   { colour: COLOURS.gameplay },
     camera_category:     { colour: COLOURS.camera },
     appearance_category: { colour: COLOURS.appearance },
     event_category:      { colour: COLOURS.event },

@@ -50,8 +50,12 @@ export const defineDetectGenerators = () => {
   };
 
   pythonGenerator.forBlock['detect_ask'] = function (block) {
-    const x = block.getFieldValue('x');
-    return `CoronaEngine.ask("${x}")\n`;
+    return `CoronaEngine.ask(${pyString(block.getFieldValue('x'))})\n`;
+  };
+
+  pythonGenerator.forBlock.detect_ask_answer = function (block) {
+    const question = connectedValue(block, 'QUESTION') || pyString(block.getFieldValue('QUESTION_TEXT'));
+    return [`CoronaEngine.ask(${question})`, pythonGenerator.ORDER_FUNCTION_CALL];
   };
 
   pythonGenerator.forBlock['detect_keyboard1'] = function (block) {
@@ -177,6 +181,9 @@ export const defineDetectGenerators = () => {
   pythonGenerator.forBlock.detect_mouse_pick_object = () => ['CoronaEngine.mouse_pick_object()', pythonGenerator.ORDER_FUNCTION_CALL];
   pythonGenerator.forBlock.detect_mouse_left_half = () => ['CoronaEngine.mouse_left_half()', pythonGenerator.ORDER_FUNCTION_CALL];
   pythonGenerator.forBlock.detect_mouse_right_half = () => ['CoronaEngine.mouse_right_half()', pythonGenerator.ORDER_FUNCTION_CALL];
+
+  pythonGenerator.forBlock.detect_mouse_x_ratio = () => ['CoronaEngine.mouse_viewport_x_ratio()', pythonGenerator.ORDER_FUNCTION_CALL];
+
   pythonGenerator.forBlock.detect_mouse_pick_hit_tag = (block) => [`CoronaEngine.mouse_pick_hit_tag(${valueOrText(block,'TAG')})`, pythonGenerator.ORDER_FUNCTION_CALL];
 
 };
