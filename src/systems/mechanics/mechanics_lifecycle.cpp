@@ -12,6 +12,26 @@ namespace Corona::Systems {
 
 using namespace MechanicsInternal;
 
+namespace {
+constexpr float kDefaultFixedDt = 1.0f / 60.0f;
+constexpr float kMinFixedDt = 1.0f / 120.0f;
+constexpr float kMaxFixedDt = 1.0f / 30.0f;
+constexpr int kMaxCatchUpSteps = 4;
+
+float resolve_fixed_dt() {
+    auto& hub = SharedDataHub::instance();
+    const auto& scenes = hub.scene_storage();
+    auto& environments = hub.environment_storage();
+    for (const auto& scene : scenes) {
+        if (!scene.enabled || !scene.simulation_enabled || scene.environment == 0) continue;
+        if (auto environment = environments.try_acquire_read(scene.environment)) {
+            return std::clamp(environment->fixed_dt, kMinFixedDt, kMaxFixedDt);
+        }
+    }
+    return kDefaultFixedDt;
+}
+}  // namespace
+
 MechanicsSystem::MechanicsSystem() : impl_(std::make_unique<Impl>()) {
     set_target_fps(60);
 }
@@ -53,7 +73,7 @@ void MechanicsSystem::update() {
     if (impl_->first_update) {
         impl_->last_update_time = now;
         impl_->first_update = false;
-        update_physics();
+        update_physics(resolve_fixed_dt());
         return;
     }
 
@@ -66,12 +86,14 @@ void MechanicsSystem::update() {
 
     impl_->time_accumulator += actual_dt;
 
-    // 固定步长迭代（与 update_physics 内的 fixed_dt 保持一致，默认 1/60）
-    const float fixed_dt = 1.0f / 60.0f;
+    const float fixed_dt = resolve_fixed_dt();
+    int catch_up_steps = 0;
     while (impl_->time_accumulator >= fixed_dt &&
+           catch_up_steps < kMaxCatchUpSteps &&
            !impl_->shutdown_requested.load(std::memory_order_acquire)) {
-        update_physics();
+        update_physics(fixed_dt);
         impl_->time_accumulator -= fixed_dt;
+        ++catch_up_steps;
     }
 
     // ---- 骨骼动画 CPU 蒙皮（P2，自 GeometrySystem 迁入）----

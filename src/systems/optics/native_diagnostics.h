@@ -41,6 +41,7 @@ struct NativePerfSample {
 struct NativePerfStats {
     std::uint32_t samples{0};
     double avg_total_ms{0.0};
+    double p95_total_ms{0.0};
     double max_total_ms{0.0};
     double avg_throttle_wait_ms{0.0};
     double max_throttle_wait_ms{0.0};
@@ -69,6 +70,9 @@ public:
     void add(const NativePerfSample& sample) noexcept {
         ++samples_;
         total_ms_ += sample.total_ms;
+        if (total_sample_count_ < total_samples_.size()) {
+            total_samples_[total_sample_count_++] = sample.total_ms;
+        }
         throttle_wait_ms_ += sample.throttle_wait_ms;
         collect_ms_ += sample.collect_ms;
         submit_ms_ += sample.submit_ms;
@@ -105,6 +109,15 @@ public:
         }
         const double inverse = 1.0 / static_cast<double>(samples_);
         stats.avg_total_ms = total_ms_ * inverse;
+        if (total_sample_count_ != 0) {
+            auto ordered = total_samples_;
+            const std::size_t rank =
+                (total_sample_count_ * 95u + 99u) / 100u;
+            const std::size_t index = std::max<std::size_t>(rank, 1u) - 1u;
+            std::nth_element(ordered.begin(), ordered.begin() + index,
+                             ordered.begin() + total_sample_count_);
+            stats.p95_total_ms = ordered[index];
+        }
         stats.max_total_ms = max_total_ms_;
         stats.avg_throttle_wait_ms = throttle_wait_ms_ * inverse;
         stats.max_throttle_wait_ms = max_throttle_wait_ms_;
@@ -138,6 +151,8 @@ public:
 private:
     std::uint32_t samples_{0};
     double total_ms_{0.0};
+    std::array<double, 256> total_samples_{};
+    std::size_t total_sample_count_{0};
     double throttle_wait_ms_{0.0};
     double collect_ms_{0.0};
     double submit_ms_{0.0};

@@ -80,7 +80,7 @@ vision::DataWrap make_base_scene() {
     };
 }
 
-void path_tracing_rewrites_ssat_scene_to_normal_framebuffer() {
+void path_tracing_preserves_source_lightfield_framebuffer() {
     auto data = make_base_scene();
     Corona::Systems::Vision::configure_vision_scene_for_mode(
         data, CameraVisionRenderMode::PathTracing);
@@ -88,14 +88,14 @@ void path_tracing_rewrites_ssat_scene_to_normal_framebuffer() {
     expect(!data["output"]["denoise"].get<bool>(),
            "path_tracing should set output.denoise=false");
     expect(data["pipeline"]["param"]["frame_buffer"]["type"].get<std::string>() ==
-               "normal",
-           "path_tracing should use normal framebuffer");
+               "lightfield",
+           "path_tracing should preserve the source lightfield framebuffer");
     expect(data["render"]["integrator"]["param"]["denoiser"]["type"].get<std::string>() ==
                "svgf",
            "path_tracing should not keep SSAT denoiser descriptor");
 }
 
-void svgf_rewrites_ssat_scene_to_normal_svgf() {
+void svgf_preserves_source_lightfield_framebuffer() {
     auto data = make_base_scene();
     Corona::Systems::Vision::configure_vision_scene_for_mode(
         data, CameraVisionRenderMode::SVGF);
@@ -103,15 +103,28 @@ void svgf_rewrites_ssat_scene_to_normal_svgf() {
     expect(data["output"]["denoise"].get<bool>(),
            "svgf should set output.denoise=true");
     expect(data["pipeline"]["param"]["frame_buffer"]["type"].get<std::string>() ==
-               "normal",
-           "svgf should use normal framebuffer");
+               "lightfield",
+           "svgf should preserve the source lightfield framebuffer");
     expect(data["render"]["integrator"]["param"]["denoiser"]["type"].get<std::string>() ==
                "svgf",
            "svgf should use svgf integrator denoiser");
     expect(data["render"]["integrator"]["param"]["denoiser"]["param"]["ssat_radius"]
                .get<int>() == 7,
            "svgf compatibility path should preserve existing denoiser params");
+}
 
+void path_tracing_and_svgf_preserve_source_normal_framebuffer() {
+    for (const auto mode : {CameraVisionRenderMode::PathTracing,
+                            CameraVisionRenderMode::SVGF}) {
+        auto data = make_base_scene();
+        data["pipeline"]["param"]["frame_buffer"]["type"] = "normal";
+
+        Corona::Systems::Vision::configure_vision_scene_for_mode(data, mode);
+
+        expect(data["pipeline"]["param"]["frame_buffer"]["type"]
+                       .get<std::string>() == "normal",
+               "path_tracing and svgf should preserve a source normal framebuffer");
+    }
 }
 
 void ssat_rewrites_svgf_scene_to_lightfield_ssat() {
@@ -131,7 +144,6 @@ void ssat_rewrites_svgf_scene_to_lightfield_ssat() {
     expect(data["render"]["integrator"]["param"]["denoiser"]["type"].get<std::string>() ==
                "SSAT",
            "ssat should use SSAT integrator denoiser");
-
 }
 
 void missing_blocks_are_created_for_requested_mode() {
@@ -255,8 +267,8 @@ void cbox_lf_scene_supports_pt_and_ssat_mode_import() {
 
     expect(!pt_desc.output_desc.denoise,
            "PT import from cbox-lf should disable realtime denoise");
-    expect(pt_desc.pipeline_desc.frame_buffer_desc.sub_type == "normal",
-           "PT import from cbox-lf should use a normal framebuffer");
+    expect(pt_desc.pipeline_desc.frame_buffer_desc.sub_type == "lightfield",
+           "PT import from cbox-lf should preserve its lightfield framebuffer");
     expect(pt_desc.renderer_desc.integrator_desc.denoiser_desc.sub_type == "svgf",
            "PT import from cbox-lf should not keep the SSAT denoiser descriptor");
 
@@ -283,8 +295,9 @@ void cbox_lf_scene_supports_pt_and_ssat_mode_import() {
 
 int main() {
     mode_names_and_denoise_flags_are_stable();
-    path_tracing_rewrites_ssat_scene_to_normal_framebuffer();
-    svgf_rewrites_ssat_scene_to_normal_svgf();
+    path_tracing_preserves_source_lightfield_framebuffer();
+    svgf_preserves_source_lightfield_framebuffer();
+    path_tracing_and_svgf_preserve_source_normal_framebuffer();
     ssat_rewrites_svgf_scene_to_lightfield_ssat();
     missing_blocks_are_created_for_requested_mode();
     ssat_defaults_from_cbox_lf_are_applied_to_minimal_scene();

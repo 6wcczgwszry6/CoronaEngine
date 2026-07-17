@@ -3722,6 +3722,51 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("self._active_project_path = project_path", settings_source)
         self.assertIn("self.active_project_config = proj_cfg", settings_source)
 
+    def test_collision_shape_is_persisted_and_round_trips_as_three_state_value(self):
+        repo_root = self._repo_root()
+        hub_source = (repo_root / "include" / "corona" / "shared_data_hub.h").read_text(encoding="utf-8")
+        api_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        object_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "Object.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("enum class CollisionShape", hub_source)
+        self.assertIn("CollisionShape collision_shape{CollisionShape::Box}", hub_source)
+        self.assertIn(".mechanics.collision_type", api_source)
+        self.assertIn('item["collision"] = actor.mechanics ? collision_shape_name(', api_source)
+        self.assertIn("set_collision_shape", api_source)
+        self.assertIn("normalizeCollisionType(data.collision)", object_source)
+        mechanics_source = (
+            repo_root / "src" / "systems" / "mechanics" / "mechanics_system.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertIn("const bool both_mesh", mechanics_source)
+        self.assertIn("collision_shape == CollisionShape::Mesh", mechanics_source)
+
+    def test_physics_loop_does_not_synchronously_invoke_python_move_callback(self):
+        repo_root = self._repo_root()
+        mechanics_source = (
+            repo_root / "src" / "systems" / "mechanics" / "mechanics_system.cpp"
+        ).read_text(encoding="utf-8")
+        bindings_source = (
+            repo_root / "src" / "systems" / "script" / "python" / "engine_bindings.cpp"
+        ).read_text(encoding="utf-8")
+        lifecycle_source = (
+            repo_root / "src" / "systems" / "mechanics" / "mechanics_lifecycle.cpp"
+        ).read_text(encoding="utf-8")
+        actor_source = (
+            repo_root / "editor" / "CoronaCore" / "core" / "entities" / "actor.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("Py_AddPendingCall", bindings_source)
+        self.assertIn("g_python_callbacks", bindings_source)
+        self.assertIn("resolve_fixed_dt", lifecycle_source)
+        self.assertIn("kMaxCatchUpSteps", lifecycle_source)
+        on_move_start = actor_source.index("    def on_move(self):")
+        on_move_end = actor_source.index("\n    def enable_collision_callback", on_move_start)
+        self.assertNotIn("self.save_data()", actor_source[on_move_start:on_move_end])
+
 
 if __name__ == "__main__":
     unittest.main()

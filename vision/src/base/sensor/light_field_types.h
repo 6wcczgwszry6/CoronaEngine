@@ -36,6 +36,14 @@ struct LightFieldGeometry {
     float H_f{0.f};             // Focal plane height (derived)
 };
 
+[[nodiscard]] constexpr float lightfield_aspect_from_resolution(
+    uint2 resolution) noexcept {
+    return resolution.y == 0u
+               ? 1.0f
+               : static_cast<float>(resolution.x) /
+                     static_cast<float>(resolution.y);
+}
+
 }// namespace vision
 
 // GPU-side struct definitions

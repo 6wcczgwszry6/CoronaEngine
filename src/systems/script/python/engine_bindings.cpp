@@ -14,7 +14,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
 
 #include <SDL3/SDL.h>
 
@@ -56,6 +59,51 @@ namespace nb = nanobind;
 using namespace Corona::API;
 
 namespace EngineScripts {
+
+namespace {
+std::mutex g_python_callback_mutex;
+std::deque<std::function<void()>> g_python_callbacks;
+bool g_python_callback_scheduled = false;
+
+int run_pending_python_callbacks(void*) {
+    for (;;) {
+        std::function<void()> callback;
+        {
+            std::lock_guard lock(g_python_callback_mutex);
+            if (g_python_callbacks.empty()) {
+                g_python_callback_scheduled = false;
+                return 0;
+            }
+            callback = std::move(g_python_callbacks.front());
+            g_python_callbacks.pop_front();
+        }
+        try {
+            callback();
+        } catch (const std::exception& error) {
+            CFW_LOG_ERROR("[Bindings::pending_callback] {}", error.what());
+        } catch (...) {
+            CFW_LOG_ERROR("[Bindings::pending_callback] Unknown exception");
+        }
+    }
+}
+
+void enqueue_python_callback(std::function<void()> callback) {
+    bool schedule = false;
+    {
+        std::lock_guard lock(g_python_callback_mutex);
+        g_python_callbacks.push_back(std::move(callback));
+        if (!g_python_callback_scheduled) {
+            g_python_callback_scheduled = true;
+            schedule = true;
+        }
+    }
+    if (schedule && Py_AddPendingCall(&run_pending_python_callbacks, nullptr) != 0) {
+        std::lock_guard lock(g_python_callback_mutex);
+        g_python_callback_scheduled = false;
+        CFW_LOG_WARNING("Python pending-call queue is full; callbacks retained for retry");
+    }
+}
+}  // namespace
 
 namespace {
 
@@ -178,14 +226,9 @@ void BindAll(nanobind::module_& m) {
                 });
 
                 CallbackType cb = [func_ptr](std::uintptr_t other, bool began, const std::array<float, 3>& normal, const std::array<float, 3>& point) mutable {
-                    nb::gil_scoped_acquire gil;
-                    try {
+                    enqueue_python_callback([func_ptr, other, began, normal, point] {
                         (*func_ptr).attr("__call__")(other, began, normal, point);
-                    }  catch (const std::exception &e) {
-                        CFW_LOG_ERROR("[Bindings::collision_callback] std::exception when invoking Python callback: {}", e.what());
-                    } catch (...) {
-                        CFW_LOG_ERROR("[Bindings::collision_callback] Unknown exception when invoking Python callback");
-                    }
+                    });
                 };
 
                  self.set_collision_callback(cb); },
@@ -209,17 +252,14 @@ void BindAll(nanobind::module_& m) {
                 });
 
                 CallbackType cb = [func_ptr]() mutable {
-                    nb::gil_scoped_acquire gil;
-                    try {
+                    enqueue_python_callback([func_ptr] {
                         (*func_ptr).attr("__call__")();
-                    } catch (const std::exception& e) {
-                        CFW_LOG_ERROR("[Bindings::move_callback] std::exception when invoking Python callback: {}", e.what());
-                    } catch (...) {
-                        CFW_LOG_ERROR("[Bindings::move_callback] Unknown exception when invoking Python callback");
-                    }
+                    });
                 };
 
-                self.set_on_move_callback(cb); }, nb::arg("callback"), "Set move callback for geometry.");
+                self.set_on_move_callback(cb); }, nb::arg("callback"), "Set move callback for geometry.")
+        .def("set_collision_shape", &Mechanics::set_collision_shape, nb::arg("shape"))
+        .def("get_collision_shape", &Mechanics::get_collision_shape);
 
     // ============================================================================
     // Optics: 光学/渲染组件
