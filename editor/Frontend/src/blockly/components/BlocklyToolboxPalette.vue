@@ -43,7 +43,7 @@ const { error: logError } = useErrorHandler('BlocklyToolboxPalette');
 const blockdiv = ref(null);
 const loadingLabel = ref('');
 const activeCategoryName = ref('');
-const returnValueBlocks = ref([]);
+const conditionBlockGroups = ref([]);
 
 let workspace = null;
 let BlocklyLib = null;
@@ -62,6 +62,7 @@ const normalCategories = computed(() =>
     .filter((category) => category.kind === 'category')
     .map((category) => ({
       name: category.name,
+      categorystyle: category.categorystyle,
       blocks: (category.contents || []).filter((item) => item.kind === 'block' && item.type),
     }))
     .filter((category) => category.blocks.length > 0)
@@ -69,24 +70,145 @@ const normalCategories = computed(() =>
 
 const categories = computed(() =>
   props.workspaceRole === 'condition'
-    ? [{ name: '返回值', blocks: returnValueBlocks.value }]
+    ? conditionBlockGroups.value.map((group) => ({
+      name: t(group.labelKey),
+      blocks: group.blocks,
+    }))
     : normalCategories.value
 );
 
-const CONDITION_BLOCK_PRIORITY = new Map([
-  ['math_AND', 0],
-  ['math_OR', 1],
-  ['math_NOT', 2],
-  ['logic_operation', 3],
-  ['logic_negate', 4],
-  ['logic_compare', 5],
-  ['math_E', 6],
-  ['math_G', 7],
-  ['math_L', 8],
-  ['logic_boolean', 9],
-  ['math_number', 10],
-  ['text', 11],
-]);
+const CONDITION_GROUPS = [
+  {
+    labelKey: 'blocklyToolbox.conditionLogic',
+    types: [
+      'logic_boolean',
+      'logic_compare',
+      'logic_operation',
+      'logic_negate',
+      'math_AND',
+      'math_OR',
+      'math_NOT',
+      'math_G',
+      'math_L',
+      'math_E',
+    ],
+  },
+  {
+    labelKey: 'blocklyToolbox.conditionInput',
+    types: [
+      'detect_keyboard1',
+      'detect_keyboard0',
+      'detect_mouse1',
+      'detect_mouse0',
+      'detect_mouse_left_half',
+      'detect_mouse_right_half',
+      'detect_mouse_x_ratio',
+      'camera_mouse_dx',
+      'camera_mouse_dy',
+      'detect_ask_answer',
+    ],
+  },
+  {
+    labelKey: 'blocklyToolbox.conditionCollision',
+    types: [
+      'detect_touch',
+      'detect_not_touch',
+      'detect_touch_any',
+      'detect_not_touch_any',
+      'detect_touch_tag',
+      'detect_not_touch_tag',
+      'detect_touch_started',
+      'detect_touch_tag_started',
+      'detect_last_touch_object',
+      'detect_raycast',
+      'detect_raycast_distance',
+      'detect_raycast_object',
+      'detect_raycast_point',
+      'detect_raycast_hit_tag',
+      'camera_raycast_object',
+      'detect_last_collision_axis',
+      'detect_last_collision_normal_x',
+      'detect_last_collision_normal_y',
+      'detect_last_collision_normal_z',
+      'detect_mouse_pick_object',
+      'detect_mouse_pick_hit_tag',
+    ],
+  },
+  {
+    labelKey: 'blocklyToolbox.conditionObject',
+    types: [
+      'object_exists',
+      'object_count_tag',
+      'object_count_active_tag',
+      'detect_object_exists',
+      'detect_object_not_exists',
+      'detect_distance',
+      'detect_ground_below',
+      'detect_no_ground_below',
+      'detect_passed_x',
+      'detect_passed_z',
+      'detect_crossed_x_once',
+      'detect_crossed_z_once',
+      'detect_outside_axis',
+      'detect_inside_axis',
+      'detect_inside_box',
+      'detect_position_near',
+      'detect_attribute',
+      'engine_X',
+      'engine_Y',
+      'engine_Z',
+      'engine_rotationX',
+      'engine_rotationY',
+      'engine_rotationZ',
+      'engine_get_velocity',
+      'engine_get_game_speed',
+      'object_get_x',
+      'object_get_y',
+      'object_get_z',
+      'object_lane_index',
+      'combat_alive_count',
+      'object_logical_collision_enabled',
+    ],
+  },
+  {
+    labelKey: 'blocklyToolbox.conditionState',
+    types: [
+      'variable_get',
+      'variable_exists',
+      'list_item_named',
+      'list_length_named',
+      'list_contains_named',
+      'ui_score',
+      'ui_lives',
+      'ui_countdown_left',
+      'ui_countdown_elapsed',
+      'ui_countdown_finished',
+      'ui_game_state',
+    ],
+  },
+  {
+    labelKey: 'blocklyToolbox.conditionValue',
+    types: [
+      'math_number',
+      'math_arithmetic',
+      'math_single',
+      'math_round',
+      'math_modulo',
+      'math_constrain',
+      'math_random_int',
+      'math_random_float',
+      'text',
+      'text_join',
+      'text_length',
+      'text_isEmpty',
+      'text_indexOf',
+      'text_charAt',
+      'text_getSubstring',
+      'text_changeCase',
+      'text_trim',
+    ],
+  },
+];
 
 function collectReturnValueBlocks() {
   if (!BlocklyLib) return;
@@ -98,21 +220,16 @@ function collectReturnValueBlocks() {
   }
 
   const probeWorkspace = new BlocklyLib.Workspace();
-  const discovered = [];
+  const outputItems = new Map();
   try {
     for (const item of itemsByType.values()) {
       let block = null;
       try {
         block = probeWorkspace.newBlock(item.type);
         if (!block.outputConnection) continue;
-        const checks = outputChecks(block);
-        discovered.push({
-          item,
-          isBoolean: checks.includes('Boolean'),
-          priority: CONDITION_BLOCK_PRIORITY.get(item.type) ?? Number.MAX_SAFE_INTEGER,
-        });
+        outputItems.set(item.type, item);
       } catch (e) {
-        logError(`检查返回值积木失败: ${item.type}`, e);
+        logError(`Inspect return-value block failed: ${item.type}`, e);
       } finally {
         try { block?.dispose?.(false); } catch {}
       }
@@ -121,16 +238,30 @@ function collectReturnValueBlocks() {
     probeWorkspace.dispose();
   }
 
-  discovered.sort((a, b) =>
-    a.priority - b.priority ||
-    Number(b.isBoolean) - Number(a.isBoolean) ||
-    a.item.type.localeCompare(b.item.type)
-  );
-  returnValueBlocks.value = discovered.map(({ item }) => item);
+  const used = new Set();
+  const groups = CONDITION_GROUPS
+    .map((group) => ({
+      labelKey: group.labelKey,
+      blocks: group.types
+        .map((type) => outputItems.get(type))
+        .filter((item) => {
+          if (!item || used.has(item.type)) return false;
+          used.add(item.type);
+          return true;
+        }),
+    }))
+    .filter((group) => group.blocks.length > 0);
+
+  const remaining = [...outputItems.values()].filter((item) => !used.has(item.type));
+  if (remaining.length) {
+    remaining.sort((a, b) => a.type.localeCompare(b.type));
+    groups.push({ labelKey: 'blocklyToolbox.conditionOther', blocks: remaining });
+  }
+  conditionBlockGroups.value = groups;
 }
 
 function syncActiveCategory() {
-  const preferredName = props.workspaceRole === 'condition' ? '返回值' : categories.value[0]?.name;
+  const preferredName = categories.value[0]?.name;
   if (!categories.value.some((category) => category.name === activeCategoryName.value)) {
     activeCategoryName.value = preferredName || '';
   }
@@ -212,8 +343,15 @@ function resizeBlockly() {
   } catch {}
 }
 
-function preparePaletteBlock(block) {
+function shouldUseConditionPaletteStyle(block, category = activeCategory()) {
+  return Boolean(block?.outputConnection) && (
+    props.workspaceRole === 'condition' || category?.categorystyle === 'condition_category'
+  );
+}
+
+function preparePaletteBlock(block, category = activeCategory()) {
   try {
+    if (shouldUseConditionPaletteStyle(block, category)) block.setStyle('condition_blocks');
     block.setMovable?.(false);
     block.setDeletable?.(false);
     block.setEditable?.(false);
@@ -255,10 +393,10 @@ function renderPaletteBlocks() {
     for (const item of category?.blocks || []) {
       try {
         const block = workspace.newBlock(item.type);
+        preparePaletteBlock(block, category);
         block.initSvg();
         block.render();
         block.moveBy(16, provisionalY);
-        preparePaletteBlock(block);
         renderedBlocks.push(block);
         provisionalY += 72;
       } catch (e) {
@@ -439,6 +577,7 @@ async function initBlockly() {
 
 watch(locale, () => {
   applyBlocklyLocale();
+  syncActiveCategory();
   renderPaletteBlocks();
 });
 

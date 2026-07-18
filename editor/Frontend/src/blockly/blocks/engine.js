@@ -10,7 +10,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('让角色向前移动指定的步数');
       this.setHelpUrl('');
     },
@@ -25,7 +25,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('让角色绕 X 轴旋转指定角度');
       this.setHelpUrl('');
     },
@@ -40,7 +40,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('让角色绕 Y 轴旋转指定角度');
       this.setHelpUrl('');
     },
@@ -55,7 +55,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('让角色绕 Z 轴旋转指定角度（2D平面旋转）');
       this.setHelpUrl('');
     },
@@ -70,7 +70,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('让角色面向指定角度（0=右, 90=上, 180=左, 270=下）');
       this.setHelpUrl('');
     },
@@ -90,7 +90,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('将角色移动到预设位置');
       this.setHelpUrl('');
     },
@@ -108,7 +108,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('将角色移动到指定的 XYZ 坐标');
       this.setHelpUrl('');
     },
@@ -126,7 +126,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('在指定时间内平滑移动到目标 XYZ 坐标');
       this.setHelpUrl('');
     },
@@ -136,7 +136,7 @@ export const defineEngineBlocks = () => {
     init: function () {
       this.appendDummyInput().appendField('X');
       this.setOutput(true, 'Number');
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('该角色的 X 坐标');
     },
   };
@@ -145,7 +145,7 @@ export const defineEngineBlocks = () => {
     init: function () {
       this.appendDummyInput().appendField('Y');
       this.setOutput(true, 'Number');
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('该角色的 Y 坐标');
     },
   };
@@ -154,7 +154,7 @@ export const defineEngineBlocks = () => {
     init: function () {
       this.appendDummyInput().appendField('Z');
       this.setOutput(true, 'Number');
-      this.setStyle('engine_blocks');
+      this.setStyle('motion_blocks');
       this.setTooltip('该角色的 Z 坐标');
     },
   };
@@ -183,7 +183,7 @@ export const defineEngineBlocks = () => {
           'AXIS'
         );
       this.setOutput(true, 'Number');
-      this.setStyle('engine_blocks');
+      this.setStyle('physics_blocks');
       this.setTooltip('获取物体当前速度分量');
     },
   };
@@ -197,7 +197,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('physics_blocks');
       this.setTooltip('设置当前脚本运行时重力；无原生物理接口时用 Python 速度缓存降级模拟');
     },
   };
@@ -211,7 +211,7 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true);
       this.setPreviousStatement(true, null);
       this.setNextStatement(true, null);
-      this.setStyle('engine_blocks');
+      this.setStyle('physics_blocks');
       this.setTooltip('按指定轴反转当前速度并乘以系数，用于打砖块/弹跳/滚动天空');
     },
   };
@@ -219,20 +219,20 @@ export const defineEngineBlocks = () => {
     init: function () {
       this.appendDummyInput().appendField('游戏速度');
       this.setOutput(true, 'Number');
-      this.setStyle('engine_blocks');
+      this.setStyle('gameplay_blocks');
       this.setTooltip('读取当前运行时游戏速度，默认 1');
     },
   };
 
 
-  const numberValueStatement = (type, label, input, legacy, defaultValue = 0) => {
+  const numberValueStatement = (type, label, input, legacy, defaultValue = 0, style = 'motion_blocks') => {
     Blockly.Blocks[type] = { init() {
       this.appendValueInput(input)
         .setCheck('Number')
         .appendField(label)
         .appendField(new Blockly.FieldNumber(defaultValue), legacy)
         .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
-      this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+      this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle(style);
     } };
   };
   numberValueStatement('engine_Xset', '\u8bbe\u7f6e X \u4e3a', 'VALUE', 'X');
@@ -241,10 +241,10 @@ export const defineEngineBlocks = () => {
   numberValueStatement('engine_Xadd', 'X \u589e\u52a0', 'VALUE', 'DX');
   numberValueStatement('engine_Yadd', 'Y \u589e\u52a0', 'VALUE', 'DY');
   numberValueStatement('engine_Zadd', 'Z \u589e\u52a0', 'VALUE', 'DZ');
-  numberValueStatement('engine_jump', '\u8df3\u8dc3\u529b\u5ea6', 'VALUE', 'POWER', 8);
-  numberValueStatement('engine_set_game_speed', '\u8bbe\u7f6e\u6e38\u620f\u901f\u5ea6', 'VALUE', 'VALUE', 1);
+  numberValueStatement('engine_jump', '\u8df3\u8dc3\u529b\u5ea6', 'VALUE', 'POWER', 8, 'physics_blocks');
+  numberValueStatement('engine_set_game_speed', '\u8bbe\u7f6e\u6e38\u620f\u901f\u5ea6', 'VALUE', 'VALUE', 1, 'gameplay_blocks');
 
-  const vectorStatement = (type, label, names, legacyNames) => {
+  const vectorStatement = (type, label, names, legacyNames, style = 'physics_blocks') => {
     Blockly.Blocks[type] = { init() {
       this.appendDummyInput('LABEL').appendField(label);
       names.forEach((name, index) => {
@@ -254,7 +254,7 @@ export const defineEngineBlocks = () => {
           .appendField(new Blockly.FieldNumber(0), legacyNames[index])
           .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
       });
-      this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+      this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle(style);
     } };
   };
   vectorStatement('engine_set_velocity', '\u8bbe\u7f6e\u901f\u5ea6', ['VX','VY','VZ'], ['VX','VY','VZ']);
@@ -268,7 +268,7 @@ export const defineEngineBlocks = () => {
       .appendField('\u901f\u5ea6\u4e3a')
       .appendField(new Blockly.FieldNumber(0), 'VALUE_DEFAULT')
       .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
-    this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+    this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('physics_blocks');
   } };
   Blockly.Blocks.engine_bounce_last_collision = { init() {
     this.appendValueInput('FACTOR')
@@ -276,11 +276,11 @@ export const defineEngineBlocks = () => {
       .appendField('\u6839\u636e\u6700\u8fd1\u78b0\u649e\u65b9\u5411\u53cd\u5f39 \u7cfb\u6570')
       .appendField(new Blockly.FieldNumber(1), 'FACTOR_DEFAULT')
       .appendField('\u6216\u63a5\u5165\u53d8\u91cf/\u8fd0\u7b97');
-    this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+    this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('physics_blocks');
   } };
   Blockly.Blocks.engine_stop_motion = { init() {
     this.appendDummyInput().appendField('\u505c\u6b62\u5f53\u524d\u7269\u4f53\u8fd0\u52a8');
-    this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('engine_blocks');
+    this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle('physics_blocks');
   } };
 
 };

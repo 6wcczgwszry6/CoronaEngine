@@ -387,18 +387,18 @@ const externalDrag = reactive({
   clientY: 0,
   pointerId: null,
 });
-const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v3';
+const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v5';
 const LAYOUT_LIMITS = Object.freeze({
-  toolboxMin: 360,
-  toolboxMax: 720,
-  toolboxEmergencyMin: 260,
+  toolboxMin: 460,
+  toolboxMax: 980,
+  toolboxEmergencyMin: 320,
   inspectorMin: 520,
   inspectorMax: 960,
   inspectorEmergencyMin: 340,
   canvasMin: 420,
   gridChrome: 60,
 });
-const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 460, inspectorWidth: 720, variablesHeight: 240 });
+const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 640, inspectorWidth: 720, variablesHeight: 240 });
 const layout = reactive({ ...DEFAULT_LAYOUT });
 const layoutStyle = computed(() => ({
   '--toolbox-width': `${layout.toolboxWidth}px`,
