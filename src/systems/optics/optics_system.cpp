@@ -2660,21 +2660,21 @@ bool OpticsSystem::initialize_render_pipelines() {
         for (auto& shadow_pipeline : hardware_->shadowPipelines) {
             shadow_pipeline.emplace(shadow_desc);
         }
-        hardware_->ssaoPipeline.emplace(ssao_comp_glsl);
-        hardware_->ssaoBlurPipeline.emplace(ssao_blur_comp_glsl);
-        hardware_->lightingPipeline.emplace(lighting_comp_glsl);
-        hardware_->skyPipeline.emplace(sky_comp_glsl);
-        hardware_->skySHProjectPipeline.emplace(sky_sh_project_comp_glsl);
-        hardware_->tonemapPipeline.emplace(tonemap_comp_glsl);
-        hardware_->debugResolvePipeline.emplace(debug_resolve_comp_glsl);
-        hardware_->visibilityDebugResolvePipeline.emplace(visibility_debug_resolve_comp_glsl);
-        hardware_->actorPickPipeline.emplace(actor_pick_comp_glsl);
-        hardware_->opticsOverlayPipeline.emplace(optics_overlay_comp_glsl);
-        hardware_->opticsCursorPipeline.emplace(optics_cursor_comp_glsl);
-        hardware_->opticsUiWarpPipeline.emplace(optics_ui_warp_comp_glsl);
-        hardware_->opticsCompositePipeline.emplace(optics_composite_comp_glsl);
+        hardware_->ssaoPipeline.emplace(ssao_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->ssaoBlurPipeline.emplace(ssao_blur_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->lightingPipeline.emplace(lighting_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->skyPipeline.emplace(sky_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->skySHProjectPipeline.emplace(sky_sh_project_comp_glsl, ktm::uvec3(64, 1, 1));
+        hardware_->tonemapPipeline.emplace(tonemap_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->debugResolvePipeline.emplace(debug_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->visibilityDebugResolvePipeline.emplace(visibility_debug_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->actorPickPipeline.emplace(actor_pick_comp_glsl, ktm::uvec3(1, 1, 1));
+        hardware_->opticsOverlayPipeline.emplace(optics_overlay_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->opticsCursorPipeline.emplace(optics_cursor_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->opticsUiWarpPipeline.emplace(optics_ui_warp_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->opticsCompositePipeline.emplace(optics_composite_comp_glsl, ktm::uvec3(8, 8, 1));
 #ifdef CORONA_ENABLE_VISION
-        hardware_->visionResolvePipeline.emplace(vision_resolve_comp_glsl);
+        hardware_->visionResolvePipeline.emplace(vision_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
 #endif
         hardware_->shaderHasInit = true;
     } catch (const std::exception& e) {
@@ -3967,8 +3967,12 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // ================================================================
                 // 8. GPU sync & dispatch
                 // ================================================================
-                const uint32_t dispatchX = hardware_->gbufferSize.x;
-                const uint32_t dispatchY = hardware_->gbufferSize.y;
+                // dispatch 参数是 workgroup 组数(原样进 vkCmdDispatch)。这些延迟通道
+                // 全是 local_size 8x8, 用 dispatch_groups 从像素换算 ceil(w/8)xceil(h/8);
+                // 除数取自管线反射的真实 local size(已由 Horizon SPIR-V patch 修正)。
+                // 曾经直接传裸像素 gbufferSize 会导致 64x 超发(越界 guard 使画面仍对但极浪费)。
+                const auto [dispatchX, dispatchY] =
+                    lighting.dispatch_groups(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
                 const auto actor_pick_request = take_pending_actor_pick(cam_handle);
 
                 if (actor_pick_request) {
@@ -4382,8 +4386,9 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     auto& opticsUiWarp = *hardware_->opticsUiWarpPipeline;
     auto& opticsComposite = *hardware_->opticsCompositePipeline;
 
-    const auto [dispatchX, dispatchY] = opticsComposite.dispatch_groups(
-        hardware_->gbufferSize.x, hardware_->gbufferSize.y);
+    // 组数换算用管线反射的真实 local size(经 Horizon SPIR-V patch, 均为 8x8)。
+    const auto [dispatchX, dispatchY] =
+        opticsComposite.dispatch_groups(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
     uint32_t cursorDispatchX = dispatchX;
     uint32_t cursorDispatchY = dispatchY;
 

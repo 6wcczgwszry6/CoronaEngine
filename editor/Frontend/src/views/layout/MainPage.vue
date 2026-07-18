@@ -326,7 +326,7 @@
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
       @pointerleave="handleViewportPointerLeave"
-      @mousedown.left="handleViewportPick"
+      @click="handleViewportScratchClick"
       @wheel.prevent="handleWheel"
     ></div>
 
@@ -471,7 +471,7 @@ import {
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
 
-const { error: logError } = useErrorHandler('MainPage');
+const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
 const router = useRouter();
 const dockStore = useDockStore();
@@ -730,11 +730,15 @@ const activeMenu = ref(null);
 const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
+const previewDetails = ref({});
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
 let previewPollTimer = null;
-window.__coronaGamePreviewInputLocked = false;
+window.__coronaEditorInputLocks = window.__coronaEditorInputLocks instanceof Set
+  ? window.__coronaEditorInputLocks
+  : new Set();
+window.__coronaGamePreviewInputLocked = window.__coronaEditorInputLocks.size > 0;
 const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
 
 // 物理参数状态
@@ -966,6 +970,8 @@ const applySceneSnapshot = (sceneId, payload) => {
         ? Number(activeCamera.fov)
         : cameraState.value.fov,
     };
+    // Keep the editor main viewport aligned with the scene's active camera on load.
+    scheduleCameraUpdate();
   }
 };
 
@@ -998,7 +1004,25 @@ const restoreCameraViews = async (sceneId) => {
   }
 };
 
+const scratchMouseButton = (button) => ({ 0: 'LeftButton', 1: 'MiddleButton', 2: 'RightButton' }[button] || '');
+const sendScratchPointerEvent = (type, event, pickedActor = '') => {
+  const renderRect = getViewportRenderRect();
+  const localX = Number(event.clientX || 0) - Number(renderRect.left || 0);
+  const localY = Number(event.clientY || 0) - Number(renderRect.top || 0);
+  scriptingService.sendMouseEvent(
+    type,
+    scratchMouseButton(event.button),
+    event.clientX || 0,
+    event.clientY || 0,
+    localX,
+    localY,
+    renderRect.width || 0,
+    renderRect.height || 0,
+    pickedActor || ''
+  ).catch(() => {});
+};
 const handleWheel = (event) => {
+  sendScratchPointerEvent('wheel', event);
   if (isGamePreviewInputLocked()) return;
   if (event.shiftKey) {
     // Shift+滚轮：调节摄像头速度
@@ -1024,6 +1048,21 @@ const handleKeyDown = (event) => {
   }
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  const modifiers = [
+    event.ctrlKey ? 'Ctrl' : '',
+    event.altKey ? 'Alt' : '',
+    event.shiftKey ? 'Shift' : '',
+    event.metaKey ? 'Meta' : '',
+  ].filter(Boolean).join(',');
+  // Native SDL is authoritative in the editor; this is browser-dev fallback.
+  if (!window.coronaBridge && !event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyEvent(
+      event.code || event.key || '',
+      modifiers,
+      event.key || event.code || ''
+    ).catch(() => {});
+  }
   if (isGamePreviewInputLocked()) {
     resetRealtimeCameraInput();
     return;
@@ -1038,6 +1077,15 @@ const handleKeyDown = (event) => {
 };
 
 const handleKeyUp = (event) => {
+  const tag = event.target?.tagName;
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (!window.coronaBridge && !event.__coronaScratchKeyForwarded) {
+    event.__coronaScratchKeyForwarded = true;
+    scriptingService.sendKeyUpEvent(
+      event.code || event.key || '',
+      event.key || event.code || ''
+    ).catch(() => {});
+  }
   if (isGamePreviewInputLocked()) {
     resetRealtimeCameraInput();
     return;
@@ -1082,7 +1130,13 @@ const stopMoveLoop = () => {
   }
 };
 
-const isGamePreviewInputLocked = () => Boolean(window.__coronaGamePreviewInputLocked);
+const isGamePreviewInputLocked = () => {
+  const locks = window.__coronaEditorInputLocks;
+  return Boolean(
+    window.__coronaGamePreviewInputLocked ||
+    (locks instanceof Set && locks.size > 0)
+  );
+};
 
 const resetRealtimeCameraInput = () => {
   Object.keys(movementKeys).forEach((key) => {
@@ -1093,8 +1147,14 @@ const resetRealtimeCameraInput = () => {
 };
 
 const setGamePreviewInputLocked = (locked) => {
-  window.__coronaGamePreviewInputLocked = Boolean(locked);
-  if (locked) {
+  const locks = window.__coronaEditorInputLocks instanceof Set
+    ? window.__coronaEditorInputLocks
+    : new Set();
+  window.__coronaEditorInputLocks = locks;
+  if (locked) locks.add('game_preview');
+  else locks.delete('game_preview');
+  window.__coronaGamePreviewInputLocked = locks.size > 0;
+  if (window.__coronaGamePreviewInputLocked) {
     resetRealtimeCameraInput();
   }
 };
@@ -1322,11 +1382,13 @@ const handleMouseRotate = (dx, dy) => {
 const viewportCursorShape = () => (mouseRotate.active ? 'grabbing' : 'arrow');
 
 const handleViewportPointer = (event) => {
+  sendScratchPointerEvent(event.type === 'pointerup' ? 'mouseup' : 'move', event);
   viewportUiPointerController.send(event, event.type, viewportCursorShape());
 };
 
 const handleViewportPointerDown = (event) => {
   focusViewportInput();
+  sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
     event.type,
@@ -1338,8 +1400,50 @@ const handleViewportPointerLeave = () => {
   viewportUiPointerController.hide();
 };
 
-const handleViewportPick = (event) => {
-  viewportPickController.pickAt(event);
+let pendingScratchClick = null;
+
+const finishPendingScratchClick = (pickedActor = '') => {
+  const pending = pendingScratchClick;
+  if (!pending) return;
+  pendingScratchClick = null;
+  if (pending.timer != null) window.clearTimeout(pending.timer);
+  sendScratchPointerEvent('click', pending.event, pickedActor);
+};
+
+const handleViewportScratchClick = (event) => {
+  // Preserve rapid click gameplay even though the native picker tracks one
+  // outstanding request at a time. The previous click falls back to an empty
+  // pick, which is exactly what whole-viewport click blocks need.
+  if (pendingScratchClick) finishPendingScratchClick('');
+
+  const eventSnapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  const requestId = viewportPickController.pickAt(event);
+  if (!requestId) {
+    sendScratchPointerEvent('click', eventSnapshot, '');
+    return;
+  }
+
+  pendingScratchClick = {
+    requestId,
+    event: eventSnapshot,
+    timer: window.setTimeout(() => finishPendingScratchClick(''), 220),
+  };
+};
+
+const finishScratchClickFromPick = (payload, result) => {
+  if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
+  if (result?.status === 'pending' || result?.status === 'stale') return;
+  const pickedActor =
+    result?.actor?.name ||
+    payload?.actorName ||
+    payload?.name ||
+    payload?.actor?.name ||
+    '';
+  finishPendingScratchClick(pickedActor);
 };
 
 const onMouseDown = (event) => {
@@ -1429,19 +1533,26 @@ const handleActorPickResult = (payload) => {
   const result = viewportPickController.handlePickResult(payload);
   if (result.status !== 'unknown' || !payload?.sceneId) {
     applyActorPickResult(result, payload);
+    finishScratchClickFromPick(payload, result);
     return;
   }
 
   refreshActorPickIndex(payload.sceneId)
     .then(() => {
-      applyActorPickResult(viewportPickController.handlePickResult(payload), payload);
+      const refreshedResult = viewportPickController.handlePickResult(payload);
+      applyActorPickResult(refreshedResult, payload);
+      finishScratchClickFromPick(payload, refreshedResult);
     })
     .catch((error) => {
       logError('Actor pick index refresh failed', error);
+      finishScratchClickFromPick(payload, result);
     });
 };
 
 const sendCameraUpdateFast = () => {
+  // During Blockly/node-graph execution the editor must not publish camera
+  // poses. Keyboard/mouse events are still sent to Scratch by their handlers.
+  if (isGamePreviewInputLocked()) return true;
   const handle = cameraBindingState.value.cameraHandle;
   if (!handle) return false;
   const bridge = window.coronaBridge;
@@ -1633,114 +1744,182 @@ const clearPreviewPoll = () => {
   }
 };
 
+const normalizePreviewDetails = (payload = {}) => ({
+  ...payload,
+  scope: payload.scope || 'project',
+  sceneName: payload.sceneName ?? payload.scene_name ?? '',
+  startedCount: Number(payload.startedCount ?? payload.started_count ?? 0),
+  runningCount: Number(payload.runningCount ?? payload.running_count ?? 0),
+  completedCount: Number(payload.completedCount ?? payload.completed_count ?? 0),
+  errorCount: Number(payload.errorCount ?? payload.error_count ?? 0),
+  blocklyCount: Number(payload.blocklyCount ?? payload.blockly_count ?? 0),
+  nodeGraphCount: Number(payload.nodeGraphCount ?? payload.node_graph_count ?? 0),
+  inputLocked: Boolean(payload.inputLocked ?? payload.input_locked),
+  hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
+  restoreStatus: payload.restoreStatus ?? payload.restore_status ?? 'idle',
+  restoreError: payload.restoreError ?? payload.restore_error ?? '',
+  restored: Boolean(payload.restored),
+  stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
+  errors: Array.isArray(payload.errors) ? payload.errors : [],
+  warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
+  targets: Array.isArray(payload.targets) ? payload.targets : [],
+});
+
+const publishGamePreviewStatus = (details = {}) => {
+  if (typeof window === 'undefined') return;
+  window.__coronaGamePreviewState = details;
+  window.dispatchEvent(new CustomEvent('corona-game-preview-status', { detail: details }));
+};
+
+const applyPreviewStatus = (payload = {}) => {
+  const details = normalizePreviewDetails(payload);
+  previewDetails.value = details;
+  const state = details.status || 'idle';
+  previewRunning.value = ['starting', 'running', 'stopping'].includes(state)
+    || details.runningCount > 0
+    || details.hasSnapshot;
+  setGamePreviewInputLocked(Boolean(details.inputLocked));
+  if (state === 'starting') previewStatusText.value = '正在启动脚本...';
+  else if (state === 'running') previewStatusText.value = `预览中 ${details.runningCount || details.startedCount}`;
+  else if (state === 'stopping') previewStatusText.value = '正在停止并恢复...';
+  else if (state === 'completed') previewStatusText.value = details.errorCount ? `已完成，${details.errorCount} 个脚本错误` : '脚本已完成';
+  else if (state === 'stopped') previewStatusText.value = '已停止并恢复';
+  else if (state === 'error') previewStatusText.value = details.restoreError ? `场景恢复失败：${details.restoreError}` : (details.errors[0] || details.message || '预览出错');
+  else previewStatusText.value = details.startedCount === 0 && details.warnings.length ? '没有可运行脚本' : '';
+  publishGamePreviewStatus(details);
+  return details;
+};
+
 const pollGamePreviewStatus = () => {
   clearPreviewPoll();
   const poll = async () => {
     try {
       const result = await scriptingService.getGamePreviewStatus();
-      const status = unwrapBridgeData(result);
-      const state = status?.status || 'idle';
-      const count = status?.running_count || 0;
-      const hasSnapshot = !!status?.has_snapshot;
-      previewRunning.value = state === 'running' || state === 'stopping' || count > 0 || hasSnapshot;
-      setGamePreviewInputLocked(Boolean(status?.input_locked ?? previewRunning.value));
-      previewStatusText.value = previewRunning.value
-        ? (count > 0 ? `预览中 ${count}` : '预览已停止，等待恢复')
-        : state === 'error'
-          ? '预览出错'
-          : '';
-      if (previewRunning.value) {
-        previewPollTimer = setTimeout(poll, 1000);
-      }
+      const details = applyPreviewStatus(unwrapBridgeData(result));
+      broadcastViewportControlsState();
+      if (previewRunning.value) previewPollTimer = setTimeout(poll, 700);
+      return details;
     } catch (error) {
       previewRunning.value = false;
+      previewDetails.value = {};
       setGamePreviewInputLocked(false);
       previewStatusText.value = '预览状态异常';
       logError('查询预览状态失败', error);
+      return null;
     }
   };
-  previewPollTimer = setTimeout(poll, 800);
+  previewPollTimer = setTimeout(poll, 300);
 };
 
-const handleStartGamePreview = async () => {
-  if (previewRunning.value || previewBusy.value) return false;
+const normalizePreviewRequest = (request) => {
+  if (!request || typeof request !== 'object' || !['project', 'scene'].includes(request.scope)) {
+    return { scope: 'project' };
+  }
+  return {
+    scope: request.scope,
+    ...(request.scope === 'scene' ? { scene_name: request.scene_name || request.sceneName || '' } : {}),
+  };
+};
+
+const handleStartGamePreview = async (request = { scope: 'project' }) => {
+  if (previewBusy.value) return false;
+  const previewRequest = normalizePreviewRequest(request);
+  window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
+  window.__coronaPreviewActionPending = true;
+  window.__coronaPreviewPendingScope = previewRequest.scope;
   previewBusy.value = true;
-  previewStatusText.value = '准备预览...';
+  previewStatusText.value = previewRequest.scope === 'scene' ? '准备当前场景脚本...' : '准备项目预览...';
   try {
+    // 本地 previewRunning 可能因跨面板广播延迟而滞后。启动前重新读取
+    // 后端真值，避免把一次有效点击误判为重复启动。
+    try {
+      const live = applyPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
+      const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
+        || live.runningCount > 0
+        || live.hasSnapshot;
+      if (liveActive) {
+        broadcastViewportControlsState();
+        return live;
+      }
+    } catch (statusError) {
+      logWarn('启动前查询预览状态失败，将继续尝试启动', statusError);
+    }
+    publishGamePreviewStatus(normalizePreviewDetails({
+      status: 'starting',
+      scope: previewRequest.scope,
+      sceneName: previewRequest.scene_name || '',
+    }));
     if (typeof window.__coronaBlocklyFlushSave === 'function') {
       await window.__coronaBlocklyFlushSave();
     }
-    const result = await scriptingService.startGamePreview({ scope: 'project' });
+    if (typeof window.__coronaNodeGraphFlushSave === 'function') {
+      await window.__coronaNodeGraphFlushSave();
+    }
+    const result = await scriptingService.startGamePreview(previewRequest);
     const payload = unwrapBridgeData(result);
+    const details = applyPreviewStatus(payload);
     if (payload?.status === 'error') {
-      previewRunning.value = false;
-      setGamePreviewInputLocked(false);
-      previewStatusText.value = '预览启动失败';
-      logError('开始预览失败', payload.message);
+      logError('开始预览失败', payload.message || details.errors[0]);
+      broadcastViewportControlsState();
       return false;
     }
-    previewRunning.value = payload?.status === 'running' || (payload?.started_count || 0) > 0;
-    setGamePreviewInputLocked(Boolean(payload?.input_locked ?? previewRunning.value));
-    previewStatusText.value = previewRunning.value
-      ? `预览中 ${payload?.started_count || 0}`
-      : '没有可运行积木';
     if (previewRunning.value) pollGamePreviewStatus();
-    return previewRunning.value;
+    broadcastViewportControlsState();
+    return details;
   } catch (error) {
     previewRunning.value = false;
+    previewDetails.value = {};
     setGamePreviewInputLocked(false);
     previewStatusText.value = '预览启动失败';
     logError('开始预览失败', error);
+    broadcastViewportControlsState();
     return false;
   } finally {
+    window.__coronaPreviewActionPendingCount = Math.max(0, Number(window.__coronaPreviewActionPendingCount || 1) - 1);
+    window.__coronaPreviewActionPending = window.__coronaPreviewActionPendingCount > 0;
+    if (!window.__coronaPreviewActionPending) window.__coronaPreviewPendingScope = '';
     previewBusy.value = false;
     activeMenu.value = null;
+    broadcastViewportControlsState();
   }
 };
 
 const handleStopGamePreview = async () => {
-  if (!previewRunning.value || previewBusy.value) return false;
+  // 后端停止接口是幂等的。不要因为前端状态同步稍慢而挡住停止请求，
+  // 否则 Scene ID 不一致或跨窗口状态延迟时会出现“只能运行、不能停止”。
+  if (previewBusy.value) return false;
   previewBusy.value = true;
-  previewStatusText.value = '正在恢复预览前参数...';
-  let keepPreviewActive = false;
+  previewStatusText.value = '正在停止并恢复...';
   try {
     const result = await scriptingService.stopGamePreview();
     const payload = unwrapBridgeData(result);
-    if (payload?.restore_error) {
-      keepPreviewActive = true;
-      setGamePreviewInputLocked(Boolean(payload?.input_locked ?? true));
-      previewStatusText.value = '预览恢复失败';
-      logError('结束预览恢复失败', payload.restore_error);
+    const details = applyPreviewStatus(payload);
+    if (details.status === 'stopping' || details.stopPending) {
+      pollGamePreviewStatus();
+    } else {
+      clearPreviewPoll();
+    }
+    if (details.restoreError && details.status !== 'stopping') {
+      logError('结束预览恢复失败', details.restoreError);
+      broadcastViewportControlsState();
       return false;
     }
-    setGamePreviewInputLocked(Boolean(payload?.input_locked ?? false));
-    if (payload?.restored) {
-      previewStatusText.value = '已恢复预览前参数';
-      setTimeout(() => {
-        if (!previewRunning.value && !previewBusy.value && previewStatusText.value === '已恢复预览前参数') {
-          previewStatusText.value = '';
-        }
-      }, 2000);
-    } else {
-      previewStatusText.value = '';
-    }
-    return true;
+    broadcastViewportControlsState();
+    return details;
   } catch (error) {
     previewStatusText.value = '结束预览失败';
     logError('结束预览失败', error);
+    // 即使本次 RPC 报错也继续轮询，后端可能已经收到停止请求。
+    pollGamePreviewStatus();
+    broadcastViewportControlsState();
     return false;
   } finally {
-    clearPreviewPoll();
-    previewRunning.value = keepPreviewActive;
-    if (!keepPreviewActive) {
-      setGamePreviewInputLocked(false);
-    }
     previewBusy.value = false;
     activeMenu.value = null;
+    broadcastViewportControlsState();
   }
 };
 
-// 修改：运行菜单的处理函数
 const handleRunProject = async () => {
   try {
     console.log('运行项目');
@@ -1844,6 +2023,7 @@ const getEditorControlsState = () => ({
   previewRunning: previewRunning.value,
   previewBusy: previewBusy.value,
   previewStatusText: previewStatusText.value,
+  preview: previewDetails.value,
   visionAvailable: visionAvailable.value,
   renderMode: currentMainRenderMode(),
   renderLabel: mainRenderModeLabel.value,
@@ -1867,7 +2047,7 @@ const broadcastViewportControlsState = () => {
     .catch(() => {});
 };
 
-const handleViewportControlsRequest = (payload = {}) => {
+const handleViewportControlsRequest = async (payload = {}) => {
   if (!payload || typeof payload !== 'object') {
     broadcastViewportControlsState();
     return;
@@ -1880,6 +2060,18 @@ const handleViewportControlsRequest = (payload = {}) => {
 
   if (payload.action === 'setCameraSpeed') {
     setCameraSpeedFromPanel(payload.value);
+    return;
+  }
+
+  if (payload.action === 'startPreview') {
+    await handleStartGamePreview(payload.request || payload);
+    broadcastViewportControlsState();
+    return;
+  }
+
+  if (payload.action === 'stopPreview') {
+    await handleStopGamePreview();
+    broadcastViewportControlsState();
     return;
   }
 

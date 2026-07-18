@@ -305,6 +305,8 @@ export default {
     control: '控制',
     detect: '侦测',
     engine: '引擎',
+    object: '对象',
+    ui: '界面',
     event: '事件',
     functions: '函数',
     list: '列表',

@@ -2324,7 +2324,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "createProject: (projectData) =>\n    editorApi.project.createProject",
             "createWorldProject: (worldData) =>\n    editorApi.project.createWorldProject",
             "createMultiplayerProject: (projectData) =>\n    editorApi.project.createMultiplayerProject",
-            "openProject: (projectPath) =>\n    editorApi.project.openProject",
+            "openProject: async (projectPath) => {",
+            "const result = await editorApi.project.openProject(projectPath)",
+            "await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath)",
             "setProjectMode: (mode, settings) =>\n    editorApi.project.setProjectMode",
             "getRecentProjects: () => editorApi.project.getRecentProjects()",
         ):
@@ -2779,7 +2781,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "ScratchTool.save_blockly_target": ("kObjectPayloadParam", "EditorApiValueType::Any"),
             "ScratchTool.start_game_preview": ("kObjectPayloadParam", "EditorApiValueType::Any"),
             "ScratchTool.stop_game_preview": ("kNoParams", "EditorApiValueType::Any"),
-            "ScratchTool.stop_script_execution": ("kNoParams", "EditorApiValueType::Any"),
+            "ScratchTool.stop_script_execution": ("kScratchStopScriptParams", "EditorApiValueType::Any"),
         }
         for api_name, (params_name, return_type) in expected.items():
             module, method = api_name.split(".", 1)
@@ -2814,11 +2816,12 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "startGamePreview: (payload = { scope: 'project' }) =>",
             "stopGamePreview: () => call_manifest_editor_api('scratch.stopGamePreview', [])",
             "getGamePreviewStatus: () => call_manifest_editor_api('scratch.getGamePreviewStatus', [])",
-            "stopScriptExecution: () => call_manifest_editor_api('scratch.stopScriptExecution', [])",
+            "stopScriptExecution: (restoreState = false) =>",
+            "call_manifest_editor_api('scratch.stopScriptExecution', [Boolean(restoreState)])",
             "getScriptStatus: () => call_manifest_editor_api('scratch.getScriptStatus', [])",
             "sendKeyEvent: (key, modifiers, displayKey) =>",
             "sendKeyUpEvent: (key, displayKey) =>",
-            "sendMouseEvent: (eventType, button, x, y) =>",
+            "sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor = '') =>",
             "sendMessageToAIStream: (payload) => editorApi.ai.sendMessageToAIStream(payload)",
             "readLocalFileAsBase64: (filePath) => editorApi.ai.readLocalFileAsBase64(filePath)",
             "generateHint: (elementType, context = {}) => editorApi.ai.generateHint(elementType, context)",
@@ -3403,6 +3406,17 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
 
+    def test_opening_runtime_project_does_not_duplicate_it(self):
+        source = self._handler_source()
+        start = source.find("std::filesystem::path copy_existing_project_to_data_native")
+        end = source.find("std::filesystem::path open_project_native", start)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        copy_body = source[start:end]
+        self.assertIn("absolute_normalized_path(runtime_data_dir())", copy_body)
+        self.assertIn("is_path_within(data_dir, source_dir)", copy_body)
+        self.assertIn("return source_dir", copy_body)
+
     def test_project_launcher_business_logic_is_native(self):
         source = self._handler_source()
         for snippet in (
@@ -3616,7 +3630,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("await handleOpenProject(result.data.path)", body)
         self.assertIn("console.error('打开现有项目失败:'", body)
 
-    def test_native_scene_load_keeps_expensive_mesh_processing_opt_in(self):
+    def test_native_scene_load_enables_runtime_mesh_optimization(self):
         repo_root = pathlib.Path(__file__).resolve().parents[4]
         engine_source = (repo_root / "src" / "engine.cpp").read_text(encoding="utf-8")
         parse_common_source = (
@@ -3629,12 +3643,62 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             / "parse_common.h"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("assimp_options.simplify_mesh = false", engine_source)
-        self.assertIn("assimp_options.lod_options.enabled = false", engine_source)
-        self.assertNotIn("lod.enabled     = true", engine_source)
+        self.assertIn("scene_parser->assimp_options.simplify_mesh = true", engine_source)
+        self.assertIn("scene_parser->assimp_options.lod_options.enabled = true", engine_source)
 
         self.assertNotIn("bool /*simplify_mesh*/", parse_common_source)
         self.assertIn("if (!simplify_mesh)", parse_common_source)
+
+    def test_camera_view_click_uses_native_actor_pick_and_cleans_up_callback(self):
+        repo_root = self._repo_root()
+        source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "tools" / "CameraView.vue"
+        ).read_text(encoding="utf-8")
+
+        for snippet in (
+            "createViewportPickController",
+            "indexActorsByHandle",
+            "sceneService.listSceneTree(sceneId)",
+            "editorApi.events.onActorPickResult(handleCameraViewActorPickResult)",
+            "cameraViewPickController.pickAt(snapshot)",
+            "pickedActor",
+            "editorApi.off(actorPickResultCallbackToken)",
+            "cameraViewPickController.dispose()",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        self.assertIn('@click="handleScratchClick"', source)
+        self.assertNotIn("@click=\"forwardScratchMouse('click', $event)\"", source)
+
+    def test_mouse_click_block_only_dispatches_for_click_event(self):
+        repo_root = self._repo_root()
+        source = (
+            repo_root / "editor" / "Frontend" / "src" / "blockly" / "generators" / "event.js"
+        ).read_text(encoding="utf-8")
+        start = source.find("pythonGenerator.forBlock['event_mouse_click']")
+        end = source.find("pythonGenerator.forBlock['event_mouse_move']", start)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        body = source[start:end]
+
+        self.assertIn("strip().lower() == 'click'", body)
+        self.assertNotIn("'mousedown', 'pointerdown', 'down'", body)
+
+    def test_scratch_mouse_click_does_not_latch_held_state(self):
+        repo_root = self._repo_root()
+        source = (
+            repo_root / "editor" / "CoronaCore" / "utils" / "corona_engine_scratch.py"
+        ).read_text(encoding="utf-8")
+        start = source.find("def handle_mouse_event(")
+        end = source.find("\ndef ", start + 1)
+        self.assertGreaterEqual(start, 0)
+        self.assertGreater(end, start)
+        body = source[start:end]
+
+        self.assertIn('normalized_event in ("mousedown", "pointerdown", "down")', body)
+        self.assertIn('normalized_event in ("mouseup", "pointerup", "up")', body)
+        self.assertNotIn('normalized_event in ("click",', body)
 
     def test_python_settings_hydrates_native_last_project(self):
         repo_root = pathlib.Path(__file__).resolve().parents[4]

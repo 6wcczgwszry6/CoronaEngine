@@ -337,6 +337,15 @@ std::filesystem::path resolve_project_path(const std::filesystem::path& project_
 using IniSection = std::unordered_map<std::string, std::string>;
 using IniFile = std::unordered_map<std::string, IniSection>;
 
+void strip_utf8_bom(std::string& line) {
+    if (line.size() >= 3 &&
+        static_cast<unsigned char>(line[0]) == 0xEF &&
+        static_cast<unsigned char>(line[1]) == 0xBB &&
+        static_cast<unsigned char>(line[2]) == 0xBF) {
+        line.erase(0, 3);
+    }
+}
+
 IniFile read_ini_file(const std::filesystem::path& file_path) {
     IniFile result;
     std::ifstream input(file_path);
@@ -350,6 +359,7 @@ IniFile read_ini_file(const std::filesystem::path& file_path) {
         if (!line.empty() && line.back() == '\r') {
             line.pop_back();
         }
+        strip_utf8_bom(line);
         auto trimmed = trim_ascii(line);
         if (trimmed.empty() || trimmed[0] == '#' || trimmed[0] == ';') {
             continue;
@@ -836,6 +846,7 @@ void replace_ini_section(const std::filesystem::path& file_path,
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
+            strip_utf8_bom(line);
             lines.push_back(line);
         }
     }
@@ -875,7 +886,23 @@ void replace_ini_section(const std::filesystem::path& file_path,
         insert_pos = lines.insert(insert_pos, replacement_lines.begin(), replacement_lines.end());
         auto after_insert = std::next(insert_pos, static_cast<std::ptrdiff_t>(replacement_lines.size()));
         if (after_insert != lines.end() && (after_insert == lines.begin() || !std::prev(after_insert)->empty())) {
-            lines.insert(after_insert, "");
+            after_insert = lines.insert(after_insert, "");
+            ++after_insert;
+        }
+
+        // A UTF-8 BOM on the first header used to make the original section
+        // invisible to the parser, so settings updates appended a duplicate
+        // section. Keep the newly written section and remove any stale copies.
+        for (auto it = after_insert; it != lines.end();) {
+            if (!is_target_section(*it)) {
+                ++it;
+                continue;
+            }
+            auto duplicate_end = std::next(it);
+            while (duplicate_end != lines.end() && !is_any_section(*duplicate_end)) {
+                ++duplicate_end;
+            }
+            it = lines.erase(it, duplicate_end);
         }
     }
 
@@ -895,6 +922,7 @@ void remove_ini_section(const std::filesystem::path& file_path,
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
+            strip_utf8_bom(line);
             lines.push_back(line);
         }
     }
@@ -2410,6 +2438,12 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
         return native_failure("Actor not found: " + actor_name, 2);
     }
 
+    bool persist_transform = true;
+    if (const auto persist_it = transform_data.find("persist");
+        persist_it != transform_data.end() && persist_it->is_boolean()) {
+        persist_transform = persist_it->get<bool>();
+    }
+
     const auto position = transform_float3_value(transform_data, "position", "pos");
     const auto rotation = transform_float3_value(transform_data, "rotation", "rot");
     const auto scale = transform_float3_value(transform_data, "scale", "scl");
@@ -2435,8 +2469,14 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
             actor->geometry->set_scale(*scale);
         }
     }
-    sync_native_actor_to_embedded_vision_document(*scene, *actor);
-    persist_native_scene_actors(*scene);
+    // Blockly/game-preview transforms can update every frame. Persisting the
+    // complete scene on every frame starves stop/restore requests and performs
+    // excessive disk I/O. Runtime callers pass persist=false; snapshot restore
+    // and regular editor operations keep the default persistent behavior.
+    if (persist_transform) {
+        sync_native_actor_to_embedded_vision_document(*scene, *actor);
+        persist_native_scene_actors(*scene);
+    }
     return native_success({
         {"status", "success"},
         {"scene", scene->route},
@@ -2565,6 +2605,22 @@ std::filesystem::path absolute_normalized_path(const std::filesystem::path& path
     }
     const auto canonical = std::filesystem::weakly_canonical(absolute, ec);
     return ec ? absolute : canonical;
+}
+
+bool is_path_within(const std::filesystem::path& root,
+                    const std::filesystem::path& candidate) {
+    std::error_code ec;
+    const auto relative = std::filesystem::relative(
+        absolute_normalized_path(candidate), absolute_normalized_path(root), ec);
+    if (ec || relative.empty() || relative == ".") {
+        return !ec;
+    }
+    for (const auto& component : relative) {
+        if (component == "..") {
+            return false;
+        }
+    }
+    return true;
 }
 
 bool is_valid_project_dir(const std::filesystem::path& project_dir) {
@@ -4140,12 +4196,16 @@ std::filesystem::path create_vision_project_native(const std::filesystem::path& 
 }
 
 std::filesystem::path copy_existing_project_to_data_native(const std::filesystem::path& source_ini) {
-    const auto source_dir = source_ini.parent_path();
+    const auto source_dir = absolute_normalized_path(source_ini.parent_path());
+    const auto data_dir = absolute_normalized_path(runtime_data_dir());
+    if (is_path_within(data_dir, source_dir)) {
+        return source_dir;
+    }
+
     const auto source_project = read_ini_file(source_ini);
     const auto project_name = safe_project_dir_name(
         ini_value(source_project, "Project", "name", path_to_utf8(source_dir.filename())),
         path_to_utf8(source_dir.filename()));
-    const auto data_dir = runtime_data_dir();
     std::filesystem::create_directories(data_dir);
     const auto target = unique_project_target(data_dir, project_name);
     std::filesystem::copy(source_dir, target, std::filesystem::copy_options::recursive);
@@ -4706,12 +4766,26 @@ std::string get_editor_scene_snapshot_from_python(const std::string& scene_name)
             actors.push_back(actor_to_json(*scene, actor));
         }
         const auto scene_aabb = native_scene_world_aabb(*scene);
+        nlohmann::json cameras = nlohmann::json::array();
+        for (const auto& camera : scene->cameras) {
+            cameras.push_back(camera_to_json(camera));
+        }
+        const auto active_index = scene->cameras.empty()
+                                      ? 0
+                                      : std::min(scene->active_camera_index, scene->cameras.size() - 1);
+        const auto active_camera = scene->cameras.empty()
+                                       ? nlohmann::json(nullptr)
+                                       : camera_to_json(scene->cameras[active_index]);
         return nlohmann::json{
             {"status", "success"},
             {"scene", scene->route},
             {"scene_name", scene->name},
             {"actor_count", scene->actors.size()},
             {"actors", actors},
+            {"active_camera_id", active_camera.is_null() ? "" : active_camera.value("camera_id", "")},
+            {"active_camera_name", active_camera.is_null() ? "" : active_camera.value("name", "")},
+            {"camera", active_camera},
+            {"cameras", cameras},
             {"scene_aabb", scene_aabb ? aabb_to_json(*scene_aabb) : nlohmann::json(nullptr)},
             {"bounds_ready", static_cast<bool>(scene_aabb)},
         }.dump();
@@ -4759,6 +4833,67 @@ std::string set_editor_actor_transform_from_python(const std::string& scene_name
             {"status", "error"},
             {"message", "set_editor_actor_transform native handler error"},
             {"error", "set_editor_actor_transform native handler error"},
+        }.dump();
+    }
+}
+
+std::string set_editor_camera_transform_from_python(const std::string& scene_name,
+                                                    const std::string& camera_name,
+                                                    const std::string& camera_data_json) {
+    try {
+        nlohmann::json camera_data = nlohmann::json::object();
+        if (!camera_data_json.empty()) {
+            camera_data = nlohmann::json::parse(camera_data_json);
+            if (!camera_data.is_object()) {
+                camera_data = nlohmann::json::object();
+            }
+        }
+
+        auto* scene = ensure_native_editor_scene();
+        const auto scene_route = normalize_route(scene_name);
+        if (!scene_route.empty() && scene_route != scene->route) {
+            scene = reload_native_editor_scene("", scene_route);
+        }
+        auto* camera = find_native_camera(*scene, camera_name);
+        if (!camera || !camera->engine_camera) {
+            return nlohmann::json{
+                {"status", "error"},
+                {"message", "Native editor camera unavailable"},
+            }.dump();
+        }
+
+        const auto position = camera_data.contains("position")
+                                  ? json_float3_value(camera_data["position"]).value_or(camera->engine_camera->get_position())
+                                  : camera->engine_camera->get_position();
+        const auto forward = camera_data.contains("forward")
+                                 ? json_float3_value(camera_data["forward"]).value_or(camera->engine_camera->get_forward())
+                                 : camera->engine_camera->get_forward();
+        const auto world_up = camera_data.contains("world_up")
+                                  ? json_float3_value(camera_data["world_up"]).value_or(camera->engine_camera->get_world_up())
+                                  : camera_data.contains("up")
+                                      ? json_float3_value(camera_data["up"]).value_or(camera->engine_camera->get_world_up())
+                                      : camera->engine_camera->get_world_up();
+        const auto fov = json_float_value(camera_data, "fov", camera->engine_camera->get_fov());
+        camera->engine_camera->set(position, forward, world_up, fov);
+
+        const bool persist = json_bool_value(camera_data, "persist", true);
+        if (persist) {
+            persist_native_scene_cameras(*scene);
+        }
+        return nlohmann::json{
+            {"status", "success"},
+            {"scene", scene->route},
+            {"camera", camera_to_json(*camera)},
+        }.dump();
+    } catch (const std::exception& e) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", e.what()},
+        }.dump();
+    } catch (...) {
+        return nlohmann::json{
+            {"status", "error"},
+            {"message", "set_editor_camera_transform native handler error"},
         }.dump();
     }
 }

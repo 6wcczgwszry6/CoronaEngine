@@ -737,6 +737,18 @@
                 请先选中一个物体
               </div>
             </div>
+            <!-- 单位 - 节点 -->
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
+              <NodeGraphWorkspace
+                v-if="actorData.name"
+                :actorName="currentActorFile || actorData.name"
+                :sceneName="actorData.parentScene || sceneData.sceneId || sceneData.name"
+                targetType="actor"
+              />
+              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
+                请先选中一个物体
+              </div>
+            </div>
 
             <!-- 单位 - 脚本 -->
             <div v-show="ActiveSubTab === 'Script'" class="space-y-2 text-xs">
@@ -1313,6 +1325,18 @@
                 请先选中一个物体
               </div>
             </div>
+            <!-- 模型 - 节点 -->
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
+              <NodeGraphWorkspace
+                v-if="modelData.name"
+                :actorName="currentModelFile || modelData.name"
+                :sceneName="modelData.targetScene || sceneData.sceneId || sceneData.name"
+                targetType="model"
+              />
+              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
+                请先选中一个物体
+              </div>
+            </div>
           </template>
         </div>
       </template>
@@ -1326,6 +1350,7 @@ import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import BlocklyWorkspace from '@/blockly/components/BlocklyWorkspace.vue';
+import NodeGraphWorkspace from '@/blockly/components/NodeGraphWorkspace.vue';
 import { sceneService, projectService, editorApi } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
@@ -1369,6 +1394,7 @@ const actorTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
+  { id: 'NodeGraph', label: '节点' },
   { id: 'Script', label: '脚本' },
 ];
 
@@ -1376,6 +1402,7 @@ const modelTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
+  { id: 'NodeGraph', label: '节点' },
 ];
 
 // ========== Blockly 工作区引用 ==========

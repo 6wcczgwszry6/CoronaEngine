@@ -8,6 +8,7 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/systems/script/camera_follow_controller.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
@@ -2494,6 +2495,14 @@ std::uintptr_t Corona::API::Camera::pick_actor_at_pixel(int x, int y) const {
 }
 
 namespace Corona::API {
+void set_editor_camera_input_enabled(bool enabled) {
+    Systems::CameraFollowController::instance().set_input_enabled(enabled);
+}
+
+bool is_editor_camera_input_enabled() {
+    return Systems::CameraFollowController::instance().is_input_enabled();
+}
+
 void set_default_surface(void* surface) {
     g_default_surface.store(surface, std::memory_order_relaxed);
 
