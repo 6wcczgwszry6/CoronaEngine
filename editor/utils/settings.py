@@ -183,6 +183,7 @@ class CoronaSettings:
                     "name": project_name,
                     "path": raw_path,
                     "if_exists": True,
+                    "legacy": not portable,
                     "last_edited": last_edited
                 })
             else:
@@ -190,6 +191,7 @@ class CoronaSettings:
                     "name": project_name,
                     "path": raw_path,
                     "if_exists": False,
+                    "legacy": False,
                     "last_edited": '-'
                 })
         return refined_projects

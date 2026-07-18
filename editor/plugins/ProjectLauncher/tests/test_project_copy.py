@@ -140,6 +140,24 @@ class ProjectCopyTests(unittest.TestCase):
             self.assertEqual(recent[0]["name"], "Portable Name")
             self.assertTrue(recent[0]["if_exists"])
 
+    def test_recent_projects_marks_project_ini_saves_as_legacy(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            legacy = root / "Legacy"
+            legacy.mkdir()
+            (legacy / "project.ini").write_text(
+                "[Project]\nname = Legacy\nentrance_scene = Scene/default.scene\n",
+                encoding="utf-8",
+            )
+            config_path = root / "CoronaEditor.ini"
+            config_path.write_text(
+                f"[General]\nlast_project =\n[History]\nrecent_projects = {__import__('json').dumps([str(legacy)])}\n",
+                encoding="utf-8",
+            )
+            settings = CoronaSettings(str(config_path))
+            recent = settings.get_recent_projects()
+            self.assertTrue(recent[0]["legacy"])
+
     def test_portable_settings_save_does_not_modify_scene_ini_or_create_project_ini(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
