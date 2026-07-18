@@ -4629,6 +4629,7 @@ nlohmann::json recent_projects_native() {
                                          : path_to_utf8(project_dir.filename()))},
             {"path", path_to_utf8(project_dir)},
             {"if_exists", exists},
+            {"legacy", exists && !portable},
             {"last_edited", exists ? ini_value(ini, "Project", "last_opened", "-") : "-"},
         });
     }

@@ -37,6 +37,13 @@
                 <span v-else class="text-red-500">{{ proj.name }} (路径异常)</span>
               </div>
               <div class="text-[10px] text-gray-500 truncate mt-1">{{ proj.path }}</div>
+              <button
+                v-if="proj.if_exists && proj.legacy"
+                class="mt-2 px-2 py-1 text-[10px] rounded bg-[#84a65b] hover:bg-[#95b86c]"
+                @click.stop="migrateLegacyProject(proj)"
+              >
+                另存为便携场景
+              </button>
             </div>
           </div>
           <div
@@ -174,6 +181,36 @@ const handleCreateProject = async () => {
     }
   } catch (error) {
     console.error('创建项目异常:', error);
+  }
+};
+
+const migrateLegacyProject = async (project) => {
+  if (!project?.path || !project.if_exists) return;
+  try {
+    const selected = await projectLauncherService.choosePortableSceneTarget();
+    const targetPath = selected?.data ?? selected;
+    if (!targetPath) return;
+    const migrated = await projectLauncherService.migrateLegacyScene({
+      sourcePath: project.path,
+      targetPath,
+      sceneName: project.name || 'PortableScene',
+    });
+    const result = migrated?.data ?? migrated;
+    if (!result?.ok) {
+      const details = (result?.diagnostics || [])
+        .map((item) => `${item.actor || 'scene'}: ${item.path} — ${item.message}`)
+        .join('\n');
+      window.alert(`迁移失败：\n${details}`);
+      return;
+    }
+    recentProjects.value = recentProjects.value.map((item) =>
+      item.path === project.path
+        ? { ...item, path: result.path, legacy: false, name: project.name }
+        : item,
+    );
+    await handleOpenProject(result.path);
+  } catch (error) {
+    console.error('旧项目迁移失败:', error);
   }
 };
 

@@ -3824,6 +3824,23 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("migrateLegacyScene", file_manager_source)
         self.assertIn("另存为便携场景", file_manager_source)
 
+    def test_recent_project_card_exposes_legacy_migration_action(self):
+        repo_root = self._repo_root()
+        launcher_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue"
+        ).read_text(encoding="utf-8")
+        self.assertIn("migrateLegacyProject", launcher_source)
+        self.assertIn("另存为便携场景", launcher_source)
+        self.assertIn("proj.legacy", launcher_source)
+        self.assertIn("@click.stop=\"migrateLegacyProject(proj)\"", launcher_source)
+
+    def test_recent_project_entries_mark_legacy_projects_for_the_launcher(self):
+        source = self._handler_source()
+        start = source.index("nlohmann::json recent_projects_native()")
+        end = source.index("nlohmann::json active_project_info_json()", start)
+        recent_body = source[start:end]
+        self.assertIn('{"legacy", exists && !portable}', recent_body)
+
     def test_project_settings_does_not_write_project_section_into_portable_scene(self):
         repo_root = self._repo_root()
         settings_source = (
