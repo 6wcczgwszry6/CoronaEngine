@@ -514,6 +514,42 @@ class Scene:
                 self.file_data.set('actors', key, value)
 
     def save_data(self):
+        if self._is_portable_scene_folder():
+            # Portable scene saves are owned by the native scene store.  Python
+            # only supplies the fields that are not already native scene state.
+            from ..editor_api import CoronaEditorApi
+            vision_document = getattr(self, 'vision_document', None)
+            snapshot = {
+                'name': self.name,
+                'script_path': getattr(self, 'script_path', ''),
+                'terrain': {
+                    'path': getattr(self, 'terrain_path', ''),
+                    'type': getattr(self, 'terrain_type', ''),
+                },
+                'vision': {
+                    'storage': getattr(self, 'vision_storage', ''),
+                    'source_id': getattr(self, 'vision_source_id', ''),
+                    'import_mode': getattr(self, 'vision_import_mode', ''),
+                },
+                'vision_document': {
+                    'version': VISION_DOCUMENT_VERSION,
+                    'encoding': VISION_DOCUMENT_ENCODING,
+                    'asset_root': getattr(self, 'vision_document_asset_root', ''),
+                    'data': _encode_vision_document(vision_document) if vision_document is not None else '',
+                },
+            }
+            scene_route = 'scene.ini' if os.path.isabs(self.route) else self.route
+            result = CoronaEditorApi.main.scene_save(scene_route, snapshot)
+            if isinstance(result, dict) and not result.get('ok', False):
+                diagnostics = result.get('diagnostics', [])
+                raise RuntimeError(
+                    f"Portable scene save failed: {result.get('message', 'validation failed')}; "
+                    f"diagnostics={diagnostics}")
+            return result
+
+        raise RuntimeError(
+            'Legacy projects are read-only; use Save as Portable Scene before editing')
+
         # 保存文件数据
         if os.path.isabs(self.route):
             data_path = self.route

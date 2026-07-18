@@ -255,19 +255,15 @@ class CoronaSettings:
         if not ini_path:
             logger.error("活动存档配置文件不存在")
             return False
-        section = 'scene' if os.path.basename(ini_path).lower() == 'scene.ini' else 'Project'
-        if not self.active_project_config.has_section(section):
-            self.active_project_config.add_section(section)
-        self.active_project_config.set(section, 'last_opened',
-                                       datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
-        try:
-            with open(ini_path, 'w', encoding='utf-8') as f:
-                self.active_project_config.write(f)
-            logger.debug("项目配置保存成功: %s", ini_path)
+        portable = os.path.basename(ini_path).lower() == 'scene.ini'
+        if portable:
+            # Portable scene metadata is saved by the native scene store.  Keep
+            # editor recency in CoronaEditor.ini without rewriting scene.ini.
+            self.config.set('General', 'last_project', self.active_project_path)
+            self.save()
             return True
-        except Exception as e:
-            logger.error(f"保存项目配置文件失败: {e}")
-            return False
+        logger.warning("Legacy projects are read-only; migrate before saving project metadata")
+        return False
 
 
 settings_manager = CoronaSettings()

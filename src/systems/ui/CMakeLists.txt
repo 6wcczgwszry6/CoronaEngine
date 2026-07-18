@@ -76,6 +76,7 @@ corona_add_system(ui
         Python::Python
         nanobind-static
         corona::resource::manager
+        assimp::assimp
         nlohmann_json::nlohmann_json
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
@@ -99,7 +100,10 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     )
     target_link_libraries(corona_scene_folder_tests
-        PRIVATE nlohmann_json::nlohmann_json bcrypt
+        PRIVATE nlohmann_json::nlohmann_json bcrypt assimp::assimp
+    )
+    target_compile_definitions(corona_scene_folder_tests PRIVATE
+        CORONA_SOURCE_DIR="${PROJECT_SOURCE_DIR}"
     )
     if(MSVC)
         target_compile_options(corona_scene_folder_tests PRIVATE /EHsc)

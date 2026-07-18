@@ -4,6 +4,9 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
+#include <set>
+#include <thread>
 #include <string_view>
 
 #include <nlohmann/json.hpp>
@@ -227,6 +230,47 @@ void reopening_asset_store_preserves_existing_manifest_bundles() {
     expect(manifest["bundles"].size() == 2, "reopened store should retain the first bundle");
 }
 
+void corrupted_manifest_blocks_import_and_writeback() {
+    TempDir temp;
+    const auto scene = temp.path / "scene";
+    write_text(scene / "assets.manifest.json", "{ definitely not json");
+    write_text(temp.path / "model.glb", "model");
+    const auto original = sha256_file(scene / "assets.manifest.json");
+
+    SceneAssetStore store(scene);
+    const auto imported = store.import_model(temp.path / "model.glb");
+    expect(!imported.ok(), "a corrupt manifest must block importing new assets");
+    expect(!imported.diagnostics.empty() && imported.diagnostics.front().code == "invalid_manifest",
+           "a corrupt manifest should report an invalid_manifest diagnostic");
+    expect(!store.write_manifest(), "a corrupt manifest must not be overwritten");
+    expect(sha256_file(scene / "assets.manifest.json") == original,
+           "blocked import must preserve the corrupt manifest for recovery");
+}
+
+void unsupported_manifest_version_blocks_import_and_writeback() {
+    TempDir temp;
+    const auto scene = temp.path / "scene";
+    write_text(scene / "assets.manifest.json",
+               R"({"format":"corona_scene_assets","version":2,"bundles":[]})");
+    write_text(temp.path / "model.glb", "model");
+    SceneAssetStore store(scene);
+    const auto imported = store.import_model(temp.path / "model.glb");
+    expect(!imported.ok(), "unsupported manifest version must block asset import");
+    expect(!store.write_manifest(), "unsupported manifest version must not be overwritten");
+}
+
+void missing_manifest_in_existing_portable_scene_blocks_import() {
+    TempDir temp;
+    const auto scene = temp.path / "scene";
+    expect(create_scene_folder(scene, "Missing manifest").has_value(), "portable scene should be created");
+    fs::remove(scene / "assets.manifest.json");
+    write_text(temp.path / "model.glb", "model");
+    SceneAssetStore store(scene);
+    expect(!store.import_model(temp.path / "model.glb").ok(),
+           "missing manifest in an existing portable scene must block import");
+    expect(!store.write_manifest(), "missing portable manifest must not be silently recreated");
+}
+
 void gltf_import_copies_external_buffers_and_images() {
     TempDir temp;
     const auto source = temp.path / "source";
@@ -238,6 +282,49 @@ void gltf_import_copies_external_buffers_and_images() {
     const auto result = store.import_model(source / "scene.gltf");
     expect(result.ok(), "glTF import should succeed");
     expect(result.files.size() == 3, "glTF should include buffer and image dependencies");
+}
+
+void gltf_import_decodes_percent_encoded_local_uris_and_rejects_remote_uris() {
+    TempDir temp;
+    const auto source = temp.path / "source";
+    write_text(source / "scene.gltf",
+               R"({"asset":{"version":"2.0"},"buffers":[{"uri":"mesh%20data.bin"}]})");
+    write_text(source / "mesh data.bin", "buffer");
+    SceneAssetStore store(temp.path / "portable");
+    const auto imported = store.import_model(source / "scene.gltf");
+    expect(imported.ok() && imported.files.size() == 2,
+           "glTF percent-encoded local URI should resolve to the decoded file name");
+
+    write_text(source / "remote.gltf",
+               R"({"asset":{"version":"2.0"},"buffers":[{"uri":"https://example.test/mesh.bin"}]})");
+    const auto remote = store.import_model(source / "remote.gltf");
+    expect(!remote.ok(), "remote glTF dependencies must be rejected for portable scenes");
+    expect(!remote.diagnostics.empty() && remote.diagnostics.front().code == "remote_dependency",
+           "remote glTF dependency should have a deterministic diagnostic");
+}
+
+void obj_import_supports_multiple_material_libraries_on_one_line() {
+    TempDir temp;
+    const auto source = temp.path / "source";
+    write_text(source / "scene.obj", "mtllib first.mtl second.mtl\nv 0 0 0\n");
+    write_text(source / "first.mtl", "map_Kd first.png\n");
+    write_text(source / "second.mtl", "map_Kd second.png\n");
+    write_text(source / "first.png", "first");
+    write_text(source / "second.png", "second");
+    SceneAssetStore store(temp.path / "portable");
+    const auto imported = store.import_model(source / "scene.obj");
+    expect(imported.ok(), "OBJ with multiple mtllib entries should import");
+    expect(imported.files.size() == 5, "both material libraries and textures should be archived");
+}
+
+void unsupported_model_extension_is_rejected() {
+    TempDir temp;
+    write_text(temp.path / "payload.txt", "not a model");
+    SceneAssetStore store(temp.path / "portable");
+    const auto imported = store.import_model(temp.path / "payload.txt");
+    expect(!imported.ok(), "unsupported model extensions must not be archived as models");
+    expect(!imported.diagnostics.empty() && imported.diagnostics.front().code == "unsupported_model",
+           "unsupported models should return a deterministic diagnostic");
 }
 
 void actor_import_rewrites_model_path_into_portable_assets() {
@@ -258,6 +345,22 @@ void actor_import_rewrites_model_path_into_portable_assets() {
            "actor bundle should record its model bundle dependency");
     expect(store.write_manifest(), "actor manifest should be written");
     expect(store.validate_manifest().empty(), "actor manifest should validate");
+}
+
+void legacy_actor_model_path_is_resolved_beside_actor_before_project_root() {
+    TempDir temp;
+    const auto legacy = temp.path / "legacy";
+    const auto target = temp.path / "Portable";
+    write_text(legacy / "project.ini",
+               "[Project]\nname = Legacy\nentrance_scene = Scene/default.scene\n");
+    write_text(legacy / "Scene" / "default.scene",
+               "[base]\nname = Actor migration\n[actors]\n"
+               "chair.actor_type = actor\nchair.route = Actors/chair.actor\n");
+    write_text(legacy / "Actors" / "chair.actor", "[base]\nname = Chair\npath = models/chair.glb\n");
+    write_text(legacy / "Actors" / "models" / "chair.glb", "model");
+
+    const auto result = migrate_legacy_scene({legacy / "project.ini", target, "Portable"});
+    expect(result.ok(), "legacy actor model route should resolve relative to the actor descriptor");
 }
 
 void manifest_rejects_unlisted_but_existing_asset_route() {
@@ -305,6 +408,262 @@ void portable_scene_reopens_after_copy_to_another_root() {
     fs::remove_all(moved, ec);
 }
 
+void portable_scene_validation_checks_every_persisted_resource_field() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Validation").has_value(), "portable scene should be created");
+    write_text(temp.path / "model.glb", "model");
+    SceneAssetStore assets(scene);
+    const auto model = assets.import_model(temp.path / "model.glb");
+    expect(model.ok() && assets.write_manifest(), "model fixture should be archived");
+    write_text(scene / "scene.ini",
+               "[format]\ntype = corona_scene_folder\nversion = 1\n"
+               "[scene]\nname = Validation\n"
+               "[actors]\nchair.route = " + model.main_route +
+                   "\nchair.material.texture = C:/external.png\n"
+               "[scripts]\npath = ../outside.py\n"
+               "[terrain]\npath = Resource/terrain.bin\n"
+               "[vision_document]\nasset_root = C:/vision\n");
+
+    const auto result = validate_portable_scene(scene, true);
+    expect(!result.ok(), "unsafe non-model resource fields must fail portable validation");
+    expect(result.asset_count == 1 && result.total_bytes == 5,
+           "portable validation should report manifest asset statistics");
+    std::set<std::string> fields;
+    for (const auto& diagnostic : result.diagnostics) fields.insert(diagnostic.field);
+    expect(fields.contains("actors.chair.material.texture"), "material texture should be validated");
+    expect(fields.contains("scripts.path"), "script path should be validated");
+    expect(fields.contains("terrain.path"), "terrain path should be validated");
+    expect(fields.contains("vision_document.asset_root"), "Vision asset root should be validated");
+}
+
+void portable_scene_validation_decodes_embedded_vision_resource_paths() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Vision validation").has_value(), "portable scene should be created");
+    write_text(scene / "scene.ini",
+               "[format]\ntype = corona_scene_folder\nversion = 1\n"
+               "[scene]\nname = Vision validation\n"
+               "[vision]\nstorage = embedded\n"
+               "[vision_document]\nversion = 1\nencoding = zlib_base64_json\nasset_root = Assets\n"
+               "data = eAEBUQCu/3sic2hhcGUiOnsiZm4iOiJDOi9leHRlcm5hbC5nbGIifSwiaW1hZ2UiOnsidGV4dHVyZSI6IkFzc2V0cy9JbWFnZXMvYWJjL29rLnBuZyJ9fVljG8k=\n");
+    const auto validation = validate_portable_scene(scene, true);
+    expect(!validation.ok(), "absolute path inside embedded Vision data must fail validation");
+    expect(std::any_of(validation.diagnostics.begin(), validation.diagnostics.end(), [](const auto& item) {
+               return item.field == "vision_document.data.shape.fn";
+           }),
+           "Vision diagnostic should identify the exact embedded field");
+}
+
+void scene_document_store_commits_multiple_sections_in_one_snapshot() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Atomic").has_value(), "portable scene should be created");
+    SceneDocumentStore document(scene);
+    std::map<std::string, std::vector<std::string>> sections;
+    sections["sun"] = {"[sun]", "enabled = false", "sun_direction = 0, 1, 0"};
+    sections["grid"] = {"[grid]", "enabled = false"};
+    sections["camera"] = {"[camera]", "count = 0"};
+    std::vector<Diagnostic> diagnostics;
+    expect(document.replace_sections(sections, diagnostics), "multi-section transaction should commit");
+    expect(diagnostics.empty(), "successful transaction should have no diagnostics");
+    auto text = std::ifstream(scene / "scene.ini");
+    const std::string saved((std::istreambuf_iterator<char>(text)), std::istreambuf_iterator<char>());
+    expect(saved.find("enabled = false") != std::string::npos, "updated sections should be persisted");
+    expect(saved.find("[format]") != std::string::npos, "unmodified format section should be preserved");
+}
+
+void scene_document_store_recovers_interrupted_transaction() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Recovery").has_value(), "portable scene should be created");
+    const auto original_hash = sha256_file(scene / "scene.ini");
+    fs::copy_file(scene / "scene.ini", scene / ".scene.ini.backup", fs::copy_options::overwrite_existing);
+    write_text(scene / ".scene-save.transaction", "scene.ini\n");
+    write_text(scene / "scene.ini", "truncated");
+
+    SceneDocumentStore recovered(scene);
+    expect(sha256_file(scene / "scene.ini") == original_hash,
+           "opening a document store should roll back an interrupted transaction");
+    expect(!fs::exists(scene / ".scene-save.transaction"), "recovery marker should be removed");
+    expect(!fs::exists(scene / ".scene.ini.backup"), "recovery backup should be removed");
+}
+
+void scene_document_store_reports_unrecoverable_transaction_without_deleting_marker() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Broken recovery").has_value(),
+           "portable scene should be created");
+    write_text(scene / ".scene-save.transaction", "scene.ini\n");
+
+    const auto validation = validate_portable_scene(scene, true);
+    expect(!validation.ok(), "a transaction without its backup must block opening");
+    expect(!validation.diagnostics.empty() &&
+               validation.diagnostics.front().code == "scene_recovery_failed",
+           "failed recovery should return a deterministic diagnostic");
+    expect(fs::is_regular_file(scene / ".scene-save.transaction"),
+           "failed recovery must preserve its marker for manual repair");
+}
+
+void scene_document_store_can_remove_obsolete_sections() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Remove").has_value(), "portable scene should be created");
+    write_text(scene / "scene.ini",
+               "[format]\ntype = corona_scene_folder\nversion = 1\n"
+               "[scene]\nname = Remove\n[vision]\nstorage = project_sidecar\n[actors]\n");
+    SceneDocumentStore document(scene);
+    std::vector<Diagnostic> diagnostics;
+    expect(document.replace_sections({{"vision", {}}}, diagnostics),
+           "empty replacement should remove an obsolete section");
+    auto input = std::ifstream(scene / "scene.ini");
+    const std::string saved((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    expect(saved.find("[vision]") == std::string::npos, "removed section must not remain on disk");
+    expect(saved.find("[actors]") != std::string::npos, "following sections must remain intact");
+}
+
+void concurrent_section_updates_do_not_lose_each_other() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Concurrent").has_value(), "portable scene should be created");
+    const auto update = [&](std::string section, std::string value) {
+        SceneDocumentStore store(scene);
+        std::vector<Diagnostic> diagnostics;
+        expect(store.replace_sections({{section, {"[" + section + "]", "value = " + value}}}, diagnostics),
+               "concurrent section update should commit");
+    };
+    std::thread one(update, "one", "1");
+    std::thread two(update, "two", "2");
+    std::thread three(update, "three", "3");
+    one.join();
+    two.join();
+    three.join();
+    auto input = std::ifstream(scene / "scene.ini");
+    const std::string saved((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    expect(saved.find("[one]") != std::string::npos && saved.find("[two]") != std::string::npos &&
+               saved.find("[three]") != std::string::npos,
+           "all concurrent section updates should survive");
+}
+
+void cleanup_only_removes_unreferenced_bundles_and_supports_dry_run() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    expect(create_scene_folder(scene, "Cleanup").has_value(), "portable scene should be created");
+    write_text(temp.path / "used.glb", "used");
+    write_text(temp.path / "unused.glb", "unused");
+    SceneAssetStore assets(scene);
+    const auto used = assets.import_model(temp.path / "used.glb");
+    const auto unused = assets.import_model(temp.path / "unused.glb");
+    expect(used.ok() && unused.ok() && assets.write_manifest(), "cleanup fixtures should be archived");
+    write_text(scene / "scene.ini",
+               "[format]\ntype = corona_scene_folder\nversion = 1\n"
+               "[scene]\nname = Cleanup\n[actors]\nitem.route = " + used.main_route + "\n");
+
+    const auto preview = cleanup_portable_scene_assets(scene, true);
+    expect(preview.ok() && preview.removed_bundles == 1, "dry run should identify one unused bundle");
+    expect(fs::is_regular_file(scene / fs::path(unused.main_route)),
+           "dry run must not remove the unused resource");
+
+    const auto cleaned = cleanup_portable_scene_assets(scene, false);
+    expect(cleaned.ok() && cleaned.removed_bundles == 1, "cleanup should remove one unused bundle");
+    expect(fs::is_regular_file(scene / fs::path(used.main_route)), "referenced bundle must remain");
+    expect(!fs::exists(scene / fs::path(unused.main_route)), "unused bundle should be removed");
+    SceneAssetStore reopened(scene);
+    expect(reopened.validate_manifest().empty(), "cleaned manifest should remain valid");
+}
+
+void generic_audio_import_uses_portable_audio_category() {
+    TempDir temp;
+    write_text(temp.path / "sound.wav", "audio");
+    SceneAssetStore assets(temp.path / "portable");
+    const auto imported = assets.import_file(temp.path / "sound.wav", "Audio");
+    expect(imported.ok(), "audio file should be accepted by the generic asset importer");
+    expect(imported.main_route.find("Assets/Audio/") == 0, "audio route should use Assets/Audio");
+}
+
+void legacy_audio_actor_migrates_into_portable_audio_category() {
+    TempDir temp;
+    const auto legacy = temp.path / "legacy";
+    const auto target = temp.path / "portable";
+    write_text(legacy / "project.ini",
+               "[Project]\nentrance_scene = Scene/default.scene\n");
+    write_text(legacy / "Scene" / "default.scene",
+               "[base]\nname = Audio migration\n[actors]\n"
+               "music.actor_type = audio\nmusic.route = media/theme.wav\n");
+    write_text(legacy / "media" / "theme.wav", "audio");
+
+    const auto migrated = migrate_legacy_scene({legacy / "project.ini", target, ""});
+    expect(migrated.ok(), "legacy audio actor should migrate");
+    auto input = std::ifstream(target / "scene.ini");
+    const std::string saved((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    expect(saved.find("music.route = Assets/Audio/") != std::string::npos,
+           "migrated audio actor should use Assets/Audio");
+}
+
+void existing_bundle_directory_with_wrong_content_is_rejected() {
+    TempDir temp;
+    const auto scene = temp.path / "portable";
+    write_text(temp.path / "model.glb", "original");
+    SceneAssetStore assets(scene);
+    const auto first = assets.import_model(temp.path / "model.glb");
+    expect(first.ok(), "first bundle import should succeed");
+    write_text(scene / fs::path(first.main_route), "different content");
+    const auto second = assets.import_model(temp.path / "model.glb");
+    expect(!second.ok(), "an occupied hash-prefix directory with different content must be rejected");
+    expect(!second.diagnostics.empty() && second.diagnostics.front().code == "bundle_collision",
+           "bundle directory mismatch should report bundle_collision");
+}
+
+void legacy_ini_sections_are_read_case_insensitively() {
+    TempDir temp;
+    const auto legacy = temp.path / "legacy";
+    const auto target = temp.path / "Portable";
+    write_text(legacy / "project.ini",
+               "[project]\nname = Legacy\nentrance_scene = Content/main.scene\n");
+    write_text(legacy / "Content" / "main.scene",
+               "[Base]\nname = Case migration\n[Actors]\n"
+               "chair.actor_type = model\nchair.route = Resource/chair.glb\n");
+    write_text(legacy / "Resource" / "chair.glb", "model");
+    const auto migrated = migrate_legacy_scene({legacy / "project.ini", target, ""});
+    expect(migrated.ok(), "legacy INI section names should be matched without case sensitivity");
+    auto input = std::ifstream(target / "scene.ini");
+    const std::string saved((std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+    expect(saved.find("chair.route = Assets/Models/") != std::string::npos,
+           "case-insensitive actors section should still migrate its model");
+}
+
+void fbx_import_archives_only_loader_declared_textures() {
+    TempDir temp;
+    const auto fixture = fs::path(CORONA_SOURCE_DIR) / "assets" / "wolf" / "fbx";
+    const auto source = temp.path / "source";
+    fs::create_directories(source / "textures");
+    fs::copy_file(fixture / "Wolf.fbx", source / "Wolf.fbx");
+    for (const auto& texture : fs::directory_iterator(fixture / "textures")) {
+        if (texture.is_regular_file()) {
+            fs::copy_file(texture.path(), source / "textures" / texture.path().filename());
+        }
+    }
+    write_text(source / "unrelated.png", "must not be archived");
+
+    SceneAssetStore assets(temp.path / "portable");
+    const auto imported = assets.import_model(source / "Wolf.fbx");
+    expect(imported.ok(), "valid FBX fixture should import");
+    expect(std::none_of(imported.files.begin(), imported.files.end(), [](const auto& file) {
+               return file.source.filename() == "unrelated.png";
+           }),
+           "FBX import must not recursively archive unrelated sidecar files");
+}
+
+void usd_remote_dependency_is_rejected() {
+    TempDir temp;
+    write_text(temp.path / "remote.usda", "def Xform \"Root\" { asset source = @https://example.test/a.usd@ }\n");
+    SceneAssetStore assets(temp.path / "portable");
+    const auto imported = assets.import_model(temp.path / "remote.usda");
+    expect(!imported.ok(), "remote USD dependency must be rejected");
+    expect(!imported.diagnostics.empty() && imported.diagnostics.front().code == "remote_dependency",
+           "remote USD dependency should report a deterministic diagnostic");
+}
+
 }  // namespace
 
 int main() {
@@ -317,11 +676,32 @@ int main() {
     missing_legacy_asset_aborts_without_target_directory();
     new_scene_folder_has_no_mode_and_an_empty_valid_manifest();
     reopening_asset_store_preserves_existing_manifest_bundles();
+    corrupted_manifest_blocks_import_and_writeback();
+    unsupported_manifest_version_blocks_import_and_writeback();
+    missing_manifest_in_existing_portable_scene_blocks_import();
     gltf_import_copies_external_buffers_and_images();
+    gltf_import_decodes_percent_encoded_local_uris_and_rejects_remote_uris();
+    obj_import_supports_multiple_material_libraries_on_one_line();
+    unsupported_model_extension_is_rejected();
     actor_import_rewrites_model_path_into_portable_assets();
+    legacy_actor_model_path_is_resolved_beside_actor_before_project_root();
     manifest_rejects_unlisted_but_existing_asset_route();
     dae_import_collects_declared_external_texture_and_rejects_missing_one();
     portable_scene_reopens_after_copy_to_another_root();
+    portable_scene_validation_checks_every_persisted_resource_field();
+    portable_scene_validation_decodes_embedded_vision_resource_paths();
+    scene_document_store_commits_multiple_sections_in_one_snapshot();
+    scene_document_store_recovers_interrupted_transaction();
+    scene_document_store_reports_unrecoverable_transaction_without_deleting_marker();
+    scene_document_store_can_remove_obsolete_sections();
+    concurrent_section_updates_do_not_lose_each_other();
+    cleanup_only_removes_unreferenced_bundles_and_supports_dry_run();
+    generic_audio_import_uses_portable_audio_category();
+    legacy_audio_actor_migrates_into_portable_audio_category();
+    existing_bundle_directory_with_wrong_content_is_rejected();
+    legacy_ini_sections_are_read_case_insensitively();
+    fbx_import_archives_only_loader_declared_textures();
+    usd_remote_dependency_is_rejected();
     std::cout << "All scene folder tests passed\n";
     return 0;
 }

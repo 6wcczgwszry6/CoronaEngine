@@ -140,7 +140,7 @@ class ProjectCopyTests(unittest.TestCase):
             self.assertEqual(recent[0]["name"], "Portable Name")
             self.assertTrue(recent[0]["if_exists"])
 
-    def test_portable_settings_save_updates_scene_ini_without_creating_project_ini(self):
+    def test_portable_settings_save_does_not_modify_scene_ini_or_create_project_ini(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             scene = root / "Portable"
@@ -159,11 +159,13 @@ class ProjectCopyTests(unittest.TestCase):
             )
             settings = CoronaSettings(str(config_path))
             self.assertTrue(settings.set_active_project(str(scene)))
+            original_scene = scene_ini.read_bytes()
             self.assertTrue(settings.save_active_project_info())
             self.assertFalse((scene / "project.ini").exists())
-            saved = configparser.ConfigParser()
-            saved.read(scene_ini, encoding="utf-8")
-            self.assertTrue(saved.get("scene", "last_opened"))
+            self.assertEqual(scene_ini.read_bytes(), original_scene)
+            saved_editor = configparser.ConfigParser()
+            saved_editor.read(config_path, encoding="utf-8")
+            self.assertEqual(saved_editor.get("General", "last_project"), str(scene))
 
 
 if __name__ == "__main__":

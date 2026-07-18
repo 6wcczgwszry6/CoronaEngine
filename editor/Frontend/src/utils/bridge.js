@@ -522,6 +522,12 @@ const editorApiStatic = {
       call_manifest_editor_api('project.createWorldProject', [worldData || {}]),
     choosePortableSceneTarget: () =>
       call_manifest_editor_api('project.choosePortableSceneTarget', []),
+    validatePortableScene: (payload) =>
+      call_manifest_editor_api('project.validatePortableScene', [payload || {}]),
+    importPortableAsset: (payload) =>
+      call_manifest_editor_api('project.importPortableAsset', [payload || {}]),
+    cleanupPortableSceneAssets: (payload) =>
+      call_manifest_editor_api('project.cleanupPortableSceneAssets', [payload || {}]),
     getAppVersion: () => call_manifest_editor_api('project.getAppVersion', []),
     getDefaultProjectPath: () => call_manifest_editor_api('project.getDefaultProjectPath', []),
     getRecentProjects: () => call_manifest_editor_api('project.getRecentProjects', []),
@@ -1004,6 +1010,12 @@ export const projectLauncherService = {
     editorApi.project.browseFolder(default_path),
   choosePortableSceneTarget: () =>
     editorApi.project.choosePortableSceneTarget(),
+  validatePortableScene: (payload = {}) =>
+    editorApi.project.validatePortableScene(payload),
+  importPortableAsset: (payload = {}) =>
+    editorApi.project.importPortableAsset(payload),
+  cleanupPortableSceneAssets: (payload = {}) =>
+    editorApi.project.cleanupPortableSceneAssets(payload),
   migrateLegacyScene: (payload) =>
     editorApi.project.migrateLegacyScene(payload).then((result) => {
       const migrated = result?.data ?? result;

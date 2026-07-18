@@ -397,7 +397,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version", source)
         self.assertIn("EDITOR_API_METHOD1_WRAPPED(SceneTools, list_actor_tree", source)
         self.assertIn(
-            "EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneNameParam",
+            "EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneSaveParams",
             source,
         )
         self.assertIn("cef/cef_editor_api.cpp", cmake)
@@ -613,7 +613,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn('_invoke_manifest_cpp_api("project.get_app_version", [])', api_source)
         self.assertIn('_invoke_manifest_cpp_api("scene.list_actor_tree", [scene_name])', api_source)
         self.assertIn('_invoke_manifest_cpp_api("scene.select_actor", [scene_name, actor_type, actor_name])', api_source)
-        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", [scene_name])', api_source)
+        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", args)', api_source)
         self.assertIn("class _EventsApi", api_source)
         self.assertIn(
             'return _register_manifest_editor_api_event_callback("events.on_actor_changed", callback)',
@@ -746,7 +746,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         for snippet in (
             'EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version, "project.getAppVersion", "project.get_app_version", EditorApiValueType::String)',
             'EDITOR_API_METHOD1_WRAPPED(SceneTools, list_actor_tree, "scene.listActorTree", "scene.list_actor_tree", "scene_name", EditorApiValueType::String, EditorApiValueType::Array)',
-            'EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneNameParam, "main.sceneSave", "main.scene_save", EditorApiValueType::Object)',
+            'EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneSaveParams, "main.sceneSave", "main.scene_save", EditorApiValueType::Object)',
             '{"SceneTools.actorChanged", EditorApiValueType::Object, all_callers(), "events.onActorChanged", "events.on_actor_changed"}',
             '{"ProjectLauncher.projectOpened", EditorApiValueType::Object, all_callers(), "events.onProjectOpened", "events.on_project_opened"}',
         ):
@@ -2882,7 +2882,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "MainView.import_resource_file": ("kMainViewImportResourceFileParams", "EditorApiValueType::Object"),
             "MainView.on_init": ("kPathOptionalParam", "EditorApiValueType::Object"),
             "MainView.run_project": ("kPathOptionalParam", "EditorApiValueType::Object"),
-            "MainView.scene_save": ("kSceneNameParam", "EditorApiValueType::Object"),
+            "MainView.scene_save": ("kSceneSaveParams", "EditorApiValueType::Object"),
             "MainView.update_view_tool_state": ("kMainViewUpdateViewToolStateParams", "EditorApiValueType::Object"),
         }
         for api_name, (params_name, return_type) in expected.items():
@@ -2937,7 +2937,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertGreater(end, start)
         main_section = python_api_source[start:end]
 
-        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", [scene_name])', main_section)
+        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", args)', main_section)
         self.assertNotIn("MainView.", main_section)
 
     def test_editor_api_events_validate_payload_and_cleanup_cef_callbacks(self):
@@ -3073,7 +3073,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn('"vision_document"', source)
 
         start = source.find("std::filesystem::path create_vision_project_native")
-        end = source.find("std::filesystem::path copy_existing_project_to_data_native", start)
+        end = source.find("std::filesystem::path open_project_native", start)
         self.assertGreaterEqual(start, 0)
         self.assertGreater(end, start)
         create_body = source[start:end]
@@ -3409,16 +3409,16 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
 
-    def test_opening_runtime_project_does_not_duplicate_it(self):
+    def test_opening_legacy_project_is_read_only_and_does_not_duplicate_it(self):
         source = self._handler_source()
-        start = source.find("std::filesystem::path copy_existing_project_to_data_native")
-        end = source.find("std::filesystem::path open_project_native", start)
+        start = source.find("std::filesystem::path open_project_native")
+        end = source.find("nlohmann::json recent_projects_native", start)
         self.assertGreaterEqual(start, 0)
         self.assertGreater(end, start)
-        copy_body = source[start:end]
-        self.assertIn("absolute_normalized_path(runtime_data_dir())", copy_body)
-        self.assertIn("is_path_within(data_dir, source_dir)", copy_body)
-        self.assertIn("return source_dir", copy_body)
+        open_body = source[start:end]
+        self.assertNotIn("copy_existing_project_to_data_native", open_body)
+        self.assertIn("project_dir = candidate", open_body)
+        self.assertIn("project_dir = raw_path.parent_path()", open_body)
 
     def test_project_launcher_business_logic_is_native(self):
         source = self._handler_source()
@@ -3430,7 +3430,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             '"open_project"',
             "create_vision_project_native",
             "create_embedded_vision_document",
-            "copy_existing_project_to_data_native",
+            "open_project_native",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
@@ -3613,10 +3613,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("self.vision_document", source)
         self.assertIn("_encode_vision_document(vision_document)", source)
         self.assertIn("zlib.compressobj(level=0)", source)
-        self.assertIn("self.file_data['vision']['storage'] = 'embedded'", source)
-        self.assertIn("self.file_data['vision_document']['data']", source)
-        self.assertIn("if vision_storage == 'project_sidecar' and vision_source_id:", source)
-        self.assertIn("self.file_data['vision']['source_id']", source)
+        self.assertIn("'vision_document': {", source)
+        self.assertIn("'data': _encode_vision_document(vision_document)", source)
+        self.assertIn("'source_id': getattr(self, 'vision_source_id', '')", source)
         self.assertNotIn("self.file_data['vision']['source_path']", source)
 
     def test_recent_games_import_awaits_open_project_and_catches_errors(self):
@@ -3787,6 +3786,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         open_body = handler_source[open_start:open_end]
         self.assertIn('ext == ".scene"', open_body)
         self.assertIn('candidate / "project.ini"', open_body)
+        self.assertNotIn("copy_existing_project_to_data_native", open_body)
+        self.assertIn("project_dir = raw_path.parent_path()", open_body)
         self.assertIn("Legacy projects are read-only", handler_source)
 
     def test_new_project_creation_uses_portable_scene_folder_without_mode(self):
@@ -3831,6 +3832,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("portable = config.get('format', 'type'", settings_source)
         self.assertIn("section = 'scene' if portable else 'Project'", settings_source)
         self.assertIn("allowed_keys = ['name', 'core_version'] if portable", settings_source)
+        self.assertIn("portable_defaults = {", settings_source)
+        self.assertIn("legacy_defaults = {", settings_source)
+        self.assertIn("defaults = portable_defaults if portable else legacy_defaults", settings_source)
 
     def test_python_scene_save_preserves_portable_scene_metadata_without_base_section(self):
         repo_root = self._repo_root()
@@ -3838,8 +3842,90 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             repo_root / "editor" / "CoronaCore" / "core" / "entities" / "scene.py"
         ).read_text(encoding="utf-8")
         self.assertIn("def _is_portable_scene_folder", scene_source)
-        self.assertIn("metadata_section = 'scene' if self._is_portable_scene_folder() else 'base'", scene_source)
-        self.assertIn("self.file_data.remove_section('base')", scene_source)
+        save_start = scene_source.index("    def save_data(self):")
+        save_end = scene_source.index("    @auto_save\n    def set_script", save_start)
+        save_body = scene_source[save_start:save_end]
+        self.assertIn("if self._is_portable_scene_folder():", save_body)
+        self.assertIn("CoronaEditorApi.main.scene_save", save_body)
+        self.assertLess(save_body.index("CoronaEditorApi.main.scene_save"),
+                        save_body.index("with open(data_path"))
+
+    def test_portable_scene_has_one_native_transactional_save_path(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        scene_source = (
+            repo_root / "editor" / "CoronaCore" / "core" / "entities" / "scene.py"
+        ).read_text(encoding="utf-8")
+        autosave_source = (
+            repo_root / "editor" / "CoronaCore" / "utils" / "proejct_utils.py"
+        ).read_text(encoding="utf-8")
+        settings_source = (
+            repo_root / "editor" / "utils" / "settings.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("SceneDocumentStore document_store", handler_source)
+        self.assertIn("document_store.replace_sections", handler_source)
+        self.assertIn('sections["scene"] = {"[scene]"}', handler_source)
+        self.assertIn('scene_metadata["name"] = scene.name', handler_source)
+        save_start = scene_source.index("    def save_data(self):")
+        save_end = scene_source.index("    @auto_save\n    def set_script", save_start)
+        save_body = scene_source[save_start:save_end]
+        self.assertIn("CoronaEditorApi.main.scene_save", save_body)
+        self.assertIn("Portable scene saves are owned by the native scene store", save_body)
+        self.assertIn("if isinstance(result, dict) and not result.get('ok', False):", save_body)
+        self.assertIn("logger.exception", autosave_source)
+        self.assertIn("if portable:", settings_source)
+        self.assertIn("Portable scene metadata is saved by the native scene store", settings_source)
+
+        project_settings_source = (
+            repo_root / "editor" / "backend" / "project_settings" / "main.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CoronaEditorApi.main.scene_save('scene.ini', snapshot)",
+                      project_settings_source)
+
+    def test_portable_scene_validation_import_and_cleanup_apis_are_exposed(self):
+        repo_root = self._repo_root()
+        api_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_api.cpp"
+        ).read_text(encoding="utf-8")
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        bridge_source = (
+            repo_root / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
+        ).read_text(encoding="utf-8")
+        for native_name, wrapper in (
+            ("validate_portable_scene", "project.validatePortableScene"),
+            ("import_portable_asset", "project.importPortableAsset"),
+            ("cleanup_portable_scene_assets", "project.cleanupPortableSceneAssets"),
+        ):
+            self.assertIn(f"ProjectLauncher, {native_name}", api_source)
+            self.assertIn(f'{{"{native_name}"', handler_source)
+            self.assertIn(wrapper, bridge_source)
+
+    def test_duplicate_native_actor_check_happens_before_portable_asset_import(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        start = handler_source.index("NativeResult create_native_editor_actor")
+        end = handler_source.index("NativeResult remove_native_editor_actor", start)
+        body = handler_source[start:end]
+        self.assertLess(body.index("skip_if_exists"), body.index("portable_store.emplace"))
+
+    def test_scene_save_returns_structured_portable_validation_diagnostics(self):
+        repo_root = self._repo_root()
+        source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        start = source.index('{"scene_save"')
+        end = source.index('{"update_view_tool_state"', start)
+        body = source[start:end]
+        self.assertIn("PortableSceneValidationError", body)
+        self.assertIn('{"diagnostics", error.diagnostics()}', body)
+        self.assertIn('{"ok", false}', body)
 
 
 if __name__ == "__main__":
