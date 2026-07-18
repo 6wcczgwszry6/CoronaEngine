@@ -576,11 +576,14 @@ void GeometrySystem::update() {
                 // 整棵子树一次性收集（不逐 actor、不逐相机计数）。
                 // 与 preload 的 query_sphere（球内）对称，形成完整加载/卸载闭环。
                 //
-                // 有效卸载半径取 max(unload, preload)：确保卸载区完全在预加载区之外，
-                // 避免 actor 在边界被卸载→预加载→卸载的 ping-pong。
+                // 有效卸载半径：取 max(unload, preload×1.2)，确保卸载边界严格在预加载
+                // 边界之外。×1.2 系数提供 20% 滞回死区，避免 actor 在边界被
+                // 卸载→预加载→卸载的 ping-pong（模型反复消失/出现闪烁）。
+                // 例：preload=25 → 卸载边界≥30；unload=50 → 卸载边界=60。
                 {
                     const float effective_unload_radius = std::max(
-                        scene_state.cfg.unload_distance, scene_state.cfg.preload_distance);
+                        scene_state.cfg.unload_distance,
+                        scene_state.cfg.preload_distance * 1.2f);
                     std::vector<Impl::Payload> outside_results;
                     scene_state.tree.collect_outside_spheres(
                         cam_positions, effective_unload_radius, outside_results);
