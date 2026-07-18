@@ -88,11 +88,6 @@ const CONDITION_BLOCK_PRIORITY = new Map([
   ['text', 11],
 ]);
 
-function outputChecks(block) {
-  const checks = block?.outputConnection?.getCheck?.();
-  return Array.isArray(checks) ? checks : [];
-}
-
 function collectReturnValueBlocks() {
   if (!BlocklyLib) return;
   const itemsByType = new Map();
