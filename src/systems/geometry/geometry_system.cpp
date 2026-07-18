@@ -3252,11 +3252,125 @@ GeometrySystem::query_shadow_mesh_slots(std::uintptr_t geometry_handle,
     auto& geom_storage = SharedDataHub::instance().geometry_storage();
     auto geom = geom_storage.try_acquire_read(geometry_handle);
     if (!geom || geom->mesh_handles.empty()) return {};
-    for (uint32_t i = 0; i < static_cast<uint32_t>(geom->mesh_handles.size()); ++i)
-        request_shadow_lod(geometry_handle, i, world_units_per_texel, max_abs_scale, frame);
+
+    for (uint32_t mesh_index = 0;
+         mesh_index < static_cast<uint32_t>(geom->mesh_handles.size());
+         ++mesh_index) {
+        request_shadow_lod(geometry_handle, mesh_index, world_units_per_texel,
+                           max_abs_scale, frame);
+    }
     return build_mesh_slots(this, geometry_handle, *geom,
-                            false, {}, 0.0f, {}, 0.0f,
+                            false, {}, 0.f, {}, 0.f,
                             true, world_units_per_texel, max_abs_scale);
+}
+
+std::vector<std::vector<GeometrySystem::ShadowMeshSlot>>
+GeometrySystem::query_shadow_mesh_slots_batch(
+    std::uintptr_t geometry_handle,
+    std::span<const ShadowLodQuery> cascades,
+    float max_abs_scale,
+    std::uint64_t frame) const {
+    std::vector<std::vector<ShadowMeshSlot>> result(cascades.size());
+    if (cascades.empty()) return result;
+
+    auto& geom_storage = SharedDataHub::instance().geometry_storage();
+    auto geom = geom_storage.try_acquire_read(geometry_handle);
+    if (!geom || geom->mesh_handles.empty()) return result;
+
+    std::vector<GeometryDetail::ShadowLodQueryInput> query_inputs;
+    query_inputs.reserve(cascades.size());
+    for (const auto& cascade : cascades) {
+        query_inputs.push_back({cascade.enabled, cascade.world_units_per_texel});
+    }
+    std::vector<int> targets(cascades.size(), -1);
+    for (std::size_t cascade = 0; cascade < cascades.size(); ++cascade) {
+        if (cascades[cascade].enabled) {
+            result[cascade].reserve(geom->mesh_handles.size());
+        }
+    }
+
+    std::unique_lock lod_lock(impl_->lod_cache_mutex);
+    for (uint32_t mesh_index = 0;
+         mesh_index < static_cast<uint32_t>(geom->mesh_handles.size());
+         ++mesh_index) {
+        const auto& mesh = geom->mesh_handles[mesh_index];
+        const RenderMeshBuffers fallback{
+            mesh.vertexBuffer, mesh.indexBuffer,
+            mesh.vertexStorageBuffer, mesh.indexStorageBuffer,
+            mesh.vertex_count, mesh.index_count, mesh.max_index};
+
+        auto cache_it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
+        const bool has_levels = cache_it != impl_->lod_cache.end() &&
+                                !cache_it->second.levels.empty();
+        int main_target = 0;
+        GeometryDetail::ShadowLodBatchDecision decision;
+        if (has_levels) {
+            auto& entry = cache_it->second;
+            main_target = std::clamp(entry.committed_demand, 0,
+                                     static_cast<int>(entry.levels.size()) - 1);
+            std::array<float, 8> errors{};
+            const int level_count = static_cast<int>(
+                std::min<std::size_t>(entry.levels.size(), errors.size()));
+            for (int level = 0; level < level_count; ++level) {
+                errors[static_cast<std::size_t>(level)] =
+                    entry.levels[static_cast<std::size_t>(level)].geometric_error;
+            }
+            decision = GeometryDetail::choose_shadow_targets(
+                errors, level_count, max_abs_scale, query_inputs, targets, main_target);
+            if (entry.levels.size() > 1 && decision.aggregated_demand >= 0) {
+                if (entry.shadow_last_request_frame != frame ||
+                    entry.shadow_committed_demand < 0) {
+                    entry.shadow_committed_demand = decision.aggregated_demand;
+                } else {
+                    entry.shadow_committed_demand = std::min(
+                        entry.shadow_committed_demand, decision.aggregated_demand);
+                }
+                entry.shadow_last_request_frame = frame;
+            }
+        } else {
+            for (std::size_t cascade = 0; cascade < cascades.size(); ++cascade) {
+                targets[cascade] = cascades[cascade].enabled ? main_target : -1;
+            }
+        }
+
+        for (std::size_t cascade = 0; cascade < cascades.size(); ++cascade) {
+            if (!cascades[cascade].enabled) continue;
+            RenderMeshBuffers selected = fallback;
+            if (has_levels) {
+                const auto& levels = cache_it->second.levels;
+                const int target = std::clamp(targets[cascade], 0,
+                                              static_cast<int>(levels.size()) - 1);
+                for (int level = target; level >= 0; --level) {
+                    const auto& candidate = levels[static_cast<std::size_t>(level)];
+                    if (!candidate.ready || !candidate.vertex_buffer ||
+                        !candidate.index_buffer) {
+                        continue;
+                    }
+                    selected = RenderMeshBuffers{
+                        candidate.vertex_buffer,
+                        candidate.index_buffer,
+                        candidate.vertex_storage ? candidate.vertex_storage
+                                                 : fallback.vertex_storage,
+                        candidate.index_storage ? candidate.index_storage
+                                                : fallback.index_storage,
+                        candidate.vertex_count,
+                        candidate.index_count,
+                        candidate.max_index};
+                    break;
+                }
+            }
+
+            ShadowMeshSlot slot;
+            slot.mesh_index = mesh_index;
+            slot.geo = std::move(selected);
+            slot.vertex_count = slot.geo.vertex_count;
+            slot.index_count = slot.geo.index_count;
+            slot.max_index = slot.geo.max_index;
+            slot.valid = render_mesh_buffers_valid(slot.geo);
+            result[cascade].push_back(std::move(slot));
+        }
+    }
+    return result;
 }
 
 void GeometrySystem::update_cpu_resource_ledger() {

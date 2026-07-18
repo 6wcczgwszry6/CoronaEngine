@@ -151,4 +151,26 @@ export const defineMathBlocks = () => {
       this.setHelpUrl('');
     },
   };
+
+  // 数字可直接填写；A/B 连接口仅用于可选的变量或运算表达式。
+  const binaryValueBlock = (type, label, output = 'Number') => {
+    Blockly.Blocks[type] = { init() {
+      this.appendValueInput('A').setCheck(null).appendField(new Blockly.FieldNumber(0), 'x1');
+      this.appendValueInput('B').setCheck(null).appendField(label).appendField(new Blockly.FieldNumber(0), 'x2');
+      this.setInputsInline(true); this.setOutput(true, output); this.setStyle('math_blocks');
+    } };
+  };
+  binaryValueBlock('math_add', '+');
+  binaryValueBlock('math_sub', '-');
+  binaryValueBlock('math_mul', '\u00d7');
+  binaryValueBlock('math_div', '\u00f7');
+  binaryValueBlock('math_G', '>','Boolean');
+  binaryValueBlock('math_L', '<','Boolean');
+  binaryValueBlock('math_E', '=','Boolean');
+  Blockly.Blocks.math_random = { init() {
+    this.appendValueInput('A').setCheck('Number').appendField('\u968f\u673a\u6570\u4ece').appendField(new Blockly.FieldNumber(0), 'x1');
+    this.appendValueInput('B').setCheck('Number').appendField('\u5230').appendField(new Blockly.FieldNumber(10), 'x2');
+    this.setInputsInline(true); this.setOutput(true, 'Number'); this.setStyle('math_blocks');
+  } };
+
 };

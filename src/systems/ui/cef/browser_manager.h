@@ -102,6 +102,7 @@ struct BrowserTab {
     int detach_y = 120;
     int detach_w = 640;
     int detach_h = 480;
+    bool detach_maximized = false;
 
     char url_buffer[1024] = "";
     std::vector<uint8_t> pixel_buffer;

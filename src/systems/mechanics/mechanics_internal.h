@@ -400,6 +400,7 @@ struct BodyFrameParams {
     float damping = 0.99f;
     float restitution = 0.8f;
     bool collision_enabled = true;
+    CollisionShape collision_shape = CollisionShape::Box;
     std::uintptr_t actor = 0;
 };
 
@@ -789,7 +790,6 @@ struct MechanicsSystem::Impl {
     std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, MechanicsInternal::PairHash> prev_active_collisions;
     std::vector<std::function<void()>> deferred_move_callbacks;
     std::vector<MechanicsInternal::DeferredCollisionCallback> deferred_collision_callbacks;
-
     MechanicsInternal::BodyRuntimeState& body(std::uintptr_t handle) {
         return bodies.try_emplace(handle).first->second;
     }

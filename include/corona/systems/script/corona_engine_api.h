@@ -7,6 +7,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,6 +31,11 @@ struct GeometryRenderStatus {
 // ============================================================================
 void set_default_surface(void* surface);
 [[nodiscard]] void* get_default_surface();
+
+// Editor camera input ownership. Blockly/game runtimes disable only editor
+// camera controls; keyboard and mouse events continue to reach script input.
+void set_editor_camera_input_enabled(bool enabled);
+[[nodiscard]] bool is_editor_camera_input_enabled();
 
 // ============================================================================
 // Geometry: 作为所有组件的锚点，存储位置/旋转/缩放和模型数据
@@ -110,6 +116,8 @@ class Mechanics {
     // 碰撞检测开关：false 时物体不参与碰撞检测（不与其他物体或地面碰撞）
     void set_collision_enabled(bool enabled);
     [[nodiscard]] bool get_collision_enabled() const;
+    void set_collision_shape(std::string_view shape);
+    [[nodiscard]] std::string get_collision_shape() const;
 
     // 轴锁定：锁定指定轴上的线性运动（平移）
     void set_linear_lock(bool lock_x, bool lock_y, bool lock_z);

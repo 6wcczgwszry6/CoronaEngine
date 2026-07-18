@@ -8,6 +8,7 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/systems/script/camera_follow_controller.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
@@ -1456,16 +1457,42 @@ void Corona::API::Mechanics::set_collision_enabled(bool enabled) {
         return;
     }
     if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
-        accessor->bEnableCollision = enabled;  // 设置碰撞检测开关
+        accessor->collision_shape = enabled ? CollisionShape::Box : CollisionShape::None;
     }
 }
 
 bool Corona::API::Mechanics::get_collision_enabled() const {
     if (handle_ == 0) return true;
     if (auto accessor = SharedDataHub::instance().mechanics_storage().try_acquire_read(handle_)) {
-        return accessor->bEnableCollision;  // 读取碰撞检测开关状态
+        return accessor->collision_shape != CollisionShape::None;
     }
     return true;
+}
+
+void Corona::API::Mechanics::set_collision_shape(std::string_view shape) {
+    if (handle_ == 0) return;
+    CollisionShape value = CollisionShape::Box;
+    if (shape == "none") value = CollisionShape::None;
+    else if (shape == "mesh") value = CollisionShape::Mesh;
+    else if (shape != "box") {
+        CFW_LOG_WARNING("[Mechanics::set_collision_shape] Invalid shape '{}'; using box", shape);
+    }
+    if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
+        accessor->collision_shape = value;
+    }
+}
+
+std::string Corona::API::Mechanics::get_collision_shape() const {
+    if (handle_ != 0) {
+        if (auto accessor = SharedDataHub::instance().mechanics_storage().try_acquire_read(handle_)) {
+            switch (accessor->collision_shape) {
+                case CollisionShape::None: return "none";
+                case CollisionShape::Mesh: return "mesh";
+                case CollisionShape::Box: return "box";
+            }
+        }
+    }
+    return "box";
 }
 
 void Corona::API::Mechanics::set_linear_lock(bool lock_x, bool lock_y, bool lock_z) {
@@ -2242,6 +2269,12 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
         output_mode = CameraOutputMode::VisibilityBuffer;
     } else if (mode == "ssao") {
         output_mode = CameraOutputMode::SSAO;
+    } else if (mode == "ssao_raw") {
+        output_mode = CameraOutputMode::SSAORaw;
+    } else if (mode == "shadow_mask_raw") {
+        output_mode = CameraOutputMode::ShadowMaskRaw;
+    } else if (mode == "shadow_mask") {
+        output_mode = CameraOutputMode::ShadowMask;
     } else if (mode != "final_color") {
         CFW_LOG_WARNING("[Camera::set_output_mode] Unknown mode '{}', defaulting to final_color", mode);
     }
@@ -2272,6 +2305,12 @@ std::string Corona::API::Camera::get_output_mode() const {
                 return "visibility_buffer";
             case CameraOutputMode::SSAO:
                 return "ssao";
+            case CameraOutputMode::SSAORaw:
+                return "ssao_raw";
+            case CameraOutputMode::ShadowMaskRaw:
+                return "shadow_mask_raw";
+            case CameraOutputMode::ShadowMask:
+                return "shadow_mask";
             case CameraOutputMode::FinalColor:
                 [[fallthrough]];
             default:
@@ -2499,6 +2538,14 @@ std::uintptr_t Corona::API::Camera::pick_actor_at_pixel(int x, int y) const {
 }
 
 namespace Corona::API {
+void set_editor_camera_input_enabled(bool enabled) {
+    Systems::CameraFollowController::instance().set_input_enabled(enabled);
+}
+
+bool is_editor_camera_input_enabled() {
+    return Systems::CameraFollowController::instance().is_input_enabled();
+}
+
 void set_default_surface(void* surface) {
     g_default_surface.store(surface, std::memory_order_relaxed);
 

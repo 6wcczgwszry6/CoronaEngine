@@ -619,10 +619,10 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         context.vulkan_backend->request_rebuild();
     }
 
-    // A secondary (detached) window was closed by the user (its OS close button). Treat it as a
-    // redock request: find the tab hosted on that window's surface and flip it to Redocking, so
-    // the reconcile step below tears the window + surface down (promise-synced) this frame. This
-    // runs on the UI thread, so flipping detach_state directly is safe.
+    // A secondary (detached) window was closed by the user (its OS close button). Camera views
+    // are standalone render targets, so closing their window closes the tab. A regular detached
+    // panel still redocks. Camera tabs are marked closed here and are torn down by the common
+    // close path below, before their surface can be rebound to the main window.
     for (const SDL_WindowID closed_id : result.closed_window_ids) {
         const ManagedWindow* mw = SdlWindowManager::instance().find_by_id(closed_id);
         if (mw == nullptr || mw->surface == nullptr) {
@@ -631,7 +631,13 @@ void UiFrameRunner::run_frame(UiFrameContext& context) {
         for (auto& [tab_id, tab] : BrowserManager::instance().get_tabs()) {
             if (tab && tab->host_surface == mw->surface &&
                 tab->detach_state == BrowserTab::DetachState::Detached) {
-                tab->detach_state = BrowserTab::DetachState::Redocking;
+                if (detached_window_close_action(tab->camera_view) ==
+                    DetachedWindowCloseAction::CloseTab) {
+                    tab->open = false;
+                    CFW_LOG_INFO("CameraViewport: OS close requested tab {}; closing camera view", tab_id);
+                } else {
+                    tab->detach_state = BrowserTab::DetachState::Redocking;
+                }
                 break;
             }
         }
@@ -749,6 +755,17 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
             continue;
         }
 
+        if (tab->detach_maximized) {
+            const SDL_DisplayID display_id = SDL_GetPrimaryDisplay();
+            SDL_Rect usable_bounds{};
+            if (display_id != 0 && SDL_GetDisplayUsableBounds(display_id, &usable_bounds)) {
+                tab->detach_x = usable_bounds.x;
+                tab->detach_y = usable_bounds.y;
+                tab->detach_w = std::max(1, usable_bounds.w);
+                tab->detach_h = std::max(1, usable_bounds.h);
+            }
+        }
+
         void* surface = window_manager.create_secondary_window(
             tab->detach_x, tab->detach_y, tab->detach_w, tab->detach_h);
         if (surface == nullptr) {
@@ -813,6 +830,7 @@ void UiFrameRunner::reconcile_detach_states(UiFrameContext& context) {
         }
 
         tab->detach_state = BrowserTab::DetachState::Docked;
+        tab->detach_maximized = false;
         CFW_LOG_INFO("reconcile: tab {} redocked (surface {} destroyed)", tab_id, surface);
     }
 }
