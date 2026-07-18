@@ -546,14 +546,18 @@ const editorApiStatic = {
       call_manifest_editor_api('scratch.startGamePreview', [payload || { scope: 'project' }]),
     stopGamePreview: () => call_manifest_editor_api('scratch.stopGamePreview', []),
     getGamePreviewStatus: () => call_manifest_editor_api('scratch.getGamePreviewStatus', []),
-    stopScriptExecution: () => call_manifest_editor_api('scratch.stopScriptExecution', []),
+    stopScriptExecution: (restoreState = false) => call_manifest_editor_api('scratch.stopScriptExecution', [Boolean(restoreState)]),
     getScriptStatus: () => call_manifest_editor_api('scratch.getScriptStatus', []),
     sendKeyEvent: (key, modifiers, displayKey) =>
       call_manifest_editor_api('scratch.sendKeyEvent', [key, modifiers || '', displayKey || key]),
     sendKeyUpEvent: (key, displayKey) =>
       call_manifest_editor_api('scratch.sendKeyUpEvent', [key, displayKey || key]),
-    sendMouseEvent: (eventType, button, x, y) =>
-      call_manifest_editor_api('scratch.sendMouseEvent', [eventType, button || '', x || 0, y || 0]),
+    sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor = '') =>
+      call_manifest_editor_api('scratch.sendMouseEvent', [
+        eventType, button || '', x || 0, y || 0,
+        viewportX ?? x ?? 0, viewportY ?? y ?? 0,
+        viewportWidth ?? 0, viewportHeight ?? 0, pickedActor || '',
+      ]),
   },
   sceneTools: {
     createScene: (sceneName) => call_manifest_editor_api('sceneTools.createScene', [sceneName]),
@@ -833,6 +837,8 @@ export const appService = {
   // in logical px; width/height default to the panel's current size on the C++ side.
   detachPanel: (opts = {}) =>
     Bridge.callDockCommand({ cmd: 'detachPanel', ...opts }),
+  togglePanelWindowMode: (opts = {}) =>
+    Bridge.callDockCommand({ cmd: 'togglePanelWindowMode', ...opts }),
   // Re-dock the calling panel back into the main window (destroys its secondary window).
   redockPanel: (opts = {}) =>
     Bridge.callDockCommand({ cmd: 'redockPanel', ...opts }),
@@ -941,11 +947,25 @@ export const scriptingService = {
   /**
    * 停止当前正在执行的脚本
    */
-  stopScriptExecution: () => editorApi.scratch.stopScriptExecution(),
+  stopScriptExecution: (restoreState = false) => editorApi.scratch.stopScriptExecution(restoreState),
 
   /**
-   * 查询当前脚本执行状态
-   * @returns {Promise<{status: 'running'|'idle'}>}
+   * Query the current script state and node-graph execution trace.
+   * @returns {Promise<{
+   *   status: 'starting'|'running'|'completed'|'stopped'|'error',
+   *   outcome: string,
+   *   error: string,
+   *   contextId: string,
+   *   sceneName: string,
+   *   actorName: string,
+   *   targetType: 'actor'|'project',
+   *   currentNodeId: string,
+   *   currentNodeName: string,
+   *   waitingEdgeId: string,
+   *   waitingEdgeName: string,
+   *   startedAt: number,
+   *   finishedAt: number
+   * }>}
    */
   getScriptStatus: () => editorApi.scratch.getScriptStatus(),
 
@@ -966,8 +986,10 @@ export const scriptingService = {
   /**
    * 发送鼠标事件到积木脚本
    */
-  sendMouseEvent: (eventType, button, x, y) =>
-    editorApi.scratch.sendMouseEvent(eventType, button, x, y),
+  sendMouseEvent: (eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor = '') =>
+    editorApi.scratch.sendMouseEvent(
+      eventType, button, x, y, viewportX, viewportY, viewportWidth, viewportHeight, pickedActor
+    ),
 };
 
 export const projectLauncherService = {
@@ -988,16 +1010,30 @@ export const projectLauncherService = {
   // 创建首页联机入口使用的临时项目：{ role: 'host'|'guest' } -> { name, path, role }
   createMultiplayerProject: (projectData) =>
     editorApi.project.createMultiplayerProject(projectData),
-  // 打开项目（执行加载逻辑）
-  openProject: (projectPath) =>
-    editorApi.project.openProject(projectPath).then((result) => {
-      const success = result?.data ?? result;
-      const activeProjectPath = success?.path || projectPath;
-      if (success && activeProjectPath) {
-        window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+  // Open a project and force the active native scene to come from it.
+  openProject: async (projectPath) => {
+    const result = await editorApi.project.openProject(projectPath);
+    const success = result?.data ?? result;
+    const activeProjectPath = success?.path || projectPath;
+    if (success && activeProjectPath) {
+      window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+      try {
+        // Different projects commonly reuse Scene/default.scene. Reload the
+        // native scene so actors from the previous project cannot leak across.
+        const initResult = await editorApi.main.onInit(activeProjectPath);
+        const initData = initResult?.data ?? initResult;
+        const scenes = Array.isArray(initData?.scenes) ? initData.scenes : [];
+        const activeIndex = Number(initData?.active_index ?? 0);
+        const activeScene = scenes[activeIndex] || scenes[0];
+        if (activeScene?.path) {
+          await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath);
+        }
+      } catch (error) {
+        console.warn('Project opened, but the active scene could not be reloaded:', error);
       }
-      return result;
-    }),
+    }
+    return result;
+  },
   // 设置项目模式 (2D/3D/渲染)
   setProjectMode: (mode, settings) =>
     editorApi.project.setProjectMode(mode, settings),

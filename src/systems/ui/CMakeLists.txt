@@ -5,6 +5,7 @@
 set(UI_SYSTEM_SOURCES
     ui_system.cpp
     ui_frame_runner.cpp
+    ui_surface_lifecycle.cpp
     camera_viewport_manager.cpp
     panel_layout.cpp
 
@@ -14,12 +15,17 @@ set(UI_SYSTEM_SOURCES
 
     cef/browser_manager.cpp
     cef/browser_ui.cpp
+    cef/cef_app.cpp
     cef/cef_client.cpp
     cef/cef_editor_api.cpp
     cef/cef_editor_native_api_registry.cpp
     cef/cef_editor_native_api_handlers.cpp
+    cef/vision_actor_material_bridge.cpp
+    cef/vision_actor_transform_bridge.cpp
     cef/cef_query_bridge.cpp
     cef/cef_realtime_bridge.cpp
+    cef/cef_renderer_bridge.cpp
+    cef/cef_runtime.cpp
     cef/cef_py_bind.cpp
 
     sdl/sdl_utils.cpp
@@ -29,12 +35,17 @@ set(UI_SYSTEM_SOURCES
     # Internal headers (listed for IDE visibility, matching other systems).
     cef/browser_manager.h
     cef/browser_ui.h
+    cef/cef_app.h
     cef/cef_bridge_helpers.h
     cef/cef_client.h
     cef/cef_editor_native_api_registry.h
+    cef/vision_actor_material_bridge.h
+    cef/vision_actor_transform_bridge.h
+    cef/cef_renderer_bridge.h
     sdl/sdl_utils.h
 
     ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/vulkan_backend.h
+    ${PROJECT_SOURCE_DIR}/include/corona/systems/ui/cef_runtime.h
     # quad_compositor.h owns the `#include GLSL(ui_quad.vert/frag)` macros.
     # Helicon's shader scan is textual over the target's SOURCES (it does not
     # follow #include chains), so this header must be listed explicitly or the
@@ -75,3 +86,96 @@ target_compile_definitions(corona_ui_system PUBLIC VK_NO_PROTOTYPES)
 helicon_compile_shaders(corona_ui_system
     OUTPUT_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated_shaders"
 )
+
+if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_cef_app_tests
+        tests/test_cef_app.cpp
+    )
+    target_include_directories(corona_cef_app_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_cef_app_tests
+        PRIVATE corona_ui_system
+    )
+    if(COMMAND helicon_install_runtime_deps)
+        helicon_install_runtime_deps(corona_cef_app_tests)
+    endif()
+    add_custom_command(TARGET corona_cef_app_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<IF:$<CONFIG:Debug>,${CEF_ROOT}/Debug/libcef.dll,${CEF_ROOT}/Release/libcef.dll>"
+                "$<TARGET_FILE_DIR:corona_cef_app_tests>/libcef.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "$<IF:$<CONFIG:Debug>,${CEF_ROOT}/Debug/chrome_elf.dll,${CEF_ROOT}/Release/chrome_elf.dll>"
+                "$<TARGET_FILE_DIR:corona_cef_app_tests>/chrome_elf.dll"
+        VERBATIM
+    )
+    add_test(NAME CefAppTests COMMAND corona_cef_app_tests)
+
+    add_executable(corona_ui_surface_lifecycle_tests
+        tests/test_ui_surface_lifecycle.cpp
+        ui_surface_lifecycle.cpp
+    )
+    target_include_directories(corona_ui_surface_lifecycle_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME UiSurfaceLifecycleTests
+             COMMAND corona_ui_surface_lifecycle_tests)
+
+    add_executable(corona_camera_viewport_manager_tests
+        tests/test_camera_viewport_manager.cpp
+    )
+    target_include_directories(corona_camera_viewport_manager_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME CameraViewportManagerTests
+             COMMAND corona_camera_viewport_manager_tests)
+
+    add_executable(corona_vision_actor_material_bridge_tests
+        tests/test_vision_actor_material_bridge.cpp
+        cef/vision_actor_material_bridge.cpp
+    )
+    target_include_directories(corona_vision_actor_material_bridge_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_vision_actor_material_bridge_tests
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(NAME VisionActorMaterialBridgeTests
+             COMMAND corona_vision_actor_material_bridge_tests)
+
+    add_executable(corona_vision_actor_transform_bridge_tests
+        tests/test_vision_actor_transform_bridge.cpp
+        cef/vision_actor_transform_bridge.cpp
+    )
+    target_include_directories(corona_vision_actor_transform_bridge_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_vision_actor_transform_bridge_tests
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(NAME VisionActorTransformBridgeTests
+             COMMAND corona_vision_actor_transform_bridge_tests)
+
+    add_executable(corona_ui_multisurface_smoke
+        tests/ui_multisurface_smoke.cpp
+        ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
+    )
+    target_include_directories(corona_ui_multisurface_smoke
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+                ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_ui_multisurface_smoke
+        PRIVATE corona_ui_system corona_display_system corona_script_system
+    )
+    if(COMMAND helicon_install_runtime_deps)
+        helicon_install_runtime_deps(corona_ui_multisurface_smoke)
+    endif()
+    add_test(NAME UiMultiSurfaceSmoke
+             COMMAND corona_ui_multisurface_smoke)
+    set_tests_properties(UiMultiSurfaceSmoke PROPERTIES
+        RUN_SERIAL TRUE
+        SKIP_RETURN_CODE 77
+        TIMEOUT 180
+    )
+endif()

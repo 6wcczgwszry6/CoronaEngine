@@ -23,6 +23,8 @@ const COLOURS = {
   text:       '#3EB07A',
   function:   '#C040C0',
   audio:      '#D94A8C',
+  object:     '#2FB8A6',
+  ui:         '#E66A5E',
 };
 
 // 生成标准格式的 blockStyle
@@ -75,6 +77,8 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
     text_blocks:       bs(COLOURS.text),
     procedure_blocks:  bs(COLOURS.function),
     audio_blocks:      bs(COLOURS.audio),
+    object_blocks:     bs(COLOURS.object),
+    ui_blocks:         bs(COLOURS.ui),
 
     // ── 覆盖标准样式 → 归入对应分类颜色 ──
     logic_blocks:             bs(COLOURS.control),
@@ -98,6 +102,8 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
     text_category:       { colour: COLOURS.text },
     function_category:   { colour: COLOURS.function },
     audio_category:      { colour: COLOURS.audio },
+    object_category:     { colour: COLOURS.object },
+    ui_category:         { colour: COLOURS.ui },
   },
 
   fontStyle: {

@@ -114,7 +114,7 @@
               :class="codeRunning
                 ? 'text-red-300 bg-red-700/40 hover:bg-red-600/50 hover:text-red-200'
                 : 'text-green-400 bg-green-700/30 hover:bg-green-600/40 hover:text-green-200'"
-              @click="handleToggleRun"
+              @click.stop="handleToggleRun"
             >{{ codeRunning ? `⏹ ${t('blockly.stop')}` : `▶ ${t('blockly.run')}` }}</button>
             <button
               class="text-gray-400 hover:text-white transition-colors text-lg leading-none px-1"
@@ -232,6 +232,7 @@ let sharedStore = null;
 
 let loadedActorKey = '';
 let loadedTargetInfo = null;
+const targetEnabledByKey = new Map();
 let currentActorNameVar = '';
 let pollTimer = null;
 let autoSaveTimer = null;
@@ -294,6 +295,8 @@ let scriptKeyUpHandler = null;
 
 function setupScriptKeyForwarding() {
   scriptKeyHandler = (e) => {
+    // Native SDL is authoritative in CEF; retain this only for browser development.
+    if (window.coronaBridge || e.__coronaScratchKeyForwarded) return;
     // 焦点在输入框时跳过（不干扰文字输入）
     const activeEl = document.activeElement;
     if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
@@ -302,6 +305,7 @@ function setupScriptKeyForwarding() {
 
     const code = e.code || e.key;
     const displayKey = e.key || code;
+    e.__coronaScratchKeyForwarded = true;
     const mods = [];
     if (e.ctrlKey || e.metaKey) mods.push('Ctrl');
     if (e.shiftKey) mods.push('Shift');
@@ -317,18 +321,16 @@ function setupScriptKeyForwarding() {
   };
 
   scriptKeyUpHandler = (e) => {
-    const activeEl = document.activeElement;
-    if (activeEl && (activeEl.tagName === 'INPUT' || activeEl.tagName === 'TEXTAREA')) {
-      return;
-    }
-    // ── 快速通道：coronaBridge.injectInput → CEF ProcessMessage → 队列 → Python 批量消费 ──
+    if (window.coronaBridge || e.__coronaScratchKeyForwarded) return;
+    e.__coronaScratchKeyForwarded = true;
+    // Key-up is always forwarded so a key cannot remain stuck after focus moves.
     const bridge = window.coronaBridge;
     if (bridge && typeof bridge.injectInput === 'function') {
       try { bridge.injectInput(1, e.code || e.key, e.key || e.code); return; } catch (e) {}
     }
-    // ── 慢通道：cefQuery 回退 ──
     scriptingService.sendKeyUpEvent(e.code || e.key, e.key || e.code).catch(() => {});
   };
+
 
   document.addEventListener('keydown', scriptKeyHandler, true);
   document.addEventListener('keyup', scriptKeyUpHandler, true);
@@ -392,7 +394,29 @@ async function handleToggleRun() {
     return;
   }
 
-  // 当前未执行 → 运行
+  // 当前未执行 → 运行。全局运行/项目预览拥有执行权时，不再重复启动
+  // 单物体脚本，否则后端会正确拒绝但界面会误显示为本脚本执行失败。
+  try {
+    const previewResult = window.__coronaPreviewActionPending
+      ? {
+          status: 'starting',
+          scope: window.__coronaPreviewPendingScope || 'project',
+        }
+      : await scriptingService.getGamePreviewStatus();
+    const preview = previewResult?.data ?? previewResult ?? {};
+    const previewActive = ['starting', 'running', 'stopping'].includes(preview.status)
+      || Number(preview.runningCount ?? preview.running_count ?? 0) > 0
+      || Boolean(preview.hasSnapshot ?? preview.has_snapshot);
+    if (previewActive) {
+      alert(preview.scope === 'scene'
+        ? '当前积木脚本正在由全局运行执行'
+        : '当前积木脚本正在由项目预览执行');
+      return;
+    }
+  } catch (error) {
+    console.warn('[Blockly] 查询全局运行状态失败，将继续尝试单物体运行:', error);
+  }
+
   const code = generatedCode.value;
   if (!code || code === t('blockly.codeEmpty') || code === t('blockly.codeGenerationFailed')) {
     alert(t('blockly.noExecutableCode'));
@@ -417,7 +441,12 @@ async function handleToggleRun() {
       target.targetType,
     );
     const execResult = result?.data ?? result;
-    if (execResult?.status === 'error') {
+    if (execResult?.outcome === 'preview_running') {
+      // The global preview already owns this target. A racing single-run request
+      // is an ownership handoff, not a Blockly execution failure.
+      codeRunning.value = false;
+      console.info('[Blockly] single-target run is owned by the global preview');
+    } else if (execResult?.status === 'error') {
       alert(t('blockly.codeRunningFailed', { message: execResult.message || t('blockly.codeRunUnknownError') }));
       codeRunning.value = false;
     } else {
@@ -499,13 +528,16 @@ function saveCurrentWorkspace() {
     updateGeneratedCode();
     const state = BlocklyLib.serialization.workspaces.save(workspace);
     const target = loadedTargetInfo || getCurrentTarget();
+    const hasBlocks = Array.isArray(state?.blocks?.blocks) && state.blocks.blocks.length > 0;
+    const wasEnabled = targetEnabledByKey.get(getTargetKey(target));
     latestBlocklySavePromise = scriptingService.saveBlocklyTarget({
       target_type: target.targetType,
       scene_name: target.scene,
       actor_name: target.actor,
       workspace: state,
       code: generatedCode.value || '',
-      enabled: true,
+      enabled: hasBlocks && wasEnabled !== false,
+      runnable: hasBlocks,
     }).catch((e) => {
       console.warn('[Blockly] 保存项目积木镜像失败:', e);
       return false;
@@ -598,6 +630,9 @@ async function loadWorkspaceStateFromProject(target) {
   if (payload?.status === 'error') {
     throw new Error(payload.message || t('blockly.loadFailed'));
   }
+  const key = getTargetKey(target);
+  if (payload?.status === 'loaded') targetEnabledByKey.set(key, payload.target?.enabled !== false);
+  else targetEnabledByKey.delete(key);
   return payload?.workspace && typeof payload.workspace === 'object'
     ? payload.workspace
     : {};
@@ -710,6 +745,8 @@ const initBlocklyAndGenerators = async () => {
       { defineMathBlocks },
       { defineVariableBlocks },
       { defineListBlocks },
+      { defineObjectBlocks },
+      { defineUiBlocks },
     ] = await Promise.all([
       import('@/blockly/blocks/audio.js'),
       import('@/blockly/blocks/camera.js'),
@@ -721,6 +758,8 @@ const initBlocklyAndGenerators = async () => {
       import('@/blockly/blocks/math.js'),
       import('@/blockly/blocks/variable.js'),
       import('@/blockly/blocks/list.js'),
+      import('@/blockly/blocks/object.js'),
+      import('@/blockly/blocks/ui.js'),
     ]);
 
     try {
@@ -734,6 +773,8 @@ const initBlocklyAndGenerators = async () => {
       defineMathBlocks();
       defineVariableBlocks();
       defineListBlocks();
+      defineObjectBlocks();
+      defineUiBlocks();
 
       // 加载自定义 workspaceToCode（hat过滤、handler路由、prelude等）
       // 该模块内部已包含所有分类生成器的注册，无需在此重复调用 define*Generators()

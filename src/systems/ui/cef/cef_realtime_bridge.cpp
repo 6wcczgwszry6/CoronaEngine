@@ -162,6 +162,11 @@ bool restore_windowed_placement(HWND hwnd) {
 
 // ── drain_input_events: 消费所有积攒的输入事件 ──
 // 开放给 ScriptSystem 调用（通过头文件声明），每帧由 Python show_log_on_js 消费
+void enqueue_input_event(InputEvent event) {
+    std::lock_guard<std::mutex> lock(s_input_mutex);
+    s_input_queue.push_back(std::move(event));
+}
+
 std::vector<InputEvent> drain_input_events() {
     std::lock_guard<std::mutex> lock(s_input_mutex);
     std::vector<InputEvent> events;
@@ -193,6 +198,13 @@ bool parse_vec3_list(const CefRefPtr<CefListValue>& list, ktm::fvec3& out) {
 }
 
 bool handle_camera_move_fast(const CefRefPtr<CefProcessMessage>& message) {
+    // CameraMoveFast is the editor camera-control channel. Blockly/node-graph
+    // input must still reach Scratch, but while the runtime owns input we must
+    // not forward any pose updates produced by the editor camera controllers.
+    if (!Corona::API::is_editor_camera_input_enabled()) {
+        return true;
+    }
+
     auto args = message->GetArgumentList();
     if (!args || args->GetSize() < 5) {
         return true;
@@ -780,8 +792,8 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
     pick->pending = true;
     pick->result_ready = false;
     emit("pending", 0, pick_x, pick_y);
-    CFW_LOG_DEBUG("ViewportPick pending: camera={} scene='{}' request={} pos=({},{}) -> cam_px=({},{})",
-                  camera_handle, scene_id, request_id, x, y, pick_x, pick_y);
+    CFW_LOG_DEBUG("ViewportPick pending: camera={} scene='{}' request={} pos=({},{}) vp={}x{} cam={}x{} -> cam_px=({},{})",
+                  camera_handle, scene_id, request_id, x, y, vp_w, vp_h, cam_w, cam_h, pick_x, pick_y);
 
     return true;
 }
@@ -1008,7 +1020,8 @@ bool handle_property_fast(const CefRefPtr<CefProcessMessage>& message) {
             case 4:  // CollisionEnabled
                 if (profile->mechanics_handle != 0) {
                     if (auto mech = hub.mechanics_storage().try_acquire_write(profile->mechanics_handle)) {
-                        mech->bEnableCollision = (value != 0.0);
+                        mech->collision_shape = (value != 0.0)
+                            ? CollisionShape::Box : CollisionShape::None;
                     }
                 }
                 break;
@@ -1016,6 +1029,15 @@ bool handle_property_fast(const CefRefPtr<CefProcessMessage>& message) {
                 if (profile->mechanics_handle != 0) {
                     if (auto mech = hub.mechanics_storage().try_acquire_write(profile->mechanics_handle)) {
                         mech->physics_enabled = (value != 0.0);
+                    }
+                }
+                break;
+            case 8:  // CollisionShape: 0=None, 1=Box, 2=Mesh
+                if (profile->mechanics_handle != 0) {
+                    if (auto mech = hub.mechanics_storage().try_acquire_write(profile->mechanics_handle)) {
+                        const int shape = static_cast<int>(value);
+                        mech->collision_shape = shape == 0 ? CollisionShape::None
+                            : (shape == 2 ? CollisionShape::Mesh : CollisionShape::Box);
                     }
                 }
                 break;
@@ -1073,11 +1095,7 @@ bool handle_input_inject(const CefRefPtr<CefProcessMessage>& message) {
             return true;
     }
 
-    {
-        std::lock_guard<std::mutex> lock(s_input_mutex);
-        s_input_queue.push_back(std::move(evt));
-    }
-
+    enqueue_input_event(std::move(evt));
     return true;
 }
 
@@ -1193,6 +1211,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
         const std::string cmd = command.value("cmd", "");
         auto& bm = BrowserManager::instance();
 
+        if (cmd == "createDetachedPanel") {
+            CFW_LOG_INFO("DockCommand createDetachedPanel received: panel_id={}, route={}, size={}x{}, pos=({}, {})",
+                         command.value("panelId", ""), command.value("routePath", ""),
+                         command.value("width", 400), command.value("height", 600),
+                         command.value("x", 120), command.value("y", 120));
+        }
+
         if (cmd == "createCameraView") {
             const std::string scene_id = command.value("sceneId", "");
             const std::string camera_id = command.value("cameraId", "");
@@ -1236,6 +1261,17 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                     }
                     const int tab_id = browser_manager.create_tab(
                         base_url, route, "camera", width, height, false, true, x, y);
+                    if (auto* tab = browser_manager.get_tab(tab_id)) {
+                        // Camera views are standalone secondary surfaces.  Mark the tab for
+                        // detachment before it can be laid out in the main window, so the
+                        // frame runner creates the SDL child window and routes this camera's
+                        // image to its own surface.
+                        tab->detach_x = x;
+                        tab->detach_y = y;
+                        tab->detach_w = (width > 0) ? width : std::max(1, tab->width);
+                        tab->detach_h = (height > 0) ? height : std::max(1, tab->height);
+                        tab->detach_state = BrowserTab::DetachState::Detaching;
+                    }
                     if (!CameraViewportManager::instance().register_view(
                             scene_id, camera_id, camera_handle, tab_id)) {
                         browser_manager.remove_tab(tab_id);
@@ -1701,6 +1737,11 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                     tab->detach_w = (width > 0) ? width : std::max(1, tab->width);
                     tab->detach_h = (height > 0) ? height : std::max(1, tab->height);
                     tab->detach_state = BrowserTab::DetachState::Detaching;
+                    CFW_LOG_INFO("createDetachedPanel: tab {} created and marked Detaching (panel_id={})",
+                                 tab_id, panel_id);
+                } else {
+                    CFW_LOG_ERROR("createDetachedPanel: tab {} was not found after create_tab (panel_id={})",
+                                  tab_id, panel_id);
                 }
                 nlohmann::json result;
                 result["tab_id"] = tab_id;
@@ -1793,12 +1834,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             const int y = command.value("y", 120);
             const int w = command.value("width", 0);
             const int h = command.value("height", 0);
+            const bool maximized = command.value("maximized", false);
 
             // Desired-state only: flip Docked -> Detaching on the UI thread. The frame runner's
             // reconcile step does the actual window create + surface register next frame. All
             // mutation of detach_state goes through enqueue_main_thread_task so the field stays
             // single-threaded (UI thread), needing no lock. See Phase 7d design notes.
-            bm.enqueue_main_thread_task([tab_id, x, y, w, h] {
+            bm.enqueue_main_thread_task([tab_id, x, y, w, h, maximized] {
                 auto* tab = BrowserManager::instance().get_tab(tab_id);
                 if (!tab || tab->detach_state != BrowserTab::DetachState::Docked) {
                     return;  // unknown tab or mid-transition: reject (guards ABA / double-detach)
@@ -1807,7 +1849,42 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
                 tab->detach_y = y;
                 tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
                 tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
+                tab->detach_maximized = maximized;
                 tab->detach_state = BrowserTab::DetachState::Detaching;
+            });
+
+            nlohmann::json result;
+            result["queued"] = tab_id >= 0;
+            send_dock_callback(frame, request_id, nullptr, result);
+            return true;
+        }
+
+        if (cmd == "togglePanelWindowMode") {
+            int tab_id = find_tab_id_for_browser(browser);
+            if (command.contains("tabId") && command["tabId"].is_number_integer()) {
+                tab_id = command.value("tabId", -1);
+            }
+            const int x = command.value("x", 120);
+            const int y = command.value("y", 120);
+            const int w = command.value("width", 0);
+            const int h = command.value("height", 0);
+
+            bm.enqueue_main_thread_task([tab_id, x, y, w, h] {
+                auto* tab = BrowserManager::instance().get_tab(tab_id);
+                if (!tab) {
+                    return;
+                }
+                if (tab->detach_state == BrowserTab::DetachState::Docked) {
+                    tab->detach_x = x;
+                    tab->detach_y = y;
+                    tab->detach_w = (w > 0) ? w : std::max(1, tab->width);
+                    tab->detach_h = (h > 0) ? h : std::max(1, tab->height);
+                    tab->detach_state = BrowserTab::DetachState::Detaching;
+                    CFW_LOG_INFO("togglePanelWindowMode: tab {} -> Detaching", tab_id);
+                } else if (tab->detach_state == BrowserTab::DetachState::Detached) {
+                    tab->detach_state = BrowserTab::DetachState::Redocking;
+                    CFW_LOG_INFO("togglePanelWindowMode: tab {} -> Redocking", tab_id);
+                }
             });
 
             nlohmann::json result;

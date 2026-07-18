@@ -2,9 +2,19 @@
   <div class="dock-panel" :data-dock-panel-id="panelId">
     <div class="dock-panel-header" @pointerdown="onHeaderPointerDown">
       <span class="dock-panel-title" :title="panelTitle">{{ panelTitle }}</span>
-      <div class="dock-panel-actions">
-        <button class="dock-action-btn" :title="t('dock.popOut')" @click="handlePopOut">&#x29C9;</button>
-        <button class="dock-action-btn dock-action-close" :title="t('dock.close')" @click="handleClose">&times;</button>
+      <div class="dock-panel-actions" @pointerdown.stop @mousedown.stop>
+        <button
+          type="button"
+          class="dock-action-btn"
+          :title="t('dock.popOut')"
+          @click.stop.prevent="handlePopOut"
+        >&#x29C9;</button>
+        <button
+          type="button"
+          class="dock-action-btn dock-action-close"
+          :title="t('dock.close')"
+          @click.stop.prevent="handleClose"
+        >&times;</button>
       </div>
     </div>
     <div class="dock-panel-body">
@@ -59,11 +69,17 @@ function onHeaderPointerDown(e) {
   if (e.target.closest('.dock-panel-actions')) return;
   if (e.target.closest('[class*="blockly"]')) return;
 
+  e.preventDefault();
+  if (e.currentTarget?.setPointerCapture && e.pointerId !== undefined) {
+    e.currentTarget.setPointerCapture(e.pointerId);
+  }
+
   drag = {
     startX: e.clientX,
     startY: e.clientY,
     active: false,
     pointerId: e.pointerId,
+    captureTarget: e.currentTarget,
   };
   window.addEventListener('pointermove', onPointerMove);
   window.addEventListener('pointerup', onPointerUp);
@@ -89,6 +105,14 @@ function onPointerUp(e) {
   window.removeEventListener('pointermove', onPointerMove);
   window.removeEventListener('pointerup', onPointerUp);
   window.removeEventListener('pointercancel', onPointerUp);
+
+  if (drag?.captureTarget?.releasePointerCapture && e.pointerId !== undefined) {
+    try {
+      drag.captureTarget.releasePointerCapture(e.pointerId);
+    } catch {
+      // The pointer may already have been released by the browser/CEF host.
+    }
+  }
 
   const wasActive = drag && drag.active;
   drag = null;
@@ -132,12 +156,14 @@ function resolveDropTarget(x, y) {
   const before = isVerticalZone
     ? y < rect.top + rect.height / 2
     : x < rect.left + rect.width / 2;
-  return { zone, beforeId: before ? overId : nextPanelId(zone, overId) };
+  return { zone, beforeId: before ? overId : nextPanelId(zone, overId, props.panelId) };
 }
 
 // 返回 zone 内排在 afterId 之后的面板 id（用于“插在 afterId 之后”=“插在其后继之前”）。
-function nextPanelId(zone, afterId) {
-  const list = dockStore.panelsByZone(zone).map((p) => p.id);
+function nextPanelId(zone, afterId, excludeId = null) {
+  const list = dockStore.panelsByZone(zone)
+    .map((p) => p.id)
+    .filter((id) => id !== excludeId);
   const idx = list.indexOf(afterId);
   return idx >= 0 && idx + 1 < list.length ? list[idx + 1] : null;
 }
@@ -150,18 +176,14 @@ async function handlePopOut() {
   const m = manifest.value;
   if (!m) return;
   try {
-    // NOTE: Phase 9 detached pop-out (createDetachedPanel → own borderless OS window) is
-    // disabled pending the multi-surface GPU crash fix (startup auto-detach of 3 panels
-    // SIGABRTs on the per-surface present path). Reverted to createPanelTab — the panel
-    // floats as a main-window rectangle (single surface, verified path). Re-enable via
-    // createDetachedPanel once the multi-surface render/present path is fixed.
-    const result = await appService.createPanelTab(
-      props.panelId,
-      '#' + (m.routePath || ''),
-      m.defaultWidth || 400,
-      m.defaultHeight || 600,
-      m.defaultFloatPosition || 'right_top'
-    );
+    const result = await appService.createDetachedPanel({
+      panelId: props.panelId,
+      routePath: '#' + (m.routePath || ''),
+      width: m.defaultWidth || 400,
+      height: m.defaultHeight || 600,
+      x: 120,
+      y: 120,
+    });
     const tabId = result?.tab_id ?? result?.data?.tab_id;
     dockStore.setExternal(props.panelId, tabId);
   } catch (e) {

@@ -57,6 +57,42 @@ class ProjectCopyTests(unittest.TestCase):
             copied_cfg.read(second_path / "project.ini", encoding="utf-8")
             self.assertEqual(copied_cfg.get("Project", "name"), "sample_save_1")
 
+    def test_copy_existing_to_data_reuses_runtime_project(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_root = Path(temp_dir)
+            runtime_data = temp_root / "runtime" / "data"
+            source_dir = runtime_data / "creative_world_5"
+            source_scene_dir = source_dir / "Scene"
+            source_scene_dir.mkdir(parents=True)
+            (source_scene_dir / "default.scene").write_text(
+                "[base]\nname = default\n", encoding="utf-8"
+            )
+            source_ini = source_dir / "project.ini"
+            source_ini.write_text(
+                "\n".join([
+                    "[Project]",
+                    "name = Coin Collector",
+                    "mode = 3d",
+                    "entrance_scene = Scene/default.scene",
+                    "",
+                ]),
+                encoding="utf-8",
+            )
+
+            original_core_path = project_copy.core_path
+            project_copy.core_path = SimpleNamespace(repo_root=temp_root / "runtime")
+            try:
+                result = project_copy.ProjectCopy.copy_existing_to_data(str(source_ini))
+            finally:
+                project_copy.core_path = original_core_path
+
+            self.assertEqual(result["name"], "creative_world_5")
+            self.assertEqual(Path(result["path"]), source_dir)
+            self.assertEqual(
+                sorted(path.name for path in runtime_data.iterdir()),
+                ["creative_world_5"],
+            )
+
     def test_open_project_file_only_returns_selected_path(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             source = Path(temp_dir) / "vision_scene.json"

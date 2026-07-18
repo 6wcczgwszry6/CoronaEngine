@@ -142,6 +142,35 @@ struct ExternalLiveShapeRecord {
     bool dynamically_added{false};
 };
 
+enum class ExternalLiveShapeRemovalAction {
+    ForgetTracking,
+    HideOriginal,
+    RemoveTopology,
+};
+
+[[nodiscard]] constexpr ExternalLiveShapeRemovalAction external_live_shape_removal_action(
+    const ExternalLiveShapeRecord& record,
+    bool embedded_runtime) noexcept {
+    if (record.dynamically_added) {
+        return ExternalLiveShapeRemovalAction::RemoveTopology;
+    }
+    return embedded_runtime ? ExternalLiveShapeRemovalAction::HideOriginal
+                            : ExternalLiveShapeRemovalAction::ForgetTracking;
+}
+
+[[nodiscard]] constexpr std::string_view external_live_shape_removal_action_name(
+    ExternalLiveShapeRemovalAction action) noexcept {
+    switch (action) {
+        case ExternalLiveShapeRemovalAction::ForgetTracking:
+            return "forget_tracking";
+        case ExternalLiveShapeRemovalAction::HideOriginal:
+            return "hide_original";
+        case ExternalLiveShapeRemovalAction::RemoveTopology:
+            return "remove_topology";
+    }
+    return "forget_tracking";
+}
+
 // Tracks an engine-native actor (one WITHOUT an external_vision_binding) that has
 // been mixed into an ExternalLive Vision scene as an appended shape. Kept in a map
 // separate from external_live_shapes_by_actor because the bound-proxy reaper would

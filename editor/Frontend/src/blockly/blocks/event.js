@@ -232,4 +232,21 @@ export const defineEventBlocks = (broadcastList, createNewBroadcast) => {
       this.setHelpUrl('');
     },
   };
+
+  const defineNodeLifecycleHat = (type, label, tooltip) => {
+    Blockly.Blocks[type] = {
+      init: function () {
+        this.appendDummyInput().appendField(label);
+        this.appendStatementInput('DO').setCheck(null).appendField('\u6267\u884c');
+        this.setPreviousStatement(false, null);
+        this.setNextStatement(false, null);
+        this.setStyle('event_blocks');
+        this.setTooltip(tooltip);
+      },
+    };
+  };
+  defineNodeLifecycleHat('node_when_enter', '\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6', '\u8fdb\u5165\u8282\u70b9\u65f6\u6267\u884c\u4e00\u6b21');
+  defineNodeLifecycleHat('node_while_active', '\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6', '\u8282\u70b9\u6fc0\u6d3b\u671f\u95f4\u6bcf 0.05 \u79d2\u6267\u884c\u4e00\u6b21');
+  defineNodeLifecycleHat('node_when_exit', '\u5f53\u79bb\u5f00\u5f53\u524d\u8282\u70b9\u65f6', '\u5207\u6362\u5230\u4e0b\u4e00\u8282\u70b9\u524d\u6267\u884c\u4e00\u6b21');
+
 };

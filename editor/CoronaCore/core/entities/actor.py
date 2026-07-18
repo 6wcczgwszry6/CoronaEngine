@@ -216,10 +216,17 @@ class Actor:
         self.set_scale(scale, True)
 
         self._create_and_add_profile()
-        self._apply_mechanics_data({
+        mechanics_data = {
             "physics_enabled": self.file_data.getboolean(
-                'mechanics', 'physics_enabled', fallback=True)
-        })
+                'mechanics', 'physics_enabled', fallback=True),
+        }
+        if self.file_data.has_option('mechanics', 'collision_type'):
+            mechanics_data['collision_type'] = self.file_data.get(
+                'mechanics', 'collision_type', fallback='box')
+        elif self.file_data.has_option('mechanics', 'collision_enabled'):
+            mechanics_data['collision_enabled'] = self.file_data.getboolean(
+                'mechanics', 'collision_enabled', fallback=True)
+        self._apply_mechanics_data(mechanics_data)
 
     def _create_components_from_actor_data(self, actor_data: dict):
         """从actor_data字典创建几何体和组件"""
@@ -447,6 +454,12 @@ class Actor:
             return
         if "physics_enabled" in mechanics_data:
             self.set_physics_enabled(self._coerce_bool(mechanics_data.get("physics_enabled")))
+        if "collision_type" in mechanics_data:
+            self.set_collision_enabled(mechanics_data.get("collision_type"))
+        elif "collision_enabled" in mechanics_data:
+            self.set_collision_enabled(
+                'box' if self._coerce_bool(mechanics_data.get("collision_enabled")) else 'none'
+            )
 
     @staticmethod
     def _coerce_bool(value) -> bool:
@@ -938,6 +951,7 @@ class Actor:
                     )
                 except Exception:
                     pass
+            self.file_data['mechanics']['collision_type'] = self.get_collision_enabled()
             if self.model_path:
                 position = self.get_position()
                 rotation = self.get_rotation()
@@ -1199,9 +1213,10 @@ class Actor:
         Args:
             collision_type: 'none'（关闭碰撞检测）, 'box'（包围盒碰撞）, 'mesh'（网格碰撞）
         """
+        collision_type = collision_type if collision_type in ('none', 'box', 'mesh') else 'box'
         self._collision_type = collision_type
         if hasattr(self, '_mechanics') and self._mechanics:
-            self._mechanics.set_collision_enabled(collision_type != 'none')
+            self._mechanics.set_collision_shape(collision_type)
 
     def get_collision_enabled(self) -> str:
         """获取碰撞检测类型：'none', 'box', 'mesh'"""
@@ -1258,7 +1273,6 @@ class Actor:
             CoronaEditor.emit_editor_event("actor-ownership-claim",
                                       [{"actor_guid": self.actor_guid}])
             self._broadcast_actor_transform_updated()
-        self.save_data()
 
 
     def enable_collision_callback(self, enable: bool):

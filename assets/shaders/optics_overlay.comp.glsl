@@ -14,6 +14,8 @@ layout(push_constant) uniform PushConsts
     uint visibilityImageIndex;
     uint instanceInfoBufferIndex;
     uint materialTableBufferIndex;
+    uint instanceCount;
+    uint materialCount;
     uint vpBufferIndex;
     uint outputImage;
 } pushConsts;
@@ -65,6 +67,40 @@ mat4 readMat4(uint bufIdx, uint offset)
     return m;
 }
 
+bool finiteFloat(float v)
+{
+    return !isnan(v) && !isinf(v);
+}
+
+bool finiteVec2(vec2 v)
+{
+    return finiteFloat(v.x) && finiteFloat(v.y);
+}
+
+bool finiteVec3(vec3 v)
+{
+    return finiteFloat(v.x) && finiteFloat(v.y) && finiteFloat(v.z);
+}
+
+bool finiteVec4(vec4 v)
+{
+    return finiteFloat(v.x) && finiteFloat(v.y) && finiteFloat(v.z) && finiteFloat(v.w);
+}
+
+vec4 fetchMaterialTexture(uint descriptor, vec2 uv)
+{
+    ivec2 texSize = textureSize(textures[nonuniformEXT(descriptor)], 0);
+    if (texSize.x <= 0 || texSize.y <= 0) {
+        return vec4(1.0);
+    }
+
+    vec2 wrapped = fract(uv);
+    ivec2 coord = ivec2(clamp(floor(wrapped * vec2(texSize)),
+                              vec2(0.0),
+                              vec2(texSize) - vec2(1.0)));
+    return texelFetch(textures[nonuniformEXT(descriptor)], coord, 0);
+}
+
 struct InstanceInfo
 {
     mat4 modelMatrix;
@@ -72,17 +108,25 @@ struct InstanceInfo
     uint indexBufferIndex;
     uint materialID;
     uint objectID;
+    uint indexCount;
+    uint vertexCount;
+    uint maxIndex;
+    uint flags;
 };
 
 InstanceInfo loadInstanceInfo(uint instanceID)
 {
-    uint base = instanceID * 20u;
+    uint base = instanceID * 24u;
     InstanceInfo info;
     info.modelMatrix       = readMat4(pushConsts.instanceInfoBufferIndex, base);
     info.vertexBufferIndex = readUint(pushConsts.instanceInfoBufferIndex, base + 16u);
     info.indexBufferIndex  = readUint(pushConsts.instanceInfoBufferIndex, base + 17u);
     info.materialID        = readUint(pushConsts.instanceInfoBufferIndex, base + 18u);
     info.objectID          = readUint(pushConsts.instanceInfoBufferIndex, base + 19u);
+    info.indexCount        = readUint(pushConsts.instanceInfoBufferIndex, base + 20u);
+    info.vertexCount       = readUint(pushConsts.instanceInfoBufferIndex, base + 21u);
+    info.maxIndex          = readUint(pushConsts.instanceInfoBufferIndex, base + 22u);
+    info.flags             = readUint(pushConsts.instanceInfoBufferIndex, base + 23u);
     return info;
 }
 
@@ -147,12 +191,30 @@ void main()
     }
 
     uint instanceID = instanceID_1based - 1u;
+    if (instanceID >= pushConsts.instanceCount) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
     InstanceInfo inst = loadInstanceInfo(instanceID);
+    if (inst.materialID >= pushConsts.materialCount) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
     MaterialInfo matl = loadMaterialInfo(inst.materialID);
 
+    uint indexBase = primitiveID * 3u;
+    if (inst.indexCount == 0u || inst.vertexCount == 0u || indexBase + 2u >= inst.indexCount) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
     uint i0 = readIndex16(inst.indexBufferIndex, primitiveID * 3u + 0u);
     uint i1 = readIndex16(inst.indexBufferIndex, primitiveID * 3u + 1u);
     uint i2 = readIndex16(inst.indexBufferIndex, primitiveID * 3u + 2u);
+    if (i0 >= inst.vertexCount || i1 >= inst.vertexCount || i2 >= inst.vertexCount ||
+        i0 > inst.maxIndex || i1 > inst.maxIndex || i2 > inst.maxIndex) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
 
     Vertex v0 = loadVertex(inst.vertexBufferIndex, i0);
     Vertex v1 = loadVertex(inst.vertexBufferIndex, i1);
@@ -185,17 +247,33 @@ void main()
     float inv_w1 = 1.0 / w1;
     float inv_w2 = 1.0 / w2;
     float inv_w_sum = b0 * inv_w0 + b1 * inv_w1 + b2 * inv_w2;
+    if (!finiteFloat(inv_w0) || !finiteFloat(inv_w1) || !finiteFloat(inv_w2) ||
+        !finiteFloat(inv_w_sum) || abs(inv_w_sum) < 1e-6) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
 
     vec3 bary;
     bary.x = (b0 * inv_w0) / inv_w_sum;
     bary.y = (b1 * inv_w1) / inv_w_sum;
     bary.z = (b2 * inv_w2) / inv_w_sum;
+    if (!finiteVec3(bary)) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
 
     vec2 uv = bary.x * v0.texCoord + bary.y * v1.texCoord + bary.z * v2.texCoord;
+    if (!finiteVec2(uv)) {
+        imageStore(imagesRGBA16[pushConsts.outputImage], pixel, vec4(0.0));
+        return;
+    }
 
     vec4 color = matl.materialColor;
     if (matl.textureDescriptor != 0u) {
-        color *= texture(textures[nonuniformEXT(matl.textureDescriptor)], uv);
+        vec4 texSample = fetchMaterialTexture(matl.textureDescriptor, uv);
+        if (finiteVec4(texSample)) {
+            color *= texSample;
+        }
     }
 
     imageStore(imagesRGBA16[pushConsts.outputImage], pixel, color);

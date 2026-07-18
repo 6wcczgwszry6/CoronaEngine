@@ -190,7 +190,7 @@ void main()
 
     vec2 screenUV = vec2(float(gl_GlobalInvocationID.x) / float(pushConsts.gbufferSize.x),
                          float(gl_GlobalInvocationID.y) / float(pushConsts.gbufferSize.y));
-    float gbufferDepth = texture(textures[pushConsts.gbufferDepthImage], screenUV).r;
+    float gbufferDepth = textureLod(textures[nonuniformEXT(pushConsts.gbufferDepthImage)], screenUV, 0.0).r;
 
     // Only render sky for pixels without geometry
     if (gbufferDepth < (1.0 - 1e-3)) {

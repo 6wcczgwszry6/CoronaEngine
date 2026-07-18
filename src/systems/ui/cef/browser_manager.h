@@ -47,6 +47,7 @@ struct DragRegion {
 // ============================================================================
 
 struct BrowserTab {
+    int tab_id = -1;
     std::string name;
     std::string url;
 
@@ -75,6 +76,7 @@ struct BrowserTab {
     bool buffer_dirty = false;
     bool has_focus = false;
     bool camera_view = false;
+    bool cef_creation_failed = false;
     bool transparent_overlay = false;
     std::atomic_bool hide_system_cursor{false};
     std::atomic_bool use_custom_system_cursor{false};
@@ -100,6 +102,7 @@ struct BrowserTab {
     int detach_y = 120;
     int detach_w = 640;
     int detach_h = 480;
+    bool detach_maximized = false;
 
     char url_buffer[1024] = "";
     std::vector<uint8_t> pixel_buffer;

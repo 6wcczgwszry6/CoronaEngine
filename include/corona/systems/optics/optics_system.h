@@ -13,6 +13,7 @@
 #endif
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -109,6 +110,15 @@ class OpticsSystem : public Kernel::SystemBase {
     void evict_idle_ui_view_resources(uint64_t frame_index);
     void optics_pipeline(float frame_count, uint64_t frame_index);
     void process_pending_screenshots(std::uintptr_t camera_handle, Horizon::HardwareImage& render_target);
+
+    struct VisionSceneLoadRequest {
+        std::string scene_path;
+        std::string scene_json;
+        std::string base_dir;
+        std::string scene_key;
+        bool external_live{false};
+    };
+
 #ifdef CORONA_ENABLE_VISION
     // Vision 相关私有方法（在 CORONA_ENABLE_VISION 宏保护下实现）
     bool init_vision_lazy();  ///< 首次切换到 Vision 时的 lazy 初始化
@@ -125,13 +135,6 @@ class OpticsSystem : public Kernel::SystemBase {
     using VisionSceneResourceKey = Vision::VisionSceneResourceKey;
     using VisionSceneResourceKeyHash = Vision::VisionSceneResourceKeyHash;
     struct VisionPipelineRuntime;
-    struct VisionSceneLoadRequest {
-        std::string scene_path;
-        std::string scene_json;
-        std::string base_dir;
-        std::string scene_key;
-        bool external_live{false};
-    };
 
     VisionPipelineRuntime& get_or_create_runtime(const VisionPipelineKey& key);
     VisionPipelineRuntime& active_vision_runtime();
@@ -208,6 +211,7 @@ class OpticsSystem : public Kernel::SystemBase {
                        VisionSceneResourceKeyHash>
         vision_scene_resources_;
 #endif  // CORONA_ENABLE_VISION
+
     struct ActorPickRequest {
         std::uintptr_t pick_handle{0};
         std::string request_id;
@@ -306,6 +310,8 @@ class OpticsSystem : public Kernel::SystemBase {
     static constexpr uint64_t kUiViewIdleEvictFrames = 240;
 
     std::unique_ptr<Hardware> hardware_;
+    double pending_native_throttle_wait_ms_{0.0};
+    std::atomic<std::uint64_t> pending_native_consumed_serial_{0};
 
     // LOD 系统引用（渲染时查询 LOD 缓冲）
     GeometrySystem* geometry_system_ = nullptr;
@@ -353,6 +359,7 @@ class OpticsSystem : public Kernel::SystemBase {
     Kernel::EventId backend_switch_sub_id_ = 0;
     Kernel::EventId vision_scene_load_sub_id_ = 0;
     Kernel::EventId residency_sub_id_ = 0;
+    Kernel::EventId native_frame_consumed_sub_id_ = 0;
 
     // ActorResidencyChangedEvent 驱动的驻留集合（Loaded actor 在此）
     mutable std::shared_mutex residency_mtx_;

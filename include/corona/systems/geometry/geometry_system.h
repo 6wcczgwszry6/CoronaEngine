@@ -15,6 +15,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -125,6 +126,7 @@ struct LODMeshBuffers {
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
     std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
     std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
+    std::uint32_t max_index    = 0;  // 该级别最大索引（调试/诊断用）
 
     // 按需驻留（Step 3a）：本级在 Scene::data.meshes[mesh].lod_levels 中的源下标。
     // upload 会跳过空 LOD 级，故缓存级序与源级序不一一对应；reconcile 重建某级时
@@ -329,6 +331,9 @@ class GeometrySystem : public Kernel::SystemBase {
         Horizon::HardwareBuffer index;
         Horizon::HardwareBuffer vertex_storage;
         Horizon::HardwareBuffer index_storage;
+        std::uint32_t vertex_count = 0;
+        std::uint32_t index_count = 0;
+        std::uint32_t max_index = 0;
     };
 
     /// 单个 mesh 的当前 GPU 状态快照（LOD 已由 GeometrySystem 内部解析）。
@@ -345,6 +350,27 @@ class GeometrySystem : public Kernel::SystemBase {
         Horizon::HardwareImage texture;          ///< 贴图句柄（null = 无贴图）
         std::array<float, 4>   material_color = {1.f, 1.f, 1.f, 1.f}; ///< 材质颜色 RGBA
         bool                   valid = false;    ///< false = 首次加载中，唯一合法的跳过原因
+        bool                   texture_ready = false;
+        std::uint32_t          vertex_count = 0;
+        std::uint32_t          index_count = 0;
+        std::uint32_t          max_index = 0;
+    };
+
+    struct ShadowLodQuery {
+        bool enabled = false;
+        float world_units_per_texel = 0.0f;
+    };
+
+    /// Minimal immutable shadow-pass snapshot. Shadow rendering does not sample
+    /// the material texture, so keeping those handles out of the hot path avoids
+    /// four cascades worth of unnecessary ref-counted copies.
+    struct ShadowMeshSlot {
+        uint32_t          mesh_index = 0;
+        RenderMeshBuffers geo;
+        bool              valid = false;
+        std::uint32_t     vertex_count = 0;
+        std::uint32_t     index_count = 0;
+        std::uint32_t     max_index = 0;
     };
 
     /// 查询一个 geometry 的所有 MeshSlot（常驻路由，无相机上下文）。
@@ -366,6 +392,28 @@ class GeometrySystem : public Kernel::SystemBase {
         const ktm::fvec3& world_center,
         float             bounding_radius) const;
 
+    /// Shadow-pass routing: selects the coarsest ready level whose geometric
+    /// error fits within one shadow texel, never falling back to a coarser
+    /// level than the requested target.
+    [[nodiscard]] std::vector<MeshSlot> query_shadow_mesh_slots(
+        std::uintptr_t geometry_handle,
+        float world_units_per_texel,
+        float max_abs_scale,
+        std::uint64_t frame = 0) const;
+
+    /// Batch shadow routing for all cascades. Acquires Geometry Storage and the
+    /// LOD cache once, aggregates demand once per mesh, and returns one slot
+    /// vector per input cascade. Disabled cascades return an empty vector.
+    [[nodiscard]] std::vector<std::vector<ShadowMeshSlot>> query_shadow_mesh_slots_batch(
+        std::uintptr_t geometry_handle,
+        std::span<const ShadowLodQuery> cascades,
+        float max_abs_scale,
+        std::uint64_t frame = 0) const;
+
+    void request_shadow_lod(std::uintptr_t geometry_handle, uint32_t mesh_index,
+                            float world_units_per_texel, float max_abs_scale,
+                            std::uint64_t frame) const;
+
     /// 一站式渲染缓冲选择（渲染线程调用，线程安全）。
     ///
     /// 内部流程：compute_screen_ratio() → 选 LOD 级别 → 降级到已就绪级别，
@@ -386,6 +434,13 @@ class GeometrySystem : public Kernel::SystemBase {
         float                   camera_fov_deg,
         const ktm::fvec3&       world_center,
         float                   bounding_radius,
+        const RenderMeshBuffers& fallback) const;
+
+    [[nodiscard]] RenderMeshBuffers select_shadow_render_buffers(
+        std::uintptr_t geometry_handle,
+        uint32_t mesh_index,
+        float world_units_per_texel,
+        float max_abs_scale,
         const RenderMeshBuffers& fallback) const;
 
     /// 驻留路由（渲染线程调用，线程安全，**不做屏幕占比选级**）。

@@ -20,6 +20,7 @@ Makefile
 .idea/
 .vs/
 .claude/
+.superpowers/
 codex.md
 AGENTS.md
 implementation.md
@@ -28,6 +29,7 @@ TaskSplitting.md
 # Tool caches
 **/.cache/
 __pycache__/
+/.worktrees/
 
 # third-party libraries (manually added)
 /third_party/*

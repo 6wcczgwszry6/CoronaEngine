@@ -1,32 +1,17 @@
 import { pythonGenerator } from 'blockly/python';
 
-// 将数值字段格式化为 Python 字面量：整数去小数点，浮点数保留合理精度
-function formatNumber(raw) {
-  const num = parseFloat(raw || '0');
-  if (Number.isNaN(num)) return '0';
-  return Number.isInteger(num) ? num.toString() : parseFloat(num.toFixed(6)).toString();
-}
+const py = (value) => JSON.stringify(String(value ?? ''));
+const scope = (block) => py(block.getFieldValue('SCOPE') || 'OBJECT');
+const name = (block, field = 'NAME') => py(block.getFieldValue(field) || '');
+const value = (block, input = 'VALUE', legacy = 'x', fallback = '0') =>
+  pythonGenerator.valueToCode(block, input, pythonGenerator.ORDER_NONE) || block.getFieldValue(legacy) || fallback;
 
 export const defineVariableGenerators = () => {
-  pythonGenerator.forBlock['variable_add'] = function (block) {
-    const v = block.getFieldValue('v');
-    const x = formatNumber(block.getFieldValue('x'));
-    return `CoronaEngine.var_add("${v}",${x})\n`;
-  };
-
-  pythonGenerator.forBlock['variable_set'] = function (block) {
-    const v = block.getFieldValue('v');
-    const x = formatNumber(block.getFieldValue('x'));
-    return `CoronaEngine.var_set("${v}",${x})\n`;
-  };
-
-  pythonGenerator.forBlock['variable_show'] = function (block) {
-    const v = block.getFieldValue('v');
-    return `CoronaEngine.var_show("${v}")\n`;
-  };
-
-  pythonGenerator.forBlock['variable_hide'] = function (block) {
-    const v = block.getFieldValue('v');
-    return `CoronaEngine.var_hide("${v}")\n`;
-  };
+  pythonGenerator.forBlock.variable_define = (block) => `CoronaEngine.data_define(${scope(block)}, ${name(block)}, ${value(block)})\n`;
+  pythonGenerator.forBlock.variable_get = (block) => [`CoronaEngine.data_get(${scope(block)}, ${name(block)})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  pythonGenerator.forBlock.variable_exists = (block) => [`CoronaEngine.data_exists(${scope(block)}, ${name(block)})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  pythonGenerator.forBlock.variable_add = (block) => `CoronaEngine.data_add(${scope(block)}, ${name(block, 'v')}, ${value(block)})\n`;
+  pythonGenerator.forBlock.variable_set = (block) => `CoronaEngine.data_set(${scope(block)}, ${name(block, 'v')}, ${value(block)})\n`;
+  pythonGenerator.forBlock.variable_show = (block) => `CoronaEngine.var_show(${name(block, 'v')}, ${scope(block)})\n`;
+  pythonGenerator.forBlock.variable_hide = (block) => `CoronaEngine.var_hide(${name(block, 'v')}, ${scope(block)})\n`;
 };
