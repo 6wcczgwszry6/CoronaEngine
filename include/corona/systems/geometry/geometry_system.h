@@ -10,12 +10,12 @@
 #include <corona/math/frustum.h>
 #include <corona/memory/gpu_mem_ledger.h>
 #include <corona/spatial/aabb.h>
-#include <corona/spatial/bvh.h>
 
 #include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -35,9 +35,6 @@ enum class ActorLoadState : uint8_t {
  * @brief 单场景的可见性策略
  */
 struct SceneVisibilityConfig {
-    /// 连续不可见超过该帧数时，触发 ActorEvictRequestedEvent。
-    /// 0 表示永不 evict（默认，避免在 LRU 接入前误触）。
-    int  invisible_frames_to_evict = 60;  // 连续不可见1秒(60帧)触发淘汰，0=永不
     bool collect_stats             = true;
 
     bool enable_distance_culling  = true;   // 是否启用距离剔除
@@ -121,14 +118,31 @@ struct LODMeshBuffers {
     Horizon::HardwareBuffer vertex_storage;   // GPU 顶点 StorageBuffer（Compute Shader 用）
     Horizon::HardwareBuffer index_storage;    // GPU 索引 StorageBuffer（Compute Shader 用）
     float  error            = 0.0f;  // 该级别的几何误差（QEM 计算得出，用于调试）
-    float  screen_threshold = 1.0f;  // 屏幕占比阈值：低于此值时切换到此级别
+    float  screen_threshold = 1.0f;  // 屏幕占比阈值：低于此值时切换到此级别（legacy 回退用）
+    // 模型空间几何误差（meshopt result_error × simplifyScale）。运行时 × actor_scale 得
+    // 世界单位误差，再除以相机到 mesh 世界 AABB 最近点距离得角误差，与相机角预算 ε 比较选级。
+    // LOD0 恒为 0（无简化误差）。这是 screen-space-error 选级的核心量，取代 screen_threshold。
+    float  geometric_error  = 0.0f;
     bool   ready            = false; // GPU 缓冲是否已创建完毕（创建前不能用于渲染）
     std::uint32_t vertex_count = 0;  // 该级别顶点数（调试/诊断用）
     std::uint32_t index_count  = 0;  // 该级别索引数（调试/诊断用）
+    std::uint32_t max_index    = 0;  // 该级别最大索引（调试/诊断用）
+
+    // 按需驻留（Step 3a）：本级在 Scene::data.meshes[mesh].lod_levels 中的源下标。
+    // upload 会跳过空 LOD 级，故缓存级序与源级序不一一对应；reconcile 重建某级时
+    // 用此下标回到 Scene CPU 取对应顶点/索引数据。LOD0 恒为 -1（其源是 mesh 本体）。
+    int source_lod_index = -1;
 
     // GPU 显存记账令牌（P0）：LOD1..N 各自的顶点/索引缓冲字节。
     // LOD0 复用 mesh_dev 的缓冲（非新分配）→ 该令牌留空计 0，避免重复计量。
     Corona::Memory::GpuMemToken mesh_mem;
+
+    // 释放冷却（方案 A）：本级最后一次被 reconcile 判定为"需求级 D"的帧号。
+    // reconcile 每帧给当前 D 级刷新此值；其余已就绪级仅在连续 idle 帧数超过
+    // kLodReleaseCooldownFrames 后才释放。这样物体停在 LOD 阈值边界微动时，
+    // D 在相邻级反复横跳不会每帧重建/释放 GPU 缓冲（消除 GPU churn）。
+    // 0 = 从未被需求（LOD0 恒驻，不参与冷却释放）。
+    std::uint64_t last_demand_frame = 0;
 };
 
 // LOD（动态减面）现由 GeometrySystem 内部自行决策，无外部配置面：
@@ -249,9 +263,6 @@ class GeometrySystem : public Kernel::SystemBase {
     /// mesh/texture 的 CPU(RAM) + GPU(VRAM) 内存账本快照（线程安全）。
     [[nodiscard]] MemoryReport memory_report() const;
 
-    [[nodiscard]] bool is_actor_offline(std::uintptr_t actor) const;
-    void               mark_actor_restored(std::uintptr_t actor);
-
     /// 加载状态查询接口
     [[nodiscard]] ActorLoadState get_actor_load_state(std::uintptr_t actor, std::uintptr_t scene) const;
 
@@ -264,9 +275,39 @@ class GeometrySystem : public Kernel::SystemBase {
                                       const ktm::fvec3& world_center,
                                       float              bounding_radius);
 
-    /// 根据屏幕占比选择 LOD 等级（0 = 原始网格）
+    /// 根据屏幕占比选择 LOD 等级（0 = 原始网格）。
+    /// 旧屏占比路径：仍保留供无几何误差数据的资源 fallback。
     static int select_lod_level(float                     screen_ratio,
                                 const std::vector<float>& thresholds);
+
+    // ---- 屏幕空间误差选级（统一相机/GI 的球形角预算模型）----
+    //
+    // 核心恒等：屏幕像素误差 = 角误差 × 焦距(px)。投影/FOV/分辨率全部塌缩进单个
+    // 标量角预算 epsilon = pixel_budget · 2·tan(fov/2) / height_px。于是选级判据
+    //   world_error / d ≤ epsilon
+    // 是纯球形量（只看距离、与方向无关）→ 相机背后物体（GI 需要）同样有定义。
+    //
+    // d 取「相机到 mesh 世界 AABB 最近点」的距离：保留各向异性（扁平/细长物体不被
+    // 外接球高估），且不受轴心(pivot)偏移影响（消除环绕跳级）。相机进入 AABB → d→0
+    // → 角误差→∞ → 强制最高精度 LOD0，天然正确，无需 d=max(d,r) 补丁。
+
+    /// 相机到一个世界空间 AABB 的最近点欧氏距离（点在盒内时为 0）。
+    static float distance_point_to_aabb(const ktm::fvec3& p,
+                                        const ktm::fvec3& aabb_min,
+                                        const ktm::fvec3& aabb_max);
+
+    /// 相机角预算 epsilon：把像素预算换算成「每弧度多少世界误差可接受」的角阈值。
+    /// height_px 为相机渲染高度（像素），fov_deg 为垂直 FOV（度）。
+    static float compute_angular_epsilon(float pixel_budget,
+                                         float fov_deg,
+                                         float height_px);
+
+    /// 屏幕空间误差选级：给定到 mesh 最近点距离 d、各级世界误差（world_errors[i] =
+    /// geometric_error[i]·actor_scale，下标与 levels 对齐，level 0 误差为 0），以及相机角
+    /// 预算 epsilon，返回「角误差仍 ≤ epsilon 的最粗一级」。0 = LOD0（最高精度）。
+    static int select_lod_by_error(float                     distance_to_aabb,
+                                   const std::vector<float>& world_errors,
+                                   float                     epsilon);
 
     // ========================================
     // 动态减面 (Mesh Simplification) API
@@ -290,7 +331,88 @@ class GeometrySystem : public Kernel::SystemBase {
         Horizon::HardwareBuffer index;
         Horizon::HardwareBuffer vertex_storage;
         Horizon::HardwareBuffer index_storage;
+        std::uint32_t vertex_count = 0;
+        std::uint32_t index_count = 0;
+        std::uint32_t max_index = 0;
     };
+
+    /// 单个 mesh 的当前 GPU 状态快照（LOD 已由 GeometrySystem 内部解析）。
+    ///
+    /// 所有句柄均为引用计数值副本，调用方在 query_mesh_slots 返回后无需持有任何锁。
+    /// 适用于所有需要访问 mesh GPU 资源的系统（光学、力学、Vision 等）。
+    ///
+    /// valid=false 仅在 Actor 首次加载尚未完成时成立（mesh_handles 为空），
+    /// 是唯一合法的跳过原因。对于所有已加载的 Actor，valid=true 且
+    /// geo.vertex / geo.index 一定非空。
+    struct MeshSlot {
+        uint32_t               mesh_index    = 0;
+        RenderMeshBuffers      geo;              ///< LOD 解析后的几何缓冲
+        Horizon::HardwareImage texture;          ///< 贴图句柄（null = 无贴图）
+        std::array<float, 4>   material_color = {1.f, 1.f, 1.f, 1.f}; ///< 材质颜色 RGBA
+        bool                   valid = false;    ///< false = 首次加载中，唯一合法的跳过原因
+        bool                   texture_ready = false;
+        std::uint32_t          vertex_count = 0;
+        std::uint32_t          index_count = 0;
+        std::uint32_t          max_index = 0;
+    };
+
+    struct ShadowLodQuery {
+        bool enabled = false;
+        float world_units_per_texel = 0.0f;
+    };
+
+    /// Minimal immutable shadow-pass snapshot. Shadow rendering does not sample
+    /// the material texture, so keeping those handles out of the hot path avoids
+    /// four cascades worth of unnecessary ref-counted copies.
+    struct ShadowMeshSlot {
+        uint32_t          mesh_index = 0;
+        RenderMeshBuffers geo;
+        bool              valid = false;
+        std::uint32_t     vertex_count = 0;
+        std::uint32_t     index_count = 0;
+        std::uint32_t     max_index = 0;
+    };
+
+    /// 查询一个 geometry 的所有 MeshSlot（常驻路由，无相机上下文）。
+    ///
+    /// 适用：V-buffer 收集、Vision BVH 构建、MechanicsSystem 蒙皮、无相机的通用遍历。
+    /// 内部取 geometry 写锁（texture storeDescriptor 需非 const 访问）；
+    /// 调用方不得持有同一 geometry_handle 的锁。
+    /// @return 每个 mesh_index 对应一个 MeshSlot；geometry 无效或首次加载中时返回空 vector。
+    [[nodiscard]] std::vector<MeshSlot> query_mesh_slots(
+        std::uintptr_t geometry_handle) const;
+
+    /// 查询一个 geometry 的所有 MeshSlot（LOD 选级路由，带相机上下文）。
+    ///
+    /// 适用：主渲染 pass、阴影 pass、需要 committed_demand 精度的所有路径。
+    [[nodiscard]] std::vector<MeshSlot> query_mesh_slots(
+        std::uintptr_t    geometry_handle,
+        const ktm::fvec3& camera_pos,
+        float             camera_fov_deg,
+        const ktm::fvec3& world_center,
+        float             bounding_radius) const;
+
+    /// Shadow-pass routing: selects the coarsest ready level whose geometric
+    /// error fits within one shadow texel, never falling back to a coarser
+    /// level than the requested target.
+    [[nodiscard]] std::vector<MeshSlot> query_shadow_mesh_slots(
+        std::uintptr_t geometry_handle,
+        float world_units_per_texel,
+        float max_abs_scale,
+        std::uint64_t frame = 0) const;
+
+    /// Batch shadow routing for all cascades. Acquires Geometry Storage and the
+    /// LOD cache once, aggregates demand once per mesh, and returns one slot
+    /// vector per input cascade. Disabled cascades return an empty vector.
+    [[nodiscard]] std::vector<std::vector<ShadowMeshSlot>> query_shadow_mesh_slots_batch(
+        std::uintptr_t geometry_handle,
+        std::span<const ShadowLodQuery> cascades,
+        float max_abs_scale,
+        std::uint64_t frame = 0) const;
+
+    void request_shadow_lod(std::uintptr_t geometry_handle, uint32_t mesh_index,
+                            float world_units_per_texel, float max_abs_scale,
+                            std::uint64_t frame) const;
 
     /// 一站式渲染缓冲选择（渲染线程调用，线程安全）。
     ///
@@ -312,6 +434,40 @@ class GeometrySystem : public Kernel::SystemBase {
         float                   camera_fov_deg,
         const ktm::fvec3&       world_center,
         float                   bounding_radius,
+        const RenderMeshBuffers& fallback) const;
+
+    [[nodiscard]] RenderMeshBuffers select_shadow_render_buffers(
+        std::uintptr_t geometry_handle,
+        uint32_t mesh_index,
+        float world_units_per_texel,
+        float max_abs_scale,
+        const RenderMeshBuffers& fallback) const;
+
+    /// 驻留路由（渲染线程调用，线程安全，**不做屏幕占比选级**）。
+    ///
+    /// 与 select_render_buffers 的区别：本方法不需要相机参数，不按屏幕占比选级，
+    /// 只负责"返回当前最高精度的**已常驻**级缓冲"。用于无相机上下文的渲染路径
+    /// （如 V-buffer 可见性收集 collect_actor_instances_for_visibility、actor 拾取），
+    /// 这些路径此前直接读 MeshDevice 缓冲、不接 LOD。
+    ///
+    /// 设计目的：让"几何缓冲读取统一经 GeometrySystem 路由"，从而支持后续逐级
+    /// LOD 淘汰——当 LOD0 被显存压力释放后，本方法自动改返回次高的已常驻级，
+    /// 渲染路径无需感知。
+    ///
+    /// 行为：
+    ///   - 无 LOD 缓存条目（如 from_image 程序化几何）→ 原样返回 fallback。
+    ///   - 有缓存：从 LOD0 向高级别扫描，返回首个 ready 且缓冲有效的级别。
+    ///     （今天 LOD0 恒常驻 → 返回 LOD0 = fallback，行为与改造前完全一致。）
+    ///   - 全级皆不常驻 → 返回 fallback（其缓冲可能为空，调用方据空判断跳过）。
+    ///
+    /// StorageBuffer 缺失时沿用 fallback 的，避免 compute 路径拿到空句柄。
+    ///
+    /// @param geometry_handle GeometryDevice 句柄
+    /// @param mesh_index      子网格索引
+    /// @param fallback        调用方持 geom 槽锁时从 MeshDevice 读出的 LOD0 候选缓冲
+    [[nodiscard]] RenderMeshBuffers resident_render_buffers(
+        std::uintptr_t           geometry_handle,
+        uint32_t                 mesh_index,
         const RenderMeshBuffers& fallback) const;
 
     /// 查询指定 LOD 级别的 GPU 缓冲（渲染线程调用，线程安全）
@@ -348,10 +504,13 @@ class GeometrySystem : public Kernel::SystemBase {
                                         uint32_t       mesh_index,
                                         float          screen_ratio) const;
 
-    /// 一站式 LOD 缓冲获取：自动选级 + 返回 GPU 缓冲（渲染线程调用，单次加锁）
+    /// 一站式 LOD 缓冲获取：自动选级 + 返回 GPU 缓冲（单次加锁）
     ///
-    /// 等价于 resolve_lod_level() + get_lod_buffers()，但只获取一次锁。
-    /// 渲染热路径上应优先使用此方法。
+    /// @deprecated 渲染热路径请改用 select_render_buffers()。本方法返回裸
+    /// const LODMeshBuffers*（指向 lod_cache 内部），调用方在 shared_lock 释放后
+    /// 解引用；一旦逐级 LOD 淘汰使缓存频繁增删，该指针会悬垂。select_render_buffers
+    /// 在持锁期间即拷出 HardwareBuffer 句柄（值语义、refcount 安全），无此问题。
+    /// 保留此接口仅为兼容潜在外部调用，渲染路径已不再使用。
     ///
     /// @return 指向 LODMeshBuffers 的指针，或 nullptr 表示该 mesh 无 LOD 数据
     [[nodiscard]] const LODMeshBuffers* resolve_lod_buffers(
@@ -372,46 +531,6 @@ class GeometrySystem : public Kernel::SystemBase {
     /// @return 各 LOD 级别的 (vertexBuffer, vertexStorageBuffer) 句柄对，含 LOD0
     [[nodiscard]] std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>
     get_skinning_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const;
-
-    // ========================================
-    // BVH 射线查询（三角形级加速）
-    // ========================================
-    //
-    // 使用场景：拿到 Octree 粗筛的 actor 列表后，对每个 mesh 调用以下方法
-    // 获取射线命中的三角形下标。payload = 三角形序号（i/3）。
-    //
-    // 命中基于三角形 AABB，调用方拿到候选三角形后需自行做精确
-    // ray-tri 相交检测（Möller-Trumbore）以确认最终命中。
-
-    /// 穿透查询：返回射线命中的所有三角形下标（AABB 级，无序）
-    /// @param geometry_handle GeometryDevice 句柄
-    /// @param mesh_index      子网格索引
-    /// @param lod_level       LOD 级别（0=原始精度）
-    /// @param origin          射线起点（mesh 局部空间）
-    /// @param inv_dir         射线方向倒数（1/dir.x, 1/dir.y, 1/dir.z）
-    /// @return 命中的三角形下标列表，未命中或无 BVH 时返回空 vector
-    [[nodiscard]] std::vector<uint32_t> query_mesh_ray(
-        std::uintptr_t   geometry_handle,
-        uint32_t         mesh_index,
-        int              lod_level,
-        const ktm::fvec3& origin,
-        const ktm::fvec3& inv_dir) const;
-
-    /// 最近命中查询：返回离射线起点最近的三角形及其距离
-    /// @param geometry_handle GeometryDevice 句柄
-    /// @param mesh_index      子网格索引
-    /// @param lod_level       LOD 级别
-    /// @param origin          射线起点（mesh 局部空间）
-    /// @param inv_dir         射线方向倒数
-    /// @param t_max           最大搜索距离
-    /// @return 命中返回 Hit{payload=三角形下标, t=距离}，未命中返回 std::nullopt
-    [[nodiscard]] std::optional<Spatial::BVH<uint32_t>::Hit> query_mesh_closest_hit(
-        std::uintptr_t   geometry_handle,
-        uint32_t         mesh_index,
-        int              lod_level,
-        const ktm::fvec3& origin,
-        const ktm::fvec3& inv_dir,
-        float            t_max) const;
 
     // ========================================
     // 统计
@@ -458,24 +577,37 @@ class GeometrySystem : public Kernel::SystemBase {
     // 模型导入时 meshoptimizer 已生成 LOD 数据（MeshData::lod_levels），
     // 这里只负责将其上传为 GPU 缓冲。
 
-    /// 遍历所有已加载的 Scene 资源，
-    /// 将其 MeshData::lod_levels（导入时 meshoptimizer 生成的LOD数据）上传到 GPU。
-    /// 每帧调用但只对新模型生效（已有缓存的跳过）。
+    /// 遍历所有已加载的 Scene 资源，建立 LOD 缓存条目（元数据）。
+    /// LOD0 立即就绪（复用 mesh_dev 缓冲）；LOD1..N 仅登记元数据
+    /// （screen_threshold / 计数 / source_lod_index），ready=false、不建 GPU 缓冲、不建 BVH。
+    /// 实际 GPU 缓冲由 reconcile_lod_residency() 按需构建（Step 3a：按需驻留）。
+    /// 每帧调用但只对新模型建条目（已有缓存的跳过）。
     void upload_lod_from_scene_data();
 
-    /// 骨骼动画 CPU 蒙皮（P2）。每帧遍历所有 GeometryDevice，对蒙皮模型
-    /// （Scene::skeleton 有值）：推进 anim_time → compute_pose 算 final 骨骼矩阵
-    /// → 对每个 mesh 做 CPU 蒙皮（skinned[v] = Σ wᵢ·(finalᵢ·bind[v])）→ 把蒙皮后
-    /// 顶点 write_bytes 重传到 MeshDevice 的 vertexBuffer + vertexStorageBuffer。
-    /// 蒙皮输出仍是标准 32B Vertex，故 Native 光栅 / material_resolve 着色器零改动。
-    /// 蒙皮后顶点同时缓存到 GeometryDevice::skinned_cpu_vertices，供 P3 Vision /
-    /// P4 物理作为单一数据源消费。
-    void update_skinned_geometry();
+    /// 按需 LOD 驻留协调（Step 3a，每帧 update 调用）。
+    /// 遍历所有有 LOD 缓存的 geometry，按相机屏占比算出"需求级 D"（多相机取最高精度），
+    /// 确保 D 已构建 GPU 缓冲（缺则从 Scene CPU 即时建），并释放其余 LOD1..N 级（回收显存）。
+    /// LOD0 始终保留作降级兜底（其释放属 Step 3b，本步不做）。
+    /// 渲染线程 select_render_buffers 用同一屏占比公式 → 与本决策一致；
+    /// 偶发不一致时渲染自动降级到 LOD0，不致黑屏。
+    void reconcile_lod_residency();
+
+    /// 轮询已完成的异步 LOD 构建任务（方案 C），将 GPU 缓冲回写进 lod_cache。
+    /// 在 update() 中 reconcile_lod_residency() 之前调用：让本帧完成的级即刻可见。
+    /// 回写前做 ABA 重校验（model_id + residency_epoch + 级存在 + 未就绪），
+    /// 失败则丢弃（结果 RAII 自动释放 GPU）。仅几何线程访问在途表，无需加锁。
+    void process_pending_lod_builds();
 
     /// 维护 mesh/texture 的 CPU 资源账本（P0）：登记新出现 model_id 的 Scene
     /// (mesh CPU) 与其 Image 纹理 (texture CPU)，按 rid 去重；并对 ResourceManager
     /// 的存活集合做对账，删除已被驱逐的 rid。低频调用（~1Hz）即可，CPU 用量变化缓慢。
     void update_cpu_resource_ledger();
+
+    /// CPU LOD 驻留协调（RAM 3层窗口管理）。
+    /// 遍历所有 model_id，按各实例 committed_demand 的中位数确定 CPU 驻留窗口
+    /// {lod_levels[0], lod_levels[demand_median-1], lod_levels[N-1]}，清空窗口外级的
+    /// vertices/indices/bone_weights。每 kCpuWindowEvalInterval 帧调用一次。
+    void reconcile_cpu_residency();
 
     /// 计算 mesh/texture 的 VRAM/RAM 用量 + 预算视图（线程安全，内部加锁）。
     [[nodiscard]] MemoryReport compute_memory_report() const;

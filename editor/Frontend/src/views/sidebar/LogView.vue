@@ -53,10 +53,9 @@
 
 <script setup>
 import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue';
-import { logService } from '@/utils/bridge';
+import { editorApi, logService } from '@/utils/bridge';
 import SimpleSelect from '@/components/ui/SimpleSelect.vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { coronaEventBus } from '@/utils/eventBus.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
@@ -66,6 +65,7 @@ const filterSources = ref(['Engine', 'Python', 'Vue']);
 const filterLevel = ref('all');
 const searchText = ref('');
 const scrollBox = ref(null);
+let logBatchCallbackToken = null;
 
 const levelOptions = [
   { value: 'all', label: '所有级别' },
@@ -100,6 +100,10 @@ const pushLog = (data) => {
 
 window.onReceiveLog = (logData) => pushLog(logData);
 window.onReceiveLogBatch = (logBatch) => pushLog(logBatch);
+
+const onLogBatch = (batch) => {
+  if (window.onReceiveLogBatch) window.onReceiveLogBatch(batch);
+};
 
 const filteredLogs = computed(() => {
   return logs.value.filter((l) => {
@@ -138,15 +142,16 @@ const closeFloat = () => {
   if (closeDockPanel) { closeDockPanel(); return; }
 };
 
-onMounted(() => {
+onMounted(async () => {
   logService.setLogReady();
-  // 事件总线：接收 Python 推送的 log-batch
-  coronaEventBus.on('log-batch', (batch) => {
-    if (window.onReceiveLogBatch) window.onReceiveLogBatch(batch);
-  });
+  logBatchCallbackToken = await editorApi.events.onLogBatch(onLogBatch);
 });
 
 onUnmounted(() => {
-  coronaEventBus.off('log-batch');
+  if (logBatchCallbackToken) {
+    editorApi.off(logBatchCallbackToken).finally(() => {
+      logBatchCallbackToken = null;
+    });
+  }
 });
 </script>

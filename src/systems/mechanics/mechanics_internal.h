@@ -15,6 +15,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <optional>
 #include <shared_mutex>
 #include <unordered_map>
 #include <unordered_set>
@@ -399,6 +400,7 @@ struct BodyFrameParams {
     float damping = 0.99f;
     float restitution = 0.8f;
     bool collision_enabled = true;
+    CollisionShape collision_shape = CollisionShape::Box;
     std::uintptr_t actor = 0;
 };
 
@@ -776,6 +778,10 @@ struct MechanicsSystem::Impl {
     std::chrono::steady_clock::time_point last_update_time{};
     bool first_update = true;
 
+    /// 骨骼动画上一帧时间戳（用于 update_skinned_geometry 计算 dt）。
+    /// 未初始化时（首帧）取 dt=0。自 GeometrySystem 迁入。
+    std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
+
     std::atomic<bool> shutdown_requested{false};
     float global_simulation_time = 0.0f;
 
@@ -784,7 +790,6 @@ struct MechanicsSystem::Impl {
     std::unordered_set<std::pair<std::uintptr_t, std::uintptr_t>, MechanicsInternal::PairHash> prev_active_collisions;
     std::vector<std::function<void()>> deferred_move_callbacks;
     std::vector<MechanicsInternal::DeferredCollisionCallback> deferred_collision_callbacks;
-
     MechanicsInternal::BodyRuntimeState& body(std::uintptr_t handle) {
         return bodies.try_emplace(handle).first->second;
     }

@@ -2,6 +2,7 @@
 
 #include <corona/systems/optics/vision_pipeline_key.h>
 
+#include <algorithm>
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -141,6 +142,35 @@ struct ExternalLiveShapeRecord {
     bool dynamically_added{false};
 };
 
+enum class ExternalLiveShapeRemovalAction {
+    ForgetTracking,
+    HideOriginal,
+    RemoveTopology,
+};
+
+[[nodiscard]] constexpr ExternalLiveShapeRemovalAction external_live_shape_removal_action(
+    const ExternalLiveShapeRecord& record,
+    bool embedded_runtime) noexcept {
+    if (record.dynamically_added) {
+        return ExternalLiveShapeRemovalAction::RemoveTopology;
+    }
+    return embedded_runtime ? ExternalLiveShapeRemovalAction::HideOriginal
+                            : ExternalLiveShapeRemovalAction::ForgetTracking;
+}
+
+[[nodiscard]] constexpr std::string_view external_live_shape_removal_action_name(
+    ExternalLiveShapeRemovalAction action) noexcept {
+    switch (action) {
+        case ExternalLiveShapeRemovalAction::ForgetTracking:
+            return "forget_tracking";
+        case ExternalLiveShapeRemovalAction::HideOriginal:
+            return "hide_original";
+        case ExternalLiveShapeRemovalAction::RemoveTopology:
+            return "remove_topology";
+    }
+    return "forget_tracking";
+}
+
 // Tracks an engine-native actor (one WITHOUT an external_vision_binding) that has
 // been mixed into an ExternalLive Vision scene as an appended shape. Kept in a map
 // separate from external_live_shapes_by_actor because the bound-proxy reaper would
@@ -163,10 +193,16 @@ struct VisionSceneResource {
     std::uint64_t logical_transform_version{0};
     std::uint64_t scene_gpu_transform_version{0};
     std::unordered_map<std::uintptr_t, std::size_t> external_live_transform_signatures;
+    std::unordered_map<std::uintptr_t, std::size_t>
+        external_live_original_transform_signatures;
     std::unordered_map<VisionLogicalInstanceKey,
                        VisionLogicalInstanceRecord,
                        VisionLogicalInstanceKeyHash>
         logical_instances;
+    std::unordered_map<VisionLogicalInstanceKey,
+                       VisionLogicalInstanceRecord,
+                       VisionLogicalInstanceKeyHash>
+        external_live_original_instances;
     std::unordered_map<std::uintptr_t, ExternalLiveShapeRecord>
         external_live_shapes_by_actor;
     // Engine-native actors mixed into this ExternalLive scene (no binding).
@@ -216,7 +252,9 @@ struct VisionSceneResource {
         logical_transform_version = 0;
         scene_gpu_transform_version = 0;
         external_live_transform_signatures.clear();
+        external_live_original_transform_signatures.clear();
         logical_instances.clear();
+        external_live_original_instances.clear();
         external_live_shapes_by_actor.clear();
         engine_mixed_shapes_by_actor.clear();
     }
@@ -273,6 +311,31 @@ struct VisionSceneResource {
         }
     }
 
+    bool cache_external_live_original_instance(VisionLogicalInstanceRecord record) {
+        const auto key = record.key;
+        auto [iter, inserted] =
+            external_live_original_instances.try_emplace(key, std::move(record));
+        (void)iter;
+        return inserted;
+    }
+
+    [[nodiscard]] std::vector<VisionLogicalInstanceRecord>
+    restore_external_live_original_instances(int shape_index) const {
+        std::vector<VisionLogicalInstanceRecord> records;
+        if (shape_index < 0) {
+            return records;
+        }
+        for (const auto& [key, record] : external_live_original_instances) {
+            if (key.shape_index == shape_index) {
+                records.push_back(record);
+            }
+        }
+        std::sort(records.begin(), records.end(), [](const auto& lhs, const auto& rhs) {
+            return lhs.key.instance_index < rhs.key.instance_index;
+        });
+        return records;
+    }
+
     [[nodiscard]] const ExternalLiveShapeRecord* find_external_live_shape(
         std::uintptr_t actor_handle) const noexcept {
         const auto iter = external_live_shapes_by_actor.find(actor_handle);
@@ -300,8 +363,22 @@ struct VisionSceneResource {
     }
 
     void erase_external_live_shape(std::uintptr_t actor_handle) noexcept {
+        const auto iter = external_live_shapes_by_actor.find(actor_handle);
+        if (iter != external_live_shapes_by_actor.end()) {
+            const auto shape_index = iter->second.shape_index;
+            for (auto instance_iter = external_live_original_instances.begin();
+                 instance_iter != external_live_original_instances.end();) {
+                if (instance_iter->second.actor_handle == actor_handle ||
+                    instance_iter->first.shape_index == shape_index) {
+                    instance_iter = external_live_original_instances.erase(instance_iter);
+                } else {
+                    ++instance_iter;
+                }
+            }
+        }
         external_live_shapes_by_actor.erase(actor_handle);
         external_live_transform_signatures.erase(actor_handle);
+        external_live_original_transform_signatures.erase(actor_handle);
     }
 
     [[nodiscard]] const EngineMixedShapeRecord* find_engine_mixed_shape(
@@ -339,17 +416,37 @@ struct VisionSceneResource {
             logical_instances.emplace(record.key, std::move(record));
         }
 
+        std::vector<VisionLogicalInstanceRecord> remapped_external_live_original_instances;
+        remapped_external_live_original_instances.reserve(external_live_original_instances.size());
+        for (auto& [key, existing_record] : external_live_original_instances) {
+            (void)key;
+            auto record = std::move(existing_record);
+            if (record.key.shape_index == removed_shape_index) {
+                continue;
+            }
+            if (record.key.shape_index > removed_shape_index) {
+                --record.key.shape_index;
+            }
+            remapped_external_live_original_instances.push_back(std::move(record));
+        }
+        external_live_original_instances.clear();
+        for (auto& record : remapped_external_live_original_instances) {
+            external_live_original_instances.emplace(record.key, std::move(record));
+        }
+
         for (auto iter = external_live_shapes_by_actor.begin();
              iter != external_live_shapes_by_actor.end();) {
             auto& record = iter->second;
             if (record.shape_index == removed_shape_index) {
                 external_live_transform_signatures.erase(iter->first);
+                external_live_original_transform_signatures.erase(iter->first);
                 iter = external_live_shapes_by_actor.erase(iter);
                 continue;
             }
             if (record.shape_index > removed_shape_index) {
                 --record.shape_index;
                 external_live_transform_signatures.erase(iter->first);
+                external_live_original_transform_signatures.erase(iter->first);
                 actors_to_rewrite.push_back(iter->first);
             }
             ++iter;

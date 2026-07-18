@@ -737,6 +737,18 @@
                 请先选中一个物体
               </div>
             </div>
+            <!-- 单位 - 节点 -->
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
+              <NodeGraphWorkspace
+                v-if="actorData.name"
+                :actorName="currentActorFile || actorData.name"
+                :sceneName="actorData.parentScene || sceneData.sceneId || sceneData.name"
+                targetType="actor"
+              />
+              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
+                请先选中一个物体
+              </div>
+            </div>
 
             <!-- 单位 - 脚本 -->
             <div v-show="ActiveSubTab === 'Script'" class="space-y-2 text-xs">
@@ -1313,6 +1325,18 @@
                 请先选中一个物体
               </div>
             </div>
+            <!-- 模型 - 节点 -->
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
+              <NodeGraphWorkspace
+                v-if="modelData.name"
+                :actorName="currentModelFile || modelData.name"
+                :sceneName="modelData.targetScene || sceneData.sceneId || sceneData.name"
+                targetType="model"
+              />
+              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
+                请先选中一个物体
+              </div>
+            </div>
           </template>
         </div>
       </template>
@@ -1326,7 +1350,8 @@ import { ref, reactive, onMounted, onUnmounted, computed, watch, nextTick } from
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import BlocklyWorkspace from '@/blockly/components/BlocklyWorkspace.vue';
-import { sceneService, projectService } from '@/utils/bridge.js';
+import NodeGraphWorkspace from '@/blockly/components/NodeGraphWorkspace.vue';
+import { sceneService, projectService, editorApi } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
@@ -1336,12 +1361,19 @@ import { useDockPanel } from '@/composables/useDockPanel.js';
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
 const { error: logError, warn: logWarn } = useErrorHandler('Object');
+let actorSelectionChangedCallbackToken = null;
+let actorTransformUpdatedCallbackToken = null;
 
 // ========== 防抖工具 ==========
 const _debounceTimers = {};
 const debounced = (key, fn, delay = 200) => {
   clearTimeout(_debounceTimers[key]);
   _debounceTimers[key] = setTimeout(fn, delay);
+};
+
+const normalizeCollisionType = (value) => {
+  if (value === 'none' || value === 'box' || value === 'mesh') return value;
+  return value === false ? 'none' : 'box';
 };
 
 // ========== 路由参数 ==========
@@ -1362,6 +1394,7 @@ const actorTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
+  { id: 'NodeGraph', label: '节点' },
   { id: 'Script', label: '脚本' },
 ];
 
@@ -1369,6 +1402,7 @@ const modelTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
+  { id: 'NodeGraph', label: '节点' },
 ];
 
 // ========== Blockly 工作区引用 ==========
@@ -1967,7 +2001,7 @@ const loadActorData = async (sceneId, actorId) => {
         actorData.value.hasGeometry = false;
       }
 
-      actorData.value.collision.type = data.collision || 'none';
+      actorData.value.collision.type = normalizeCollisionType(data.collision);
       actorData.value.script.path = data.script || '';
 
       // 相机锁定数据
@@ -2062,7 +2096,7 @@ const ACTOR_TRANSFORM_OPERATION = {
   Scale: 2,
 };
 
-// 属性编辑快速通道常量（与 cef_subprocess/main.cpp 中 setProperty 的 propertyType 一致）
+// 属性编辑快速通道常量（与 cef_renderer_bridge.cpp 中 setProperty 的 propertyType 一致）
 const PROPERTY = {
   Mass: 0,
   Restitution: 1,
@@ -2072,6 +2106,7 @@ const PROPERTY = {
   PhysicsEnabled: 5,
   LinearLockMask: 6,
   AngularLockMask: 7,
+  CollisionShape: 8,
 };
 
 const applyAxisOverride = (vector, axis, value) => {
@@ -2344,20 +2379,23 @@ const updateActorCollisionFast = () => {
   const bridge = window.coronaBridge;
   if (!bridge || typeof bridge.setProperty !== 'function') return;
   if (!actorData.value.handle) return;
-  const value = actorData.value.collision.type !== 'none' ? 1 : 0;
-  try { bridge.setProperty(actorData.value.handle, PROPERTY.CollisionEnabled, value); } catch (e) {}
+  const value = { none: 0, box: 1, mesh: 2 }[actorData.value.collision.type] ?? 1;
+  try { bridge.setProperty(actorData.value.handle, PROPERTY.CollisionShape, value); } catch (e) {}
 };
 
 // 更新单位碰撞类型 — 慢通道：触发 Python 写盘 + 设置
 const updateActorCollision = () => {
   if (!currentActorFile.value || !actorData.value.parentScene) return;
+  const scene = actorData.value.parentScene;
+  const actor = currentActorFile.value;
+  const collisionType = actorData.value.collision.type;
   debounced('actor_collision', async () => {
     try {
       await sceneService.actorOperation(
-        actorData.value.parentScene,
-        currentActorFile.value,
+        scene,
+        actor,
         'SetCollision',
-        [actorData.value.collision.type]
+        [collisionType]
       );
     } catch (e) {
       logError('更新单位碰撞类型失败', e);
@@ -2570,20 +2608,23 @@ const updateModelCollisionFast = () => {
   const bridge = window.coronaBridge;
   if (!bridge || typeof bridge.setProperty !== 'function') return;
   if (!modelData.value.handle) return;
-  const value = modelData.value.collision.type !== 'none' ? 1 : 0;
-  try { bridge.setProperty(modelData.value.handle, PROPERTY.CollisionEnabled, value); } catch (e) {}
+  const value = { none: 0, box: 1, mesh: 2 }[modelData.value.collision.type] ?? 1;
+  try { bridge.setProperty(modelData.value.handle, PROPERTY.CollisionShape, value); } catch (e) {}
 };
 
 // 更新模型碰撞类型
 const updateModelCollision = () => {
   if (!currentModelFile.value || !modelData.value.targetScene) return;
+  const scene = modelData.value.targetScene;
+  const actor = currentModelFile.value;
+  const collisionType = modelData.value.collision.type;
   debounced('model_collision', async () => {
     try {
       await sceneService.actorOperation(
-        modelData.value.targetScene,
-        currentModelFile.value,
+        scene,
+        actor,
         'SetCollision',
-        [modelData.value.collision.type]
+        [collisionType]
       );
     } catch (e) {
       logError('更新模型碰撞类型失败', e);
@@ -2774,18 +2815,41 @@ onMounted(async () => {
 
   setupWindowListener();
 
-  coronaEventBus.on('actor-change', (type, sceneId, actorId, oldPath) => {
-    if (window.onActorChange) window.onActorChange(type, sceneId, actorId, oldPath);
-  });
-  coronaEventBus.on('transform-update', (sceneName, actorName, position, rotation, scale, type) => {
-    if (window.onTransformUpdate) window.onTransformUpdate(sceneName, actorName, position, rotation, scale, type);
-  });
+  const onActorSelectionChangedEvent = (payload) => {
+    if (window.onActorChange) {
+      window.onActorChange(payload?.actor_type, payload?.scene, payload?.actor, payload?.previous);
+    }
+  };
+  actorSelectionChangedCallbackToken = await editorApi.events.onActorSelectionChanged(onActorSelectionChangedEvent);
+  const onActorTransformUpdatedEvent = (payload) => {
+    if (window.onTransformUpdate) {
+      window.onTransformUpdate(
+        payload?.scene,
+        payload?.actor,
+        payload?.position,
+        payload?.rotation,
+        payload?.scale,
+        payload?.actor_type
+      );
+    }
+  };
+  actorTransformUpdatedCallbackToken = await editorApi.events.onActorTransformUpdated(onActorTransformUpdatedEvent);
 });
 
 onUnmounted(() => {
   stopPlayback();
-  coronaEventBus.off('actor-change');
-  coronaEventBus.off('transform-update');
+  if (actorSelectionChangedCallbackToken) {
+    editorApi.off(actorSelectionChangedCallbackToken).catch((error) => {
+      logError('Failed to unregister actor selection callback', error);
+    });
+    actorSelectionChangedCallbackToken = null;
+  }
+  if (actorTransformUpdatedCallbackToken) {
+    editorApi.off(actorTransformUpdatedCallbackToken).catch((error) => {
+      logError('Failed to unregister actor transform callback', error);
+    });
+    actorTransformUpdatedCallbackToken = null;
+  }
 });
 </script>
 

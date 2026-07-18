@@ -8,6 +8,7 @@
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
+#include <corona/systems/script/camera_follow_controller.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/optics/optics_system.h>
 #include <corona/utils/path_utils.h>
@@ -877,6 +878,9 @@ Corona::API::Geometry Corona::API::Geometry::from_image(const std::string& image
         "script.image.index_storage");
     dev.materialIndex = 0;
     dev.materialColor = {1.0f, 1.0f, 1.0f, 1.0f};
+    dev.vertex_count = static_cast<std::uint32_t>(vertices.size());
+    dev.index_count = static_cast<std::uint32_t>(indices.size());
+    dev.max_index = 3;
 
     if (!upload_image_to_texture(image_id, dev.textureBuffer)) {
         // 上传失败：回退 1x1 白占位，几何仍可显示（白底），避免整体导入失败。
@@ -1422,16 +1426,42 @@ void Corona::API::Mechanics::set_collision_enabled(bool enabled) {
         return;
     }
     if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
-        accessor->bEnableCollision = enabled;  // 设置碰撞检测开关
+        accessor->collision_shape = enabled ? CollisionShape::Box : CollisionShape::None;
     }
 }
 
 bool Corona::API::Mechanics::get_collision_enabled() const {
     if (handle_ == 0) return true;
     if (auto accessor = SharedDataHub::instance().mechanics_storage().try_acquire_read(handle_)) {
-        return accessor->bEnableCollision;  // 读取碰撞检测开关状态
+        return accessor->collision_shape != CollisionShape::None;
     }
     return true;
+}
+
+void Corona::API::Mechanics::set_collision_shape(std::string_view shape) {
+    if (handle_ == 0) return;
+    CollisionShape value = CollisionShape::Box;
+    if (shape == "none") value = CollisionShape::None;
+    else if (shape == "mesh") value = CollisionShape::Mesh;
+    else if (shape != "box") {
+        CFW_LOG_WARNING("[Mechanics::set_collision_shape] Invalid shape '{}'; using box", shape);
+    }
+    if (auto accessor = SharedDataHub::instance().mechanics_storage().acquire_write(handle_)) {
+        accessor->collision_shape = value;
+    }
+}
+
+std::string Corona::API::Mechanics::get_collision_shape() const {
+    if (handle_ != 0) {
+        if (auto accessor = SharedDataHub::instance().mechanics_storage().try_acquire_read(handle_)) {
+            switch (accessor->collision_shape) {
+                case CollisionShape::None: return "none";
+                case CollisionShape::Mesh: return "mesh";
+                case CollisionShape::Box: return "box";
+            }
+        }
+    }
+    return "box";
 }
 
 void Corona::API::Mechanics::set_linear_lock(bool lock_x, bool lock_y, bool lock_z) {
@@ -1861,7 +1891,8 @@ void Corona::API::Actor::set_external_vision_binding(const std::string& source_p
                                                      const std::string& json_path,
                                                      const std::string& shape_type,
                                                      const std::string& shape_identity_key,
-                                                     const std::string& model_path) {
+                                                     const std::string& model_path,
+                                                     bool visible) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Actor::set_external_vision_binding] Invalid actor handle");
         return;
@@ -1869,6 +1900,7 @@ void Corona::API::Actor::set_external_vision_binding(const std::string& source_p
 
     ExternalVisionBindingDevice binding{};
     binding.enabled = true;
+    binding.visible = visible;
     binding.source_path = source_path;
     binding.shape_guid = shape_guid;
     binding.shape_index = shape_index;
@@ -2463,6 +2495,14 @@ std::uintptr_t Corona::API::Camera::pick_actor_at_pixel(int x, int y) const {
 }
 
 namespace Corona::API {
+void set_editor_camera_input_enabled(bool enabled) {
+    Systems::CameraFollowController::instance().set_input_enabled(enabled);
+}
+
+bool is_editor_camera_input_enabled() {
+    return Systems::CameraFollowController::instance().is_input_enabled();
+}
+
 void set_default_surface(void* surface) {
     g_default_surface.store(surface, std::memory_order_relaxed);
 
@@ -2552,7 +2592,28 @@ void load_vision_scene(const std::string& path) {
     }
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        event_bus->publish<Events::VisionSceneLoadEvent>({path});
+        Events::VisionSceneLoadEvent event;
+        event.scene_path = path;
+        event_bus->publish<Events::VisionSceneLoadEvent>(std::move(event));
+    }
+}
+
+void load_vision_scene_from_json(const std::string& json_text,
+                                 const std::string& base_dir,
+                                 const std::string& scene_key,
+                                 bool external_live) {
+    if (!is_vision_available()) {
+        CFW_LOG_WARNING("[load_vision_scene_from_json] Vision not compiled in; request ignored");
+        return;
+    }
+
+    if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
+        Events::VisionSceneLoadEvent event;
+        event.scene_json = json_text;
+        event.base_dir = base_dir;
+        event.scene_key = scene_key;
+        event.external_live = external_live;
+        event_bus->publish<Events::VisionSceneLoadEvent>(std::move(event));
     }
 }
 

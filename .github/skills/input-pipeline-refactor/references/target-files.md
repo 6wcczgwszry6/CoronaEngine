@@ -38,7 +38,7 @@ Target role:
 
 ## CEF Realtime Bridge
 
-### examples/cef_subprocess/main.cpp
+### src/systems/ui/cef/cef_renderer_bridge.cpp
 Current role:
 - Injects `cefQuery` in the renderer process.
 - Already injects `window.coronaBridge.cameraMove`.
@@ -151,7 +151,7 @@ Target role:
 - `InputEventBridge.vue`: command bridge only, not raw realtime tunnel
 - `MainPage.vue`: local interaction orchestration and V8 realtime calls
 - `bridge.js`: low-frequency JSON command APIs
-- `cef_subprocess/main.cpp`: V8 bridge injection
+- `cef_renderer_bridge.cpp`: V8 bridge injection
 - `cef_client.cpp`: browser-side receiver and dispatch
 - `browser_ui.cpp`: native browser input only
 - `imgui_ui.cpp`: UI frame orchestration only

@@ -6,6 +6,7 @@
 #include <functional>
 #include <memory>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -19,6 +20,11 @@ namespace API {
 // ============================================================================
 void set_default_surface(void* surface);
 [[nodiscard]] void* get_default_surface();
+
+// Editor camera input ownership. Blockly/game runtimes disable only editor
+// camera controls; keyboard and mouse events continue to reach script input.
+void set_editor_camera_input_enabled(bool enabled);
+[[nodiscard]] bool is_editor_camera_input_enabled();
 
 // ============================================================================
 // Geometry: 作为所有组件的锚点，存储位置/旋转/缩放和模型数据
@@ -98,6 +104,8 @@ class Mechanics {
     // 碰撞检测开关：false 时物体不参与碰撞检测（不与其他物体或地面碰撞）
     void set_collision_enabled(bool enabled);
     [[nodiscard]] bool get_collision_enabled() const;
+    void set_collision_shape(std::string_view shape);
+    [[nodiscard]] std::string get_collision_shape() const;
 
     // 轴锁定：锁定指定轴上的线性运动（平移）
     void set_linear_lock(bool lock_x, bool lock_y, bool lock_z);
@@ -238,7 +246,8 @@ class Actor {
                                      const std::string& json_path,
                                      const std::string& shape_type,
                                      const std::string& shape_identity_key,
-                                     const std::string& model_path);
+                                     const std::string& model_path,
+                                     bool visible = true);
     void clear_external_vision_binding();
     [[nodiscard]] bool has_external_vision_binding() const;
 
@@ -442,6 +451,13 @@ void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handl
 /// @param path 外部 Vision 场景 .json 的绝对路径；传空字符串表示卸载外部场景、
 ///             恢复由引擎数据构建的场景。
 void load_vision_scene(const std::string& path);
+
+/// 请求从内存中的 Vision JSON 加载外部场景。base_dir 用于解析 JSON 内的相对
+/// 资源路径；scene_key 用于缓存、日志和运行时身份标识。
+void load_vision_scene_from_json(const std::string& json_text,
+                                 const std::string& base_dir,
+                                 const std::string& scene_key,
+                                 bool external_live = false);
 
 // ============================================================================
 // Media (video/audio) import

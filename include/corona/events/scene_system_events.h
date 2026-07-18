@@ -30,6 +30,12 @@ struct ActorLeftFrustumEvent {
 struct ActorEvictRequestedEvent {
     std::uintptr_t scene{};
     std::uintptr_t actor{};
+    // gpu_only=true：仅释放 GPU 资源（快照存 ActorCache + 延迟释放显存），
+    //   **不**级联清理底层 Scene/Image 的 CPU 内存。用于 VRAM 压力淘汰——
+    //   GPU 压力绝不误伤 CPU，且 Scene CPU 保留使后续可快速从 CPU 重建 GPU。
+    // gpu_only=false（默认）：GPU 释放 + 级联 try_evict 底层资源 CPU。
+    //   用于不可见帧淘汰、RAM 压力淘汰（整体下线）。
+    bool gpu_only{false};
 };
 
 /**

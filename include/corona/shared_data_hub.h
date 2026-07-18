@@ -36,6 +36,11 @@ struct MeshDevice {
     // 材质颜色 (RGBA)
     std::array<float, 4> materialColor{1.0f, 1.0f, 1.0f, 1.0f};
 
+    // CPU/import-side bounds for GPU visibility/deferred decode diagnostics.
+    uint32_t vertex_count = 0;
+    uint32_t index_count = 0;
+    uint32_t max_index = 0;
+
     // ---- GPU 显存记账令牌（P0：mesh/texture 计量）----
     // mesh_mem 覆盖本 MeshDevice 的 4 个 GPU 缓冲（vertex/index/storage）；
     // tex_mem 覆盖 textureBuffer（仅真实纹理时非空，占位/共享纹理计 0）。
@@ -122,6 +127,12 @@ struct GeometryDevice {
     ktm::fvec3 skinned_aabb_max{0.0f, 0.0f, 0.0f};
 };
 
+enum class CollisionShape : std::uint8_t {
+    None,
+    Box,
+    Mesh,
+};
+
 struct MechanicsDevice {
     std::uintptr_t geometry_handle{};
     ktm::fvec3 max_xyz;
@@ -135,8 +146,8 @@ struct MechanicsDevice {
     // 物理开关：false 时物理系统跳过该对象（不参与模拟，但仍保留数据）
     bool physics_enabled{false};
 
-    // 力学碰撞检测开关：false 时完全禁用该物体的碰撞检测（物体不与其他物体或地面碰撞）
-    bool bEnableCollision{false};
+    // 权威碰撞形状。None 完全禁用；Box 使用包围体；Mesh 允许三角形窄相。
+    CollisionShape collision_shape{CollisionShape::Box};
 
     // 轴锁定位掩码：bit0=锁定X轴, bit1=锁定Y轴, bit2=锁定Z轴
     uint8_t linear_lock_mask{0};   // 锁定线性运动（平移）的轴
@@ -192,6 +203,7 @@ struct ProfileDevice {
 
 struct ExternalVisionBindingDevice {
     bool enabled{false};
+    bool visible{true};
     std::string source_path;
     std::string shape_guid;
     int shape_index{-1};

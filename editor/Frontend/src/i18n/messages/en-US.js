@@ -305,6 +305,8 @@ export default {
     control: 'Control',
     detect: 'Sensing',
     engine: 'Engine',
+    object: 'Objects',
+    ui: 'UI',
     event: 'Events',
     functions: 'Functions',
     list: 'Lists',

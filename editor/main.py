@@ -1,6 +1,7 @@
 import logging
 import os
 import sys
+import atexit
 from pathlib import Path
 
 from CoronaCore.core.corona_editor import CoronaEditor
@@ -34,6 +35,8 @@ except:
 
 editor = CoronaEditor
 editor.module_list["CoronaEditor"] = CoronaEditor
+editor.register_script_dispatcher()
+atexit.register(editor.unregister_script_dispatcher)
 
 
 def run():
@@ -45,4 +48,4 @@ def run():
     except:
         pass
 
-    logging.info("Python editor backend initialized; C++ UI owns the Vue/CEF frontend tab.")
+    logging.info("Python script runtime initialized; C++ UI owns the Vue/CEF frontend tab.")

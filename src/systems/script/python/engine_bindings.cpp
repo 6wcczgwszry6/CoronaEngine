@@ -14,7 +14,10 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <memory>
+#include <mutex>
 
 #include <SDL3/SDL.h>
 
@@ -46,6 +49,9 @@ std::string get_editor_scene_snapshot_from_python(const std::string& scene_name)
 std::string set_editor_actor_transform_from_python(const std::string& scene_name,
                                                    const std::string& actor_name,
                                                    const std::string& transform_json);
+std::string set_editor_camera_transform_from_python(const std::string& scene_name,
+                                                    const std::string& camera_name,
+                                                    const std::string& camera_data_json);
 std::string capture_editor_camera_view_from_python(const std::string& scene_name,
                                                    const std::string& camera_name,
                                                    const std::string& camera_data_json,
@@ -56,6 +62,51 @@ namespace nb = nanobind;
 using namespace Corona::API;
 
 namespace EngineScripts {
+
+namespace {
+std::mutex g_python_callback_mutex;
+std::deque<std::function<void()>> g_python_callbacks;
+bool g_python_callback_scheduled = false;
+
+int run_pending_python_callbacks(void*) {
+    for (;;) {
+        std::function<void()> callback;
+        {
+            std::lock_guard lock(g_python_callback_mutex);
+            if (g_python_callbacks.empty()) {
+                g_python_callback_scheduled = false;
+                return 0;
+            }
+            callback = std::move(g_python_callbacks.front());
+            g_python_callbacks.pop_front();
+        }
+        try {
+            callback();
+        } catch (const std::exception& error) {
+            CFW_LOG_ERROR("[Bindings::pending_callback] {}", error.what());
+        } catch (...) {
+            CFW_LOG_ERROR("[Bindings::pending_callback] Unknown exception");
+        }
+    }
+}
+
+void enqueue_python_callback(std::function<void()> callback) {
+    bool schedule = false;
+    {
+        std::lock_guard lock(g_python_callback_mutex);
+        g_python_callbacks.push_back(std::move(callback));
+        if (!g_python_callback_scheduled) {
+            g_python_callback_scheduled = true;
+            schedule = true;
+        }
+    }
+    if (schedule && Py_AddPendingCall(&run_pending_python_callbacks, nullptr) != 0) {
+        std::lock_guard lock(g_python_callback_mutex);
+        g_python_callback_scheduled = false;
+        CFW_LOG_WARNING("Python pending-call queue is full; callbacks retained for retry");
+    }
+}
+}  // namespace
 
 namespace {
 
@@ -178,14 +229,9 @@ void BindAll(nanobind::module_& m) {
                 });
 
                 CallbackType cb = [func_ptr](std::uintptr_t other, bool began, const std::array<float, 3>& normal, const std::array<float, 3>& point) mutable {
-                    nb::gil_scoped_acquire gil;
-                    try {
+                    enqueue_python_callback([func_ptr, other, began, normal, point] {
                         (*func_ptr).attr("__call__")(other, began, normal, point);
-                    }  catch (const std::exception &e) {
-                        CFW_LOG_ERROR("[Bindings::collision_callback] std::exception when invoking Python callback: {}", e.what());
-                    } catch (...) {
-                        CFW_LOG_ERROR("[Bindings::collision_callback] Unknown exception when invoking Python callback");
-                    }
+                    });
                 };
 
                  self.set_collision_callback(cb); },
@@ -209,17 +255,14 @@ void BindAll(nanobind::module_& m) {
                 });
 
                 CallbackType cb = [func_ptr]() mutable {
-                    nb::gil_scoped_acquire gil;
-                    try {
+                    enqueue_python_callback([func_ptr] {
                         (*func_ptr).attr("__call__")();
-                    } catch (const std::exception& e) {
-                        CFW_LOG_ERROR("[Bindings::move_callback] std::exception when invoking Python callback: {}", e.what());
-                    } catch (...) {
-                        CFW_LOG_ERROR("[Bindings::move_callback] Unknown exception when invoking Python callback");
-                    }
+                    });
                 };
 
-                self.set_on_move_callback(cb); }, nb::arg("callback"), "Set move callback for geometry.");
+                self.set_on_move_callback(cb); }, nb::arg("callback"), "Set move callback for geometry.")
+        .def("set_collision_shape", &Mechanics::set_collision_shape, nb::arg("shape"))
+        .def("get_collision_shape", &Mechanics::get_collision_shape);
 
     // ============================================================================
     // Optics: 光学/渲染组件
@@ -320,7 +363,7 @@ void BindAll(nanobind::module_& m) {
         .def("set_external_vision_binding", &Actor::set_external_vision_binding,
              nb::arg("source_path"), nb::arg("shape_guid"), nb::arg("shape_index"),
              nb::arg("json_path"), nb::arg("shape_type"), nb::arg("shape_identity_key"),
-             nb::arg("model_path"))
+             nb::arg("model_path"), nb::arg("visible") = true)
         .def("clear_external_vision_binding", &Actor::clear_external_vision_binding)
         .def("has_external_vision_binding", &Actor::has_external_vision_binding)
         .def("get_handle", &Actor::get_handle, "Get the underlying handle of this actor");
@@ -824,6 +867,11 @@ void BindAll(nanobind::module_& m) {
           "Load an external Vision scene file (.json). Pass an empty string to "
           "unload and restore the engine-built scene. Only effective when Vision "
           "is available and the Vision backend is active.");
+    m.def("load_vision_scene_from_json", &load_vision_scene_from_json,
+          nb::arg("json_text"), nb::arg("base_dir"), nb::arg("scene_key"),
+          nb::arg("external_live") = false,
+          "Load an external Vision scene from in-memory JSON. base_dir resolves "
+          "relative resources and scene_key identifies the runtime cache entry.");
 
     // ============================================================================
     // Media (video/audio) import — standalone resources, not 3D actors
@@ -913,6 +961,18 @@ void BindAll(nanobind::module_& m) {
             nb::arg("transform_json"),
             "Set a native editor actor transform, persist it, and return actor JSON.");
 
+    m.def("set_editor_camera_transform",
+            [](const std::string& scene_name,
+               const std::string& camera_name,
+               const std::string& camera_data_json) {
+               return Corona::Systems::UI::set_editor_camera_transform_from_python(
+                   scene_name, camera_name, camera_data_json);
+            },
+            nb::arg("scene_name"),
+            nb::arg("camera_name") = "",
+            nb::arg("camera_data_json") = "{}",
+            "Set the active native editor camera transform; pass persist=false for runtime preview updates.");
+
     m.def("capture_editor_camera_view",
             [](const std::string& scene_name,
                const std::string& camera_name,
@@ -959,7 +1019,7 @@ void BindAll(nanobind::module_& m) {
     }, "Clear the camera follow target");
 
     m.def("camera_follow_set_input_enabled", [](bool enabled) {
-        Corona::Systems::CameraFollowController::instance().set_input_enabled(enabled);
+        Corona::API::set_editor_camera_input_enabled(enabled);
     }, nb::arg("enabled"),
        "Enable or disable editor camera-follow keyboard/mouse input");
 

@@ -30,6 +30,27 @@
             unsupported {{ sceneVision.unsupported_count }}
           </span>
         </div>
+        <span
+          v-if="scenePreviewSummary"
+          class="scene-preview-summary"
+          :class="{ error: scenePreviewHasError }"
+          :title="scenePreviewDetailTitle"
+          data-testid="scene-global-run-status"
+        >
+          {{ scenePreviewSummary }}
+        </span>
+        <button
+          type="button"
+          class="scene-preview-button"
+          :class="{ running: scenePreviewStopAvailable }"
+          :disabled="scenePreviewButtonDisabled"
+          :title="scenePreviewButtonTitle"
+          data-testid="scene-global-run-button"
+          @pointerdown.stop
+          @click.stop.prevent="toggleSceneScripts($event)"
+        >
+          {{ scenePreviewButtonLabel }}
+        </button>
       </div>
 
       <div class="viewport-control-strip" data-testid="scenebar-viewport-controls">
@@ -512,7 +533,7 @@
           </div>
 
           <!-- 对象列表 -->
-          <div v-show="actorsExpanded" class="pl-2">
+          <div v-show="actorsExpanded" class="pl-2 pb-8">
             <div
               v-for="scene in sceneImages"
               :key="scene.name"
@@ -698,7 +719,7 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
+import { editorApi, appService, sceneService, projectService, resourceService, scriptingService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
@@ -712,6 +733,10 @@ const { error: logError, warn: logWarn } = useErrorHandler('SceneBar');
 const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
 const defaultViewportControls = {
   available: false,
+  previewRunning: false,
+  previewBusy: false,
+  previewStatusText: '',
+  preview: {},
   viewportUiMode: 'flat2d',
   viewportUiModes: [
     { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI', active: true },
@@ -719,12 +744,17 @@ const defaultViewportControls = {
   ],
   cameraSpeed: 0.2,
 };
+const currentSceneName = ref('');
 const viewportControlState = ref({ ...defaultViewportControls });
 const cameraSpeedLabel = computed(() =>
   Number(viewportControlState.value.cameraSpeed || 0).toFixed(2)
 );
 let viewportControlPollTimer = null;
 let speedApplyTimer = null;
+let actorChangedCallbackToken = null;
+let focusPoseResultCallbackToken = null;
+let sceneTreeChangedCallbackToken = null;
+let directPreviewPollTimer = null;
 
 const normalizeViewportControls = (state = {}) => {
   const modes = Array.isArray(state.viewportUiModes) && state.viewportUiModes.length > 0
@@ -733,6 +763,10 @@ const normalizeViewportControls = (state = {}) => {
   const speed = Number(state.cameraSpeed);
   return {
     available: Boolean(state.available),
+    previewRunning: Boolean(state.previewRunning),
+    previewBusy: Boolean(state.previewBusy),
+    previewStatusText: String(state.previewStatusText || ''),
+    preview: state.preview && typeof state.preview === 'object' ? { ...state.preview } : {},
     viewportUiMode: state.viewportUiMode || defaultViewportControls.viewportUiMode,
     viewportUiModes: modes.map((item) => ({
       mode: item.mode,
@@ -807,6 +841,195 @@ const onViewportControlsState = (state) => {
   syncViewportControls(state);
 };
 
+const scenePreviewActionBusy = ref(false);
+const sceneIdTokens = (value) => {
+  const text = String(value || '').trim().replace(/\\/g, '/').toLowerCase();
+  if (!text) return new Set();
+  const name = text.split('/').pop() || text;
+  const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
+  return new Set([text, name, stem]);
+};
+const isSameSceneId = (left, right) => {
+  const leftTokens = sceneIdTokens(left);
+  const rightTokens = sceneIdTokens(right);
+  return Array.from(leftTokens).some((token) => rightTokens.has(token));
+};
+const activePreview = computed(() => viewportControlState.value.preview || {});
+const anyPreviewActive = computed(() =>
+  Boolean(viewportControlState.value.previewRunning || activePreview.value.hasSnapshot || activePreview.value.has_snapshot)
+);
+// 场景运行启动后，即使用户切换了场景，或后端返回的是 route 而前端保存的是
+// scene id，也必须保留停止入口。否则按钮会因标识不完全一致而永久禁用。
+const scenePreviewStopAvailable = computed(() =>
+  anyPreviewActive.value && activePreview.value.scope === 'scene'
+);
+const scenePreviewHasError = computed(() =>
+  Number(activePreview.value.errorCount ?? activePreview.value.error_count ?? 0) > 0
+  || activePreview.value.status === 'error'
+);
+const scenePreviewButtonDisabled = computed(() =>
+  scenePreviewActionBusy.value
+  || viewportControlState.value.previewBusy
+  || (!currentSceneName.value && !scenePreviewStopAvailable.value)
+  || (anyPreviewActive.value && !scenePreviewStopAvailable.value)
+);
+const scenePreviewButtonLabel = computed(() =>
+  scenePreviewStopAvailable.value ? '停止并恢复' : '全局运行'
+);
+const scenePreviewButtonTitle = computed(() => {
+  if (scenePreviewStopAvailable.value) return '停止正在运行的场景脚本并恢复运行前状态';
+  if (!currentSceneName.value) return '请先打开场景';
+  if (anyPreviewActive.value) return '项目预览正在运行';
+  return '运行当前场景全部物体的积木和节点图脚本';
+});
+const scenePreviewSummary = computed(() => {
+  const preview = activePreview.value;
+  const state = preview.status || '';
+  const running = Number(preview.runningCount ?? preview.running_count ?? 0);
+  const started = Number(preview.startedCount ?? preview.started_count ?? 0);
+  const blockly = Number(preview.blocklyCount ?? preview.blockly_count ?? 0);
+  const nodeGraph = Number(preview.nodeGraphCount ?? preview.node_graph_count ?? 0);
+  const errors = Number(preview.errorCount ?? preview.error_count ?? 0);
+  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return '处理中...';
+  if (anyPreviewActive.value && !scenePreviewStopAvailable.value) {
+    return '项目预览运行中';
+  }
+  if (scenePreviewStopAvailable.value) {
+    return `运行 ${running || started}（积木 ${blockly} / 节点 ${nodeGraph}）`;
+  }
+  const previewScene = preview.sceneName || preview.scene_name || '';
+  if (preview.scope !== 'scene' || !isSameSceneId(previewScene, currentSceneName.value)) return '';
+  if (state === 'completed') return errors ? `已完成，${errors} 个错误` : '已完成';
+  if (state === 'stopped') return '已停止并恢复';
+  if (state === 'error') return (preview.restoreError || preview.restore_error) ? '场景恢复失败' : (errors ? `${errors} 个脚本错误` : '运行失败');
+  if (!started && Array.isArray(preview.warnings) && preview.warnings.length) return '无可运行脚本';
+  return viewportControlState.value.previewStatusText || '';
+});
+const scenePreviewDetailTitle = computed(() => {
+  const preview = activePreview.value;
+  const details = [preview.restoreError || preview.restore_error, ...(preview.errors || []), ...(preview.warnings || [])].filter(Boolean);
+  return details.length ? details.join('\n') : scenePreviewSummary.value;
+});
+
+const unwrapBridgeData = (result) => result?.data ?? result;
+
+const publishGamePreviewStatus = (preview = {}) => {
+  if (typeof window === 'undefined') return;
+  window.__coronaGamePreviewState = preview;
+  window.dispatchEvent(new CustomEvent('corona-game-preview-status', { detail: preview }));
+};
+
+const applyDirectPreviewStatus = (payload = {}) => {
+  const preview = {
+    ...payload,
+    scope: payload.scope || 'project',
+    sceneName: payload.sceneName ?? payload.scene_name ?? '',
+    runningCount: Number(payload.runningCount ?? payload.running_count ?? 0),
+    startedCount: Number(payload.startedCount ?? payload.started_count ?? 0),
+    errorCount: Number(payload.errorCount ?? payload.error_count ?? 0),
+    blocklyCount: Number(payload.blocklyCount ?? payload.blockly_count ?? 0),
+    nodeGraphCount: Number(payload.nodeGraphCount ?? payload.node_graph_count ?? 0),
+    hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
+    stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
+  };
+  const active = ['starting', 'running', 'stopping'].includes(preview.status)
+    || preview.runningCount > 0
+    || preview.hasSnapshot;
+  viewportControlState.value = {
+    ...viewportControlState.value,
+    available: true,
+    previewRunning: active,
+    previewBusy: false,
+    preview,
+  };
+  publishGamePreviewStatus(preview);
+  return preview;
+};
+
+const pollDirectPreviewStatus = () => {
+  if (directPreviewPollTimer) clearTimeout(directPreviewPollTimer);
+  const poll = async () => {
+    try {
+      const preview = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
+      if (['starting', 'running', 'stopping'].includes(preview.status) || preview.stopPending) {
+        directPreviewPollTimer = window.setTimeout(poll, 500);
+      } else {
+        directPreviewPollTimer = null;
+      }
+    } catch (error) {
+      directPreviewPollTimer = null;
+      logWarn('查询全局运行状态失败', error);
+    }
+  };
+  directPreviewPollTimer = window.setTimeout(poll, 150);
+};
+
+const refreshPreviewStateSoon = () => {
+  requestViewportControlsState();
+  window.setTimeout(requestViewportControlsState, 250);
+  window.setTimeout(requestViewportControlsState, 900);
+};
+
+const toggleSceneScripts = async (event = null) => {
+  // Remove button focus immediately so the game's Space input cannot retrigger
+  // the preview button after global execution starts.
+  event?.currentTarget?.blur?.();
+  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return;
+  const controls = getEditorControls();
+  window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
+  window.__coronaPreviewActionPending = true;
+  window.__coronaPreviewPendingScope = 'scene';
+  scenePreviewActionBusy.value = true;
+  let stopping = false;
+  try {
+    // 始终以后端状态决定本次点击是启动还是停止，避免场景栏轮询稍慢时
+    // 第二次点击再次发送 start，或第一次启动后仍显示成“全局运行”。
+    const live = applyDirectPreviewStatus(
+      unwrapBridgeData(await scriptingService.getGamePreviewStatus())
+    );
+    const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
+      || live.runningCount > 0
+      || live.hasSnapshot;
+    stopping = liveActive && live.scope === 'scene';
+
+    if (stopping) {
+      if (controls && typeof controls.stopPreview === 'function') {
+        await controls.stopPreview();
+      } else {
+        applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.stopGamePreview()));
+        pollDirectPreviewStatus();
+      }
+    } else if (liveActive) {
+      throw new Error('项目预览正在运行，请先在主视口停止');
+    } else {
+      const request = { scope: 'scene', scene_name: currentSceneName.value };
+      let started;
+      if (controls && typeof controls.startPreview === 'function') {
+        started = await controls.startPreview(request);
+      } else {
+        started = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.startGamePreview(request)));
+        pollDirectPreviewStatus();
+      }
+      if (started === false) {
+        const refreshed = applyDirectPreviewStatus(
+          unwrapBridgeData(await scriptingService.getGamePreviewStatus())
+        );
+        const message = refreshed.message || refreshed.errors?.[0] || '全局运行启动失败';
+        throw new Error(message);
+      }
+    }
+  } catch (error) {
+    logError(stopping ? '停止并恢复失败' : '全局运行失败', error);
+  } finally {
+    window.__coronaPreviewActionPendingCount = Math.max(0, Number(window.__coronaPreviewActionPendingCount || 1) - 1);
+    window.__coronaPreviewActionPending = window.__coronaPreviewActionPendingCount > 0;
+    if (!window.__coronaPreviewActionPending) window.__coronaPreviewPendingScope = '';
+    scenePreviewActionBusy.value = false;
+    refreshPreviewStateSoon();
+    pollDirectPreviewStatus();
+  }
+};
+
 const showLoading = (title, message, progress = 0) => {
   coronaEventBus.emit('loading-show', { title, message, progress });
 };
@@ -856,7 +1079,6 @@ const sceneImages = ref([]);
 const sceneVision = ref({});
 const playingStates = reactive({});  // { name: true/false } — 音频播放状态
 const route = useRoute();
-const currentSceneName = ref('');
 const px = ref('1.0'),
   py = ref('1.0'),
   pz = ref('1.0');
@@ -1173,7 +1395,10 @@ const clearActorSingleClickTimer = () => {
   }
 };
 
-const handleFocusPoseResult = (requestId, payload) => {
+const handleFocusPoseResult = (payloadOrRequestId, maybePayload) => {
+  const payload = maybePayload ?? payloadOrRequestId;
+  const requestId =
+    typeof payloadOrRequestId === 'string' ? payloadOrRequestId : payload?.request_id;
   const pending = pendingFocusPoseRequests.get(requestId);
   if (!pending) return;
 
@@ -1240,11 +1465,9 @@ const SelectActor = (scene) => {
   if (isMediaItem(scene) && !isAudioActor(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
-  if (typeof window !== 'undefined' && typeof window.__coronaEmit === 'function') {
-    window.__coronaEmit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
-  } else {
-    coronaEventBus.emit('actor-change', scene.type || 'actor', currentSceneName.value, scene.name);
-  }
+  editorApi.sceneTools.selectActor(currentSceneName.value, scene.type || 'actor', scene.name).catch((error) => {
+    logError('Failed to publish actor selection', error);
+  });
 };
 
 const SelectCamera = (cam) => {
@@ -1834,12 +2057,6 @@ const createActorFromSelectedFile = async (payload, actorType, logLabel) => {
 };
 
 const HandleFileImport = async () => {
-  // 测试 window.cefQuery 是否存在
-  if (typeof window.cefQuery === 'undefined') {
-    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
-    return;
-  }
-
   ShowModelDropdown.value = false;
   if (!currentSceneName.value) {
     logWarn('File import aborted: no active scene');
@@ -1868,11 +2085,6 @@ const HandleFileImport = async () => {
 
 const HandleUiImageImport = async () => {
   // 导入一张图片，自动创建一个带该图为纹理的 quad（光场 UI 平面），默认作为 UI。
-  if (typeof window.cefQuery === 'undefined') {
-    alert('错误：window.cefQuery 未定义！CEF bridge 未初始化。');
-    return;
-  }
-
   ShowModelDropdown.value = false;
   if (!currentSceneName.value) {
     logWarn('UI image import aborted: no active scene');
@@ -2091,21 +2303,24 @@ onMounted(async () => {
   requestViewportControlsState();
   viewportControlPollTimer = window.setInterval(requestViewportControlsState, 1000);
 
-  // 监听 Python 推送的 actor-change：场景切换/物体变化时重新加载场景树
+  // 后端对象变化：场景切换/物体变化时重新加载场景树
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
-  coronaEventBus.on('actor-change', onActorChangeEvent);
-  coronaEventBus.on('scene-tree-changed', onSceneTreeChangedEvent);
-  coronaEventBus.on('focus-pose-result', handleFocusPoseResult);
+  actorChangedCallbackToken = await editorApi.events.onActorChanged(onActorChangeEvent);
+  sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onSceneTreeChangedEvent);
+  focusPoseResultCallbackToken = await editorApi.events.onFocusPoseResult(handleFocusPoseResult);
 });
 
 // 场景切换时刷新当前场景树；actor 选择只更新详情面板，不重建树，避免点击闪烁。
-const onActorChangeEvent = (type, sceneId /*, actorId, oldPath */) => {
+const onActorChangeEvent = (payload, maybeSceneId /*, actorId, oldPath */) => {
+  const type = payload?.actor_type ?? payload?.type ?? payload;
+  const sceneId = payload?.scene ?? maybeSceneId;
   if (type !== 'scene' || !sceneId) return;
   currentSceneName.value = sceneId;
   OnInitObjTree();
 };
 
-const onSceneTreeChangedEvent = (sceneName) => {
+const onSceneTreeChangedEvent = (payload) => {
+  const sceneName = payload?.scene ?? payload;
   if (!sceneName || sceneName === currentSceneName.value) {
     OnInitObjTree();
   }
@@ -2187,6 +2402,10 @@ onUnmounted(() => {
     clearTimeout(speedApplyTimer);
     speedApplyTimer = null;
   }
+  if (directPreviewPollTimer) {
+    clearTimeout(directPreviewPollTimer);
+    directPreviewPollTimer = null;
+  }
   clearFocusPoseCache();
   clearActorSingleClickTimer();
   actorFocusSeq++;
@@ -2199,13 +2418,70 @@ onUnmounted(() => {
   pendingFocusCameraMoveFrames.clear();
 
   coronaEventBus.off('viewport-controls-state', onViewportControlsState);
-  coronaEventBus.off('actor-change', onActorChangeEvent);
-  coronaEventBus.off('scene-tree-changed', onSceneTreeChangedEvent);
-  coronaEventBus.off('focus-pose-result', handleFocusPoseResult);
+  if (actorChangedCallbackToken) {
+    editorApi.off(actorChangedCallbackToken).catch((error) => {
+      logError('Failed to unregister actor changed callback', error);
+    });
+    actorChangedCallbackToken = null;
+  }
+  if (sceneTreeChangedCallbackToken) {
+    editorApi.off(sceneTreeChangedCallbackToken).catch((error) => {
+      logError('Failed to unregister scene tree changed callback', error);
+    });
+    sceneTreeChangedCallbackToken = null;
+  }
+  if (focusPoseResultCallbackToken) {
+    editorApi.off(focusPoseResultCallbackToken).catch((error) => {
+      logError('Failed to unregister focus pose result callback', error);
+    });
+    focusPoseResultCallbackToken = null;
+  }
 });
 </script>
 
 <style scoped>
+.scene-preview-button {
+  flex: 0 0 auto;
+  min-width: 72px;
+  padding: 4px 8px;
+  border: 1px solid rgba(132, 166, 91, 0.65);
+  border-radius: 5px;
+  background: rgba(73, 96, 49, 0.72);
+  color: #e8f4dc;
+  font-size: 10px;
+  line-height: 1.2;
+  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
+}
+
+.scene-preview-button:hover:not(:disabled) {
+  background: rgba(105, 137, 71, 0.9);
+  border-color: #9bc46a;
+}
+
+.scene-preview-button.running {
+  border-color: rgba(211, 103, 86, 0.85);
+  background: rgba(117, 48, 42, 0.82);
+  color: #ffd9d2;
+}
+
+.scene-preview-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.scene-preview-summary {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #b9d79d;
+  font-size: 10px;
+}
+
+.scene-preview-summary.error {
+  color: #ff9b8f;
+}
+
 .scene-tools-panel {
   background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
   border: 1px solid rgba(255, 255, 255, 0.08);

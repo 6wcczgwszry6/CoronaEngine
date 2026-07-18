@@ -11,6 +11,8 @@
 #include <cfloat>
 #include <cmath>
 #include <cstdint>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -940,8 +942,8 @@ inline void optimize_mesh_for_gpu(std::vector<Vertex>& vertices,
 inline MeshOptimizeResult optimize_mesh_pipeline(
     std::vector<Vertex>& unindexed_vertices,
     std::vector<std::uint32_t>& indices,
-    bool /*simplify_mesh*/,          // 忽略：始终简化
-    float /*simplification_error*/,  // 忽略：使用渐进式误差
+    bool simplify_mesh,
+    float /*simplification_error*/,  // 渐进式简化路径使用固定误差阶梯
     const std::string& mesh_name,
     const std::vector<BoneWeights>* bone_weights = nullptr) {
     MeshOptimizeResult result;
@@ -953,6 +955,66 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
     if (!can_simplify) {
         CFW_LOG_WARNING("[MeshOpt] Mesh '{}' cannot be simplified (not a triangle mesh or empty), skipping simplification",
                         mesh_name);
+        return result;
+    }
+
+    std::vector<unsigned int> remap(unindexed_vertices.size());
+    const size_t unique_vertex_count = generate_vertex_remap_rig_aware(
+        remap, indices, unindexed_vertices, bone_weights);
+
+    if (!simplify_mesh) {
+        if (unique_vertex_count <= kMaxVerticesUint16) {
+            result.indices.resize(indices.size());
+            meshopt_remapIndexBuffer(result.indices.data(), indices.data(),
+                                     indices.size(), remap.data());
+
+            result.vertices.resize(unique_vertex_count);
+            meshopt_remapVertexBuffer(
+                result.vertices.data(),
+                unindexed_vertices.data(),
+                unindexed_vertices.size(),
+                sizeof(Vertex),
+                remap.data());
+
+            if (has_bones) {
+                result.bone_weights.resize(unique_vertex_count);
+                meshopt_remapVertexBuffer(
+                    result.bone_weights.data(),
+                    bone_weights->data(),
+                    bone_weights->size(),
+                    sizeof(BoneWeights),
+                    remap.data());
+            }
+
+            if (!result.vertices.empty()) {
+                optimize_mesh_for_gpu(result.vertices, result.indices, mesh_name,
+                                      has_bones ? &result.bone_weights : nullptr);
+            }
+
+            result.was_split = false;
+            result.success = true;
+            return result;
+        }
+
+        auto split_results = split_mesh_uniformly(unindexed_vertices, indices,
+                                                  unique_vertex_count, mesh_name,
+                                                  has_bones ? bone_weights : nullptr);
+        if (split_results.empty()) {
+            CFW_LOG_ERROR("[MeshOpt] Mesh '{}': failed to split mesh", mesh_name);
+            return result;
+        }
+
+        for (auto& sub_mesh : split_results) {
+            if (!sub_mesh.vertices.empty()) {
+                const bool sub_has_bones = !sub_mesh.bone_weights.empty();
+                optimize_mesh_for_gpu(sub_mesh.vertices, sub_mesh.indices, mesh_name,
+                                      sub_has_bones ? &sub_mesh.bone_weights : nullptr);
+            }
+        }
+
+        result.sub_meshes = std::move(split_results);
+        result.was_split = true;
+        result.success = true;
         return result;
     }
 
@@ -1034,8 +1096,40 @@ inline MeshOptimizeResult optimize_mesh_pipeline(
     return result;
 }
 
-/// 将 uint32 索引转换为 uint16
-inline std::vector<std::uint16_t> convert_indices_to_uint16(const std::vector<std::uint32_t>& indices) {
+/// 将 uint32 索引转换为 uint16，并在 CPU 侧拒绝会截断或越界的 mesh。
+inline std::vector<std::uint16_t> convert_indices_to_uint16(const std::vector<std::uint32_t>& indices,
+                                                            size_t vertex_count = 0,
+                                                            const std::string& mesh_name = "<unnamed>") {
+    constexpr std::uint32_t kMaxUint16Index = std::numeric_limits<std::uint16_t>::max();
+    constexpr size_t kMaxUint16AddressableVertices =
+        static_cast<size_t>(std::numeric_limits<std::uint16_t>::max()) + 1u;
+
+    for (size_t i = 0; i < indices.size(); ++i) {
+        const std::uint32_t idx = indices[i];
+        if (idx > kMaxUint16Index) {
+            CFW_LOG_ERROR("[MeshOpt] Mesh '{}': index {} at element {} exceeds uint16 max {}",
+                          mesh_name, idx, i, kMaxUint16Index);
+            throw std::runtime_error("[MeshOpt] Mesh '" + mesh_name +
+                                     "' has index " + std::to_string(idx) +
+                                     " above uint16 range");
+        }
+        if (vertex_count > 0 && static_cast<size_t>(idx) >= vertex_count) {
+            CFW_LOG_ERROR("[MeshOpt] Mesh '{}': index {} at element {} exceeds vertex count {}",
+                          mesh_name, idx, i, vertex_count);
+            throw std::runtime_error("[MeshOpt] Mesh '" + mesh_name +
+                                     "' has index " + std::to_string(idx) +
+                                     " outside vertex count " + std::to_string(vertex_count));
+        }
+    }
+
+    if (vertex_count > kMaxUint16AddressableVertices) {
+        CFW_LOG_ERROR("[MeshOpt] Mesh '{}': vertex count {} exceeds uint16 addressable vertex count {}",
+                      mesh_name, vertex_count, kMaxUint16AddressableVertices);
+        throw std::runtime_error("[MeshOpt] Mesh '" + mesh_name +
+                                 "' has vertex count " + std::to_string(vertex_count) +
+                                 " above uint16 addressable range");
+    }
+
     std::vector<std::uint16_t> result;
     result.reserve(indices.size());
     for (auto idx : indices) {
@@ -1134,11 +1228,8 @@ inline LODLevel build_lod_level_from_simplified(
                           has_bones ? &compact_weights : nullptr);
 
     // 转换索引为 uint16
-    std::vector<std::uint16_t> final_indices;
-    final_indices.reserve(remapped_indices.size());
-    for (auto idx : remapped_indices) {
-        final_indices.push_back(static_cast<std::uint16_t>(idx));
-    }
+    std::vector<std::uint16_t> final_indices =
+        convert_indices_to_uint16(remapped_indices, compact_vertices.size(), lod_label);
 
     LODLevel level;
     level.vertices = std::move(compact_vertices);
@@ -1278,6 +1369,15 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
 
     const size_t T0 = indices_u32.size() / 3;
 
+    // meshopt 的 result_error 是相对归一化偏差；乘 simplifyScale 得模型空间（object-space）
+    // 绝对误差，供运行时屏幕空间/角度误差选级使用（screen-space error LOD）。
+    // 顶点已在 import 时归一化，故此 scale 与运行时 actor scale 互补：
+    //   world_error = geometric_error * actor_scale。一次算好缓存。
+    const float simplify_scale =
+        vertices.empty() ? 1.0f
+                         : meshopt_simplifyScale(&vertices[0].position[0],
+                                                 vertices.size(), sizeof(Vertex));
+
     // 相对比例下限（+ 可选绝对下限）。蒙皮网格更保守（静止误差对动画偏乐观）。
     const float min_ratio_eff = has_bones ? options.skinned_min_ratio : options.min_ratio;
     const float ratio = std::max(0.0f, std::min(min_ratio_eff, 1.0f));
@@ -1357,6 +1457,9 @@ inline std::vector<LODLevel> generate_lod_levels_adaptive(
             indices_u32.size(), lod_label);
 
         level.error = result_error;
+        // 模型空间绝对误差（screen-space error LOD 的核心输入）：result_error 为归一化
+        // 相对偏差，× simplify_scale 转模型空间。运行时再 × actor_scale 得世界误差。
+        level.geometric_error = result_error * simplify_scale;
         // 切换阈值按"实际三角形保留比例 r = 该级三角形 / LOD0"推导：
         //   screen_threshold = clamp(sqrt(r) * kAggr)
         // r 恒在 (0,1]，跨网格稳定；保留比例越低（越粗）→ 阈值越小 → 物体越小才用，
@@ -1440,6 +1543,12 @@ inline std::vector<LODLevel> generate_lod_levels(
         lock_ptr = &seam_locks;
     }
 
+    // meshopt 误差为归一化量（相对网格尺度）；乘 simplifyScale 转模型空间绝对误差，
+    // 供运行时 screen-space-error 选级（geometric_error）。与自适应路径同源。
+    const float simplify_scale = (!vertices.empty())
+        ? meshopt_simplifyScale(&vertices[0].position[0], vertices.size(), sizeof(Vertex))
+        : 1.0f;
+
     for (std::uint32_t i = 0; i < actual_levels; ++i) {
         float ratio = options.target_ratios[i];
         float level_max_error = options.max_errors[i];
@@ -1494,8 +1603,10 @@ inline std::vector<LODLevel> generate_lod_levels(
             indices_u32.size(), lod_label);
 
         level.error = result_error;
-        // 旧反比公式（保持 legacy 行为）
+        // 旧反比公式（保持 legacy 行为，作为无 geometric_error 时的回退阈值）
         level.screen_threshold = (result_error > 0.0f) ? std::max(0.01f, 1.0f / (1.0f + result_error * 80.0f)) : 0.0f;
+        // 模型空间绝对几何误差（运行时 screen-space-error 选级主用）
+        level.geometric_error = result_error * simplify_scale;
 
         (void)ratio;
         levels.push_back(std::move(level));

@@ -5,6 +5,7 @@
 #include "base/shape.h"
 #include "base/mgr/scene.h"
 #include "importers/assimp_parser.h"
+#include "model_normalization.h"
 
 namespace vision {
 
@@ -32,6 +33,21 @@ public:
                                desc["flip_uv"].as_bool(true));
         string mat_name = desc["material"].as_string();
         auto instances = parser.parse_meshes(false, desc["subdiv_level"].as_uint(0u));
+        std::vector<std::vector<ocarina::Vertex>*> meshes;
+        meshes.reserve(instances.size());
+        for (auto& instance : instances) {
+            if (instance.mesh()) {
+                meshes.push_back(&instance.mesh()->vertices());
+            }
+        }
+        const bool normalize_to_unit_bounds =
+            desc["normalize_to_unit_bounds"].as_bool(false);
+        const auto normalization = normalize_model_vertices_to_unit_bounds(
+            meshes, normalize_to_unit_bounds);
+        if (normalize_to_unit_bounds && !normalization.valid) {
+            OC_WARNING("Model normalization skipped for invalid or degenerate mesh: ",
+                       fn.string());
+        }
         add_instances(ocarina::move(instances));
     }
 };

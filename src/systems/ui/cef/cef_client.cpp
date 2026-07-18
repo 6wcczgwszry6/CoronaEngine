@@ -7,11 +7,14 @@
 #include <filesystem>
 #include <string>
 #include <system_error>
+#include <thread>
 
 #include <corona/kernel/core/i_logger.h>
 
 #include "browser_manager.h"
+#include "cef_app.h"
 #include "cef_bridge_helpers.h"
+#include "cef_editor_api.h"
 
 namespace Corona::Systems::UI {
 
@@ -124,6 +127,7 @@ CefRefPtr<CefRenderHandler> OffscreenCefClient::GetRenderHandler() {
 }
 
 void OffscreenCefClient::SetTab(BrowserTab* tab) {
+    tab_id_ = tab ? tab->tab_id : -1;
     if (render_handler_) {
         render_handler_->SetTab(tab);
     }
@@ -131,6 +135,9 @@ void OffscreenCefClient::SetTab(BrowserTab* tab) {
 
 void OffscreenCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
+    CFW_LOG_INFO("CEF: OnAfterCreated tab={}, browser={}, thread={}", tab_id_,
+                 browser ? browser->GetIdentifier() : -1,
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()));
 
     bool close_requested = false;
     {
@@ -142,10 +149,8 @@ void OffscreenCefClient::OnAfterCreated(CefRefPtr<CefBrowser> browser) {
     }
 
     if (!browser_side_router_) {
-        CefMessageRouterConfig config;
-        config.js_query_function = "cefQuery";
-        config.js_cancel_function = "cefQueryCancel";
-        browser_side_router_ = CefMessageRouterBrowserSide::Create(config);
+        browser_side_router_ =
+            CefMessageRouterBrowserSide::Create(make_cef_message_router_config());
 
         js_handler_ = new BrowserSideJSHandler();
         browser_side_router_->AddHandler(js_handler_, true);
@@ -169,7 +174,8 @@ void OffscreenCefClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
         return;
     }
 
-    CFW_LOG_INFO("CEF: main frame load end status={}", httpStatusCode);
+    CFW_LOG_INFO("CEF: OnLoadEnd tab={}, status={}, thread={}", tab_id_, httpStatusCode,
+                 std::hash<std::thread::id>{}(std::this_thread::get_id()));
     browser->GetHost()->WasHidden(false);
     browser->GetHost()->WasResized();
     browser->GetHost()->Invalidate(PET_VIEW);
@@ -177,6 +183,10 @@ void OffscreenCefClient::OnLoadEnd(CefRefPtr<CefBrowser> browser,
 
 void OffscreenCefClient::OnBeforeClose(CefRefPtr<CefBrowser> browser) {
     CEF_REQUIRE_UI_THREAD();
+    if (browser) {
+        EditorApiCallbackRegistry::instance().clear_cef_callbacks_for_browser(
+            browser->GetIdentifier());
+    }
     if (browser_side_router_) {
         browser_side_router_->OnBeforeClose(browser);
     }
@@ -213,6 +223,8 @@ bool OffscreenCefClient::WaitForClose(std::chrono::milliseconds timeout) {
 }
 
 void OffscreenCefClient::MarkBrowserCreationFailed() {
+    CFW_LOG_ERROR("CEF: MarkBrowserCreationFailed tab={}, thread={}", tab_id_,
+                  std::hash<std::thread::id>{}(std::this_thread::get_id()));
     {
         std::lock_guard lock(browser_mutex_);
         browser_closed_ = true;
@@ -360,40 +372,19 @@ void OffscreenCefClient::OnContextMenuDismissed(CefRefPtr<CefBrowser> browser,
 }
 
 // ============================================================================
-// CefAppConfig 实现
-// ============================================================================
-
-void CefAppConfig::OnBeforeCommandLineProcessing(const CefString& process_type,
-                                                 CefRefPtr<CefCommandLine> command_line) {
-    command_line->AppendSwitch("disable-web-security");
-    command_line->AppendSwitch("allow-file-access-from-files");
-    command_line->AppendSwitch("allow-file-access");
-    command_line->AppendSwitch("no-sandbox");
-    command_line->AppendSwitch("disable-gpu");
-    command_line->AppendSwitch("disable-gpu-compositing");
-    command_line->AppendSwitch("disable-extensions");
-    command_line->AppendSwitch("disable-component-extensions-with-background-pages");
-    command_line->AppendSwitch("enable-net-benchmarking");
-    command_line->AppendSwitch("disable-pdf-extension");
-    command_line->AppendSwitch("disable-pdf-viewer");
-    command_line->AppendSwitch("disable-component-update");
-    command_line->AppendSwitch("disable-background-networking");
-    command_line->AppendSwitch("disable-d3d11");
-    command_line->AppendSwitch("disable-accelerated-video-decode");
-}
-
-// ============================================================================
 // CEF 生命周期管理
 // ============================================================================
 
-CefMessageRouterConfig message_router_config;
-
 bool initialize_cef() {
-    message_router_config.js_query_function = "cefQuery";
-    message_router_config.js_cancel_function = "cefQueryCancel";
+    if (!was_cef_process_dispatch_completed()) {
+        CFW_LOG_ERROR(
+            "CEF process dispatch was not completed; call "
+            "execute_cef_subprocess_if_needed() at the start of main()");
+        return false;
+    }
 
     CefMainArgs main_args(GetModuleHandle(nullptr));
-    CefRefPtr<CefAppConfig> app(new CefAppConfig());
+    CefRefPtr<CefApp> app = create_cef_app();
 
     CefSettings settings;
     settings.multi_threaded_message_loop = true;
@@ -441,26 +432,19 @@ bool initialize_cef() {
         CefString(&settings.cache_path).FromString(cache_path.string());
     }
 
-    // 使用单独的子进程可执行文件
-    wchar_t exe_path[MAX_PATH];
-    GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
-    std::filesystem::path exe_dir = std::filesystem::path(exe_path).parent_path();
-    std::filesystem::path subprocess_path = exe_dir / "cef_subprocess.exe";
-
-    if (std::filesystem::exists(subprocess_path)) {
-        CefString(&settings.browser_subprocess_path).FromWString(subprocess_path.wstring());
-        CFW_LOG_INFO("CEF: Using separate subprocess: {}", subprocess_path.string());
-    } else {
-        CefString(&settings.browser_subprocess_path).FromWString(exe_path);
-        CFW_LOG_WARNING("CEF: cef_subprocess.exe not found, using main executable as subprocess");
+    wchar_t exe_path[MAX_PATH]{};
+    const DWORD exe_path_length = GetModuleFileNameW(nullptr, exe_path, MAX_PATH);
+    if (exe_path_length == 0 || exe_path_length >= MAX_PATH) {
+        CFW_LOG_ERROR("CEF: failed to resolve the current executable path");
+        return false;
     }
+    CefString(&settings.browser_subprocess_path).FromWString(exe_path);
+    CFW_LOG_INFO("CEF: Using main executable for subprocesses: {}",
+                 std::filesystem::path(exe_path).string());
 
     CefString(&settings.user_agent).FromASCII("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36");
     settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     settings.persist_session_cookies = true;
-
-    CefRefPtr<CefCommandLine> command_line = CefCommandLine::CreateCommandLine();
-    command_line->InitFromString(::GetCommandLineW());
 
     if (!CefInitialize(main_args, settings, app.get(), nullptr)) {
         CFW_LOG_ERROR("Failed to initialize CEF.");

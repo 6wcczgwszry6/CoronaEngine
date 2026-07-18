@@ -1,5 +1,6 @@
 #include <corona/engine.h>
 #include <corona/kernel/core/i_logger.h>
+#include <corona/systems/ui/cef_runtime.h>
 
 #include <csignal>
 #include <cstdint>
@@ -80,6 +81,12 @@ void signal_handler(int signal) {
  * 4. 优雅关闭引擎
  */
 int main(int argc, char* argv[]) {
+    if (const auto exit_code =
+            Corona::Systems::UI::execute_cef_subprocess_if_needed(argc, argv);
+        exit_code.has_value()) {
+        return *exit_code;
+    }
+
     Corona::Kernel::CoronaLogger::initialize();
     Corona::Kernel::CoronaLogger::set_log_level(Corona::Kernel::LogLevel::debug);
 

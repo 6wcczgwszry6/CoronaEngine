@@ -5,6 +5,7 @@
 #include <filesystem>
 #include <iostream>
 #include <ranges>
+#include <thread>
 
 #include "cef_client.h"
 #include "corona/kernel/core/i_logger.h"
@@ -94,8 +95,10 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
     auto tab = std::make_unique<BrowserTab>();
 
     int id = ++tab_counter_;
+    const auto thread_id = std::hash<std::thread::id>{}(std::this_thread::get_id());
 
     // 设置 docking 属性
+    tab->tab_id = id;
     tab->docking_pos = docking_pos;
     tab->dock_width = dock_width;
     tab->dock_height = dock_height;
@@ -118,7 +121,8 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
 
     tab->name = "Browser " + path;
 
-    CFW_LOG_INFO("Loading Path: {}", path);
+    CFW_LOG_INFO("create_tab: id={}, camera_view={}, thread={}, path={}", id, camera_view,
+                 thread_id, path);
 
     // URL Processing
     std::string full_url = convert_local_path_to_url(url);
@@ -133,7 +137,7 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
         }
         full_url += "#" + clean_fragment;
     }
-    CFW_LOG_INFO("Loading URL: {}", full_url);
+    CFW_LOG_INFO("create_tab: id={}, URL={}", id, full_url);
 
     tab->url = full_url;
     strncpy(tab->url_buffer, full_url.c_str(), sizeof(tab->url_buffer) - 1);
@@ -179,13 +183,19 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
     browser_settings.background_color =
         CefColorSetARGB(transparent_overlay ? 0 : 255, 16, 19, 16);
 
-    if (!CefBrowserHost::CreateBrowser(window_info, CefRefPtr<CefClient>(tab->client),
-                                       full_url, browser_settings, nullptr, nullptr)) {
-        tab->client->MarkBrowserCreationFailed();
-        CFW_LOG_ERROR("Failed to create browser tab: ID={}", id);
-    }
-
+    // Publish before invoking CEF: lifecycle callbacks may arrive before CreateBrowser returns.
     tabs_[id] = std::move(tab);
+    BrowserTab* registered_tab = tabs_[id].get();
+    const bool browser_created = CefBrowserHost::CreateBrowser(
+        window_info, CefRefPtr<CefClient>(registered_tab->client), full_url, browser_settings,
+        nullptr, nullptr);
+    CFW_LOG_INFO("create_tab: id={}, CreateBrowser returned {}, thread={}", id,
+                 browser_created, thread_id);
+    if (!browser_created) {
+        registered_tab->cef_creation_failed = true;
+        registered_tab->client->MarkBrowserCreationFailed();
+        CFW_LOG_ERROR("Failed to create browser tab: ID={}, camera_view={}", id, camera_view);
+    }
     return id;
 }
 
@@ -244,13 +254,9 @@ void BrowserManager::update() {
         }
     }
 
-    for (auto& [tab_id, tab] : tabs_) {
-        if (!tab->open) {
-            continue;
-        }
-        update_texture(tab_id);
-        std::string window_id = tab->name + "##" + std::to_string(tab_id);
-    }
+    // Texture uploads are driven by UiFrameRunner after this frame's SDL/CEF input has
+    // already been routed. Keeping uploads out of this queue drain prevents a GPU receipt
+    // wait for one detached surface from delaying mouse events destined for the main window.
 }
 
 void BrowserManager::enqueue_main_thread_task(std::function<void()> task) {

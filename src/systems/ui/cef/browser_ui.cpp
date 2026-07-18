@@ -1,5 +1,6 @@
 #include "browser_ui.h"
 
+#include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/ui/camera_viewport_manager.h>
 
 #include <SDL3/SDL.h>
@@ -14,6 +15,7 @@
 #endif
 
 #include "browser_manager.h"
+#include "cef_bridge_helpers.h"
 #include "cef_client.h"
 #include "sdl/sdl_utils.h"
 
@@ -25,6 +27,98 @@ float clamp_float(float value, float min_value, float max_value) {
         return min_value;
     }
     return std::clamp(value, min_value, max_value);
+}
+
+
+struct ScratchKeyNames {
+    std::string code;
+    std::string display;
+};
+
+std::string scratch_key_modifiers(SDL_Keymod modifiers) {
+    std::string result;
+    auto append = [&result](const char* value) {
+        if (!result.empty()) {
+            result += ',';
+        }
+        result += value;
+    };
+    if (modifiers & SDL_KMOD_CTRL) append("Ctrl");
+    if (modifiers & SDL_KMOD_ALT) append("Alt");
+    if (modifiers & SDL_KMOD_SHIFT) append("Shift");
+    if (modifiers & SDL_KMOD_GUI) append("Meta");
+    return result;
+}
+
+bool is_gameplay_key(SDL_Keycode key) {
+    switch (key) {
+        case SDLK_SPACE:
+        case SDLK_W:
+        case SDLK_A:
+        case SDLK_S:
+        case SDLK_D:
+        case SDLK_F:
+        case SDLK_LEFT:
+        case SDLK_RIGHT:
+        case SDLK_UP:
+        case SDLK_DOWN:
+            return true;
+        default:
+            return false;
+    }
+}
+
+ScratchKeyNames scratch_key_names(const SDL_KeyboardEvent& event) {
+    const SDL_Keycode key = event.key;
+    if (key >= SDLK_A && key <= SDLK_Z) {
+        const char letter = static_cast<char>('A' + (key - SDLK_A));
+        return {std::string("Key") + letter, std::string(1, letter)};
+    }
+    if (key >= SDLK_0 && key <= SDLK_9) {
+        const char digit = static_cast<char>('0' + (key - SDLK_0));
+        return {std::string("Digit") + digit, std::string(1, digit)};
+    }
+    if (key >= SDLK_F1 && key <= SDLK_F12) {
+        const int number = 1 + static_cast<int>(key - SDLK_F1);
+        const std::string value = "F" + std::to_string(number);
+        return {value, value};
+    }
+
+    switch (key) {
+        case SDLK_SPACE: return {"Space", " "};
+        case SDLK_RETURN: return {"Enter", "Enter"};
+        case SDLK_ESCAPE: return {"Escape", "Escape"};
+        case SDLK_TAB: return {"Tab", "Tab"};
+        case SDLK_BACKSPACE: return {"Backspace", "Backspace"};
+        case SDLK_LEFT: return {"ArrowLeft", "ArrowLeft"};
+        case SDLK_RIGHT: return {"ArrowRight", "ArrowRight"};
+        case SDLK_UP: return {"ArrowUp", "ArrowUp"};
+        case SDLK_DOWN: return {"ArrowDown", "ArrowDown"};
+        case SDLK_LSHIFT: return {"ShiftLeft", "Shift"};
+        case SDLK_RSHIFT: return {"ShiftRight", "Shift"};
+        case SDLK_LCTRL: return {"ControlLeft", "Control"};
+        case SDLK_RCTRL: return {"ControlRight", "Control"};
+        case SDLK_LALT: return {"AltLeft", "Alt"};
+        case SDLK_RALT: return {"AltRight", "Alt"};
+        case SDLK_LGUI: return {"MetaLeft", "Meta"};
+        case SDLK_RGUI: return {"MetaRight", "Meta"};
+        case SDLK_MINUS: return {"Minus", "-"};
+        case SDLK_EQUALS: return {"Equal", "="};
+        case SDLK_LEFTBRACKET: return {"BracketLeft", "["};
+        case SDLK_RIGHTBRACKET: return {"BracketRight", "]"};
+        case SDLK_BACKSLASH: return {"Backslash", "\\"};
+        case SDLK_SEMICOLON: return {"Semicolon", ";"};
+        case SDLK_APOSTROPHE: return {"Quote", "'"};
+        case SDLK_GRAVE: return {"Backquote", "`"};
+        case SDLK_COMMA: return {"Comma", ","};
+        case SDLK_PERIOD: return {"Period", "."};
+        case SDLK_SLASH: return {"Slash", "/"};
+        default: break;
+    }
+
+    const char* name = SDL_GetKeyName(key);
+    const std::string fallback = (name && name[0]) ? name : std::to_string(key);
+    return {fallback, fallback};
 }
 
 #ifdef _WIN32
@@ -75,6 +169,26 @@ void BrowserInputHandler::clear_pending_events() {
 void BrowserInputHandler::process_sdl_key_event(const SDL_Event& event) {
     bool pressed = (event.type == SDL_EVENT_KEY_DOWN);
     int key_code = static_cast<int>(event.key.key);
+
+    // Scratch input must not depend on which CEF tab currently owns DOM focus.
+    const ScratchKeyNames scratch_key = scratch_key_names(event.key);
+    InputEvent scratch_event{};
+    scratch_event.type = pressed ? 0 : 1;
+    scratch_event.arg0 = scratch_key.code;
+    scratch_event.arg1 = pressed
+        ? scratch_key_modifiers(static_cast<SDL_Keymod>(event.key.mod))
+        : scratch_key.display;
+    scratch_event.arg2 = pressed ? scratch_key.display : std::string{};
+    enqueue_input_event(std::move(scratch_event));
+
+    // While a Blockly game preview owns gameplay input, do not mirror its control
+    // keys into the focused CEF tab. Scratch already received the SDL event above;
+    // forwarding Space/WASD as DOM input can reactivate a focused editor button
+    // (notably the global Run/Stop button) and interrupt the game.
+    if (!Corona::API::is_editor_camera_input_enabled() && is_gameplay_key(event.key.key)) {
+        return;
+    }
+
     int scan_code = static_cast<int>(event.key.scancode);
     int modifiers = 0;
 

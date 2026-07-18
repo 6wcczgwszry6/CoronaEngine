@@ -1,8 +1,7 @@
 ﻿#pragma once
 
 // CEF headers
-#include <Python.h>
-#include <cef_app.h>
+#include <include/cef_app.h>
 #include <cef_browser.h>
 #include <cef_render_handler.h>
 #include <wrapper/cef_helpers.h>
@@ -18,12 +17,6 @@
 namespace Corona::Systems::UI {
 
 struct BrowserTab;  // 前向声明
-
-// ============================================================================
-// 消息路由配置（用于 JS-C++ 通信）
-// ============================================================================
-
-extern CefMessageRouterConfig message_router_config;
 
 // ============================================================================
 // 离屏渲染处理器
@@ -52,8 +45,8 @@ class OffscreenRenderHandler : public CefRenderHandler {
 class BrowserSideJSHandler : public CefMessageRouterBrowserSide::Handler,
                              public CefBaseRefCounted {
    public:
-    BrowserSideJSHandler() { initialize_python(); }
-    ~BrowserSideJSHandler() override;
+    BrowserSideJSHandler() = default;
+    ~BrowserSideJSHandler() override = default;
 
     bool OnQuery(CefRefPtr<CefBrowser> browser,
                  CefRefPtr<CefFrame> frame,
@@ -70,9 +63,6 @@ class BrowserSideJSHandler : public CefMessageRouterBrowserSide::Handler,
     }
 
    private:
-    PyObject* pFunc_{};
-    void initialize_python();
-
     IMPLEMENT_REFCOUNTING(BrowserSideJSHandler);
     DISALLOW_COPY_AND_ASSIGN(BrowserSideJSHandler);
 };
@@ -160,6 +150,7 @@ class OffscreenCefClient : public CefClient,
                                 CefRefPtr<CefFrame> frame) override;
 
    private:
+    int tab_id_ = -1;
     std::mutex browser_mutex_;
     std::condition_variable browser_closed_cv_;
     CefRefPtr<CefBrowser> browser_;
@@ -172,20 +163,6 @@ class OffscreenCefClient : public CefClient,
     static constexpr int MENU_ID_REFRESH = 1001;
 
     IMPLEMENT_REFCOUNTING(OffscreenCefClient);
-};
-
-// ============================================================================
-// CEF 应用程序配置类（配置命令行参数）
-// ============================================================================
-
-class CefAppConfig : public CefApp {
-   public:
-    CefAppConfig() = default;
-
-    void OnBeforeCommandLineProcessing(const CefString& process_type,
-                                       CefRefPtr<CefCommandLine> command_line) override;
-
-    IMPLEMENT_REFCOUNTING(CefAppConfig);
 };
 
 // ============================================================================

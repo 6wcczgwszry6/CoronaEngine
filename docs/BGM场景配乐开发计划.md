@@ -51,7 +51,6 @@
 |------|------|------|
 | `play_audio(rid, loop)` | C++ pybind 完整，发 `PlayAudioEvent` 到 event_bus | [corona_engine_api.cpp:2015](../src/systems/script/python/corona_engine_api.cpp#L2015) |
 | `import_media(path)` / `stop_audio(rid)` | 齐全 | corona_engine_api.cpp |
-| 无引擎 fallback | `play_audio`/`stop_audio`/`import_media` 桩齐全，无声不报错 | [corona_engine_fallback.py:509](../editor/CoronaCore/utils/corona_engine_fallback.py#L509) |
 
 > 唯一要新写的是**编排链**：`BGM 文件 → import_media(path) → rid → play_audio(rid, loop=True)`（几行）。播放原语本身不缺。
 

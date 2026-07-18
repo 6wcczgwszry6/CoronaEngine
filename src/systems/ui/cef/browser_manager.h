@@ -47,6 +47,7 @@ struct DragRegion {
 // ============================================================================
 
 struct BrowserTab {
+    int tab_id = -1;
     std::string name;
     std::string url;
 
@@ -75,6 +76,7 @@ struct BrowserTab {
     bool buffer_dirty = false;
     bool has_focus = false;
     bool camera_view = false;
+    bool cef_creation_failed = false;
     bool transparent_overlay = false;
     std::atomic_bool hide_system_cursor{false};
     std::atomic_bool use_custom_system_cursor{false};
@@ -100,6 +102,7 @@ struct BrowserTab {
     int detach_y = 120;
     int detach_w = 640;
     int detach_h = 480;
+    bool detach_maximized = false;
 
     char url_buffer[1024] = "";
     std::vector<uint8_t> pixel_buffer;
@@ -132,6 +135,7 @@ class BrowserManager {
     void update_texture(int tab_id);
     void resize_tab(int tab_id, int width, int height);
     [[nodiscard]] const Horizon::HardwareImage* get_texture_image(UiTextureId texture_id) const;
+    [[nodiscard]] Horizon::SubmitReceipt get_texture_upload_receipt(UiTextureId texture_id) const;
     void wait_for_texture_upload(UiTextureId texture_id);
 
     // 隐藏标签页（最小化）

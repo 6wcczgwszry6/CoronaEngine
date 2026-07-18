@@ -73,20 +73,11 @@ bool Engine::initialize() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
     resource_manager.register_parser<Resource::TextParser>();
     resource_manager.register_parser<Resource::ImageParser>();
-    // SceneParser：开启导入期 LOD 生成（meshoptimizer 在导入时生成多级简化网格，
-    // 存入 MeshData::lod_levels）。运行时由 GeometrySystem 内部自动上传/选级，无需上层配置。
+    // 交互式项目导入启用网格简化和自适应 LOD，降低大量物体场景的运行时几何量。
     {
         auto scene_parser = std::make_shared<Resource::SceneParser>();
-        auto& lod = scene_parser->assimp_options.lod_options;
-        lod.enabled     = true;
-        lod.auto_levels = true;
-        // 常规 LOD 参数：逐级减半，最低保留比例 静态 ~2% / 蒙皮 ~5%（更保守）。
-        // 切换阈值由生成端按"实际三角形保留比例"自适应推导（sqrt(r)*kAggr），跨网格稳定。
-        lod.decay              = 0.5f;   // 每级目标 ≈ 上一级的一半（平滑过渡）
-        lod.min_ratio          = 0.02f;  // 静态最低 ~2% 面
-        lod.max_levels         = 4;
-        lod.skinned_min_ratio  = 0.05f;  // 蒙皮最低 ~5% 面（关节缝硬锁，保守）
-        lod.skinned_max_levels = 3;
+        scene_parser->assimp_options.simplify_mesh = true;
+        scene_parser->assimp_options.lod_options.enabled = true;
         resource_manager.register_parser(scene_parser);
     }
     resource_manager.register_parser<Resource::VideoParser>();

@@ -123,9 +123,13 @@ const handleOpenProject = async (path) => {
 };
 
 const handleImport = async () => {
-  const result = await projectLauncherService.openProjectFile();
-  if (result && result.data.path) {
-    handleOpenProject(result.data.path);
+  try {
+    const result = await projectLauncherService.openProjectFile();
+    if (result?.data?.path) {
+      await handleOpenProject(result.data.path);
+    }
+  } catch (error) {
+    console.error('打开现有项目失败:', error);
   }
 };
 </script>

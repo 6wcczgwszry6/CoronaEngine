@@ -13,6 +13,7 @@
 #endif
 
 #include <chrono>
+#include <atomic>
 #include <cstdint>
 #include <memory>
 #include <mutex>
@@ -125,6 +126,13 @@ class OpticsSystem : public Kernel::SystemBase {
     using VisionSceneResourceKey = Vision::VisionSceneResourceKey;
     using VisionSceneResourceKeyHash = Vision::VisionSceneResourceKeyHash;
     struct VisionPipelineRuntime;
+    struct VisionSceneLoadRequest {
+        std::string scene_path;
+        std::string scene_json;
+        std::string base_dir;
+        std::string scene_key;
+        bool external_live{false};
+    };
 
     VisionPipelineRuntime& get_or_create_runtime(const VisionPipelineKey& key);
     VisionPipelineRuntime& active_vision_runtime();
@@ -156,6 +164,9 @@ class OpticsSystem : public Kernel::SystemBase {
                                     std::optional<VisionPipelineSource> source_override =
                                         std::nullopt,
                                     bool force_reload_scene_resource = false);
+    bool load_external_vision_scene_from_json(const VisionSceneLoadRequest& request,
+                                              Corona::CameraVisionRenderMode mode,
+                                              bool force_reload_scene_resource = false);
     void apply_vision_render_mode(Corona::CameraVisionRenderMode mode);
 
     /// 计算当前 SharedDataHub 场景的轻量签名，用于检测动态变化
@@ -296,6 +307,8 @@ class OpticsSystem : public Kernel::SystemBase {
     static constexpr uint64_t kUiViewIdleEvictFrames = 240;
 
     std::unique_ptr<Hardware> hardware_;
+    double pending_native_throttle_wait_ms_{0.0};
+    std::atomic<std::uint64_t> pending_native_consumed_serial_{0};
 
     // LOD 系统引用（渲染时查询 LOD 缓冲）
     GeometrySystem* geometry_system_ = nullptr;
@@ -321,11 +334,11 @@ class OpticsSystem : public Kernel::SystemBase {
     uint32_t vision_rebuild_retries_{0};        ///< 数据未就绪导致的连续重试次数
     static constexpr uint32_t kVisionRebuildMaxRetries = 30;  ///< 重试上限（约 0.5s @60fps）
 
-    // ---- Vision 外部场景加载（跨线程：事件写路径，渲染线程消费）----
-    // VisionSceneLoadEvent 只携带路径写入此处；实际 import 在 run_vision_frame
+    // ---- Vision 外部场景加载（跨线程：事件写请求，渲染线程消费）----
+    // VisionSceneLoadEvent 只携带轻量请求写入此处；实际 import 在 run_vision_frame
     // 起始的渲染线程执行，避免在 Python/CEF 线程触碰 CUDA pipeline。
     std::mutex vision_scene_load_mutex_;
-    std::optional<std::string> pending_vision_scene_load_;
+    std::optional<VisionSceneLoadRequest> pending_vision_scene_load_;
 
     struct PendingScreenshot {
         std::uintptr_t camera_handle = 0;
@@ -343,6 +356,7 @@ class OpticsSystem : public Kernel::SystemBase {
     Kernel::EventId backend_switch_sub_id_ = 0;
     Kernel::EventId vision_scene_load_sub_id_ = 0;
     Kernel::EventId residency_sub_id_ = 0;
+    Kernel::EventId native_frame_consumed_sub_id_ = 0;
 
     // ActorResidencyChangedEvent 驱动的驻留集合（Loaded actor 在此）
     mutable std::shared_mutex residency_mtx_;

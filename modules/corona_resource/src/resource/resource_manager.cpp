@@ -60,12 +60,14 @@ std::future<TResourceID> ResourceManager::import_async(const std::filesystem::pa
     auto future = promise->get_future();
 
     // 将加载任务提交到任务组
-    async_tasks_.run([this, path, promise]() {
-        try {
-            promise->set_value(load_internal(path));
-        } catch (...) {
-            promise->set_value(IResource::INVALID_UID);
-        }
+    import_arena_.execute([this, path, promise]() {
+        async_tasks_.run([this, path, promise]() {
+            try {
+                promise->set_value(load_internal(path));
+            } catch (...) {
+                promise->set_value(IResource::INVALID_UID);
+            }
+        });
     });
 
     return future;

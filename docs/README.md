@@ -37,15 +37,13 @@
 - `scripting/PYTHON_API_EXAMPLES.md`：Python API 示例。
 - `scripting/PYTHON_API_STORAGE_MAPPING_cn.md`：Python API 与存储映射。
 - `scripting/SCRIPT_SYSTEM_cn.md`：脚本系统说明。
-- `scripting/DUAL_SCRIPT_THREE_LAYER_ARCHITECTURE_cn.md`：双脚本三层架构。
 - `scripting/SCRIPT_REFACTORING_TODO_cn.md`：脚本系统重构计划。
 
 ## editor
 
+- `editor/UNIFIED_EDITOR_API_cn.md`：C++ 统一 Editor API 现行设计与接入指南。
 - `editor/CABBAGE_EDITOR_MERGE_CHECKLIST_cn.md`：CabbageEditor 合并迁移清单。
-- `editor/AI_FRONTEND_CHAIN_AND_CAI_GENERALIZATION_cn.md`：AI 前端链路与 CAI 通用化。
 - `editor/CAI_API_REFERENCE.md`：CAI API 参考入口。
-- `editor/VUE_WINDOW_MANAGEMENT_DESIGN_cn.md`：Vue 窗口管理设计。
 - `editor/LOG_CALLBACK_DESIGN_cn.md`：日志到前端回调设计。
 - `editor/fix_media_url_leak.md`：媒体 URL 泄漏修复记录。
 - `editor/session_tracking_implementation.md`：会话跟踪实现记录。

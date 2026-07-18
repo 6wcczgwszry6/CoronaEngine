@@ -1,1 +1,1 @@
-"""Explicit Python backend services for CoronaEditor."""
+"""Python script services registered for C++ controlled execution."""

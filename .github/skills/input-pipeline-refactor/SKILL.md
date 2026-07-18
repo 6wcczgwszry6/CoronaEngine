@@ -92,7 +92,7 @@ Typical anchors in this repo:
 - `editor/Frontend/src/components/bridge/InputEventBridge.vue`
 - `editor/Frontend/src/views/layout/MainPage.vue`
 - `editor/Frontend/src/utils/bridge.js`
-- `examples/cef_subprocess/main.cpp`
+- `src/systems/ui/cef/cef_renderer_bridge.cpp`
 - `src/systems/ui/cef/cef_client.cpp`
 - `src/systems/ui/cef/browser_ui.cpp`
 - `src/systems/ui/imgui/imgui_ui.cpp`
@@ -134,7 +134,7 @@ When the feature is realtime:
 - optionally issue a final low-frequency sync command after drag end
 
 In this repo, the V8 injection surface is typically:
-- `examples/cef_subprocess/main.cpp`
+- `src/systems/ui/cef/cef_renderer_bridge.cpp`
 
 The browser-process receiver is typically:
 - `src/systems/ui/cef/cef_client.cpp`
@@ -178,7 +178,7 @@ Load these references when you need concrete repo anchors or rollout guidance:
 These files should remain the home for browser-focused keyboard, text, IME, and mouse behavior.
 
 ### Realtime Bridge Surfaces
-- `examples/cef_subprocess/main.cpp`
+- `src/systems/ui/cef/cef_renderer_bridge.cpp`
 - `src/systems/ui/cef/cef_client.cpp`
 
 Use these for V8 function injection and browser-process message handling.

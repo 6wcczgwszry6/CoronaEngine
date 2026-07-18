@@ -1,16 +1,22 @@
 import { pythonGenerator } from 'blockly/python';
 
 export const defineControlGenerators = () => {
+  pythonGenerator.forBlock['control_run_project_script'] = function (block) {
+    const scriptPath = String(block.getFieldValue('PATH') || '').trim();
+    return `CoronaEngine.run_project_script(${JSON.stringify(scriptPath)})\n`;
+  };
+
   pythonGenerator.forBlock['control_wait'] = function (block) {
     const seconds = block.getFieldValue('SECONDS');
     return `CoronaEngine.wait(${seconds})\n`;
   };
 
-  /** 在循环体开头注入 stop 检查 */
-  function injectStopCheck(branch, indent) {
-    const stopCheck = indent + 'CoronaEngine.check_stop()\n';
-    if (!branch) return stopCheck + indent + 'pass\n';
-    return stopCheck + branch;
+  /** Inject a stop guard and optionally yield once per frame for long-running loops. */
+  function injectStopCheck(branch, indent, paced = false) {
+    let guard = indent + 'CoronaEngine.check_stop()\n';
+    if (paced) guard += indent + 'CoronaEngine.loop_yield()\n';
+    if (!branch) return guard + indent + 'pass\n';
+    return guard + branch;
   }
 
   pythonGenerator.forBlock['control_for'] = function (block) {
@@ -22,7 +28,7 @@ export const defineControlGenerators = () => {
           pythonGenerator.INDENT
         ) + branch;
     }
-    branch = injectStopCheck(branch, pythonGenerator.INDENT);
+    branch = injectStopCheck(branch, pythonGenerator.INDENT, true);
     return `while True:\n` + branch;
   };
 
@@ -76,7 +82,7 @@ export const defineControlGenerators = () => {
     const condition =
       pythonGenerator.valueToCode(block, 'CONDITION', pythonGenerator.ORDER_NONE) || 'False';
     let branch = pythonGenerator.statementToCode(block, 'DO');
-    branch = injectStopCheck(branch, pythonGenerator.INDENT);
+    branch = injectStopCheck(branch, pythonGenerator.INDENT, true);
     return `while not (${condition}):\n` + branch;
   };
 
@@ -91,8 +97,8 @@ export const defineControlGenerators = () => {
   };
 
   pythonGenerator.forBlock['control_clone'] = function (block) {
-    const x = block.getFieldValue('x');
-    return `CoronaEngine.clone("${x}")\n`;
+    const x = String(block.getFieldValue('x') || '');
+    return `CoronaEngine.clone(${JSON.stringify(x)})\n`;
   };
 
   pythonGenerator.forBlock['control_cloneDEL'] = function () {
@@ -107,4 +113,23 @@ export const defineControlGenerators = () => {
   pythonGenerator.forBlock['control_nextSence'] = function () {
     return `CoronaEngine.nextScene()\n`;
   };
+
+  pythonGenerator.forBlock['control_restart_level'] = function () {
+    return 'CoronaEngine.restart_level()\n';
+  };
+
+
+  pythonGenerator.forBlock.control_cooldown_ready = (block) => {
+    const name = pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''";
+    const seconds = pythonGenerator.valueToCode(block, 'SECONDS', pythonGenerator.ORDER_NONE) || block.getFieldValue('SECONDS_NUMBER') || '0';
+    const consume = block.getFieldValue('CONSUME') === 'TRUE' ? 'True' : 'False';
+    return [`CoronaEngine.cooldown_ready(${name}, ${seconds}, ${consume})`, pythonGenerator.ORDER_FUNCTION_CALL];
+  };
+  pythonGenerator.forBlock.control_reset_cooldown = (block) => `CoronaEngine.reset_cooldown(${pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''"})\n`;
+  pythonGenerator.forBlock.control_start_cooldown = (block) => {
+    const name = pythonGenerator.valueToCode(block, 'NAME', pythonGenerator.ORDER_NONE) || "''";
+    const seconds = pythonGenerator.valueToCode(block, 'SECONDS', pythonGenerator.ORDER_NONE) || block.getFieldValue('SECONDS_NUMBER') || '0';
+    return `CoronaEngine.start_cooldown(${name}, ${seconds})\n`;
+  };
+
 };

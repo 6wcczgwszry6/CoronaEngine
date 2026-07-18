@@ -62,7 +62,15 @@ class MechanicsSystem : public Kernel::SystemBase {
 
    private:
     // 力学系统私有成员
-    void update_physics();
+    void update_physics(float fixed_dt);
+
+    /// 骨骼动画 CPU 蒙皮（P2，自 GeometrySystem 迁入）。每真实帧遍历所有 GeometryDevice，
+    /// 对蒙皮模型（Scene::skeleton 有值）：推进 anim_time → compute_pose 算 final 骨骼矩阵
+    /// → 对每个 mesh 做 CPU 蒙皮 → write_bytes 重传到 GPU 顶点缓冲（含已驻留 LOD 级别，
+    /// LOD1..N 句柄经 GeometrySystem::get_skinning_targets 借出）。蒙皮后顶点 + 动态 AABB
+    /// 写回 GeometryDevice（结果槽：所有 buffer/CPU 数据仍归 GeometrySystem 持有，便于
+    /// 流式加载 LRU 管理），供 Vision / 物理消费。在 update() 的固定步进循环之后调用。
+    void update_skinned_geometry();
 
     struct Impl;
     std::unique_ptr<Impl> impl_;

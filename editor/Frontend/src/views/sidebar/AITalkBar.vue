@@ -22,23 +22,27 @@ import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import RoomPanel from './lanchat/RoomPanel.vue';
 import lanchat from '@/stores/lanchat.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
-import { coronaEventBus } from '@/utils/eventBus.js';
+import { editorApi } from '@/utils/bridge.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const { t } = useI18n();
+let lanChatEventCallbackToken = null;
 
-// 局域网聊天室事件：C++ NetworkSystem 经 __coronaEmit('lanchat-event', event) 推送，
-// __coronaEmit → coronaEventBus.emit('lanchat-event', event) → 本 handler。
+// 局域网聊天室事件由 C++ Editor API event registry 定义和分发。
 const onLanchatEvent = (payload) => {
   lanchat.handleEvent(payload);
 };
 
-onMounted(() => {
-  coronaEventBus.on('lanchat-event', onLanchatEvent);
+onMounted(async () => {
+  lanChatEventCallbackToken = await editorApi.events.onLanChatEvent(onLanchatEvent);
 });
 
 onUnmounted(() => {
-  coronaEventBus.off('lanchat-event', onLanchatEvent);
+  if (lanChatEventCallbackToken) {
+    editorApi.off(lanChatEventCallbackToken).finally(() => {
+      lanChatEventCallbackToken = null;
+    });
+  }
 });
 
 function closeFloat() {
