@@ -1,176 +1,102 @@
 import * as Blockly from 'blockly/core';
 
 export const defineMathBlocks = () => {
-  // ── 修复 math_change（"给…加…"）积木样式 ──
-  // 标准 Blockly 中 math_change 使用 variable_blocks 样式（橙色），
-  // 但它在运算分类中，应与其他数学积木一致使用 math_blocks 样式（绿色）。
-  if (Blockly.Blocks['math_change']) {
-    const _init = Blockly.Blocks['math_change'].init;
-    Blockly.Blocks['math_change'].init = function () {
-      _init.call(this);
+  // Keep legacy math_change compatible but display it with operator colours.
+  if (Blockly.Blocks.math_change && !Blockly.Blocks.math_change.__coronaMathStylePatched) {
+    const originalInit = Blockly.Blocks.math_change.init;
+    Blockly.Blocks.math_change.init = function () {
+      originalInit.call(this);
       this.setStyle('math_blocks');
     };
+    Blockly.Blocks.math_change.__coronaMathStylePatched = true;
   }
 
-  Blockly.Blocks['math_add'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('+')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Number');
-    },
-  };
-
-  Blockly.Blocks['math_mul'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('\u00D7')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Number');
-    },
-  };
-
-  Blockly.Blocks['math_sub'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('-')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Number');
-    },
-  };
-
-  Blockly.Blocks['math_div'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('\u00F7')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Number');
-    },
-  };
-
-  Blockly.Blocks['math_random'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField('在')
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('到')
-        .appendField(new Blockly.FieldTextInput(0), 'x2')
-        .appendField('之间的一个随机数');
-      this.setInputsInline(true);
-      this.setOutput(true, 'Number');
-      this.setHelpUrl('');
-    },
-  };
-
-  Blockly.Blocks['math_G'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('>')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Boolean');
-    },
-  };
-
-  Blockly.Blocks['math_L'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('<')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Boolean');
-    },
-  };
-
-  Blockly.Blocks['math_E'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendDummyInput()
-        .appendField(new Blockly.FieldTextInput(0), 'x1')
-        .appendField('=')
-        .appendField(new Blockly.FieldTextInput(0), 'x2');
-      this.setOutput(true, 'Boolean');
-    },
-  };
-
-  Blockly.Blocks['math_AND'] = {
-    init: function () {
-      this.setStyle('math_blocks');
+  Blockly.Blocks.math_AND = {
+    init() {
+      this.setStyle('condition_blocks');
       this.appendValueInput('A').setCheck('Boolean').appendField('');
-      this.appendValueInput('B').setCheck('Boolean').appendField('与');
+      this.appendValueInput('B').setCheck('Boolean').appendField('\u4e0e');
       this.setInputsInline(true);
       this.setOutput(true, 'Boolean');
-      this.setTooltip('逻辑与运算，两个条件都满足时返回 true，否则返回 false');
+      this.setTooltip('\u903b\u8f91\u4e0e\u8fd0\u7b97\uff0c\u4e24\u4e2a\u6761\u4ef6\u90fd\u6ee1\u8db3\u65f6\u8fd4\u56de true\uff0c\u5426\u5219\u8fd4\u56de false');
       this.setHelpUrl('');
     },
   };
 
-  Blockly.Blocks['math_OR'] = {
-    init: function () {
-      this.setStyle('math_blocks');
+  Blockly.Blocks.math_OR = {
+    init() {
+      this.setStyle('condition_blocks');
       this.appendValueInput('A').setCheck('Boolean').appendField('');
-      this.appendValueInput('B').setCheck('Boolean').appendField('或');
+      this.appendValueInput('B').setCheck('Boolean').appendField('\u6216');
       this.setInputsInline(true);
       this.setOutput(true, 'Boolean');
-      this.setTooltip('逻辑或运算，两个条件中至少一个满足时返回 true，否则返回 false');
+      this.setTooltip('\u903b\u8f91\u6216\u8fd0\u7b97\uff0c\u4e24\u4e2a\u6761\u4ef6\u4e2d\u81f3\u5c11\u4e00\u4e2a\u6ee1\u8db3\u65f6\u8fd4\u56de true\uff0c\u5426\u5219\u8fd4\u56de false');
       this.setHelpUrl('');
     },
   };
 
-  Blockly.Blocks['math_NOT'] = {
-    init: function () {
-      this.setStyle('math_blocks');
-      this.appendValueInput('A').setCheck('Boolean').appendField('非');
+  Blockly.Blocks.math_NOT = {
+    init() {
+      this.setStyle('condition_blocks');
+      this.appendValueInput('A').setCheck('Boolean').appendField('\u975e');
       this.setInputsInline(true);
       this.setOutput(true, 'Boolean');
-      this.setTooltip('逻辑非运算，条件不满足时返回 true，满足时返回 false');
+      this.setTooltip('\u903b\u8f91\u975e\u8fd0\u7b97\uff0c\u6761\u4ef6\u4e0d\u6ee1\u8db3\u65f6\u8fd4\u56de true\uff0c\u6ee1\u8db3\u65f6\u8fd4\u56de false');
       this.setHelpUrl('');
     },
   };
 
-  Blockly.Blocks['math_connect'] = {
-    init: function () {
-      // 使用数学类样式，通常为圆形
-      this.setStyle('math_blocks');
-      this.appendValueInput('LEFT').appendField('连接');
-      this.appendValueInput('RIGHT').appendField('和');
+  Blockly.Blocks.math_connect = {
+    init() {
+      this.setStyle('text_blocks');
+      this.appendValueInput('LEFT').appendField('\u8fde\u63a5');
+      this.appendValueInput('RIGHT').appendField('\u548c');
       this.setInputsInline(true);
       this.setOutput(true, 'String');
-      this.setTooltip('将左右两边的内容连接成一个字符串');
+      this.setTooltip('\u5c06\u5de6\u53f3\u4e24\u8fb9\u7684\u5185\u5bb9\u8fde\u63a5\u6210\u4e00\u4e2a\u5b57\u7b26\u4e32');
       this.setHelpUrl('');
     },
   };
 
-  // 数字可直接填写；A/B 连接口仅用于可选的变量或运算表达式。
+  // Keep old custom operator block types for workspace compatibility, but hide them from toolbox.
   const binaryValueBlock = (type, label, output = 'Number') => {
-    Blockly.Blocks[type] = { init() {
-      this.appendValueInput('A').setCheck(null).appendField(new Blockly.FieldNumber(0), 'x1');
-      this.appendValueInput('B').setCheck(null).appendField(label).appendField(new Blockly.FieldNumber(0), 'x2');
-      this.setInputsInline(true); this.setOutput(true, output); this.setStyle('math_blocks');
-    } };
+    Blockly.Blocks[type] = {
+      init() {
+        this.appendValueInput('A')
+          .setCheck(null)
+          .appendField(new Blockly.FieldNumber(0), 'x1');
+        this.appendValueInput('B')
+          .setCheck(null)
+          .appendField(label)
+          .appendField(new Blockly.FieldNumber(0), 'x2');
+        this.setInputsInline(true);
+        this.setOutput(true, output);
+        this.setStyle(output === 'Boolean' ? 'condition_blocks' : 'math_blocks');
+      },
+    };
   };
+
   binaryValueBlock('math_add', '+');
   binaryValueBlock('math_sub', '-');
   binaryValueBlock('math_mul', '\u00d7');
   binaryValueBlock('math_div', '\u00f7');
-  binaryValueBlock('math_G', '>','Boolean');
-  binaryValueBlock('math_L', '<','Boolean');
-  binaryValueBlock('math_E', '=','Boolean');
-  Blockly.Blocks.math_random = { init() {
-    this.appendValueInput('A').setCheck('Number').appendField('\u968f\u673a\u6570\u4ece').appendField(new Blockly.FieldNumber(0), 'x1');
-    this.appendValueInput('B').setCheck('Number').appendField('\u5230').appendField(new Blockly.FieldNumber(10), 'x2');
-    this.setInputsInline(true); this.setOutput(true, 'Number'); this.setStyle('math_blocks');
-  } };
+  binaryValueBlock('math_G', '>', 'Boolean');
+  binaryValueBlock('math_L', '<', 'Boolean');
+  binaryValueBlock('math_E', '=', 'Boolean');
 
+  Blockly.Blocks.math_random = {
+    init() {
+      this.appendValueInput('A')
+        .setCheck('Number')
+        .appendField('\u968f\u673a\u6570\u4ece')
+        .appendField(new Blockly.FieldNumber(0), 'x1');
+      this.appendValueInput('B')
+        .setCheck('Number')
+        .appendField('\u5230')
+        .appendField(new Blockly.FieldNumber(10), 'x2');
+      this.setInputsInline(true);
+      this.setOutput(true, 'Number');
+      this.setStyle('math_blocks');
+    },
+  };
 };
