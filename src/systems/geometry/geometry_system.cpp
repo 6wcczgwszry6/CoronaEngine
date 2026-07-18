@@ -491,7 +491,7 @@ void GeometrySystem::update() {
         }
 
         // ---- M3 LRU 唤醒触发器 ----
-        // 遍历可见 actor，检查是否有被 evict 后 offline 的
+        // 遍历可见 actor，检查是否有被 evict 后 offline 的。
         std::vector<Events::ActorRestoreRequestedEvent> pending_restores;
         {
             std::shared_lock lock(impl_->mtx);
@@ -506,6 +506,20 @@ void GeometrySystem::update() {
                     if (state_it->second != ActorLoadState::Unloaded) continue;
                     if (scene_state.loading_tasks.count(actor)) continue;
                     if (scene_state.unloading_tasks.count(actor)) continue;
+
+                    // 距离门禁：防止 P1 距离剔除与 M3 恢复互相推拉
+                    if (scene_state.cfg.enable_distance_culling) {
+                        auto entry_it = scene_state.actor_to_entry.find(actor);
+                        if (entry_it != scene_state.actor_to_entry.end() && !cameras.empty()) {
+                            float min_d = std::numeric_limits<float>::max();
+                            for (const auto& [cam_pos, _] : cameras) {
+                                min_d = std::min(min_d,
+                                    ktm::distance(entry_it->second.center(), cam_pos));
+                            }
+                            if (min_d > scene_state.cfg.preload_distance) continue;
+                        }
+                    }
+
                     pending_restores.push_back({scene_handle, actor});
                 }
             }

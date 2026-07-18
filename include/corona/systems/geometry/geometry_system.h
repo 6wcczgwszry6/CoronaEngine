@@ -38,8 +38,8 @@ struct SceneVisibilityConfig {
     bool collect_stats             = true;
 
     bool enable_distance_culling  = true;   // 是否启用距离剔除
-    float unload_distance         = 10.0f;  // 超过此距离且不可见时触发淘汰
-    float preload_distance        = 25.0f;  // 进入此距离时触发预加载
+    float unload_distance         = 80.0f;  // 超过此距离且不可见时触发淘汰
+    float preload_distance        = 50.0f;  // 进入此距离时触发预加载
 };
 
 /**

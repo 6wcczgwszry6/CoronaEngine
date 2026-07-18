@@ -430,12 +430,20 @@ class Octree {
                     child.get(), cam_positions, radius_sq, pred, out);
             }
         } else {
-            // 叶节点且部分在范围内 → 逐 entry 判断后收集
+            // 叶节点且部分在范围内 → 逐 entry 判断后收集。
             NodeInRange info;
             info.bounds           = node->bounds;
             info.min_cam_distance = std::sqrt(min_dist_sq);
             for (const auto& e : node->entries) {
-                if (pred(e.payload)) info.actors.push_back(e.payload);
+                if (!pred(e.payload)) continue;
+                // 验证 entry 确实在范围内
+                float entry_min_sq = point_aabb_dist_sq(cam_positions[0], e.bounds);
+                for (size_t i = 1; i < cam_positions.size(); ++i) {
+                    float d_sq = point_aabb_dist_sq(cam_positions[i], e.bounds);
+                    if (d_sq < entry_min_sq) entry_min_sq = d_sq;
+                }
+                if (entry_min_sq > radius_sq) continue;  // 超出预加载半径
+                info.actors.push_back(e.payload);
             }
             if (!info.actors.empty()) out.push_back(std::move(info));
         }
