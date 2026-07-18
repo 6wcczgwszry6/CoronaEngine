@@ -476,10 +476,10 @@ defineExpose({ resizeBlockly });
 <style scoped>
 .blockly-toolbox-palette {
   min-height: 0;
-  height: 420px;
+  height: 100%;
   display: grid;
-  grid-template-columns: 74px minmax(0, 1fr);
-  gap: 6px;
+  grid-template-columns: 86px minmax(0, 1fr);
+  gap: 8px;
 }
 
 .palette-tabs {

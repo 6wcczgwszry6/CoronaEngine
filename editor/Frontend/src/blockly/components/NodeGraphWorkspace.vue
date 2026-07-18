@@ -387,8 +387,18 @@ const externalDrag = reactive({
   clientY: 0,
   pointerId: null,
 });
-const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v2';
-const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 320, inspectorWidth: 560, variablesHeight: 320 });
+const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v3';
+const LAYOUT_LIMITS = Object.freeze({
+  toolboxMin: 360,
+  toolboxMax: 720,
+  toolboxEmergencyMin: 260,
+  inspectorMin: 520,
+  inspectorMax: 960,
+  inspectorEmergencyMin: 340,
+  canvasMin: 420,
+  gridChrome: 60,
+});
+const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 460, inspectorWidth: 720, variablesHeight: 240 });
 const layout = reactive({ ...DEFAULT_LAYOUT });
 const layoutStyle = computed(() => ({
   '--toolbox-width': `${layout.toolboxWidth}px`,
@@ -781,14 +791,23 @@ function persistLayout() {
 function loadLayout() {
   try {
     const saved = JSON.parse(window.localStorage?.getItem(LAYOUT_STORAGE_KEY) || '{}');
-    layout.toolboxWidth = Math.min(460, Math.max(240, Number(saved.toolboxWidth) || DEFAULT_LAYOUT.toolboxWidth));
-    layout.inspectorWidth = Math.min(760, Math.max(380, Number(saved.inspectorWidth) || DEFAULT_LAYOUT.inspectorWidth));
-    layout.variablesHeight = Math.max(140, Number(saved.variablesHeight) || DEFAULT_LAYOUT.variablesHeight);
+    layout.toolboxWidth = Math.min(
+      LAYOUT_LIMITS.toolboxMax,
+      Math.max(LAYOUT_LIMITS.toolboxMin, Number(saved.toolboxWidth) || DEFAULT_LAYOUT.toolboxWidth)
+    );
+    layout.inspectorWidth = Math.min(
+      LAYOUT_LIMITS.inspectorMax,
+      Math.max(LAYOUT_LIMITS.inspectorMin, Number(saved.inspectorWidth) || DEFAULT_LAYOUT.inspectorWidth)
+    );
+    layout.variablesHeight = Math.max(120, Number(saved.variablesHeight) || DEFAULT_LAYOUT.variablesHeight);
   } catch (_) {
     Object.assign(layout, DEFAULT_LAYOUT);
   }
 }
 function resizeEmbeddedWorkspaces() {
+  const clamped = clampLayoutWidths(layout.toolboxWidth, layout.inspectorWidth);
+  if (clamped.toolbox !== layout.toolboxWidth) layout.toolboxWidth = clamped.toolbox;
+  if (clamped.inspector !== layout.inspectorWidth) layout.inspectorWidth = clamped.inspector;
   nextTick(() => {
     updateCanvasSize();
     variablesBlocklyRef.value?.resizeBlockly?.();
@@ -797,16 +816,28 @@ function resizeEmbeddedWorkspaces() {
 }
 function clampLayoutWidths(toolboxWidth, inspectorWidth) {
   const total = workspaceRootRef.value?.getBoundingClientRect?.().width || window.innerWidth;
-  const available = Math.max(0, total - 12);
-  let toolbox = Math.min(460, Math.max(240, toolboxWidth));
-  let inspector = Math.min(760, Math.max(380, inspectorWidth));
-  const maxSides = Math.max(620, available - 480);
+  const available = Math.max(0, total - LAYOUT_LIMITS.gridChrome);
+  let toolbox = Math.min(LAYOUT_LIMITS.toolboxMax, Math.max(LAYOUT_LIMITS.toolboxMin, toolboxWidth));
+  let inspector = Math.min(LAYOUT_LIMITS.inspectorMax, Math.max(LAYOUT_LIMITS.inspectorMin, inspectorWidth));
+  const maxSides = Math.max(
+    LAYOUT_LIMITS.toolboxEmergencyMin + LAYOUT_LIMITS.inspectorEmergencyMin,
+    available - LAYOUT_LIMITS.canvasMin
+  );
   if (toolbox + inspector > maxSides) {
-    const overflow = toolbox + inspector - maxSides;
-    if (layoutResizeState?.kind === 'toolbox') toolbox = Math.max(240, toolbox - overflow);
-    else inspector = Math.max(380, inspector - overflow);
+    let overflow = toolbox + inspector - maxSides;
+    if (layoutResizeState?.kind === 'toolbox') {
+      const reduce = Math.min(overflow, toolbox - LAYOUT_LIMITS.toolboxEmergencyMin);
+      toolbox -= reduce;
+      overflow -= reduce;
+      inspector = Math.max(LAYOUT_LIMITS.inspectorEmergencyMin, inspector - overflow);
+    } else {
+      const reduce = Math.min(overflow, inspector - LAYOUT_LIMITS.inspectorEmergencyMin);
+      inspector -= reduce;
+      overflow -= reduce;
+      toolbox = Math.max(LAYOUT_LIMITS.toolboxEmergencyMin, toolbox - overflow);
+    }
   }
-  return { toolbox, inspector };
+  return { toolbox: Math.round(toolbox), inspector: Math.round(inspector) };
 }
 function beginLayoutResize(event, kind) {
   event.preventDefault();
@@ -826,8 +857,8 @@ function beginLayoutResize(event, kind) {
 function handleLayoutResize(event) {
   if (!layoutResizeState) return;
   if (layoutResizeState.kind === 'variables') {
-    const maxHeight = Math.max(140, layoutResizeState.inspectorHeight - 306);
-    layout.variablesHeight = Math.min(maxHeight, Math.max(140, layoutResizeState.variablesHeight + event.clientY - layoutResizeState.startY));
+    const maxHeight = Math.max(120, layoutResizeState.inspectorHeight - 366);
+    layout.variablesHeight = Math.min(maxHeight, Math.max(120, layoutResizeState.variablesHeight + event.clientY - layoutResizeState.startY));
   } else {
     const nextToolbox = layoutResizeState.kind === 'toolbox'
       ? layoutResizeState.toolboxWidth + event.clientX - layoutResizeState.startX
@@ -2004,7 +2035,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: var(--toolbox-width) 6px minmax(480px, 1fr) 6px var(--inspector-width);
+  grid-template-columns: var(--toolbox-width) 6px minmax(420px, 1fr) 6px var(--inspector-width);
   gap: 8px;
   padding: 8px;
 }
@@ -2016,8 +2047,15 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 .ng-toolbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
   padding: 10px;
-  overflow: auto;
+  overflow: hidden;
+}
+.ng-native-palette {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .ng-section-title {
   display: flex;
@@ -2460,7 +2498,7 @@ onBeforeUnmount(() => {
 }
 .ng-inspector {
   display: grid;
-  grid-template-rows: minmax(140px, var(--variables-height)) 6px minmax(300px, 1fr);
+  grid-template-rows: minmax(120px, var(--variables-height)) 6px minmax(360px, 1fr);
   gap: 0;
   padding: 8px;
   background: rgba(15, 23, 42, 0.9);
