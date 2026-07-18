@@ -16,12 +16,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <future>
 #include <limits>
 #include <mutex>
 #include <shared_mutex>
 #include <span>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -61,6 +63,140 @@ Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
 }
 
 }  // namespace
+
+// ============================================================================
+// LOD 磁盘缓存 — 编译期结构体大小保护
+// ============================================================================
+// 若 Vertex/BoneWeights 因平台或编译器差异发生变化，编译直接失败，避免磁盘缓存
+// 格式静默损坏（二进制 blob 的 header 中记录顶点/权重数量，反序列化按 sizeof 计算偏移）。
+
+static_assert(sizeof(Resource::Vertex)      == 32,
+    "Vertex size changed — update LOD blob format version in serialize_lod_record");
+static_assert(sizeof(Resource::BoneWeights) == 32,
+    "BoneWeights size changed — update LOD blob format version in serialize_lod_record");
+
+// ============================================================================
+// LOD 磁盘缓存 — 内部辅助函数
+// ============================================================================
+
+/// 构造磁盘缓存 key：三元素唯一标识一个 LOD 级
+/// 格式："lod:<model_id_hex>:<mesh_index>:<lod_level_index>"
+[[nodiscard]] static std::string make_lod_disk_key(
+    std::uint64_t model_id,
+    std::uint32_t mesh_index,
+    int           lod_level_idx)
+{
+    std::ostringstream oss;
+    oss << "lod:0x" << std::hex << model_id
+        << ":" << std::dec << mesh_index
+        << ":" << lod_level_idx;
+    return oss.str();
+}
+
+/// 将 LodDiskRecord 序列化为固定布局的二进制 blob
+///
+/// 布局（全部小端序，x86/x64 原生即为 LE，memcpy 直接写入即 LE）：
+///   [0..3]   魔数 'L''O''D''1'（第4字节为版本号，格式升级时递增）
+///   [4..7]   顶点数量  (uint32_t)
+///   [8..11]  索引数量  (uint32_t)
+///   [12..15] 骨骼权重数量 (uint32_t)
+///   [16..19] error            (float)
+///   [20..23] screen_threshold (float)
+///   [24..27] geometric_error  (float)
+///   [28..]   顶点数组 (每顶点32字节，packed Vertex，连续 memcpy)
+///   [...]    索引数组 (每索引2字节，uint16_t，连续 memcpy)
+///   [...]    骨骼权重数组 (每顶点32字节，BoneWeights，连续 memcpy)
+///
+/// Vertex 有 #pragma pack(1) 保证无填充，BoneWeights 为定长32字节，
+/// 因此直接 memcpy 整块拷贝比逐字段读写快一个数量级，且不会漏字段。
+[[nodiscard]] static std::vector<char> serialize_lod_record(const LodDiskRecord& rec) {
+    const std::uint32_t vc = static_cast<std::uint32_t>(rec.vertices.size());
+    const std::uint32_t ic = static_cast<std::uint32_t>(rec.indices.size());
+    const std::uint32_t bc = static_cast<std::uint32_t>(rec.bone_weights.size());
+
+    constexpr size_t kHeaderBytes = 28;
+    const size_t total = kHeaderBytes
+                       + vc * sizeof(Resource::Vertex)
+                       + ic * sizeof(std::uint16_t)
+                       + bc * sizeof(Resource::BoneWeights);
+
+    std::vector<char> blob(total);
+    char* p = blob.data();
+
+    // 写入 header：魔数 + 版本号 + 数组大小 + 误差值
+    p[0] = 'L'; p[1] = 'O'; p[2] = 'D'; p[3] = '1'; p += 4;
+    std::memcpy(p, &vc, 4); p += 4;
+    std::memcpy(p, &ic, 4); p += 4;
+    std::memcpy(p, &bc, 4); p += 4;
+    std::memcpy(p, &rec.error, 4); p += 4;
+    std::memcpy(p, &rec.screen_threshold, 4); p += 4;
+    std::memcpy(p, &rec.geometric_error, 4); p += 4;
+
+    // 写入 payload：三个数组连续原始内存（无填充，直接整块拷贝）
+    if (vc) { std::memcpy(p, rec.vertices.data(), vc * sizeof(Resource::Vertex)); p += vc * sizeof(Resource::Vertex); }
+    if (ic) { std::memcpy(p, rec.indices.data(),  ic * sizeof(std::uint16_t)); p += ic * sizeof(std::uint16_t); }
+    if (bc) { std::memcpy(p, rec.bone_weights.data(), bc * sizeof(Resource::BoneWeights)); }
+
+    return blob;
+}
+
+/// 从二进制 blob 反序列化为 LodDiskRecord
+///
+/// 校验流程（任一失败返回 nullopt，该级数据视为不可恢复，调用方保持其为空）：
+///   1. blob 至少 28 字节（一个空 header 的下限）
+///   2. 前 3 字节必须为 'L''O''D'——防止误读其他文件
+///   3. 第 4 字节版本号必须为 '1'——引擎升级格式变化时递增，旧版本 blob 直接丢弃
+///   4. 读出 3 个 uint32_t 数量 + 3 个 float 误差值
+///   5. 用数量反算期望总字节数，与实际 blob 大小比对——防止数据截断/损坏导致 memcpy 越界
+///   6. 按数量 resize 目标 vector，memcpy 整块拷入数据
+[[nodiscard]] static std::optional<LodDiskRecord> deserialize_lod_record(const std::vector<char>& blob) {
+    // 最小大小检查：不足一个 header 的长度必为损坏/截断数据
+    if (blob.size() < 28) return std::nullopt;
+    const char* p = blob.data();
+
+    // 魔数 + 版本号校验
+    if (p[0] != 'L' || p[1] != 'O' || p[2] != 'D') return std::nullopt;
+    const char version = p[3];
+    if (version != '1') {
+        CFW_LOG_WARNING("[LOD-Disk] 无法识别的 blob 版本 '{}'，丢弃", version);
+        return std::nullopt;
+    }
+    p += 4;
+
+    // 读取 header 中的数量和误差值
+    std::uint32_t vc, ic, bc;
+    std::memcpy(&vc, p, 4); p += 4;
+    std::memcpy(&ic, p, 4); p += 4;
+    std::memcpy(&bc, p, 4); p += 4;
+
+    float error, st, ge;
+    std::memcpy(&error, p, 4); p += 4;
+    std::memcpy(&st,    p, 4); p += 4;
+    std::memcpy(&ge,    p, 4); p += 4;
+
+    // 用读出的数量反算期望总大小，校验 blob 是否完整（防截断数据导致 memcpy 越界）
+    const size_t expected = 28
+                          + vc * sizeof(Resource::Vertex)
+                          + ic * sizeof(std::uint16_t)
+                          + bc * sizeof(Resource::BoneWeights);
+    if (blob.size() < expected) {
+        CFW_LOG_WARNING("[LOD-Disk] blob 大小不匹配：期望 {} 实际 {}",
+                        expected, blob.size());
+        return std::nullopt;
+    }
+
+    // 按数量分配空间，整块拷贝数据
+    LodDiskRecord rec;
+    rec.error            = error;
+    rec.screen_threshold = st;
+    rec.geometric_error  = ge;
+
+    if (vc) { rec.vertices.resize(vc); std::memcpy(rec.vertices.data(), p, vc * sizeof(Resource::Vertex)); p += vc * sizeof(Resource::Vertex); }
+    if (ic) { rec.indices.resize(ic);   std::memcpy(rec.indices.data(),  p, ic * sizeof(std::uint16_t)); p += ic * sizeof(std::uint16_t); }
+    if (bc) { rec.bone_weights.resize(bc); std::memcpy(rec.bone_weights.data(), p, bc * sizeof(Resource::BoneWeights)); }
+
+    return rec;
+}
 
 // ============================================================================
 // 生命周期
@@ -173,7 +309,8 @@ void GeometrySystem::update() {
     // ---- CPU LOD 驻留协调（RAM 3层窗口管理）----
     // 每 kCpuWindowEvalInterval 帧运行一次：确定各 model_id 的 CPU 驻留窗口
     // {lod_levels[0], lod_levels[demand_median-1], lod_levels[N-1]}，
-    // 清空窗口外的 LODLevel::vertices/indices 以节省 RAM。
+    // 窗口外的 LODLevel 数据移交异步队列写入磁盘缓存以节省 RAM，
+    // 窗口内数据缺失的级从磁盘缓存回读，供 GPU 侧按需重建该级缓冲。
     if (++impl_->cpu_window_eval_counter >= Impl::kCpuWindowEvalInterval) {
         impl_->cpu_window_eval_counter = 0;
         reconcile_cpu_residency();
@@ -770,6 +907,54 @@ void GeometrySystem::shutdown() {
     // 避免 task_group 析构时仍有任务运行 / promise 悬挂。结果丢弃（缓冲 RAII 释放）。
     impl_->lod_build_tasks.wait();
     impl_->pending_lod_builds.clear();
+
+    // 停止 LOD 磁盘缓存写入线程：先置停止标志再唤醒，worker 醒来后会把队列中
+    // 剩余任务排空再退出；join 确保线程在 Impl 成员销毁前结束，防止 worker
+    // 访问悬空的 this / 已析构的队列与缓存对象。
+    if (impl_->lod_disk_worker_running.load(std::memory_order_acquire)) {
+        impl_->lod_disk_worker_running.store(false, std::memory_order_release);
+        impl_->lod_disk_write_cv.notify_one();
+        if (impl_->lod_disk_worker && impl_->lod_disk_worker->joinable()) {
+            impl_->lod_disk_worker->join();
+        }
+    }
+
+    // join 之后不会再有新任务入队，但仍做一次防御性排空：覆盖"置停止标志与
+    // worker 检查标志之间"极窄窗口内入队、worker 退出前未及处理的任务，
+    // 确保已从 lod_levels 移出的数据不丢失（该数据是此级唯一的副本，
+    // 丢失后该级不再可恢复）。
+    while (true) {
+        LodDiskWriteTask task;
+        {
+            std::lock_guard qlock(impl_->lod_disk_write_mutex);
+            if (impl_->pending_lod_disk_writes.empty()) break;
+            task = std::move(impl_->pending_lod_disk_writes.front());
+            impl_->pending_lod_disk_writes.pop_front();
+        }
+        // 任务只会在 ensure_lod_disk_cache() 之后入队，此处 lod_disk_cache
+        // 必然非空；判空仅为防御（空则任务只能丢弃，无处可写）
+        if (impl_->lod_disk_cache) {
+            bool ok = impl_->write_one_lod_record(task);
+            if (!ok && task.retry_count < Impl::kMaxLodDiskWriteRetries) {
+                ++task.retry_count;
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                impl_->pending_lod_disk_writes.push_front(std::move(task));
+                continue;
+            }
+            if (!ok) {
+                CFW_LOG_ERROR("[LOD-Disk] 关闭时写入失败已达最大重试次数，丢弃: {}"
+                              " (model={:#x} mesh={} lod={})",
+                              task.key, task.model_id, task.mesh_index, task.lod_level);
+            }
+        }
+    }
+
+    // 释放 LOD 磁盘缓存（CacheManager 析构时将内存级数据刷盘）。
+    // 磁盘条目虽跨进程保留，但不会被下次启动命中：restore 的前提
+    // vertices.empty() 只在本会话 evict（会覆盖写同 key blob）之后成立，
+    // 而下次启动导入会重新生成全部 lod_levels。旧条目仅占用磁盘 LRU
+    // 容量，直到被自然淘汰。
+    impl_->lod_disk_cache.reset();
 
     // 释放 LRU ActorCache（确保在 shutdown 时清理磁盘/内存）
     impl_->actor_cache.reset();
@@ -1473,6 +1658,147 @@ void GeometrySystem::Impl::ensure_actor_cache() {
                    kDefaultMemCacheBytes / (1024 * 1024),
                    kDefaultDiskCacheBytes / (1024 * 1024),
                    actor_cache_dir.string());
+}
+
+// ============================================================================
+// LOD 磁盘缓存 — 延迟初始化 + 后台异步写入线程
+// ============================================================================
+
+void GeometrySystem::Impl::ensure_lod_disk_cache() {
+    // std::call_once 保证即使将来从多线程调用也只初始化一次
+    std::call_once(lod_disk_cache_once, [this]() {
+        auto dir = actor_cache_dir.empty()
+            ? std::filesystem::current_path() / "cache" / "lod"
+            : actor_cache_dir / "lod";
+
+        lod_disk_cache = std::make_unique<Corona::Cache::CacheManager>(
+            128 * 1024 * 1024,   // 128MB 内存缓存
+            512 * 1024 * 1024,   // 512MB 磁盘缓存
+            dir);
+
+        // 淘汰回调仅做诊断日志。此时对应 Scene::lod_levels 的 vector 已被
+        // std::move 清空（RAM 已释放），磁盘副本被 LRU 淘汰后该级数据即不可
+        // 恢复——GPU 侧无法再重建该级缓冲，渲染继续使用已驻留的级（通常
+        // LOD0），直到模型重新导入。容量配置应确保此情形罕见。
+        lod_disk_cache->set_evict_callback(
+            [](const std::string& key, const std::vector<char>&) {
+                CFW_LOG_NOTICE("[LOD-Disk] LRU 淘汰: {} (该级数据不再可恢复)", key);
+            });
+
+        // 启动后台序列化+写盘线程
+        lod_disk_worker_running = true;
+        lod_disk_worker = std::make_unique<std::thread>([this]() {
+            lod_disk_writer_loop();
+        });
+
+        CFW_LOG_NOTICE("[LOD-Disk] 缓存已初始化: dir={} 内存=128MB 磁盘=512MB",
+                       dir.string());
+    });
+}
+
+void GeometrySystem::Impl::lod_disk_writer_loop() {
+    CFW_LOG_NOTICE("[LOD-Disk] 写入线程已启动");
+
+    while (lod_disk_worker_running.load(std::memory_order_acquire)) {
+        LodDiskWriteTask task;
+
+        {
+            std::unique_lock lock(lod_disk_write_mutex);
+            lod_disk_write_cv.wait(lock, [this]() {
+                return !pending_lod_disk_writes.empty()
+                    || !lod_disk_worker_running.load(std::memory_order_acquire);
+            });
+
+            if (!lod_disk_worker_running.load(std::memory_order_acquire)) {
+                // 关闭中：排空剩余任务后再退出（含重试逻辑，与正常路径一致）
+                while (!pending_lod_disk_writes.empty()) {
+                    task = std::move(pending_lod_disk_writes.front());
+                    pending_lod_disk_writes.pop_front();
+                    lod_disk_write_inflight_key = task.key;
+                    lock.unlock();
+                    bool ok = write_one_lod_record(task);
+                    lock.lock();
+                    lod_disk_write_inflight_key.clear();
+
+                    if (!ok && task.retry_count < Impl::kMaxLodDiskWriteRetries) {
+                        ++task.retry_count;
+                        CFW_LOG_WARNING("[LOD-Disk] 关闭时写入失败，重试 {}/{}: {}",
+                                       task.retry_count, Impl::kMaxLodDiskWriteRetries,
+                                       task.key);
+                        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                        pending_lod_disk_writes.push_front(std::move(task));
+                        continue;
+                    }
+                    if (!ok) {
+                        CFW_LOG_ERROR("[LOD-Disk] 关闭时写入失败已达最大重试次数，丢弃: {}"
+                                      " (model={:#x} mesh={} lod={})",
+                                      task.key, task.model_id, task.mesh_index,
+                                      task.lod_level);
+                    }
+                }
+                break;
+            }
+
+            task = std::move(pending_lod_disk_writes.front());
+            pending_lod_disk_writes.pop_front();
+            // 标记在写 key：restore 侧在"已出队、blob 未写完"窗口内跳过磁盘回读
+            lod_disk_write_inflight_key = task.key;
+        }  // 解锁后再写盘，避免长时间持锁阻塞几何线程入队
+
+        bool write_ok = write_one_lod_record(task);
+        {
+            std::lock_guard clear_lock(lod_disk_write_mutex);
+            lod_disk_write_inflight_key.clear();
+        }
+
+        // 写盘失败重试：瞬时错误（磁盘满、CacheManager 内部异常等）短暂退避后重新入队。
+        // 超大 blob（超过内存缓存容量）同样返回 false，但 retry 计数仍递增——超大项
+        // 每次都会失败，达到上限后丢弃，避免无限循环。
+        if (!write_ok && task.retry_count < Impl::kMaxLodDiskWriteRetries) {
+            ++task.retry_count;
+            CFW_LOG_WARNING("[LOD-Disk] 写入失败，重试 {}/{}: {}",
+                           task.retry_count, Impl::kMaxLodDiskWriteRetries, task.key);
+            // 短暂退避：给瞬时错误（磁盘满等）恢复窗口，也避免快速空转
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            {
+                std::lock_guard qlock(lod_disk_write_mutex);
+                pending_lod_disk_writes.push_front(std::move(task));
+            }
+        } else if (!write_ok) {
+            CFW_LOG_ERROR("[LOD-Disk] 写入失败已达最大重试次数，丢弃: {} "
+                          "(model={:#x} mesh={} lod={}, 该级不再可恢复)",
+                          task.key, task.model_id, task.mesh_index, task.lod_level);
+        }
+    }
+
+    CFW_LOG_NOTICE("[LOD-Disk] 写入线程已退出");
+}
+
+bool GeometrySystem::Impl::write_one_lod_record(const LodDiskWriteTask& task) {
+    // 序列化为二进制 blob（恒含 28 字节 header，不会为空）
+    auto blob = serialize_lod_record(task.record);
+
+    // 超大项保护：超过内存缓存容量 → 永久失败，不可重试
+    // （该级数据量本身超过 LRU 内存级容量，无论重试多少次都无法放入，
+    //   唯一副本随任务销毁，该级不再可恢复）
+    if (blob.size() > lod_disk_cache->memory_capacity()) {
+        CFW_LOG_WARNING("[LOD-Disk] blob {} 字节超出缓存容量 {} 字节; "
+                        "丢弃 model={:#x} mesh={} lod={} (超大项，不重试)",
+                        blob.size(), lod_disk_cache->memory_capacity(),
+                        task.model_id, task.mesh_index, task.lod_level);
+        return false;
+    }
+
+    // 写入两级缓存（可能触发 LRU 淘汰刷盘，发生在 worker 线程不阻塞几何帧循环）
+    if (!lod_disk_cache->put(task.key, blob.data(), blob.size())) {
+        CFW_LOG_WARNING("[LOD-Disk] 写入失败: {} (model={:#x} mesh={} lod={})",
+                       task.key, task.model_id, task.mesh_index, task.lod_level);
+        return false;
+    }
+
+    CFW_LOG_NOTICE("[LOD-Disk] 已写入: {} ({} 字节, model={:#x} mesh={} lod={})",
+                   task.key, blob.size(), task.model_id, task.mesh_index, task.lod_level);
+    return true;
 }
 
 void GeometrySystem::on_evict_requested(const Events::ActorEvictRequestedEvent& event) {
@@ -2379,13 +2705,59 @@ void GeometrySystem::upload_lod_from_scene_data() {
         for (uint32_t mesh_idx = 0; mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
             uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
 
-            // 已有缓存且模型未变更则跳过（model_id 比较防止 slot 复用）
+            // 已有缓存且模型未变更则跳过（model_id 比较防止 slot 复用）。
+            // 检测到变更时记下旧 model_id，锁外清理其磁盘缓存条目——
+            // 避免在 lod_cache_mutex 持有期间做 CacheManager 的磁盘 IO。
+            std::uint64_t stale_model_id = 0;  // 非 0 表示同一 slot 换了新模型
+            std::vector<std::uint32_t> stale_extra_meshes;  // 旧模型多出的 mesh 下标
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
                 auto cache_it = impl_->lod_cache.find(lod_key);
-                if (cache_it != impl_->lod_cache.end()
-                    && cache_it->second.model_id == model_id)
-                    continue;
+                if (cache_it != impl_->lod_cache.end()) {
+                    if (cache_it->second.model_id == model_id)
+                        continue;
+                    stale_model_id = cache_it->second.model_id;
+
+                    // 旧模型 mesh 数可能多于新模型：多出的 mesh 不会被本循环
+                    // 遍历到，其磁盘条目须在此一并收集。仅在 mesh 0（旧模型必有）
+                    // 检测到变更时扫一次 lod_cache——模型重载是罕见事件，线性扫
+                    // 描可接受。make_lod_key 高 32 位 = handle 低 32 位（见其定义），
+                    // 据此归属到本 geometry 并提取 mesh 下标。
+                    if (mesh_idx == 0) {
+                        const std::uint64_t geom_hi =
+                            static_cast<std::uint64_t>(geom_handle) & 0xffffffffull;
+                        const auto new_mesh_count =
+                            static_cast<std::uint32_t>(geom_dev.mesh_handles.size());
+                        for (const auto& [k, e] : impl_->lod_cache) {
+                            if ((k >> 32) != geom_hi || e.model_id != stale_model_id)
+                                continue;
+                            const auto old_mesh =
+                                static_cast<std::uint32_t>(k & 0xffffffffull);
+                            if (old_mesh >= new_mesh_count)
+                                stale_extra_meshes.push_back(old_mesh);
+                        }
+                    }
+                }
+            }
+
+            // 模型已变更（同一 geometry slot 重新导入了新模型）：旧 model_id 的
+            // 磁盘缓存条目已永久失效——新模型的顶点数据与旧 blob 无任何关系，
+            // 不清理则这些条目会占着 LRU 容量直到被自然淘汰。
+            // 逐级 erase：max_lod_levels 与下方 GPU 侧级数上限一致，CPU 侧
+            // lod_levels 级数由 LODGenerationOptions::max_levels（默认8）控制，
+            // 不会超过此值；erase 不存在的 key 是无害空操作。
+            if (stale_model_id != 0 && impl_->lod_disk_cache) {
+                for (int lod_idx = 0; lod_idx < max_lod_levels; ++lod_idx) {
+                    impl_->lod_disk_cache->erase(
+                        make_lod_disk_key(stale_model_id, mesh_idx, lod_idx));
+                    for (auto extra_mesh : stale_extra_meshes) {
+                        impl_->lod_disk_cache->erase(
+                            make_lod_disk_key(stale_model_id, extra_mesh, lod_idx));
+                    }
+                }
+                CFW_LOG_NOTICE("[LOD-Disk] 已清理旧模型的失效缓存条目: "
+                               "旧 model={:#x} mesh={} (+{} 个旧模型多出的 mesh)",
+                               stale_model_id, mesh_idx, stale_extra_meshes.size());
             }
 
             // 从 ResourceManager 读取 Scene 数据
@@ -3363,14 +3735,19 @@ namespace Corona::Systems {
 // ============================================================================
 
 // ============================================================================
-// reconcile_cpu_residency（RAM 3层窗口管理）
+// reconcile_cpu_residency（RAM 3层窗口管理 + LOD 磁盘缓存换入换出）
 // ----------------------------------------------------------------------------
 // 每 kCpuWindowEvalInterval 帧调用一次（update() → reconcile_lod_residency 之后）。
 // 将每个 model 的 CPU LODLevel 数据限制在固定3层窗口内：
 //   { lod_levels[0],  lod_levels[demand_median-1],  lod_levels[N-1] }
 //     最精细简化级           中位数需求级                最粗级
 // LOD0（MeshData::vertices/indices）永远保留，不在此管理。
-// 窗口外的 LODLevel::vertices/indices/bone_weights 被 clear+shrink 以节省 RAM。
+//
+// 窗口外的级不再直接丢弃：数据 std::move 进异步写盘队列，由后台 worker 线程
+// 序列化后写入两级 LRU 磁盘缓存（几何线程只付出移动指针 + 入队的开销）。
+// 窗口内数据缺失的级则反向操作：查磁盘缓存 → 反序列化回填 lod_levels，
+// 命中后 reconcile_lod_residency 才能为该级重建 GPU 缓冲；未命中则该级
+// 保持为空，GPU 侧继续使用已驻留的级（通常 LOD0）渲染。
 // ============================================================================
 void GeometrySystem::reconcile_cpu_residency() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
@@ -3396,6 +3773,11 @@ void GeometrySystem::reconcile_cpu_residency() {
     }
     if (model_info.empty()) return;
 
+    // 延迟初始化磁盘缓存 + 启动 worker 线程（call_once，首次以后为空操作）。
+    // 放在函数入口而非 evict 现场：目录创建 + 线程启动在任何 Scene 写锁之外
+    // 完成，避免首次 evict 时在 acquire_write<Scene> 持有期间做文件系统操作。
+    impl_->ensure_lod_disk_cache();
+
     for (auto& [model_id, mi] : model_info) {
         if (mi.demands.empty() || mi.coarsest_src < 0) continue;
 
@@ -3419,27 +3801,136 @@ void GeometrySystem::reconcile_cpu_residency() {
             impl_->model_cpu_windows[model_id] = {0, demand_lod_src, mi.coarsest_src};
         }
 
-        // 4. acquire_write<Scene>，清空窗口外的 LODLevel CPU 数据
-        // 写锁持有期间只做 vector::clear() + shrink_to_fit()，极短暂。
-        // 已清空的级（vertices.empty()）直接跳过，避免重复操作。
+        // 4. acquire_write<Scene>，对每个 mesh 的每个 lod_level 做双向处理：
+        //    窗口内 + 数据缺失 → 查磁盘缓存恢复（反序列化回填，供 GPU 侧重建该级）
+        //    窗口外 + 数据仍在 → std::move 移交异步写盘队列（几何线程不做序列化/IO）
+        // 写锁持有期间的开销：evict 侧仅移动指针 + 入队（微秒级）；restore 侧
+        // 命中内存级缓存为一次 memcpy，仅在数据已被内存级 LRU 刷盘时才同步读盘
+        // （小概率路径，128MB 内存级容量足以覆盖正常的换出→换入时间窗口）。
         auto scene_write = resource_manager.acquire_write<Resource::Scene>(model_id);
         if (!scene_write.valid()) continue;
 
-        bool did_free = false;
-        for (auto& mesh : scene_write->data.meshes) {
+        int freed_count    = 0;  // 本周期移交写盘队列的级数1
+        int restored_count = 0;  // 本周期从磁盘恢复的级数
+        for (std::uint32_t mesh_idx = 0;
+             mesh_idx < static_cast<std::uint32_t>(scene_write->data.meshes.size());
+             ++mesh_idx) {
+            auto& mesh = scene_write->data.meshes[mesh_idx];
             for (int j = 0; j < static_cast<int>(mesh.lod_levels.size()); ++j) {
-                if (cpu_window.count(j) > 0) continue;  // 窗口内：保留
                 auto& lod = mesh.lod_levels[j];
-                if (lod.vertices.empty()) continue;     // 已清空：跳过
-                lod.vertices.clear();      lod.vertices.shrink_to_fit();
-                lod.indices.clear();       lod.indices.shrink_to_fit();
-                lod.bone_weights.clear();  lod.bone_weights.shrink_to_fit();
-                did_free = true;
+
+                if (cpu_window.count(j) > 0) {
+                    // ---- 窗口内：保留；数据缺失时尝试恢复 ----
+                    // 数据为空说明此级此前被移出窗口写过盘（或写盘失败被丢弃）。
+                    // 恢复顺序：
+                    //   ① 异步写盘队列——该级刚被 evict、blob 尚未落盘时数据仍在
+                    //     队列中，直接 move 回填。既消除落盘前的 miss，也杜绝命中
+                    //     同 key 陈旧磁盘 blob（此前 put 失败/超大跳过时遗留）的竞态。
+                    //   ② worker 正在写该 key → 本周期跳过，下周期从磁盘命中。
+                    //   ③ 磁盘缓存 get → 反序列化回填。
+                    // 全部未命中则保持为空——该级无法重建（无运行时 meshopt 路径），
+                    // 渲染继续使用已驻留的级（通常 LOD0），直到模型重新导入。
+                    if (lod.vertices.empty() && impl_->lod_disk_cache) {
+                        const auto key = make_lod_disk_key(model_id, mesh_idx, j);
+
+                        // ①② 查队列/在写标记（仅锁 3，未嵌套锁 2，符合锁层次）
+                        bool handled = false;
+                        {
+                            std::lock_guard qlock(impl_->lod_disk_write_mutex);
+                            auto qit = std::find_if(
+                                impl_->pending_lod_disk_writes.begin(),
+                                impl_->pending_lod_disk_writes.end(),
+                                [&key](const LodDiskWriteTask& t) { return t.key == key; });
+                            if (qit != impl_->pending_lod_disk_writes.end()) {
+                                lod.vertices         = std::move(qit->record.vertices);
+                                lod.indices          = std::move(qit->record.indices);
+                                lod.bone_weights     = std::move(qit->record.bone_weights);
+                                lod.error            = qit->record.error;
+                                lod.screen_threshold = qit->record.screen_threshold;
+                                lod.geometric_error  = qit->record.geometric_error;
+                                impl_->pending_lod_disk_writes.erase(qit);
+                                ++restored_count;
+                                handled = true;
+                            } else if (impl_->lod_disk_write_inflight_key == key) {
+                                handled = true;  // 正在落盘：本周期跳过
+                            }
+                        }
+                        if (handled) {
+                            // 队列回填成功后顺带清理可能残留的同 key 旧磁盘 blob；
+                            // 在写跳过时 vertices 仍空，不清理（以免与 put 竞争）
+                            if (!lod.vertices.empty())
+                                impl_->lod_disk_cache->erase(key);
+                            continue;
+                        }
+
+                        // ③ 磁盘缓存回读
+                        auto cached = impl_->lod_disk_cache->get(key);
+                        if (cached) {
+                            auto record = deserialize_lod_record(cached->data);
+                            if (record) {
+                                lod.vertices         = std::move(record->vertices);
+                                lod.indices          = std::move(record->indices);
+                                lod.bone_weights     = std::move(record->bone_weights);
+                                lod.error            = record->error;
+                                lod.screen_threshold = record->screen_threshold;
+                                lod.geometric_error  = record->geometric_error;
+                                // 数据已回到 RAM，删除磁盘副本避免双份占用；
+                                // 下次移出窗口时会重新入队写盘
+                                impl_->lod_disk_cache->erase(key);
+                                ++restored_count;
+                            }
+                            // 反序列化失败（版本不符/数据损坏）→ 保持为空，
+                            // 该级同样不再可恢复；损坏条目留在缓存中会被 LRU
+                            // 自然淘汰，无需主动清理
+                        }
+                    }
+                    continue;
+                }
+
+                // ---- 窗口外：数据移交异步写盘队列 ----
+                if (lod.vertices.empty()) continue;  // 已清空：跳过
+
+                // 背压检查必须在 std::move 之前完成——一旦 move，本级数据即空，
+                // 队列满时无法回退。队列满则跳过本级，数据原样保留在 lod_levels
+                // 中，下个评估周期（kCpuWindowEvalInterval 帧后）重试。
+                bool queued = false;
+                {
+                    std::lock_guard qlock(impl_->lod_disk_write_mutex);
+                    if (impl_->pending_lod_disk_writes.size() < Impl::kMaxPendingLodDiskWrites) {
+                        LodDiskWriteTask task;
+                        task.key                     = make_lod_disk_key(model_id, mesh_idx, j);
+                        task.record.vertices         = std::move(lod.vertices);
+                        task.record.indices          = std::move(lod.indices);
+                        task.record.bone_weights     = std::move(lod.bone_weights);
+                        task.record.error            = lod.error;
+                        task.record.screen_threshold = lod.screen_threshold;
+                        task.record.geometric_error  = lod.geometric_error;
+                        task.model_id   = model_id;
+                        task.mesh_index = mesh_idx;
+                        task.lod_level  = j;
+                        impl_->pending_lod_disk_writes.push_back(std::move(task));
+                        queued = true;
+                    }
+                }
+
+                if (queued) {
+                    // notify 放在队列锁外，避免 worker 被唤醒后立刻阻塞在锁上
+                    impl_->lod_disk_write_cv.notify_one();
+                    // moved-from vector 标准上仅保证 valid-but-unspecified；后续
+                    // evict/restore 逻辑依赖 empty() 判断，显式 clear 守规
+                    //（所有主流实现移动后即为空，clear 为零开销）
+                    lod.vertices.clear();
+                    lod.indices.clear();
+                    lod.bone_weights.clear();
+                    ++freed_count;
+                }
             }
         }
-        if (did_free) {
-            CFW_LOG_NOTICE("[LOD-CPU] model={:#x} window={{0, {}, {}}}: freed non-window lod_levels",
-                           model_id, demand_lod_src, mi.coarsest_src);
+        if (freed_count > 0 || restored_count > 0) {
+            CFW_LOG_NOTICE("[LOD-CPU] model={:#x} window={{0, {}, {}}}: "
+                           "移交写盘队列 {} 级, 恢复 {} 级（队列/磁盘）",
+                           model_id, demand_lod_src, mi.coarsest_src,
+                           freed_count, restored_count);
         }
     }
 }
