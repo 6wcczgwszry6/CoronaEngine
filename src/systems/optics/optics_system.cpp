@@ -4053,8 +4053,12 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 // ================================================================
                 // 8. GPU sync & dispatch
                 // ================================================================
-                const uint32_t dispatchX = hardware_->gbufferSize.x;
-                const uint32_t dispatchY = hardware_->gbufferSize.y;
+                // dispatch 参数是 workgroup 组数(原样进 vkCmdDispatch)。这些延迟通道
+                // 全是 local_size 8x8, 用 dispatch_groups 从像素换算 ceil(w/8)xceil(h/8);
+                // 除数取自管线反射的真实 local size(已由 Horizon SPIR-V patch 修正)。
+                // 曾经直接传裸像素 gbufferSize 会导致 64x 超发(越界 guard 使画面仍对但极浪费)。
+                const auto [dispatchX, dispatchY] =
+                    lighting.dispatch_groups(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
                 const auto actor_pick_request = take_pending_actor_pick(cam_handle);
 
                 if (actor_pick_request) {
@@ -4468,8 +4472,9 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     auto& opticsUiWarp = *hardware_->opticsUiWarpPipeline;
     auto& opticsComposite = *hardware_->opticsCompositePipeline;
 
-    const uint32_t dispatchX = (hardware_->gbufferSize.x + 7u) / 8u;
-    const uint32_t dispatchY = (hardware_->gbufferSize.y + 7u) / 8u;
+    // 组数换算用管线反射的真实 local size(经 Horizon SPIR-V patch, 均为 8x8)。
+    const auto [dispatchX, dispatchY] =
+        opticsComposite.dispatch_groups(hardware_->gbufferSize.x, hardware_->gbufferSize.y);
     uint32_t cursorDispatchX = dispatchX;
     uint32_t cursorDispatchY = dispatchY;
 
@@ -4657,8 +4662,9 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
             static_cast<std::uint32_t>(uiBatch.materials.size()),
             hardware_->gbufferSize.x,
             hardware_->gbufferSize.y));
-        cursorDispatchX = (cursor_width + 7u) / 8u;
-        cursorDispatchY = (cursor_height + 7u) / 8u;
+        const auto [cw, ch] = opticsCursor.dispatch_groups(cursor_width, cursor_height);
+        cursorDispatchX = cw;
+        cursorDispatchY = ch;
     }
 
     uint32_t compositeOverlayDescriptor = overlayDescriptor;
@@ -6444,8 +6450,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     visionResolve.pushConsts.exposure = 1.0f;
                     visionResolve.bind_storage_image(0, target.final_output);
 
-                    const uint32_t dispatchX = (w + 7u) / 8u;
-                    const uint32_t dispatchY = (h + 7u) / 8u;
+                    const auto [dispatchX, dispatchY] = visionResolve.dispatch_groups(w, h);
                     // 不在此 commit：UI overlay pass 紧随其后读 final_output 作为背景，
                     // 整帧在同一 executor 上按程序序记录、末尾统一提交一次。
                     stream << visionResolve(dispatchX, dispatchY, 1);

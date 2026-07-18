@@ -973,8 +973,9 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
     composite_pipeline.bind_storage_image(1, ui_image);
     composite_pipeline.bind_storage_image(2, resources.output);
 
-    const uint32_t dispatch_x = (output_width + 7u) / 8u;
-    const uint32_t dispatch_y = (output_height + 7u) / 8u;
+    // 组数换算用管线反射的真实 local size(经 Horizon SPIR-V patch, composite 为 8x8)。
+    const auto [dispatch_x, dispatch_y] =
+        composite_pipeline.dispatch_groups(output_width, output_height);
     {
         std::ostringstream label;
         label << "Display/composite"
