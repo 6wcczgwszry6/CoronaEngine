@@ -63,8 +63,10 @@ from .core import (
 )
 from .tools import ResourceProvider
 from .adapters import (
+    EngineCapabilityManifestReadError,
     RuntimeCppBridge,
     RuntimeCppBridgeResult,
+    make_engine_capability_manifest_reader,
     make_engine_environment_component_import_provider,
     make_environment_component_provider,
     make_image_resource_provider,
@@ -142,6 +144,8 @@ __all__ = [
     "ResourceProvider",
     "RuntimeCppBridge",
     "RuntimeCppBridgeResult",
+    "EngineCapabilityManifestReadError",
+    "make_engine_capability_manifest_reader",
     "make_engine_environment_component_import_provider",
     "make_environment_component_provider",
     "make_image_resource_provider",

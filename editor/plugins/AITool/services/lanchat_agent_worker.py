@@ -104,6 +104,8 @@ class LANChatAgentWorker:
         self._gm_control_message_ids: set[str] = set()
         self._gm_control_message_order: deque[str] = deque()
         self._message_dispatch_ledger = MessageDispatchLedger()
+        self._pending_discussion_reply_lock = threading.RLock()
+        self._pending_discussion_replies: dict[str, dict[str, dict[str, Any]]] = {}
         self._active_room_ids: set[str] = set()
         self._active_room_order: deque[str] = deque()
         self._runtime_finalizer_retry_by_room: dict[str, dict[str, Any]] = {}
@@ -1018,6 +1020,25 @@ class LANChatAgentWorker:
             self._remember_coordinator_seen_message_id(dedupe_key)
             return False
         self._apply_generation_options_from_message(message)
+        pending_discussion_reply = self._pending_discussion_confirmation_reply(message)
+        if pending_discussion_reply is not None:
+            message_id = str(message.get("message_id") or "")
+            if self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="native_queue",
+                route="planning",
+            ):
+                self._message_dispatch_ledger.transition(room_id, message_id, "routed")
+                sent = self._send_coordinator_sync_system_reply(message, pending_discussion_reply)
+                self._message_dispatch_ledger.transition(
+                    room_id,
+                    message_id,
+                    "replied" if sent else "executed",
+                    reply=pending_discussion_reply if sent else "",
+                )
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
         # GM control traffic is authoritative protocol, not planning context.
         # Resolve it before status/intervention/SeedPlan routing so the native
         # sync copy cannot pollute a discussion plan before the agent-trigger
@@ -2452,6 +2473,9 @@ class LANChatAgentWorker:
             if text:
                 return f"planning:{text}"
         room_id = str(trigger.get("room_id") or "default").strip() or "default"
+        discussion_external_plan_id = self._active_runtime_discussion_external_plan_id(room_id)
+        if discussion_external_plan_id:
+            return discussion_external_plan_id
         runtime_status = self._runtime_status_snapshot(room_id)
         active_external_plan_id = str(runtime_status.get("active_external_plan_id") or "").strip()
         if active_external_plan_id:
@@ -2463,12 +2487,33 @@ class LANChatAgentWorker:
         agent = str(agent_name or trigger.get("agent_name") or trigger.get("agent_id") or "agent").strip() or "agent"
         return f"planning:{room_id}:{agent}"
 
+    def _active_runtime_discussion_external_plan_id(self, room_id: str) -> str:
+        room = str(room_id or "default")
+        try:
+            snapshot = self._agent_runtime.query_state(room)
+        except Exception:  # noqa: BLE001
+            return ""
+        runtime_room = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        discussion_plan_id = str(runtime_room.get("active_discussion_plan_id") or "").strip()
+        if not discussion_plan_id:
+            return ""
+        for external_plan_id, runtime_plan_id in dict(
+            runtime_room.get("external_plan_links") or {}
+        ).items():
+            if str(runtime_plan_id or "").strip() == discussion_plan_id:
+                return str(external_plan_id or "").strip()
+        plan = dict(dict(runtime_room.get("scene_plans") or {}).get(discussion_plan_id) or {})
+        return str(plan.get("external_plan_id") or discussion_plan_id).strip()
+
     def _active_runtime_external_plan_id(self, room_id: str) -> str:
         room = str(room_id or "default")
         runtime_status = self._runtime_status_snapshot(room)
         active_execution_plan_id = str(runtime_status.get("active_execution_plan_id") or "").strip()
         if active_execution_plan_id:
             return active_execution_plan_id
+        discussion_external_plan_id = self._active_runtime_discussion_external_plan_id(room)
+        if discussion_external_plan_id:
+            return discussion_external_plan_id
         active_external_plan_id = str(runtime_status.get("active_external_plan_id") or "").strip()
         if active_external_plan_id:
             return active_external_plan_id
@@ -2767,6 +2812,29 @@ class LANChatAgentWorker:
             or room.get("latest_completed_plan_id")
             or ""
         )
+        live_summary = (
+            dict(snapshot.get("summary") or {})
+            if isinstance(snapshot, dict) and isinstance(snapshot.get("summary"), dict)
+            else {}
+        )
+        if live_summary and str(live_summary.get("plan_id") or "") == target_plan_id:
+            persisted_report = (
+                dict(enriched.get("report") or {})
+                if isinstance(enriched.get("report"), dict)
+                else {}
+            )
+            merged_report = dict(live_summary)
+            for key, value in persisted_report.items():
+                if isinstance(value, dict) and isinstance(merged_report.get(key), dict):
+                    merged_value = dict(merged_report[key])
+                    merged_value.update(value)
+                    merged_report[key] = merged_value
+                else:
+                    merged_report[key] = value
+            # A persisted final report remains authoritative where present, but
+            # live RuntimeState facts fill the pre-finalizer gap so Evidence does
+            # not report zero entities/imports while the plan is still running.
+            enriched["report"] = merged_report
         if not enriched.get("batches"):
             enriched["batches"] = [
                 dict(item)
@@ -3399,6 +3467,89 @@ class LANChatAgentWorker:
             return True
         return False
 
+    def _should_track_pending_discussion_reply(self, trigger: dict[str, Any]) -> bool:
+        text = str((trigger or {}).get("text") or "").strip()
+        if not text or self._is_generation_start_text(text) or self._is_gm_target_trigger(trigger):
+            return False
+        if str((trigger or {}).get("message_kind") or "chat").strip().lower() not in {"", "chat"}:
+            return False
+        try:
+            decision = get_intent_understanding_service().classify(
+                text,
+                allow_llm=False,
+                generation_active=False,
+            )
+        except Exception:  # noqa: BLE001
+            return False
+        return decision.intent in {"discussion", "plan_drafting", "plan_revision"}
+
+    def _begin_pending_discussion_reply(self, trigger: dict[str, Any]) -> str:
+        if not self._should_track_pending_discussion_reply(trigger):
+            return ""
+        room_id = str((trigger or {}).get("room_id") or "default")
+        message_id = str(
+            (trigger or {}).get("message_id")
+            or (trigger or {}).get("correlation_id")
+            or ""
+        ).strip()
+        if not message_id:
+            return ""
+        with self._pending_discussion_reply_lock:
+            pending = self._pending_discussion_replies.setdefault(room_id, {})
+            pending[message_id] = {
+                "message_id": message_id,
+                "target_agent_id": str((trigger or {}).get("agent_id") or (trigger or {}).get("target_agent_id") or ""),
+                "target_agent_name": str((trigger or {}).get("agent_name") or (trigger or {}).get("target_agent_name") or ""),
+                "started_at": time.time(),
+            }
+        return message_id
+
+    def _finish_pending_discussion_reply(self, room_id: str, message_id: str) -> None:
+        if not message_id:
+            return
+        room = str(room_id or "default")
+        with self._pending_discussion_reply_lock:
+            pending = self._pending_discussion_replies.get(room)
+            if not pending:
+                return
+            pending.pop(str(message_id), None)
+            if not pending:
+                self._pending_discussion_replies.pop(room, None)
+
+    def _pending_discussion_reply(self, room_id: str) -> dict[str, Any]:
+        room = str(room_id or "default")
+        with self._pending_discussion_reply_lock:
+            pending = list(self._pending_discussion_replies.get(room, {}).values())
+        if not pending:
+            return {}
+        pending.sort(key=lambda item: float(item.get("started_at") or 0.0))
+        return dict(pending[0])
+
+    def _process_trigger_with_discussion_tracking(
+        self,
+        trigger: dict[str, Any],
+        tracked_message_id: str = "",
+    ) -> bool:
+        room_id = str((trigger or {}).get("room_id") or "default")
+        tracked_message_id = tracked_message_id or self._begin_pending_discussion_reply(trigger)
+        try:
+            return self._process_trigger(trigger)
+        finally:
+            self._finish_pending_discussion_reply(room_id, tracked_message_id)
+
+    def _pending_discussion_confirmation_reply(self, trigger: dict[str, Any]) -> str | None:
+        text = str((trigger or {}).get("text") or "").strip()
+        if not self._is_pure_generation_confirmation_text(text):
+            return None
+        pending = self._pending_discussion_reply(str((trigger or {}).get("room_id") or "default"))
+        if not pending:
+            return None
+        target = str(pending.get("target_agent_name") or pending.get("target_agent_id") or "Agent")
+        return (
+            f"{target} 的方案仍在整理中，当前确认没有进入生成队列。"
+            "请等待方案回复完成后再确认生成。"
+        )
+
     def process_once(self) -> bool:
         if not self._has_engine_api():
             return False
@@ -3439,17 +3590,18 @@ class LANChatAgentWorker:
             _trace_preview(trigger.get("text")),
         )
         self._sync_trigger_history_to_coordinator(trigger)
+        tracked_message_id = self._begin_pending_discussion_reply(trigger)
 
         if self._async_agent_execution:
             threading.Thread(
-                target=self._process_trigger,
-                args=(trigger,),
+                target=self._process_trigger_with_discussion_tracking,
+                args=(trigger, tracked_message_id),
                 name="LANChatAgentTask",
                 daemon=True,
             ).start()
             return True
 
-        return self._process_trigger(trigger)
+        return self._process_trigger_with_discussion_tracking(trigger, tracked_message_id)
 
     def _drain_agent_runtime_queue_once(
         self,
@@ -4081,6 +4233,29 @@ class LANChatAgentWorker:
             trigger.get("message_kind") or "",
             _trace_preview(trigger.get("text")),
         )
+        pending_discussion_reply = self._pending_discussion_confirmation_reply(trigger)
+        if pending_discussion_reply is not None:
+            if not self._message_dispatch_ledger.claim(
+                room_id,
+                message_id,
+                owner="agent_trigger",
+                route="planning",
+            ):
+                return True
+            self._message_dispatch_ledger.transition(room_id, message_id, "routed")
+            sent = bool(self._send_final_reply(
+                "gm-system",
+                "GM",
+                pending_discussion_reply,
+                trigger,
+            ))
+            self._message_dispatch_ledger.transition(
+                room_id,
+                message_id,
+                "replied" if sent else "executed",
+                reply=pending_discussion_reply if sent else "",
+            )
+            return sent
         deterministic_control = self._get_orchestrator().handle_control_trigger(trigger)
         if deterministic_control is not None:
             action_payload = self._prepare_confirmed_action_payload(
@@ -9667,7 +9842,7 @@ class LANChatAgentWorker:
             emitted = self._emit_new_disclosure_events(coordinator, disclosure_start)
             self._start_coordinator_disclosure_watch(coordinator, disclosure_start + emitted)
             if not getattr(confirmed, "ok", False):
-                return str(getattr(event, "message", "") or "当前状态暂不可用，请稍后再试。")
+                return str(getattr(confirmed, "message", "") or "当前状态暂不可用，请稍后再试。")
             plan = coordinator.active_plan_for_room(room_id) or plan
         if plan.status == SeedPlanStatus.CONFIRMED:
             if not self._agent_runtime_flags.can_call_legacy_main_workflow():
@@ -10189,6 +10364,7 @@ class LANChatAgentWorker:
     def _is_generation_start_text(text: str) -> bool:
         raw = str(text or "")
         return any(word in raw for word in (
+            "\u786e\u5b9a\u751f\u6210", "\u786e\u5b9a\u5f00\u59cb",
             "运行时",
             "确认方案", "方案确认", "确认生成", "确认开始", "开始生成", "直接生成", "执行生成",
             "按照方案执行生成", "按方案执行生成", "就按方案生成", "按这个方案生成",
@@ -10199,9 +10375,12 @@ class LANChatAgentWorker:
     @staticmethod
     def _is_pure_generation_confirmation_text(text: str) -> bool:
         raw = str(text or "").strip().lower()
-        normalized = re.sub(r"^\s*@?gm\s*", "", raw, flags=re.IGNORECASE)
+        normalized = re.sub(r"^\s*@[^\s]+\s+", "", raw, count=1)
+        normalized = re.sub(r"^\s*@?gm\s*", "", normalized, flags=re.IGNORECASE)
         normalized = re.sub(r"[\s，。！？、,.!?:：；;‘’“”\"'（）()]+", "", normalized)
         return normalized in {
+            "\u786e\u5b9a\u751f\u6210",
+            "\u786e\u5b9a\u5f00\u59cb",
             "确认方案",
             "确认生成",
             "确认开始",

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sys
 import unittest
 
+import editor.plugins.AITool.services.agent_collaboration.artifact_registry as artifact_registry_module
 from editor.plugins.AITool.services.agent_collaboration import (
     ArtDirection,
     ArtifactDependencyError,
@@ -17,6 +17,7 @@ from editor.plugins.AITool.services.agent_collaboration import (
     ProjectStatePatch,
     ProjectStateStore,
 )
+from editor.plugins.AITool.services._test_import_guard import assert_module_has_no_forbidden_imports
 
 
 def _payload(artifact_type: str, label: str):
@@ -430,7 +431,7 @@ class ArtifactRegistryTests(unittest.TestCase):
             "editor.plugins.AITool.services.agent_runtime",
             "editor.plugins.AITool.services.lanchat",
         )
-        self.assertFalse(any(name.startswith(forbidden) for name in sys.modules))
+        assert_module_has_no_forbidden_imports(self, artifact_registry_module, forbidden)
 
     def _build_stale_chain(self) -> None:
         brief = _artifact(

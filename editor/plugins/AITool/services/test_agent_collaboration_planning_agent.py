@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import sys
 import unittest
 
+import editor.plugins.AITool.services.agent_collaboration.agents.planning_agent as planning_agent_module
 from editor.plugins.AITool.services.agent_collaboration import (
     AgentTask,
     AgentTaskGraphStore,
@@ -17,6 +17,7 @@ from editor.plugins.AITool.services.agent_collaboration import (
     ProjectStateStore,
     assert_executable,
 )
+from editor.plugins.AITool.services._test_import_guard import assert_module_has_no_forbidden_imports
 from editor.plugins.AITool.services.agent_collaboration.agents import (
     PlanningAgent,
     PlanningAgentDraft,
@@ -328,7 +329,7 @@ class PlanningAgentTests(unittest.TestCase):
             "editor.plugins.AITool.services.agent_runtime",
             "editor.plugins.AITool.services.lanchat",
         )
-        self.assertFalse(any(name.startswith(forbidden) for name in sys.modules))
+        assert_module_has_no_forbidden_imports(self, planning_agent_module, forbidden)
 
 
 if __name__ == "__main__":

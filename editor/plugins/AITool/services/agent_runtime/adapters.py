@@ -230,6 +230,14 @@ class RuntimeCppBridge:
         )
 
 
+class EngineCapabilityManifestReadError(RuntimeError):
+    """A sanitized failure from the read-only Engine capability boundary."""
+
+    def __init__(self, error_code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_code = str(error_code or "engine_capability_manifest_read_failed")
+
+
 def make_image_resource_provider(
     *,
     image_tool: Any,
@@ -386,11 +394,22 @@ def make_scene_snapshot_provider(
         if isinstance(request, dict):
             room_id = str(request.get("room_id") or "")
             effective_scene_name = str(request.get("scene_name") or scene_name or "")
+            native_scene_route = str(
+                request.get("scene_route")
+                or request.get("native_scene_route")
+                or scene_name
+                or ""
+            )
         else:
             room_id = str(request or "")
             effective_scene_name = scene_name
+            native_scene_route = scene_name
         payload = {
-            "scene_name": effective_scene_name,
+            # Runtime scene_name is a semantic plan label. Only an explicitly
+            # configured/native route may select a C++ scene; forwarding the
+            # semantic label caused the native reader to reload the live scene
+            # on every readiness poll.
+            "scene_name": native_scene_route,
             "wait_for_bounds": bool(wait_for_bounds),
         }
         raw = _invoke_tool_safely(snapshot_tool, payload, fallback="scene snapshot failed")
@@ -402,6 +421,60 @@ def make_scene_snapshot_provider(
         )
 
     return _provider
+
+
+def make_engine_capability_manifest_reader(
+    *,
+    capability_tool: Any,
+    parse_result: Callable[[Any], dict[str, Any]] | None = None,
+) -> Callable[[], dict[str, Any]]:
+    """Create a read-only adapter for the Engine capability manifest.
+
+    The manifest tool is intentionally separate from ``RuntimeCppBridge``:
+    capability discovery must not pass through an Engine write gate.  The
+    returned callable preserves a small, sanitized failure vocabulary for the
+    collaboration boundary while leaving native field normalization to that
+    boundary's injected port implementation.
+    """
+
+    if capability_tool is None:
+        raise ValueError("capability_tool is required")
+
+    def _reader() -> dict[str, Any]:
+        try:
+            raw = _invoke_tool(capability_tool, {})
+        except ConnectionError as exc:
+            raise EngineCapabilityManifestReadError(
+                "bridge_not_connected",
+                "Engine capability bridge is not connected.",
+            ) from exc
+        except Exception as exc:  # noqa: BLE001
+            raise EngineCapabilityManifestReadError(
+                "engine_capability_manifest_read_failed",
+                "Engine capability manifest read failed.",
+            ) from exc
+        parsed = parse_result(raw) if parse_result is not None else _parse_tool_result(raw)
+        if _is_unstructured_raw_result(parsed):
+            raise EngineCapabilityManifestReadError(
+                "engine_capability_manifest_invalid",
+                "Engine capability manifest response is not structured.",
+            )
+        status = str(parsed.get("status") or "").strip().lower()
+        success = _coerce_adapter_bool(parsed.get("success"), default=True)
+        if status in {"error", "failed", "failure", "fail"} or not success or parsed.get("error"):
+            native_code = str(parsed.get("error_code") or "").strip().lower()
+            error_code = (
+                "bridge_not_connected"
+                if native_code in {"bridge_not_connected", "engine_not_connected", "missing_engine"}
+                else "engine_capability_manifest_unavailable"
+            )
+            raise EngineCapabilityManifestReadError(
+                error_code,
+                "Engine capability manifest is unavailable.",
+            )
+        return dict(parsed)
+
+    return _reader
 
 
 def make_scene_review_provider(

@@ -1528,7 +1528,11 @@ NativeEditorScene* ensure_native_editor_scene(const std::string& project_path_ar
         throw std::runtime_error("No entrance scene found in project.ini");
     }
 
-    if (!state.scene || state.project_path != project_path || state.scene->route != scene_route) {
+    // Keep an explicitly selected scene stable. Comparing against the project
+    // entrance route on every read caused scene-name aliases from Runtime
+    // snapshot queries to bounce the native scene between two representations,
+    // destroying and rebuilding every Geometry each poll.
+    if (!state.scene || state.project_path != project_path) {
         state.scene = load_native_scene(project_root, scene_route);
         state.project_path = project_path;
     }
@@ -1560,13 +1564,52 @@ NativeEditorScene* reload_native_editor_scene(const std::string& project_path_ar
     return state.scene.get();
 }
 
+bool native_scene_request_matches(const NativeEditorScene& scene,
+                                  const std::string& scene_route_arg) {
+    const auto requested = normalize_route(scene_route_arg);
+    if (requested.empty()) {
+        return true;
+    }
+
+    const auto requested_lower = to_lower_ascii(requested);
+    const auto route = normalize_route(scene.route);
+    const auto route_path = path_from_utf8(route);
+    const auto requested_path = path_from_utf8(requested);
+    return requested_lower == to_lower_ascii(route)
+        || requested_lower == to_lower_ascii(scene.name)
+        || requested_lower == to_lower_ascii(path_to_utf8(route_path.filename()))
+        || requested_lower == to_lower_ascii(path_to_utf8(route_path.stem()))
+        || to_lower_ascii(path_to_utf8(requested_path.filename()))
+            == to_lower_ascii(path_to_utf8(route_path.filename()));
+}
+
+NativeEditorScene* resolve_native_editor_scene_request(NativeEditorScene* scene,
+                                                       const std::string& scene_route_arg) {
+    if (scene == nullptr || native_scene_request_matches(*scene, scene_route_arg)) {
+        return scene;
+    }
+
+    const auto requested = normalize_route(scene_route_arg);
+    const auto candidate = resolve_project_path(scene->project_root, requested);
+    std::error_code ec;
+    if (!std::filesystem::is_regular_file(candidate, ec)
+        || ec
+        || to_lower_ascii(path_to_utf8(candidate.extension())) != ".scene") {
+        // Runtime scene_name is a semantic label, not necessarily a file route.
+        // Invalid aliases must remain read-only context and must never reload the
+        // live native scene.
+        return scene;
+    }
+
+    return reload_native_editor_scene(
+        "",
+        route_for_project_storage(scene->project_root, path_to_utf8(candidate)));
+}
+
 NativeEditorScene* scene_for_request_route(const NativeRequest& request, std::size_t scene_arg_index = 0) {
     auto* scene = ensure_native_editor_scene();
     const auto scene_route = normalize_route(arg_string(request.args, scene_arg_index));
-    if (!scene_route.empty() && scene_route != scene->route) {
-        scene = reload_native_editor_scene("", scene_route);
-    }
-    return scene;
+    return resolve_native_editor_scene_request(scene, scene_route);
 }
 
 nlohmann::json make_on_init_payload(const NativeEditorScene& scene) {
@@ -2211,9 +2254,7 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
     }
 
     auto* scene = ensure_native_editor_scene();
-    if (!scene_route.empty() && scene_route != scene->route) {
-        scene = reload_native_editor_scene("", scene_route);
-    }
+    scene = resolve_native_editor_scene_request(scene, scene_route);
 
     auto apply_runtime_metadata = [&](NativeEditorActor& target) {
         const auto entity_id = json_string_value(actor_data, {"entity_id", "runtime_entity_id"});
@@ -2430,9 +2471,7 @@ NativeResult remove_native_editor_actor(const std::string& scene_route_arg,
 
     auto* scene = ensure_native_editor_scene();
     const auto scene_route = normalize_route(scene_route_arg);
-    if (!scene_route.empty() && scene_route != scene->route) {
-        scene = reload_native_editor_scene("", scene_route);
-    }
+    scene = resolve_native_editor_scene_request(scene, scene_route);
 
     auto it = std::find_if(scene->actors.begin(), scene->actors.end(), [&](const NativeEditorActor& actor) {
         if (actor.name == actor_name || actor.actor_guid == actor_name) {
@@ -2470,9 +2509,7 @@ NativeResult set_native_editor_actor_transform(const std::string& scene_route_ar
     }
     auto* scene = ensure_native_editor_scene();
     const auto scene_route = normalize_route(scene_route_arg);
-    if (!scene_route.empty() && scene_route != scene->route) {
-        scene = reload_native_editor_scene("", scene_route);
-    }
+    scene = resolve_native_editor_scene_request(scene, scene_route);
 
     auto* actor = find_native_actor(*scene, actor_name);
     if (!actor && actor_name.rfind("__shell_", 0) != 0) {
@@ -4687,9 +4724,7 @@ std::string get_editor_actor_bounds_from_python(const std::string& scene_name,
     try {
         auto* scene = ensure_native_editor_scene();
         const auto scene_route = normalize_route(scene_name);
-        if (!scene_route.empty() && scene_route != scene->route) {
-            scene = reload_native_editor_scene("", scene_route);
-        }
+        scene = resolve_native_editor_scene_request(scene, scene_route);
         auto* actor = find_native_actor(*scene, actor_name);
         if (!actor) {
             return nlohmann::json{
@@ -4728,9 +4763,7 @@ std::string get_editor_actor_geometry_status_from_python(const std::string& scen
     try {
         auto* scene = ensure_native_editor_scene();
         const auto scene_route = normalize_route(scene_name);
-        if (!scene_route.empty() && scene_route != scene->route) {
-            scene = reload_native_editor_scene("", scene_route);
-        }
+        scene = resolve_native_editor_scene_request(scene, scene_route);
         auto* actor = find_native_actor(*scene, actor_name);
         if (!actor) {
             return nlohmann::json{
@@ -4779,9 +4812,7 @@ std::string get_editor_scene_snapshot_from_python(const std::string& scene_name)
     try {
         auto* scene = ensure_native_editor_scene();
         const auto scene_route = normalize_route(scene_name);
-        if (!scene_route.empty() && scene_route != scene->route) {
-            scene = reload_native_editor_scene("", scene_route);
-        }
+        scene = resolve_native_editor_scene_request(scene, scene_route);
         nlohmann::json actors = nlohmann::json::array();
         for (const auto& actor : scene->actors) {
             actors.push_back(actor_to_json(*scene, actor));
@@ -4848,9 +4879,7 @@ std::string get_editor_scene_bounds_from_python(const std::string& scene_name) {
     try {
         auto* scene = ensure_native_editor_scene();
         const auto scene_route = normalize_route(scene_name);
-        if (!scene_route.empty() && scene_route != scene->route) {
-            scene = reload_native_editor_scene("", scene_route);
-        }
+        scene = resolve_native_editor_scene_request(scene, scene_route);
         const auto aabb = native_scene_world_aabb(*scene);
         if (!aabb) {
             return nlohmann::json{
@@ -4891,9 +4920,7 @@ std::string capture_editor_camera_view_from_python(const std::string& scene_name
 
         auto* scene = ensure_native_editor_scene();
         const auto scene_route = normalize_route(scene_name);
-        if (!scene_route.empty() && scene_route != scene->route) {
-            scene = reload_native_editor_scene("", scene_route);
-        }
+        scene = resolve_native_editor_scene_request(scene, scene_route);
 
         auto* camera = ensure_native_editor_camera(*scene, camera_name, camera_data);
         if (!camera || !camera->engine_camera) {
@@ -5068,9 +5095,7 @@ void register_main_view_api_handlers(NativeApiRegistry& registry) {
         {"scene_save", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
             persist_native_scene_common(*scene);
             return native_success({
                 {"status", "success"},
@@ -5315,9 +5340,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         {"sun_direction", [](const NativeRequest& request, const NativeContext&) {
             const auto scene_route = normalize_route(arg_string(request.args, 0));
             auto* scene = ensure_native_editor_scene();
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             scene->sun_enabled = arg_bool(request.args, 1, true);
             const auto direction_arg = request.args.is_array() && request.args.size() > 2
@@ -5348,9 +5371,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         {"floor_grid", [](const NativeRequest& request, const NativeContext&) {
             const auto scene_route = normalize_route(arg_string(request.args, 0));
             auto* scene = ensure_native_editor_scene();
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             scene->floor_grid_enabled = arg_bool(request.args, 1, true);
             apply_native_scene_environment(*scene);
@@ -5417,9 +5438,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         {"save_screenshot", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             const auto output_path = arg_string(request.args, 1);
             if (output_path.empty()) {
@@ -5450,9 +5469,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             const auto mode = arg_string(request.args, 0, "native");
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 1));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             const auto camera_name = arg_string(request.args, 2);
             auto* camera = find_native_camera(*scene, camera_name);
@@ -5472,9 +5489,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         {"get_render_backend", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             const auto camera_name = arg_string(request.args, 1);
             auto* camera = find_native_camera(*scene, camera_name);
@@ -5491,9 +5506,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         {"set_vision_render_mode", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             const auto camera_name = arg_string(request.args, 1);
             const auto mode = arg_string(request.args, 2, "path_tracing");
@@ -5512,9 +5525,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         {"get_vision_render_mode", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));
-            if (!scene_route.empty() && scene_route != scene->route) {
-                scene = reload_native_editor_scene("", scene_route);
-            }
+            scene = resolve_native_editor_scene_request(scene, scene_route);
 
             const auto camera_name = arg_string(request.args, 1);
             auto* camera = find_native_camera(*scene, camera_name);

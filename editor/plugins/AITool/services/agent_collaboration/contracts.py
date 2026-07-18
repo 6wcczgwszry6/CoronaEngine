@@ -14,8 +14,8 @@ import math
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
+from ..schema_versions import COLLABORATION_SCHEMA_VERSION
 
-COLLABORATION_SCHEMA_VERSION = "1.0"
 PRODUCER_ROLES = frozenset({"planning", "art", "program"})
 ARTIFACT_TYPES = frozenset(
     {

@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import sys
 import threading
 import unittest
 
+import editor.plugins.AITool.services.agent_collaboration.task_graph as task_graph_module
 from editor.plugins.AITool.services.agent_collaboration import (
     AgentTask,
     AgentTaskGraphStore,
@@ -19,6 +19,7 @@ from editor.plugins.AITool.services.agent_collaboration import (
     TaskOutputValidationError,
     TaskTransitionError,
 )
+from editor.plugins.AITool.services._test_import_guard import assert_module_has_no_forbidden_imports
 
 
 def _task(
@@ -532,7 +533,7 @@ class AgentTaskGraphTests(unittest.TestCase):
             "editor.plugins.AITool.services.agent_runtime",
             "editor.plugins.AITool.services.lanchat",
         )
-        self.assertFalse(any(name.startswith(forbidden) for name in sys.modules))
+        assert_module_has_no_forbidden_imports(self, task_graph_module, forbidden)
 
 
 if __name__ == "__main__":

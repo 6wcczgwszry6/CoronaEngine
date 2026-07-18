@@ -7272,6 +7272,111 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertEqual(state["scene_plans"], {})
         self.assertEqual(state["tool_graphs"], {})
 
+    def test_generation_confirmation_waits_for_inflight_discussion_reply(self) -> None:
+        engine = _FakeReplyEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        discussion = {
+            "room_id": "room-pending-discussion-confirm",
+            "message_id": "msg-discussion",
+            "text": "@\u957f\u8005 \u5e2e\u6211\u751f\u6210\u4e00\u4e2a\u513f\u7ae5\u5367\u5ba4",
+            "sender_id": "host-1",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "elder",
+            "agent_name": "\u957f\u8005",
+        }
+        tracked = worker._begin_pending_discussion_reply(discussion)
+        self.assertEqual(tracked, "msg-discussion")
+
+        confirmation = {
+            "room_id": "room-pending-discussion-confirm",
+            "message_id": "msg-confirm-too-early",
+            "text": "@\u957f\u8005 \u786e\u5b9a\u751f\u6210",
+            "sender_id": "host-1",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "elder",
+            "agent_name": "\u957f\u8005",
+        }
+        try:
+            with patch.object(
+                worker._get_orchestrator(),
+                "handle_control_trigger",
+                side_effect=AssertionError("early confirmation must not create a GM proposal"),
+            ), patch.object(
+                worker,
+                "_run_agent",
+                side_effect=AssertionError("early confirmation must not call the LLM"),
+            ):
+                handled = worker._process_trigger(confirmation)
+        finally:
+            worker._finish_pending_discussion_reply(
+                "room-pending-discussion-confirm",
+                tracked,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(len(engine.replies), 1)
+        self.assertIn("\u65b9\u6848\u4ecd\u5728\u6574\u7406\u4e2d", engine.replies[0]["text"])
+        state = worker._agent_runtime.state.snapshot("room-pending-discussion-confirm")["room"]
+        self.assertEqual(state["scene_plans"], {})
+        self.assertFalse(any(
+            str(graph.get("graph_role") or "") == "business_batch"
+            for graph in state["tool_graphs"].values()
+            if isinstance(graph, dict)
+        ))
+
+    def test_native_sync_blocks_early_confirmation_before_orchestrator(self) -> None:
+        engine = _FakeIdleEngine()
+        worker = _TestWorker(
+            corona_engine=engine,
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        tracked = worker._begin_pending_discussion_reply({
+            "room_id": "room-native-early-confirm",
+            "message_id": "msg-native-discussion",
+            "text": "@elder \u5e2e\u6211\u751f\u6210\u4e00\u4e2a\u513f\u7ae5\u5367\u5ba4",
+            "sender_id": "host-1",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "elder",
+            "agent_name": "elder",
+        })
+        confirmation = {
+            "room_id": "room-native-early-confirm",
+            "message_id": "msg-native-confirm",
+            "text": "@elder \u786e\u5b9a\u751f\u6210",
+            "sender_id": "host-1",
+            "sender_name": "host",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "elder",
+            "agent_name": "elder",
+        }
+        try:
+            with patch.object(
+                worker._get_orchestrator(),
+                "handle_control_trigger",
+                side_effect=AssertionError("native sync must block before proposal routing"),
+            ):
+                handled = worker.sync_chat_message_to_coordinator(confirmation)
+        finally:
+            worker._finish_pending_discussion_reply("room-native-early-confirm", tracked)
+
+        self.assertTrue(handled)
+        self.assertEqual(len(engine.system_messages), 1)
+        self.assertIn("\u65b9\u6848\u4ecd\u5728\u6574\u7406\u4e2d", engine.system_messages[0]["text"])
+        self.assertEqual(
+            worker._message_dispatch_ledger.entry(
+                "room-native-early-confirm",
+                "msg-native-confirm",
+            )["state"],
+            "replied",
+        )
+
     def test_agent_trigger_generation_confirmation_defers_to_authoritative_sync(self) -> None:
         worker = _TestWorker(
             interaction_coordinator=_FakeCoordinator(),
@@ -7299,6 +7404,39 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
         self.assertTrue(handled)
         state = worker._agent_runtime.state.snapshot("room-authoritative-confirm")["room"]
         self.assertEqual(state["scene_plans"], {})
+
+    def test_agent_reply_reuses_active_discussion_external_plan(self) -> None:
+        worker = _TestWorker(agent_runtime_flags=AgentRuntimeFlags.from_env({}))
+        plan = worker._agent_runtime.sync_external_plan_context(
+            room_id="room-discussion-plan-reuse",
+            external_plan_id="seed-discussion-plan-reuse",
+            text="Create a kids bedroom with a bed and desk",
+            owner_agent="elder",
+        )
+        trigger = {
+            "room_id": "room-discussion-plan-reuse",
+            "message_id": "msg-role-reply",
+            "correlation_id": "different-correlation",
+            "agent_id": "elder",
+            "agent_name": "elder",
+        }
+
+        self.assertEqual(
+            worker._runtime_planning_external_id(trigger, "elder"),
+            "seed-discussion-plan-reuse",
+        )
+        recorded = worker._mirror_agent_reply_context_in_agent_runtime(
+            room_id="room-discussion-plan-reuse",
+            text="Plan: keep a clear path between the bed and desk.",
+            trigger=trigger,
+            agent_id="elder",
+            agent_name="elder",
+        )
+
+        self.assertTrue(recorded["recorded"])
+        state = worker._agent_runtime.query_state("room-discussion-plan-reuse")["room"]
+        self.assertEqual(len(state["scene_plans"]), 1)
+        self.assertEqual(recorded["runtime_plan_id"], plan.plan_id)
 
     def test_agent_reply_plan_context_survives_followup_confirm_generation(self) -> None:
         coordinator = _FakeNoActiveCoordinator()
@@ -10755,6 +10893,52 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             summary["graph_count"],
             summary["graph_active_count"] + summary["graph_terminal_count"],
         )
+
+    def test_runtime_evidence_uses_live_summary_before_final_report_exists(self) -> None:
+        worker = _TestWorker(
+            corona_engine=_FakeIdleEngine(),
+            agent_runtime_flags=AgentRuntimeFlags.from_env({}),
+        )
+        room = {
+            "active_execution_plan_id": "plan-live-evidence",
+            "batch_plans": {},
+            "tool_graphs": {},
+        }
+        live_summary = {
+            "plan_id": "plan-live-evidence",
+            "operation_count": 7,
+            "operation_total_count": 11,
+            "scene_entity_registry": {
+                "entity_count": 2,
+                "actor_count": 1,
+                "environment_count": 1,
+                "game_ready_entity_count": 1,
+            },
+            "engine_write_boundary_summary": {
+                "boundary_fact_count": 2,
+                "import_boundary_count": 2,
+                "bridge_call_count": 2,
+                "bridge_success_count": 1,
+            },
+        }
+        with patch.object(
+            worker._agent_runtime,
+            "query_state",
+            return_value={"room": room, "summary": live_summary},
+        ):
+            evidence_result = worker._runtime_evidence_result(
+                {},
+                room_id="room-live-evidence",
+                plan_id="plan-live-evidence",
+            )
+
+        summary = worker._agent_runtime_evidence_summary(evidence_result)
+        self.assertEqual(summary["entity_count"], 2)
+        self.assertEqual(summary["actor_count"], 1)
+        self.assertEqual(summary["environment_count"], 1)
+        self.assertEqual(summary["operation_count"], 7)
+        self.assertEqual(summary["engine_write_import_boundary_count"], 2)
+        self.assertEqual(summary["engine_write_bridge_success_count"], 1)
 
     def test_structured_gm_target_routes_before_generic_agent_chat(self) -> None:
         worker = _TestWorker(

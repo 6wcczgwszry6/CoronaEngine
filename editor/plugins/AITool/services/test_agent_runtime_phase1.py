@@ -19850,8 +19850,11 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(status_snapshot["observed_actor_count"], 1)
         self.assertEqual(status_snapshot["latest_scene_name"], "Scene/场景1.scene")
         self.assertEqual(status_snapshot["latest_actors"][0]["actor_name"], "钘忓疂绠?")
-        with self.assertRaisesRegex(ValueError, "requires plan_id"):
-            runtime.generate_report("room-snapshot-provider")
+        report_snapshot = runtime.generate_report(
+            "room-snapshot-provider"
+        )["scene_snapshot_summary"]
+        self.assertEqual(report_snapshot["observed_actor_count"], 1)
+        self.assertNotIn("E:/private", str(report_snapshot))
         self.assertNotIn("E:/private", str(status_snapshot))
 
     def test_scene_snapshot_provider_keeps_runtime_scene_context_over_native_result(self) -> None:
@@ -19892,6 +19895,26 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(report_snapshot["latest_scene_name"], "Scene/runtime.scene")
         self.assertNotIn("legacy.scene", str(status_snapshot))
         self.assertNotIn("鏃у満鏅?", str(report_snapshot))
+
+    def test_scene_snapshot_provider_does_not_forward_semantic_scene_name_as_native_route(self) -> None:
+        class RecordingSnapshotTool:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, Any]] = []
+
+            def invoke(self, payload: dict) -> dict:
+                self.calls.append(dict(payload))
+                return {"scene": "Scene/main.scene", "actors": []}
+
+        tool = RecordingSnapshotTool()
+        provider = make_scene_snapshot_provider(snapshot_tool=tool)
+
+        snapshot = provider({
+            "room_id": "room-semantic-scene",
+            "scene_name": "Kids Bedroom Plan",
+        })
+
+        self.assertEqual(tool.calls[0]["scene_name"], "")
+        self.assertEqual(snapshot["scene_name"], "Kids Bedroom Plan")
 
     def test_scene_snapshot_provider_counts_sanitized_actors(self) -> None:
         class FakeSnapshotTool:
