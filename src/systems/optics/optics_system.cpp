@@ -36,7 +36,6 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
-#include <variant>
 #include <vector>
 
 #include <oneapi/tbb/task_group.h>
@@ -2151,71 +2150,6 @@ namespace Corona::Systems {
 
 namespace {
 constexpr auto kScreenshotRequestTimeout = std::chrono::seconds(10);
-
-// === 阶段一诊断: 确认 compute pipeline 的 local size 三个量是否自洽 ===
-// D  = dispatch_groups 用的除数 (resolved_thread_group_size(): 反射优先, 否则构造兜底)
-// N  = 反射到的 entryPointInfoPool[].numthreads
-// R  = 被执行的 SPIR-V 里 OpExecutionMode LocalSize 的真实值 (GPU 实际每组线程)
-// 预期若三者不一致(尤其 D!=R), 即为 1/8 画面 + 过度 dispatch 的根因。
-//
-// 从 SPIR-V 字节流扫 LocalSize。返回 (0,0,0) 表示未找到(或用了 LocalSizeId 变体)。
-inline ktm::uvec3 spirv_scan_local_size(const std::vector<uint32_t>& words) {
-    // SPIR-V header 占前 5 个 word, 指令从 index 5 开始。
-    // 每条指令首 word: 高 16 位 = word count, 低 16 位 = opcode。
-    // OpExecutionMode = 16; 其 operand: [entryPoint][mode]; mode==LocalSize(17) 时后接 x,y,z 字面量。
-    constexpr uint32_t kOpExecutionMode = 16u;
-    constexpr uint32_t kExecModeLocalSize = 17u;
-    if (words.size() < 5) return ktm::uvec3(0);
-    size_t i = 5;
-    while (i < words.size()) {
-        const uint32_t first = words[i];
-        const uint32_t count = first >> 16;
-        const uint32_t op = first & 0xFFFFu;
-        if (count == 0 || i + count > words.size()) break;  // 防御: 结构损坏
-        if (op == kOpExecutionMode && count >= 6) {
-            // words[i+1]=entryPoint, words[i+2]=mode, words[i+3..5]=x,y,z
-            if (words[i + 2] == kExecModeLocalSize) {
-                return ktm::uvec3(words[i + 3], words[i + 4], words[i + 5]);
-            }
-        }
-        i += count;
-    }
-    return ktm::uvec3(0);
-}
-
-void log_compute_pipeline_local_size(const char* name,
-                                     const Horizon::ComputePipelineBase& pipeline,
-                                     ktm::uvec3 ctor_numthreads) {
-    const auto desc = pipeline.desc();
-    const ktm::uvec3 D = desc.resolved_thread_group_size();
-
-    // 反射到的 numthreads (取 compute entry)
-    ktm::uvec3 N(0);
-    for (const auto& ep : desc.compute_shader.module.shaderResources.entryPointInfoPool) {
-        if (ep.stage == EmbeddedShader::ShaderStage::ComputeShader) {
-            N = ep.numthreads;
-            break;
-        }
-    }
-
-    // R: 从 SPIR-V 扫 LocalSize
-    ktm::uvec3 R(0);
-    if (const auto* words =
-            std::get_if<std::vector<uint32_t>>(&desc.compute_shader.module.shaderCode)) {
-        R = spirv_scan_local_size(*words);
-    }
-
-    const bool mismatch = (D.x != R.x || D.y != R.y || D.z != R.z);
-    CFW_LOG_INFO(
-        "[LocalSizeDiag] {:<26} ctor=({},{},{}) reflected_N=({},{},{}) resolved_D=({},{},{}) "
-        "spirv_R=({},{},{}){}",
-        name,
-        ctor_numthreads.x, ctor_numthreads.y, ctor_numthreads.z,
-        N.x, N.y, N.z,
-        D.x, D.y, D.z,
-        R.x, R.y, R.z,
-        mismatch ? "  <<< D!=R MISMATCH (dispatch bug root)" : "");
-}
 }
 
 struct OpticsSystem::NativeViewResources {
@@ -2742,26 +2676,6 @@ bool OpticsSystem::initialize_render_pipelines() {
 #ifdef CORONA_ENABLE_VISION
         hardware_->visionResolvePipeline.emplace(vision_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
 #endif
-
-        // === 阶段一诊断: 打印每个 compute pipeline 的 local size 三量对照 ===
-        // 一次性输出, 用于确认 D(dispatch除数) / N(反射) / R(SPIR-V真实) 是否自洽。
-        log_compute_pipeline_local_size("ssao", *hardware_->ssaoPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("ssaoBlur", *hardware_->ssaoBlurPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("lighting", *hardware_->lightingPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("sky", *hardware_->skyPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("skySHProject", *hardware_->skySHProjectPipeline, ktm::uvec3(64, 1, 1));
-        log_compute_pipeline_local_size("tonemap", *hardware_->tonemapPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("debugResolve", *hardware_->debugResolvePipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("visibilityDebugResolve", *hardware_->visibilityDebugResolvePipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("actorPick", *hardware_->actorPickPipeline, ktm::uvec3(1, 1, 1));
-        log_compute_pipeline_local_size("opticsOverlay", *hardware_->opticsOverlayPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("opticsCursor", *hardware_->opticsCursorPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("opticsUiWarp", *hardware_->opticsUiWarpPipeline, ktm::uvec3(8, 8, 1));
-        log_compute_pipeline_local_size("opticsComposite", *hardware_->opticsCompositePipeline, ktm::uvec3(8, 8, 1));
-#ifdef CORONA_ENABLE_VISION
-        log_compute_pipeline_local_size("visionResolve", *hardware_->visionResolvePipeline, ktm::uvec3(8, 8, 1));
-#endif
-
         hardware_->shaderHasInit = true;
     } catch (const std::exception& e) {
         CFW_LOG_CRITICAL("OpticsSystem: Failed to initialize typed pipelines: {}", e.what());
