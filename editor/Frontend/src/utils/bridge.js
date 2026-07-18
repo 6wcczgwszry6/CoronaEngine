@@ -542,11 +542,6 @@ const editorApiStatic = {
       ]),
     saveBlocklyTarget: (payload) => call_manifest_editor_api('scratch.saveBlocklyTarget', [payload || {}]),
     loadBlocklyTarget: (payload) => call_manifest_editor_api('scratch.loadBlocklyTarget', [payload || {}]),
-    // Route XML import through the existing ScratchTool save API to avoid C++ manifest changes.
-    importBlocksDocument: (payload) => call_manifest_editor_api('scratch.saveBlocklyTarget', [{
-      ...(payload || {}),
-      __corona_blocks_document_action: 'import',
-    }]),
     startGamePreview: (payload = { scope: 'project' }) =>
       call_manifest_editor_api('scratch.startGamePreview', [payload || { scope: 'project' }]),
     stopGamePreview: () => call_manifest_editor_api('scratch.stopGamePreview', []),
@@ -942,9 +937,6 @@ export const scriptingService = {
   saveBlocklyTarget: (payload) => editorApi.scratch.saveBlocklyTarget(payload),
 
   loadBlocklyTarget: (payload) => editorApi.scratch.loadBlocklyTarget(payload),
-
-  importBlocksDocument: (payload) => editorApi.scratch.importBlocksDocument(payload),
-
   startGamePreview: (payload = { scope: 'project' }) => editorApi.scratch.startGamePreview(payload),
 
   stopGamePreview: () => editorApi.scratch.stopGamePreview(),

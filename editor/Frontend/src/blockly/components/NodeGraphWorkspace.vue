@@ -24,17 +24,6 @@
           {{ codeRunning ? '停止' : '运行' }}
         </button>
         <span v-if="runStatus" class="ng-run-status" :title="runDetail || runStatus" @click="toggleRunDetail">{{ runStatus }}</span>
-
-        <button
-          v-if="isProjectTarget"
-          type="button"
-          class="ng-mode"
-          :disabled="xmlBusy"
-          title="导入 Gemini / AI 生成的节点积木 XML"
-          @click.stop="handleImportBlocksDocument"
-        >
-          导入
-        </button>
         <button
           type="button"
           class="ng-mode fullscreen-toggle"
@@ -316,6 +305,7 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { appService, scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
+import { registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
@@ -353,7 +343,6 @@ const runBusy = ref(false);
 const globalPreviewActive = ref(false);
 const globalPreviewScope = ref('');
 const runStatus = ref('');
-const xmlBusy = ref(false);
 const runDetail = ref('');
 const runDetailVisible = ref(false);
 const currentRunNodeId = ref('');
@@ -477,7 +466,9 @@ let isLoading = false,
   layoutResizeState = null,
   runPollTimer = null,
   gamePreviewGuardTimer = null,
-  startedRunForTarget = false;
+  startedRunForTarget = false,
+  unregisterAiNodeGraphConsumer = null,
+  componentMounted = false;
 const targetEnabledByKey = new Map();
 const normalizedTargetType = computed(() => (props.targetType === 'model' ? 'actor' : props.targetType || 'actor'));
 const isProjectTarget = computed(() => normalizedTargetType.value === 'project');
@@ -1514,36 +1505,74 @@ function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
 }
 
-
-function handleImportBlocksDocument() {
-  if (!isProjectTarget.value || xmlBusy.value) return;
-  const input = document.createElement('input');
-  input.type = 'file';
-  input.accept = '.corona-blocks.xml,.xml,text/xml,application/xml';
-  input.onchange = async () => {
-    const file = input.files?.[0];
-    if (!file) return;
-    xmlBusy.value = true;
-    try {
-      const xml = await file.text();
-      const response = bridgeResult(await scriptingService.importBlocksDocument({ xml }));
-      if (response?.status === 'error' || response?.success === false) {
-        throw new Error(response?.message || '导入节点积木 XML 失败');
-      }
-      await loadGraphForCurrentTarget();
-      const warningText = Array.isArray(response.warnings) && response.warnings.length
-        ? `（${response.warnings[0]}）`
-        : '';
-      saveLabel.value = `节点积木 XML 已导入${warningText}`;
-    } catch (error) {
-      logError('导入节点积木 XML 失败', error);
-      saveLabel.value = `导入失败：${error?.message || error}`;
-    } finally {
-      xmlBusy.value = false;
-    }
-  };
-  input.click();
+async function loadEmbeddedWorkspaceStates() {
+  await nextTick();
+  variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
+  activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
+  updateCanvasSize();
 }
+
+async function handleGeneratedNodeGraph(result) {
+  if (!isProjectTarget.value) {
+    return { success: false, errors: ['\u5185\u90e8 AI \u7ed3\u679c\u53ea\u80fd\u5e94\u7528\u5230\u9879\u76ee\u5e38\u9a7b\u8282\u70b9\u56fe'], warnings: [] };
+  }
+
+  const previous = graphSnapshot();
+  const storageKey = storageKeyForTarget(currentTarget());
+  let previousLocal = null;
+  try {
+    previousLocal = window.localStorage?.getItem(storageKey) ?? null;
+  } catch (_) {}
+
+  try {
+    // The service validates the raw envelope first. Normalize only after that so
+    // missing IDs, invalid positions, and dangling edges cannot be silently repaired.
+    const candidate = normalizeGraph(result.workspace);
+    const analysis = validateNodeGraph(candidate);
+    nodeGraphToCode(candidate); // Deserializes every visible block and validates conditions/generators.
+
+    isLoading = true;
+    applyGraph(candidate);
+    await loadEmbeddedWorkspaceStates();
+    isLoading = false;
+
+    if (!(await saveNow())) throw new Error('\u5185\u90e8 AI \u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25');
+    saveLabel.value = '\u5185\u90e8 AI \u8282\u70b9\u56fe\u5df2\u5e94\u7528';
+    return {
+      success: true,
+      errors: [],
+      warnings: Array.isArray(analysis?.warnings) ? analysis.warnings : [],
+      summary: {
+        nodeCount: candidate.nodes.length,
+        edgeCount: candidate.edges.length,
+      },
+    };
+  } catch (error) {
+    isLoading = true;
+    applyGraph(normalizeGraph(previous));
+    await loadEmbeddedWorkspaceStates();
+    isLoading = false;
+    try {
+      if (previousLocal == null) window.localStorage?.removeItem(storageKey);
+      else window.localStorage?.setItem(storageKey, previousLocal);
+    } catch (_) {}
+    saveLabel.value = `\u5185\u90e8 AI \u5e94\u7528\u5931\u8d25\uff1a${error?.message || error}`;
+    return { success: false, errors: [String(error?.message || error)], warnings: [] };
+  } finally {
+    isLoading = false;
+  }
+}
+
+function syncGeneratedNodeGraphConsumer() {
+  unregisterAiNodeGraphConsumer?.();
+  unregisterAiNodeGraphConsumer = null;
+  if (componentMounted && isProjectTarget.value) {
+    unregisterAiNodeGraphConsumer = registerGeneratedNodeGraphConsumer(handleGeneratedNodeGraph);
+  }
+}
+
+
+
 function clearRunPoll() {
   if (runPollTimer) window.clearInterval(runPollTimer);
   runPollTimer = null;
@@ -1827,6 +1856,7 @@ watch(
     runStatus.value = '';
     currentRunNodeId.value = '';
     runWarnings.value = [];
+    syncGeneratedNodeGraphConsumer();
     await refreshSceneActorOptions();
     await loadGraphForCurrentTarget();
   },
@@ -1850,6 +1880,8 @@ function unregisterNodeGraphFlusher() {
   }
 }
 onMounted(() => {
+  componentMounted = true;
+  syncGeneratedNodeGraphConsumer();
   window.addEventListener('corona-game-preview-status', onGamePreviewStatus);
   window.addEventListener('keydown', handleFullscreenKey);
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
@@ -1865,6 +1897,9 @@ onMounted(() => {
   updateCanvasSize();
 });
 onBeforeUnmount(() => {
+  componentMounted = false;
+  unregisterAiNodeGraphConsumer?.();
+  unregisterAiNodeGraphConsumer = null;
   window.removeEventListener('corona-game-preview-status', onGamePreviewStatus);
   window.removeEventListener('keydown', handleFullscreenKey);
   if (isFullscreen.value) {

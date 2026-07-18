@@ -5,7 +5,6 @@ import json
 import logging
 import os
 from pathlib import Path
-import xml.etree.ElementTree as ET
 import sys
 import threading
 import time
@@ -240,8 +239,6 @@ class ScratchTool:
         """Save generated Python and workspace JSON for one Blockly or node-graph target."""
         try:
             data = cls._normalize_payload(payload)
-            if (data.get("__corona_blocks_document_action") or data.get("blocksDocumentAction")) == "import":
-                return cls.import_blocks_document(data)
             target_type = "actor" if data.get("target_type") == "model" else (data.get("target_type") or "actor")
             if target_type not in ("project", "actor"):
                 return {"status": "error", "message": f"unsupported target_type: {target_type}"}
@@ -365,166 +362,6 @@ class ScratchTool:
             return {"status": "error", "message": str(exc)}
 
 
-    @staticmethod
-    def _safe_project_graph_workspace(value: Any) -> tuple[dict, list[str]]:
-        warnings: list[str] = []
-        workspace = value if isinstance(value, dict) else {}
-        if not isinstance(workspace.get("version"), int):
-            workspace["version"] = 1
-            warnings.append("ProjectGraph workspace missing integer version; defaulted to 1")
-        if not isinstance(workspace.get("nodes"), list):
-            workspace["nodes"] = []
-            warnings.append("ProjectGraph workspace missing nodes array; defaulted to []")
-        if not isinstance(workspace.get("edges"), list):
-            workspace["edges"] = []
-            warnings.append("ProjectGraph workspace missing edges array; defaulted to []")
-        if not isinstance(workspace.get("globalVariablesWorkspace"), dict):
-            workspace["globalVariablesWorkspace"] = {}
-            warnings.append("ProjectGraph workspace missing globalVariablesWorkspace; defaulted to {}")
-        return workspace, warnings
-
-    @classmethod
-    def _project_graph_target_paths(cls) -> tuple[str, Path, Path]:
-        target_id = cls._target_id("project", "", "", "node_graph")
-        digest = cls._target_digest(target_id)
-        blockly_dir = cls._blockly_dir()
-        return (
-            target_id,
-            blockly_dir / f"node_graph_project_{digest}.py",
-            blockly_dir / f"node_graph_project_{digest}.blockly.json",
-        )
-
-    @staticmethod
-    def _collect_serialized_block_types(value: Any, output: Optional[set[str]] = None) -> set[str]:
-        types = output if output is not None else set()
-        if isinstance(value, dict):
-            block_type = value.get("type")
-            if isinstance(block_type, str) and block_type:
-                types.add(block_type)
-            for child in value.values():
-                ScratchTool._collect_serialized_block_types(child, types)
-        elif isinstance(value, list):
-            for child in value:
-                ScratchTool._collect_serialized_block_types(child, types)
-        return types
-
-    @classmethod
-    def _ensure_project_code_prelude(cls, code: str) -> str:
-        text = code or ""
-        if "set_project_global" in text:
-            return text
-        return cls._with_context_prelude(text, "project", "", "")
-
-    @classmethod
-    def import_blocks_document(cls, payload: dict | str) -> dict:
-        """Import an AI-editable XML document into the project-level node graph target."""
-        try:
-            data = cls._normalize_payload(payload)
-            xml_text = str(data.get("xml") or data.get("content") or "")
-            if not xml_text.strip():
-                return {"status": "error", "success": False, "message": "XML content is empty"}
-            lowered = xml_text[:512].lower()
-            if "<!doctype" in lowered or "<!entity" in lowered:
-                return {"status": "error", "success": False, "message": "DOCTYPE/ENTITY is not allowed in Corona blocks XML"}
-            root = ET.fromstring(xml_text)
-            if root.tag != "CoronaBlocksDocument":
-                return {"status": "error", "success": False, "message": "Root element must be CoronaBlocksDocument"}
-            if str(root.attrib.get("schemaVersion") or "") != "1":
-                return {"status": "error", "success": False, "message": "Unsupported CoronaBlocksDocument schemaVersion"}
-            project_graph = root.find("ProjectGraph")
-            if project_graph is None:
-                return {"status": "error", "success": False, "message": "ProjectGraph element is required"}
-            warnings: list[str] = []
-            legacy_targets = root.findall(".//Target")
-            if legacy_targets:
-                warnings.append(f"Ignored {len(legacy_targets)} legacy actor/target element(s); v1 imports only ProjectGraph")
-
-            workspace_el = project_graph.find("Workspace")
-            if workspace_el is None or not (workspace_el.text or "").strip():
-                return {"status": "error", "success": False, "message": "ProjectGraph Workspace CDATA is required"}
-            try:
-                workspace_raw = json.loads(workspace_el.text or "{}")
-            except json.JSONDecodeError as exc:
-                return {"status": "error", "success": False, "message": f"ProjectGraph Workspace is not valid JSON: {exc}"}
-            if not isinstance(workspace_raw, dict):
-                return {"status": "error", "success": False, "message": "ProjectGraph Workspace JSON must be an object"}
-            if not isinstance(workspace_raw.get("version"), int):
-                return {"status": "error", "success": False, "message": "ProjectGraph Workspace must contain integer version"}
-            if not isinstance(workspace_raw.get("nodes"), list):
-                return {"status": "error", "success": False, "message": "ProjectGraph Workspace must contain nodes array"}
-            if not isinstance(workspace_raw.get("edges"), list):
-                return {"status": "error", "success": False, "message": "ProjectGraph Workspace must contain edges array"}
-            workspace, workspace_warnings = cls._safe_project_graph_workspace(workspace_raw)
-            warnings.extend(workspace_warnings)
-
-            catalog_block_types = {
-                str(block.attrib.get("type"))
-                for block in root.findall("./Catalog/Blocks/Block")
-                if block.attrib.get("type")
-            }
-            if catalog_block_types:
-                used_block_types = cls._collect_serialized_block_types(workspace)
-                unknown_block_types = sorted(used_block_types - catalog_block_types)
-                if unknown_block_types:
-                    preview = ", ".join(unknown_block_types[:12])
-                    suffix = "..." if len(unknown_block_types) > 12 else ""
-                    warnings.append(f"Workspace uses block type(s) not listed in Catalog: {preview}{suffix}")
-
-            generated_el = project_graph.find("GeneratedCode")
-            raw_code = generated_el.text if generated_el is not None and generated_el.text is not None else ""
-            code_missing = not raw_code.strip()
-            if code_missing:
-                warnings.append("GeneratedCode is empty; imported graph can be displayed but may not run until saved/generated")
-            code = cls._ensure_project_code_prelude(raw_code)
-
-            project_path = cls._active_project_path()
-            target_id, code_path, workspace_path = cls._project_graph_target_paths()
-            code_path.write_text(code, encoding="utf-8")
-            with open(workspace_path, "w", encoding="utf-8") as f:
-                json.dump(workspace, f, ensure_ascii=False, indent=2)
-
-            def _rel(path: Path) -> str:
-                return path.relative_to(project_path).as_posix()
-
-            target = {
-                "id": target_id,
-                "target_type": "project",
-                "script_kind": "node_graph",
-                "scene_name": "",
-                "actor_name": "",
-                "code_path": _rel(code_path),
-                "workspace_path": _rel(workspace_path),
-                "updated_at": time.time(),
-                "enabled": True,
-                "runnable": not code_missing,
-                "validation_errors": ["GeneratedCode is empty"] if code_missing else [],
-            }
-            manifest = cls._load_manifest()
-            targets = [item for item in manifest.get("targets", []) if item.get("id") != target_id]
-            targets.append(target)
-            targets.sort(
-                key=lambda t: (
-                    0 if t.get("target_type") == "project" else 1,
-                    t.get("scene_name", ""),
-                    t.get("actor_name", ""),
-                    cls._normalize_script_kind(t.get("script_kind")),
-                )
-            )
-            manifest["targets"] = targets
-            cls._write_manifest(manifest)
-            return {
-                "status": "imported",
-                "success": True,
-                "importedCount": 1,
-                "target": target,
-                "updatedTargets": [target_id],
-                "warnings": warnings,
-            }
-        except ET.ParseError as exc:
-            return {"status": "error", "success": False, "message": f"Invalid XML: {exc}"}
-        except Exception as exc:
-            logger.exception("[ScratchTool] import_blocks_document failed")
-            return {"status": "error", "success": False, "message": str(exc)}
 
     # ------------------------------------------------------------------
     # Legacy single-code execution
