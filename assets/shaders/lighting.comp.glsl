@@ -28,6 +28,7 @@ layout(push_constant) uniform PushConsts
     uint shadowEnabled;
     uint shadowInfoBufferIndex;
     uint shadowCascadeDebug;
+    uint shadowMaskImageIndex;
     uint ssaoImageIndex;
     uint ssaoEnabled;
     float ssaoStrength;
@@ -446,6 +447,15 @@ float sampleAmbientOcclusion(ivec2 pixel)
     return clamp(1.0 - (1.0 - ao) * strength, 0.0, 1.0);
 }
 
+float sampleSunShadowMask(ivec2 pixel)
+{
+    if (pushConsts.shadowEnabled == 0u || pushConsts.shadowMaskImageIndex == 0u) {
+        return 1.0;
+    }
+    return clamp(texelFetch(textures[nonuniformEXT(pushConsts.shadowMaskImageIndex)], pixel, 0).r,
+                 0.0, 1.0);
+}
+
 vec3 DisneyBRDF(vec3 WorldPos, vec3 Normal, vec3 Tangent, vec3 Bitangent,
     vec3 lightColor, vec3 albedo, MaterialInfo matl, float shadowFactor, float ambientOcclusion)
 {
@@ -737,7 +747,7 @@ void main()
     }
 
     // --- Disney Principled BRDF lighting ---
-    float shadowFactor = computeSunShadow(interpPos, interpNormal);
+    float shadowFactor = sampleSunShadowMask(pixel);
     float ambientOcclusion = sampleAmbientOcclusion(pixel);
     vec3 renderResult = DisneyBRDF(interpPos, interpNormal, T, B,
         pushConsts.lightColor, baseColor.rgb, matl, shadowFactor, ambientOcclusion);
