@@ -1481,7 +1481,18 @@ LegacyMigrationResult migrate_legacy_scene(const LegacyMigrationRequest& request
             auto section = ini.find(section_name);
             if (section == ini.end() || !section->second.contains(key) ||
                 trim(section->second.at(key)).empty()) return;
-            const auto source = resolve_legacy_route(legacy->project_root, section->second.at(key));
+            const auto route = trim(section->second.at(key));
+            const auto source = resolve_legacy_route(legacy->project_root, route);
+            auto normalized_route = lower(route);
+            std::replace(normalized_route.begin(), normalized_route.end(), '\\', '/');
+            if (category == "Scripts" && normalized_route == "scripts/scene_script.py" &&
+                !fs::is_regular_file(source)) {
+                // The legacy project template historically emitted this placeholder
+                // even when no scene script was created. Do not turn that stale
+                // default into a migration-blocking dependency.
+                section->second[key].clear();
+                return;
+            }
             const auto imported = store.import_file(source, category);
             if (!imported.ok()) {
                 result.diagnostics.insert(result.diagnostics.end(), imported.diagnostics.begin(),

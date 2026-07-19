@@ -3805,36 +3805,66 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         portable_info_end = handler_source.index("const auto project_ini", portable_info_start)
         self.assertNotIn('{"mode"', handler_source[portable_info_start:portable_info_end])
 
+    def test_world_creation_updates_default_save_location_for_portable_migration(self):
+        handler_source = self._handler_source()
+        start = handler_source.index('{"create_world_project"')
+        end = handler_source.index('{"create_multiplayer_project"', start)
+        world_body = handler_source[start:end]
+        self.assertIn(
+            'update_editor_settings_section("General", {{"default_path", path_to_utf8(base_dir)}})',
+            world_body,
+        )
+
+    def test_legacy_project_template_does_not_reference_missing_scene_script(self):
+        repo_root = self._repo_root()
+        template_source = (
+            repo_root / "editor" / "CoronaCore" / "demo" / "project" / "Scene" / "default.scene"
+        ).read_text(encoding="utf-8")
+        self.assertIn("[scripts]\npath =\n", template_source)
+        self.assertNotIn("Scripts/scene_script.py", template_source)
+
     def test_legacy_scene_migration_has_prompt_and_permanent_file_manager_action(self):
         repo_root = self._repo_root()
         handler_source = (
             repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
         ).read_text(encoding="utf-8")
-        launcher_source = (
-            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue"
+        recent_games_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
         ).read_text(encoding="utf-8")
         file_manager_source = (
             repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "FileManager.vue"
         ).read_text(encoding="utf-8")
 
         self.assertIn('{"legacy", !detect_scene_folder(opened).has_value()}', handler_source)
-        self.assertIn("corona.legacyMigrationPrompted", launcher_source)
-        self.assertIn("另存为便携场景", launcher_source)
-        self.assertIn("migrateLegacyScene", launcher_source)
+        self.assertIn("corona.legacyMigrationPrompted", recent_games_source)
+        self.assertIn("另存为便携场景", recent_games_source)
+        self.assertIn("migrateLegacyScene", recent_games_source)
         self.assertIn("migrateLegacyScene", file_manager_source)
         self.assertIn("另存为便携场景", file_manager_source)
 
     def test_recent_project_card_exposes_legacy_migration_action(self):
         repo_root = self._repo_root()
-        launcher_source = (
-            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue"
+        recent_games_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
         ).read_text(encoding="utf-8")
-        self.assertIn("migrateLegacyProject", launcher_source)
-        self.assertIn("另存为便携场景", launcher_source)
-        self.assertIn("proj.legacy", launcher_source)
-        self.assertIn("@click.stop=\"migrateLegacyProject(proj)\"", launcher_source)
+        self.assertIn("migrateLegacyProject", recent_games_source)
+        self.assertIn("另存为便携场景", recent_games_source)
+        self.assertIn("proj.legacy", recent_games_source)
+        self.assertIn("@click.stop=\"migrateLegacyProject(proj)\"", recent_games_source)
+        self.assertIn("便携场景", recent_games_source)
+        self.assertIn("旧格式", recent_games_source)
 
-    def test_recent_project_entries_mark_legacy_projects_for_the_launcher(self):
+    def test_project_launcher_route_and_component_are_removed_after_recent_games_unification(self):
+        repo_root = self._repo_root()
+        router_source = (repo_root / "editor" / "Frontend" / "src" / "router" / "index.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertFalse(
+            (repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue").exists()
+        )
+        self.assertNotIn("ProjectLauncher.vue", router_source)
+
+    def test_recent_project_entries_mark_legacy_projects_for_recent_games(self):
         source = self._handler_source()
         start = source.index("nlohmann::json recent_projects_native()")
         end = source.index("nlohmann::json active_project_info_json()", start)

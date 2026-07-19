@@ -158,6 +158,22 @@ class ProjectCopyTests(unittest.TestCase):
             recent = settings.get_recent_projects()
             self.assertTrue(recent[0]["legacy"])
 
+    def test_portable_migration_target_defaults_to_new_project_data_directory(self):
+        captured = {}
+        original_get_default_path = project_launcher.settings_manager.get_default_path
+        original_choose_new_directory = project_launcher.FileHandler.choose_new_directory
+        project_launcher.settings_manager.get_default_path = lambda: ""
+        project_launcher.FileHandler.choose_new_directory = staticmethod(
+            lambda **kwargs: captured.update(kwargs) or ""
+        )
+        try:
+            project_launcher.ProjectLauncher.choose_portable_scene_target()
+        finally:
+            project_launcher.settings_manager.get_default_path = original_get_default_path
+            project_launcher.FileHandler.choose_new_directory = original_choose_new_directory
+
+        self.assertEqual(Path(captured["default_dir"]).name, "data")
+
     def test_portable_settings_save_does_not_modify_scene_ini_or_create_project_ini(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

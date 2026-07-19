@@ -26,11 +26,6 @@ const routes = [
     component: () => import('../views/layout/StartScreen.vue'),
   },
   {
-    path: '/ProjectLauncher',
-    name: 'ProjectLauncher',
-    component: () => import('../views/layout/ProjectLauncher.vue'),
-  },
-  {
     path: '/NewGame',
     name: 'NewGame',
     component: () => import('../views/layout/NewGame.vue'),

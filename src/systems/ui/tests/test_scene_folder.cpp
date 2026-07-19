@@ -180,6 +180,25 @@ void legacy_project_migrates_to_transactional_scene_folder() {
            "script route should be rewritten into Assets");
 }
 
+void legacy_template_script_placeholder_is_ignored_when_missing() {
+    TempDir temp;
+    const auto legacy = temp.path / "legacy";
+    const auto target = temp.path / "Portable";
+    write_text(legacy / "project.ini",
+               "[Project]\nname = Legacy\nentrance_scene = Scene/default.scene\n");
+    write_text(legacy / "Scene" / "default.scene",
+               "[base]\nname = Legacy\n"
+               "[actors]\n"
+               "[scripts]\npath = Scripts/scene_script.py\n");
+
+    const auto result = migrate_legacy_scene({legacy / "project.ini", target, "Portable"});
+    expect(result.ok(), "missing legacy template script should not block migration");
+    auto ini = std::ifstream(target / "scene.ini");
+    const std::string text((std::istreambuf_iterator<char>(ini)), std::istreambuf_iterator<char>());
+    expect(text.find("path = Assets/Scripts/") == std::string::npos,
+           "missing legacy template script must not be copied into Assets");
+}
+
 void missing_legacy_asset_aborts_without_target_directory() {
     TempDir temp;
     const auto legacy = temp.path / "legacy";
@@ -673,6 +692,7 @@ int main() {
     obj_import_copies_material_and_texture_dependencies();
     missing_obj_dependency_fails_without_creating_bundle();
     legacy_project_migrates_to_transactional_scene_folder();
+    legacy_template_script_placeholder_is_ignored_when_missing();
     missing_legacy_asset_aborts_without_target_directory();
     new_scene_folder_has_no_mode_and_an_empty_valid_manifest();
     reopening_asset_store_preserves_existing_manifest_bundles();

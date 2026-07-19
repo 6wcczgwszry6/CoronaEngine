@@ -1,9 +1,10 @@
 import os
 import datetime
 import logging
+from pathlib import Path
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaCore.utils.file_handler import FileHandler
-from utils.settings import settings_manager
+from utils.settings import core_path, settings_manager
 logger = logging.getLogger(__name__)
 
 
@@ -30,9 +31,14 @@ class ProjectLauncher(PluginBase):
     @staticmethod
     def choose_portable_scene_target() -> str:
         """选择另存为便携场景的新目录路径。"""
+        default_dir = settings_manager.get_default_path().strip()
+        if not default_dir:
+            # 新建世界和新建项目默认都存放在运行目录的 data/ 下。
+            default_dir = str(Path(core_path.repo_root) / "data")
+        os.makedirs(default_dir, exist_ok=True)
         return FileHandler.choose_new_directory(
             caption="另存为便携场景",
-            default_dir=settings_manager.get_default_path(),
+            default_dir=default_dir,
             default_name="PortableScene",
         )
 

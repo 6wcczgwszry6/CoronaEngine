@@ -5427,6 +5427,7 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             if (!create_scene_folder(target, display_name)) {
                 throw std::runtime_error("Unable to create portable world scene: " + path_to_utf8(target));
             }
+            update_editor_settings_section("General", {{"default_path", path_to_utf8(base_dir)}});
             replace_ini_section_from_map(target / "scene.ini", "world",
                                          {{"type", world_type}, {"prompt", prompt}});
             return native_success({{"name", display_name}, {"path", path_to_utf8(target)}});
@@ -5447,6 +5448,7 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             if (!create_scene_folder(target, display_name)) {
                 throw std::runtime_error("Unable to create portable multiplayer scene: " + path_to_utf8(target));
             }
+            update_editor_settings_section("General", {{"default_path", path_to_utf8(base_dir)}});
             replace_ini_section_from_map(target / "scene.ini", "multiplayer", {{"role", role}});
             return native_success({{"name", display_name}, {"path", path_to_utf8(target)}, {"role", role}});
         }},
