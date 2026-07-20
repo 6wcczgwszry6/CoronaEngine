@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from threading import RLock
 from typing import Callable, Mapping, Protocol
 
 from ..integration_contracts import (
@@ -13,6 +14,7 @@ from ..integration_contracts import (
     SKELETON_CONTRACT_VERSION,
     BlockedResult,
     MissingRequirement,
+    PublicDtoManifest,
     PublicEnumManifest,
     SkeletonContractManifest,
     SkeletonNodeStatus,
@@ -24,10 +26,13 @@ from .artifact_bundle import ProjectArtifactBundle, ProjectArtifactBundleReader
 from .artifact_registry import ArtifactRegistry
 from .contracts import (
     ARTIFACT_LINEAGE_IDS,
+    ALLOWED_GAMEPLAY_PRIMITIVES,
     AgentTask,
     ArtDirection,
     GameDesignBrief,
+    GameplayEntitySlot,
     GameplayLogicPlan,
+    GameplayPrimitiveSpec,
     LevelPlan,
     SceneCompositionPlan,
 )
@@ -53,8 +58,8 @@ SKELETON_NODE_ORDER = (
     "user_command_fixture",
     "demo_scenario_runner",
     "planning_agent",
-    "art_agent",
     "program_agent",
+    "art_agent",
     "artifact_bundle",
     "project_gate_preflight",
     "engine_capability_port",
@@ -66,8 +71,8 @@ SKELETON_INTERFACE_NAMES = (
     "UserCommandFixture",
     "DemoScenarioRunnerPort.run",
     "PlanningAgentPort.run",
-    "ArtAgentPort.run",
     "ProgramAgentPort.run",
+    "ArtAgentPort.run",
     "ArtifactBundlePort.build",
     "ProjectGatePreflightPort.evaluate",
     "EngineCapabilityPort.get_manifest",
@@ -140,7 +145,7 @@ class ProjectGatePreflightResult:
     executable: bool = False
 
     def __post_init__(self) -> None:
-        if self.status not in {"completed", "blocked"}:
+        if self.status not in {"completed", "blocked", "pending_runtime_verification"}:
             raise ValueError(f"unsupported preflight result: {self.status}")
         checks = tuple(self.checks)
         if not checks or not all(isinstance(item, PreflightCheck) for item in checks):
@@ -149,6 +154,8 @@ class ProjectGatePreflightResult:
         blocked = tuple(self.blocked_results)
         if not all(isinstance(item, BlockedResult) for item in blocked):
             raise ValueError("blocked_results must contain BlockedResult values")
+        if self.status in BLOCKED_STATUSES and not blocked:
+            raise ValueError("blocked preflight result requires blocked_results")
         object.__setattr__(self, "blocked_results", blocked)
         if self.executable:
             raise ValueError("Walking Skeleton preflight cannot be executable")
@@ -165,16 +172,23 @@ class EngineCapabilityManifest:
 
 @dataclass(frozen=True)
 class DemoResult:
+    project_id: str
+    task_graph_id: str
     scenario_id: str
     status: str
     executable: bool
     artifact_refs: tuple[str, ...]
+    required_capabilities: tuple[str, ...]
+    preflight_result: ProjectGatePreflightResult
+    pending_runtime_verifications: tuple[BlockedResult, ...]
     blocked_results: tuple[BlockedResult, ...]
     skeleton_report: SkeletonStatusReport
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "project_id", _required_text(self.project_id, "project_id"))
+        object.__setattr__(self, "task_graph_id", _required_text(self.task_graph_id, "task_graph_id"))
         object.__setattr__(self, "scenario_id", _required_text(self.scenario_id, "scenario_id"))
-        if self.status not in {"completed", *BLOCKED_STATUSES}:
+        if self.status not in {"integration_ready", "blocked", "failed"}:
             raise ValueError(f"unsupported demo result status: {self.status}")
         if self.executable:
             raise ValueError("Walking Skeleton DemoResult cannot be executable")
@@ -182,9 +196,18 @@ class DemoResult:
         blocked = tuple(self.blocked_results)
         if not all(isinstance(item, BlockedResult) for item in blocked):
             raise ValueError("blocked_results must contain BlockedResult values")
-        if self.status in BLOCKED_STATUSES and not blocked:
+        if self.status == "blocked" and not blocked:
             raise ValueError("blocked DemoResult requires blocked_results")
         object.__setattr__(self, "blocked_results", blocked)
+        pending = tuple(self.pending_runtime_verifications)
+        if not all(isinstance(item, BlockedResult) for item in pending):
+            raise ValueError("pending_runtime_verifications must contain BlockedResult values")
+        if any(item.status != "pending_runtime_verification" for item in pending):
+            raise ValueError("pending_runtime_verifications must contain pending runtime results")
+        object.__setattr__(self, "pending_runtime_verifications", pending)
+        object.__setattr__(self, "required_capabilities", tuple(sorted(_text_tuple(self.required_capabilities, "required_capabilities", allow_empty=False))))
+        if not isinstance(self.preflight_result, ProjectGatePreflightResult):
+            raise TypeError("preflight_result must be ProjectGatePreflightResult")
         if not isinstance(self.skeleton_report, SkeletonStatusReport):
             raise TypeError("skeleton_report must be SkeletonStatusReport")
 
@@ -206,6 +229,18 @@ class WalkingSkeletonRunResult:
     preflight: ProjectGatePreflightResult
     demo_result: DemoResult
     progress_event: ProgressEventFixture
+    bundle: ProjectArtifactBundle
+    artifact_payloads: Mapping[str, Mapping[str, object]]
+
+
+@dataclass(frozen=True)
+class CollaborationStageEvent:
+    stage: str
+    status: str
+    artifact_refs: tuple[str, ...] = ()
+    error_code: str = ""
+    field_path: str = ""
+    safe_summary: str = ""
 
 
 class DemoScenarioRunnerPort(Protocol):
@@ -255,7 +290,21 @@ class _PlanningReasoner:
 
 
 class _ArtReasoner:
-    def generate(self, _request, _context) -> ArtAgentDraft:
+    def generate(self, _request, context) -> ArtAgentDraft:
+        gameplay_artifact = context.gameplay_logic_artifact
+        gameplay = gameplay_artifact.payload if gameplay_artifact is not None else {}
+        slots = gameplay.get("entity_slots") if isinstance(gameplay, Mapping) else ()
+        semantic_roles = tuple(
+            str(slot.get("semantic_role") or "").strip()
+            for slot in (slots or ())
+            if isinstance(slot, Mapping) and str(slot.get("semantic_role") or "").strip()
+        )
+        entity_requirements = semantic_roles or (
+            "player_spawn",
+            "collectible_key",
+            "locked_door",
+            "goal_zone",
+        )
         return ArtAgentDraft(
             art_direction=ArtDirection(
                 style_keywords=("readable", "low-detail", "warm indoor"),
@@ -266,8 +315,13 @@ class _ArtReasoner:
             scene_composition_plan=SceneCompositionPlan(
                 scene_type="indoor_room",
                 environment_requirements=("room_box", "room_floor"),
-                entity_requirements=("player_spawn", "collectible_key", "locked_door", "goal_zone"),
+                entity_requirements=entity_requirements,
                 layout_rules=("keep a clear route from spawn to goal",),
+                image_prompts={
+                    role: f"low-detail game-ready {role}, isolated object, readable silhouette"
+                    for role in entity_requirements
+                    if role not in {"player_spawn", "goal_zone"}
+                },
             ),
         )
 
@@ -277,6 +331,18 @@ class _ProgramReasoner:
         return ProgramAgentDraft(
             gameplay_logic_plan=GameplayLogicPlan(
                 states=("key_available", "key_collected", "door_unlocked", "objective_complete"),
+                entity_slots=(
+                    GameplayEntitySlot("player", "player_spawn", ("player",)),
+                    GameplayEntitySlot("key", "collectible_key", ("collectible",)),
+                    GameplayEntitySlot("door", "locked_door", ("lockable",)),
+                    GameplayEntitySlot("goal", "goal_zone", ("trigger_zone",)),
+                ),
+                primitives=(
+                    GameplayPrimitiveSpec("collect-key", "on_collect", "key", "player", {"state_key": "key_collected", "set_value": True}),
+                    GameplayPrimitiveSpec("unlock-door", "unlock", "key", "door", {"required_state": "key_collected"}),
+                    GameplayPrimitiveSpec("enter-goal", "on_enter", "goal", "player", {}),
+                    GameplayPrimitiveSpec("complete-objective", "complete_objective", "goal", "player", {"objective_id": "reach_goal"}),
+                ),
                 triggers=("collect_key", "enter_unlocked_door", "enter_goal_zone"),
                 rules=("door requires key_collected", "goal requires door_unlocked"),
                 win_conditions=("objective_complete",),
@@ -286,6 +352,29 @@ class _ProgramReasoner:
 
 
 class ProjectGatePreflight:
+    _REQUIRED_ENGINE_OPERATIONS = frozenset(
+        {
+            "actor_create",
+            "scene_snapshot.read",
+            "actual_aabb",
+            "render_ready",
+            "gameplay.apply_manifest",
+            "gameplay.preview.start",
+        }
+    )
+
+    def __init__(self, *, engine_capabilities: EngineCapabilityPort) -> None:
+        if not callable(getattr(engine_capabilities, "get_manifest", None)):
+            raise TypeError("engine_capabilities must provide get_manifest()")
+        self._engine_capabilities = engine_capabilities
+        self._last_capability_result: EngineCapabilityManifest | BlockedResult | None = None
+
+    @property
+    def last_capability_result(self) -> EngineCapabilityManifest | BlockedResult:
+        if self._last_capability_result is None:
+            raise RuntimeError("evaluate() must run before reading capability_result")
+        return self._last_capability_result
+
     def evaluate(self, bundle: ProjectArtifactBundle) -> ProjectGatePreflightResult:
         package = bundle.as_dict()
         refs = set(bundle.artifact_refs)
@@ -323,7 +412,7 @@ class ProjectGatePreflight:
             ),
         )
         failed = tuple(check for check in checks if check.status == "failed")
-        blocked_results = ()
+        blocked_results: tuple[BlockedResult, ...] = ()
         if failed:
             blocked_results = (
                 BlockedResult(
@@ -345,8 +434,60 @@ class ProjectGatePreflight:
                     evidence_refs=tuple(ref for check in failed for ref in check.evidence_refs),
                 ),
             )
+        capability_result = self._engine_capabilities.get_manifest()
+        self._last_capability_result = capability_result
+        if isinstance(capability_result, BlockedResult):
+            if failed:
+                return ProjectGatePreflightResult(
+                    status="blocked",
+                    checks=checks,
+                    blocked_results=blocked_results + (capability_result,),
+                    executable=False,
+                )
+            return ProjectGatePreflightResult(
+                status="pending_runtime_verification",
+                checks=checks,
+                blocked_results=(capability_result,),
+                executable=False,
+            )
+
+        missing_operations = tuple(
+            sorted(self._REQUIRED_ENGINE_OPERATIONS - set(capability_result.supported_operations))
+        )
+        missing_primitives = tuple(
+            sorted(ALLOWED_GAMEPLAY_PRIMITIVES - set(capability_result.supported_gameplay_primitives))
+        )
+        if missing_operations or missing_primitives:
+            missing_requirements = tuple(
+                MissingRequirement(
+                    requirement_id=f"engine.operation.{operation}",
+                    owner_domain="engine",
+                    description=f"Engine must support operation {operation} for the demo.",
+                )
+                for operation in missing_operations
+            ) + tuple(
+                MissingRequirement(
+                    requirement_id=f"engine.gameplay_primitive.{primitive}",
+                    owner_domain="engine",
+                    description=f"Engine must support gameplay primitive {primitive} for the demo.",
+                )
+                for primitive in missing_primitives
+            )
+            blocked_results += (
+                BlockedResult(
+                    node_id="project_gate_preflight",
+                    status="blocked",
+                    error_code="engine_capability_missing",
+                    summary="Engine capability manifest does not satisfy the demo contract.",
+                    missing_requirements=missing_requirements,
+                    owner_domain="engine",
+                    retryable=True,
+                    next_action="Implement or advertise every required Engine operation and gameplay primitive.",
+                    evidence_refs=("EngineCapabilityManifest",),
+                ),
+            )
         return ProjectGatePreflightResult(
-            status="blocked" if failed else "completed",
+            status="blocked" if failed or blocked_results else "completed",
             checks=checks,
             blocked_results=blocked_results,
             executable=False,
@@ -552,6 +693,9 @@ def build_skeleton_manifest() -> SkeletonContractManifest:
             ArtAgentResult,
             ProgramRequest,
             ProgramAgentResult,
+            GameplayEntitySlot,
+            GameplayPrimitiveSpec,
+            GameplayLogicPlan,
             ProjectArtifactBundle,
             PreflightCheck,
             ProjectGatePreflightResult,
@@ -564,11 +708,71 @@ def build_skeleton_manifest() -> SkeletonContractManifest:
             ProgressEventFixture,
             WalkingSkeletonRunResult,
         )
+    ) + (
+        PublicDtoManifest(
+            "ActionProposal",
+            (
+                "schema_version",
+                "proposal_id",
+                "command_id",
+                "project_id",
+                "room_id",
+                "plan_id",
+                "scene_version",
+                "execution_scope",
+                "operation",
+                "gate_report_id",
+                "gate_profile",
+                "binding_artifact_id",
+                "binding_artifact_hash",
+                "gameplay_manifest",
+                "idempotency_key",
+                "risk_level",
+                "status",
+            ),
+        ),
+        PublicDtoManifest(
+            "GameplayManifest",
+            (
+                "project_id",
+                "plan_id",
+                "scene_version",
+                "entity_bindings",
+                "primitives",
+                "objective_id",
+                "schema_version",
+                "content_hash",
+            ),
+        ),
+        PublicDtoManifest(
+            "PlanPatch",
+            (
+                "patch_id",
+                "room_id",
+                "plan_id",
+                "text",
+                "patch_type",
+                "items",
+                "source_user",
+                "target_agent",
+                "idempotency_key",
+                "payload_schema_version",
+                "structured_payload",
+                "payload_hash",
+                "proposal_id",
+                "risk_level",
+                "status",
+                "deferred_reason",
+                "created_at",
+                "updated_at",
+            ),
+        ),
     )
     enums = (
         PublicEnumManifest("OwnerDomain", tuple(sorted(OWNER_DOMAINS))),
         PublicEnumManifest("NodeStatus", tuple(sorted(NODE_STATUSES))),
         PublicEnumManifest("BlockedStatus", tuple(sorted(BLOCKED_STATUSES))),
+        PublicEnumManifest("PreflightStatus", ("blocked", "completed", "pending_runtime_verification")),
     )
     return SkeletonContractManifest(
         contract_version=SKELETON_CONTRACT_VERSION,
@@ -582,17 +786,49 @@ def build_skeleton_manifest() -> SkeletonContractManifest:
 
 
 class DemoScenarioRunner:
-    def __init__(self, *, engine_capabilities: EngineCapabilityPort, clock) -> None:
+    def __init__(
+        self,
+        *,
+        engine_capabilities: EngineCapabilityPort,
+        clock,
+        planning_reasoner: object | None = None,
+        art_reasoner: object | None = None,
+        program_reasoner: object | None = None,
+        retry_failed_agents: bool = True,
+        stage_observer: Callable[[CollaborationStageEvent], None] | None = None,
+    ) -> None:
         if not callable(getattr(engine_capabilities, "get_manifest", None)):
             raise TypeError("engine_capabilities must provide get_manifest()")
         if not callable(clock):
             raise TypeError("clock must be callable")
         self._engine_capabilities = engine_capabilities
         self._clock = clock
+        self._planning_reasoner = planning_reasoner or _PlanningReasoner()
+        self._art_reasoner = art_reasoner or _ArtReasoner()
+        self._program_reasoner = program_reasoner or _ProgramReasoner()
+        self._retry_failed_agents = bool(retry_failed_agents)
+        if stage_observer is not None and not callable(stage_observer):
+            raise TypeError("stage_observer must be callable")
+        self._stage_observer = stage_observer
+        self._results: dict[tuple[str, str], tuple[UserCommandFixture, WalkingSkeletonRunResult]] = {}
+        self._lock = RLock()
 
     def run(self, command: UserCommandFixture) -> WalkingSkeletonRunResult:
         if not isinstance(command, UserCommandFixture):
             raise TypeError("run requires UserCommandFixture")
+        key = (command.project_id, command.command_id)
+        with self._lock:
+            previous = self._results.get(key)
+            if previous is not None:
+                previous_command, previous_result = previous
+                if previous_command != command:
+                    raise ValueError(f"command_id {command.command_id} was reused with different content")
+                return previous_result
+            result = self._run_new(command)
+            self._results[key] = (command, result)
+            return result
+
+    def _run_new(self, command: UserCommandFixture) -> WalkingSkeletonRunResult:
 
         projects = ProjectStateStore()
         projects.create_project(project_id=command.project_id, room_id=command.room_id, source="walking-skeleton")
@@ -618,26 +854,33 @@ class DemoScenarioRunner:
                 depends_on=(),
                 acceptance_criteria=("planning contracts validate",),
                 capability_set=("artifact.write",),
-            ),
-            AgentTask(
-                task_id=task_ids["art"],
-                assigned_role="art",
-                objective="Produce art contracts for the demo.",
-                input_artifact_refs=(refs["GameDesignBrief"], refs["LevelPlan"]),
-                output_types=("ArtDirection", "SceneCompositionPlan"),
-                depends_on=(task_ids["planning"],),
-                acceptance_criteria=("art contracts validate",),
-                capability_set=("artifact.write",),
+                max_attempts=2,
             ),
             AgentTask(
                 task_id=task_ids["program"],
                 assigned_role="program",
                 objective="Produce non-executable gameplay logic.",
-                input_artifact_refs=(refs["GameDesignBrief"], refs["LevelPlan"], refs["ArtDirection"]),
+                input_artifact_refs=(refs["GameDesignBrief"], refs["LevelPlan"]),
                 output_types=("GameplayLogicPlan",),
-                depends_on=(task_ids["art"],),
+                depends_on=(task_ids["planning"],),
                 acceptance_criteria=("gameplay logic validates",),
                 capability_set=("artifact.read", "artifact.write"),
+                max_attempts=2,
+            ),
+            AgentTask(
+                task_id=task_ids["art"],
+                assigned_role="art",
+                objective="Produce art contracts for the demo from gameplay slots.",
+                input_artifact_refs=(
+                    refs["GameDesignBrief"],
+                    refs["LevelPlan"],
+                    refs["GameplayLogicPlan"],
+                ),
+                output_types=("ArtDirection", "SceneCompositionPlan"),
+                depends_on=(task_ids["program"],),
+                acceptance_criteria=("art contracts cover every gameplay entity slot",),
+                capability_set=("artifact.read", "artifact.write"),
+                max_attempts=2,
             ),
         )
         graphs.create_graph(
@@ -649,12 +892,17 @@ class DemoScenarioRunner:
             source="walking-skeleton",
         )
 
-        PlanningAgent(
+        planning_agent = PlanningAgent(
             project_states=projects,
             artifacts=artifacts,
             task_graphs=graphs,
-            reasoner=_PlanningReasoner(),
-        ).run(
+            reasoner=self._planning_reasoner,
+        )
+        self._run_stage(
+            stage="planning",
+            artifact_refs=(refs["GameDesignBrief"], refs["LevelPlan"]),
+            remaining_stages=("program", "art", "narration"),
+            run_agent=lambda: planning_agent.run(
             PlanningRequest(
                 request_id=f"request.{command.scenario_id}.planning",
                 project_id=command.project_id,
@@ -665,30 +913,23 @@ class DemoScenarioRunner:
                 acceptance_criteria=("key-door-goal progression is explicit",),
                 requested_by=command.requested_by,
             )
+            ),
+            graphs=graphs,
+            graph_id=graph_id,
+            task_id=task_ids["planning"],
+            retry_failed=self._retry_failed_agents,
         )
-        ArtAgent(
+        program_agent = ProgramAgent(
             project_states=projects,
             artifacts=artifacts,
             task_graphs=graphs,
-            reasoner=_ArtReasoner(),
-        ).run(
-            ArtRequest(
-                request_id=f"request.{command.scenario_id}.art",
-                project_id=command.project_id,
-                graph_id=graph_id,
-                task_id=task_ids["art"],
-                art_objective="Define a readable low-detail indoor demo scene.",
-                constraints=("no scene writes", "low visual quality is acceptable"),
-                acceptance_criteria=("scene requirements are structured",),
-                requested_by=command.requested_by,
-            )
+            reasoner=self._program_reasoner,
         )
-        ProgramAgent(
-            project_states=projects,
-            artifacts=artifacts,
-            task_graphs=graphs,
-            reasoner=_ProgramReasoner(),
-        ).run(
+        self._run_stage(
+            stage="program",
+            artifact_refs=(refs["GameplayLogicPlan"],),
+            remaining_stages=("art", "narration"),
+            run_agent=lambda: program_agent.run(
             ProgramRequest(
                 request_id=f"request.{command.scenario_id}.program",
                 project_id=command.project_id,
@@ -699,6 +940,38 @@ class DemoScenarioRunner:
                 acceptance_criteria=("states, triggers, rules, and win condition validate",),
                 requested_by=command.requested_by,
             )
+            ),
+            graphs=graphs,
+            graph_id=graph_id,
+            task_id=task_ids["program"],
+            retry_failed=self._retry_failed_agents,
+        )
+        art_agent = ArtAgent(
+            project_states=projects,
+            artifacts=artifacts,
+            task_graphs=graphs,
+            reasoner=self._art_reasoner,
+        )
+        self._run_stage(
+            stage="art",
+            artifact_refs=(refs["ArtDirection"], refs["SceneCompositionPlan"]),
+            remaining_stages=("narration",),
+            run_agent=lambda: art_agent.run(
+            ArtRequest(
+                request_id=f"request.{command.scenario_id}.art",
+                project_id=command.project_id,
+                graph_id=graph_id,
+                task_id=task_ids["art"],
+                art_objective="Define a readable low-detail indoor demo scene.",
+                constraints=("no scene writes", "low visual quality is acceptable"),
+                acceptance_criteria=("scene requirements cover gameplay slots",),
+                requested_by=command.requested_by,
+            )
+            ),
+            graphs=graphs,
+            graph_id=graph_id,
+            task_id=task_ids["art"],
+            retry_failed=self._retry_failed_agents,
         )
 
         bundle = ProjectArtifactBundleReader(
@@ -706,11 +979,10 @@ class DemoScenarioRunner:
             artifacts=artifacts,
             task_graphs=graphs,
         ).build(project_id=command.project_id, graph_id=graph_id)
-        preflight = ProjectGatePreflight().evaluate(bundle)
-        capability_result = self._engine_capabilities.get_manifest()
+        gate = ProjectGatePreflight(engine_capabilities=self._engine_capabilities)
+        preflight = gate.evaluate(bundle)
+        capability_result = gate.last_capability_result
         blocked_results = tuple(preflight.blocked_results)
-        if isinstance(capability_result, BlockedResult):
-            blocked_results += (capability_result,)
 
         manifest = build_skeleton_manifest()
         contract_hash = manifest.contract_hash()
@@ -721,14 +993,17 @@ class DemoScenarioRunner:
                 status=(
                     capability_result.status
                     if node_id == "engine_capability_port" and isinstance(capability_result, BlockedResult)
-                    else "blocked"
-                    if node_id == "project_gate_preflight" and preflight.status == "blocked"
+                    else preflight.status
+                    if node_id == "project_gate_preflight" and preflight.status != "completed"
                     else "completed"
                 ),
                 blocker_code=(
                     capability_result.error_code
                     if node_id == "engine_capability_port" and isinstance(capability_result, BlockedResult)
-                    else preflight.blocked_results[0].error_code
+                    else next(
+                        (result.error_code for result in preflight.blocked_results if result.node_id == "project_gate_preflight"),
+                        "runtime_gate_pending",
+                    )
                     if node_id == "project_gate_preflight" and preflight.blocked_results
                     else ""
                 ),
@@ -753,8 +1028,8 @@ class DemoScenarioRunner:
             )
         )
         overall_status = (
-            "blocked"
-            if preflight.status == "blocked"
+            preflight.status
+            if preflight.status != "completed"
             else capability_result.status
             if isinstance(capability_result, BlockedResult)
             else "completed"
@@ -767,10 +1042,22 @@ class DemoScenarioRunner:
             generated_at=_utc_text(self._clock()),
         )
         demo_result = DemoResult(
+            project_id=command.project_id,
+            task_graph_id=graph_id,
             scenario_id=command.scenario_id,
-            status=overall_status,
+            status="blocked" if overall_status == "blocked" else "integration_ready",
             executable=False,
             artifact_refs=bundle.artifact_refs,
+            required_capabilities=tuple(
+                sorted(
+                    {f"operation:{operation}" for operation in ProjectGatePreflight._REQUIRED_ENGINE_OPERATIONS}
+                    | {f"gameplay_primitive:{primitive}" for primitive in ALLOWED_GAMEPLAY_PRIMITIVES}
+                )
+            ),
+            preflight_result=preflight,
+            pending_runtime_verifications=tuple(
+                result for result in blocked_results if result.status == "pending_runtime_verification"
+            ),
             blocked_results=blocked_results,
             skeleton_report=report,
         )
@@ -783,9 +1070,96 @@ class DemoScenarioRunner:
             blocked_results=blocked_results,
             skeleton_report=report,
         )
+        artifact_payloads = {
+            artifact_type: artifacts.current(
+                command.project_id,
+                ARTIFACT_LINEAGE_IDS[artifact_type],
+                require_usable=True,
+            ).artifact.payload
+            for artifact_type in sorted(ARTIFACT_LINEAGE_IDS)
+            if artifact_type in bundle.entries
+        }
         return WalkingSkeletonRunResult(
             manifest=manifest,
             preflight=preflight,
             demo_result=demo_result,
             progress_event=progress_event,
+            bundle=bundle,
+            artifact_payloads=artifact_payloads,
         )
+
+    def _run_stage(
+        self,
+        *,
+        stage: str,
+        artifact_refs: tuple[str, ...],
+        remaining_stages: tuple[str, ...],
+        run_agent: Callable[[], object],
+        graphs: AgentTaskGraphStore,
+        graph_id: str,
+        task_id: str,
+        retry_failed: bool,
+    ) -> object:
+        self._emit_stage(CollaborationStageEvent(
+            stage=stage,
+            status="in_progress",
+        ))
+        try:
+            result = self._run_with_retry(
+                run_agent=run_agent,
+                graphs=graphs,
+                graph_id=graph_id,
+                task_id=task_id,
+                retry_failed=retry_failed,
+            )
+        except Exception as exc:
+            self._emit_stage(CollaborationStageEvent(
+                stage=stage,
+                status="blocked",
+                error_code=str(getattr(exc, "error_code", "") or type(exc).__name__),
+                field_path=str(getattr(exc, "field_path", "") or ""),
+                safe_summary=str(
+                    getattr(exc, "safe_summary", "")
+                    or f"{type(exc).__name__} blocked the collaboration stage"
+                ),
+            ))
+            for remaining in remaining_stages:
+                self._emit_stage(CollaborationStageEvent(
+                    stage=remaining,
+                    status="not_started",
+                ))
+            raise
+        self._emit_stage(CollaborationStageEvent(
+            stage=stage,
+            status="completed",
+            artifact_refs=artifact_refs,
+        ))
+        return result
+
+    def _emit_stage(self, event: CollaborationStageEvent) -> None:
+        if self._stage_observer is None:
+            return
+        try:
+            self._stage_observer(event)
+        except Exception:
+            return
+
+    @staticmethod
+    def _run_with_retry(
+        *,
+        run_agent: Callable[[], object],
+        graphs: AgentTaskGraphStore,
+        graph_id: str,
+        task_id: str,
+        retry_failed: bool,
+    ) -> object:
+        while True:
+            try:
+                return run_agent()
+            except Exception:
+                if not retry_failed:
+                    raise
+                record = graphs.get(graph_id).task(task_id)
+                if record.status != "failed" or record.attempt_count >= record.task.max_attempts:
+                    raise
+                graphs.retry_task(graph_id, task_id, source=f"demo-runner:{task_id}:retry")

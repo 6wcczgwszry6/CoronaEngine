@@ -11,8 +11,11 @@ from editor.plugins.AITool.services.agent_collaboration import (
     ArtifactRegistrationConflictError,
     ArtifactRegistry,
     ArtifactVersionConflictError,
+    EntityBindingPlan,
     GameDesignBrief,
+    GameplayEntitySlot,
     GameplayLogicPlan,
+    GameplayPrimitiveSpec,
     InvalidArtifactError,
     ProjectStatePatch,
     ProjectStateStore,
@@ -38,6 +41,13 @@ def _payload(artifact_type: str, label: str):
     if artifact_type == "GameplayLogicPlan":
         return GameplayLogicPlan(
             states=("ready", label),
+            entity_slots=(
+                GameplayEntitySlot("item", "collectible_item", ("collectible",)),
+                GameplayEntitySlot("player", "player_spawn", ("player",)),
+            ),
+            primitives=(
+                GameplayPrimitiveSpec("collect-item", "on_collect", "item", "player", {"state_key": "ready", "set_value": True}),
+            ),
             triggers=("enter",),
             rules=("authoritative state",),
             win_conditions=("goal reached",),
@@ -273,6 +283,78 @@ class ArtifactRegistryTests(unittest.TestCase):
             self.projects.get("project-1").artifact_refs,
             ("art@1", "brief@2", "logic@1"),
         )
+
+    def test_gameplay_logic_revision_stales_entity_binding_plan(self) -> None:
+        logic_v1 = _artifact(
+            artifact_id="logic",
+            artifact_type="GameplayLogicPlan",
+            role="program",
+            version=1,
+            base_project_version=1,
+        )
+        self.registry.register(
+            project_id="project-1",
+            artifact=logic_v1,
+            expected_project_version=1,
+            patch_id="patch-logic-v1",
+            source="test",
+        )
+        binding = ArtifactEnvelope(
+            artifact_id="binding",
+            artifact_type="EntityBindingPlan",
+            version=1,
+            producer_role="program",
+            source_task_id="task-binding-1",
+            base_project_version=2,
+            base_world_version=1,
+            dependencies=("logic@1",),
+            snapshot_source="mock",
+            non_executable=True,
+            status="validated",
+            payload=EntityBindingPlan(
+                snapshot_plan_id="plan-fixture",
+                snapshot_version=1,
+                bindings=({
+                    "slot_id": "key",
+                    "entity_id": "entity-key",
+                    "entity_version": 1,
+                    "asset_id": "asset-key",
+                    "semantic_role": "collectible_key",
+                    "required_capabilities": ["collectible"],
+                },),
+            ),
+        )
+        self.registry.register(
+            project_id="project-1",
+            artifact=binding,
+            expected_project_version=2,
+            patch_id="patch-binding-v1",
+            source="test",
+        )
+        logic_v2 = _artifact(
+            artifact_id="logic",
+            artifact_type="GameplayLogicPlan",
+            role="program",
+            version=2,
+            base_project_version=3,
+            label="v2",
+        )
+
+        self.registry.register(
+            project_id="project-1",
+            artifact=logic_v2,
+            expected_project_version=3,
+            patch_id="patch-logic-v2",
+            source="test",
+        )
+
+        binding_record = self.registry.current("project-1", "binding", require_usable=False)
+        self.assertEqual(binding_record.registry_status, "stale")
+        self.assertEqual(binding_record.stale_reasons[0].code, "dependency_superseded")
+        self.assertEqual(binding_record.stale_reasons[0].dependency_ref.artifact_id, "logic")
+        self.assertEqual(binding_record.stale_reasons[0].replacement_ref.version, 2)
+        with self.assertRaises(ArtifactNotUsableError):
+            self.registry.current("project-1", "binding")
 
     def test_republishing_dependents_clears_current_stale_state_but_preserves_audit(self) -> None:
         self._build_stale_chain()

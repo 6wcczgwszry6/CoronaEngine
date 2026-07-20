@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-import copy
+import base64
+import hashlib
 import logging
 import json
 import os
@@ -13,6 +14,17 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .interaction_coordinator import ChatMessage, InteractionCoordinator
+from .conversation_turn_context import ConversationTurnContextStore
+from .collaboration_model_policy import (
+    CollaborationModelSelection,
+    CollaborationModelSelector,
+    default_collaboration_model_selector,
+)
+from .collaboration_model_invoker import (
+    CollaborationInvocationSaturated,
+    CollaborationModelInvoker,
+)
+from .model_call_budget import ModelCallLedger
 from .seed_plan import SeedPlanStatus
 from .lanchat_agent_orchestrator import LanChatAgentOrchestrator
 from .lanchat_host_action_executor import LanChatHostActionExecutor
@@ -64,6 +76,9 @@ def _trace_preview(value: Any, limit: int = 80) -> str:
 class LANChatAgentWorker:
     """Poll C++ LANChat agent triggers and return replies through C++."""
 
+    _quasar_config_load_lock = threading.RLock()
+    _quasar_config_process_loaded = False
+
     def __init__(
         self,
         corona_engine: Any = None,
@@ -74,6 +89,7 @@ class LANChatAgentWorker:
         composer_factory: Callable[[], Any] | None = None,
         agent_runtime_flags: AgentRuntimeFlags | None = None,
         agent_runtime: AgentRuntime | None = None,
+        collaboration_model_selector: CollaborationModelSelector | None = None,
         sleep_seconds: float = 0.1,
         async_agent_execution: bool | None = None,
     ) -> None:
@@ -86,6 +102,9 @@ class LANChatAgentWorker:
         self._logger = logging.getLogger(__name__)
         self._agent_runtime_flags = agent_runtime_flags or AgentRuntimeFlags.from_env()
         self._agent_runtime = agent_runtime or self._create_agent_runtime()
+        self._collaboration_model_selector = (
+            collaboration_model_selector or default_collaboration_model_selector()
+        )
         self._owns_generation_scheduler = generation_scheduler is None and interaction_coordinator is None
         self._sleep_seconds = sleep_seconds
         self._async_agent_execution = (
@@ -97,6 +116,7 @@ class LANChatAgentWorker:
         self._thread: threading.Thread | None = None
         self._orchestrator: LanChatAgentOrchestrator | None = None
         self._agent_call_lock = threading.RLock()
+        self._collaboration_model_invoker = CollaborationModelInvoker()
         self._coordinator_seen_message_ids: set[str] = set()
         self._coordinator_seen_message_order: deque[str] = deque()
         self._runtime_increment_message_ids: set[str] = set()
@@ -104,13 +124,21 @@ class LANChatAgentWorker:
         self._gm_control_message_ids: set[str] = set()
         self._gm_control_message_order: deque[str] = deque()
         self._message_dispatch_ledger = MessageDispatchLedger()
+        self._model_call_ledger = ModelCallLedger()
+        self._conversation_turn_contexts = ConversationTurnContextStore()
         self._pending_discussion_reply_lock = threading.RLock()
         self._pending_discussion_replies: dict[str, dict[str, dict[str, Any]]] = {}
         self._active_room_ids: set[str] = set()
         self._active_room_order: deque[str] = deque()
         self._runtime_finalizer_retry_by_room: dict[str, dict[str, Any]] = {}
+        self._collaboration_readonly_entry: Any = None
+        self._collaboration_coordinator: Any = None
         self._progress_disclosure_lock = threading.RLock()
-        self._progress_disclosure_last_by_room: dict[str, tuple[str, float]] = {}
+        self._progress_disclosure_last_by_room: dict[str, dict[str, Any]] = {}
+        self._runtime_event_disclosure_lock = threading.RLock()
+        self._runtime_event_disclosure_cursor_by_room: dict[str, str] = {}
+        self._runtime_event_report_ready_keys_by_room: dict[str, set[str]] = {}
+        self._logged_media_lineage_keys: set[tuple[str, ...]] = set()
         if self._generation_scheduler is not None:
             self._install_generation_scheduler_hooks(self._generation_scheduler)
 
@@ -126,17 +154,12 @@ class LANChatAgentWorker:
             from Quasar.ai_tools.load_tools import load_tools
             from Quasar.ai_tools.registry import get_tool_registry
         except Exception as exc:  # noqa: BLE001
-            try:
-                from plugins.AITool.Quasar.ai_config.ai_config import get_ai_config, reload_ai_config
-                from plugins.AITool.Quasar.ai_tools.load_tools import load_tools
-                from plugins.AITool.Quasar.ai_tools.registry import get_tool_registry
-            except Exception:
-                self._logger.debug(
-                    "AgentRuntime tool registry unavailable for %s: %s",
-                    tool_name,
-                    type(exc).__name__,
-                )
-                return None
+            self._logger.debug(
+                "AgentRuntime canonical tool registry unavailable for %s: %s",
+                tool_name,
+                type(exc).__name__,
+            )
+            return None
 
         self._ensure_runtime_ai_config_loaded()
         config = getattr(self, "_runtime_ai_config_override", None)
@@ -220,10 +243,7 @@ class LANChatAgentWorker:
                         registry.register(tool, overwrite=True)
                 return registry.get(tool_name)
             if tool_name == "hunyuan_generate_3d":
-                try:
-                    from Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
-                except Exception:
-                    from plugins.AITool.Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
+                from Quasar.ai_modules.three_d_generate.tools.model_tools import load_hunyuan3d_tools
 
                 for tool in load_hunyuan3d_tools(config):
                     if not registry.get(getattr(tool, "name", "")):
@@ -242,44 +262,43 @@ class LANChatAgentWorker:
 
         if getattr(self, "_runtime_ai_config_loaded", False):
             return
-        loader_namespaces: list[str] = []
-        try:
-            from Quasar.ai_modules.three_d_generate.tools import loader as _runtime_hunyuan_loader  # noqa: F401
+        with LANChatAgentWorker._quasar_config_load_lock:
+            if LANChatAgentWorker._quasar_config_process_loaded:
+                self._runtime_ai_config_loaded = True
+                self._logger.info(
+                    "[AgentRuntimeProviderTrace] phase=config_load_deduped canonical_root=Quasar"
+                )
+                return
+            self._ensure_runtime_quasar_import_path()
+            loader_status = "unavailable"
+            try:
+                from Quasar.ai_modules.three_d_generate.tools import loader as _runtime_hunyuan_loader  # noqa: F401
 
-            loader_namespaces.append("runtime")
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime canonical Hunyuan config loader unavailable: %s",
-                type(exc).__name__,
+                loader_status = "canonical"
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "AgentRuntime canonical Hunyuan config loader unavailable: %s",
+                    type(exc).__name__,
+                )
+            try:
+                from plugins.AITool import utils as _aitool_utils  # noqa: F401
+                from plugins.AITool.utils import ai_setting as _ai_setting  # noqa: F401
+                self._bind_runtime_ai_config()
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "AgentRuntime local AI setting module unavailable: %s",
+                    type(exc).__name__,
+                )
+            LANChatAgentWorker._quasar_config_process_loaded = True
+            self._runtime_ai_config_loaded = True
+            self._logger.info(
+                "[AgentRuntimeProviderTrace] phase=config_load loader=%s canonical_root=Quasar",
+                loader_status,
             )
-        try:
-            from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import loader as _plugin_hunyuan_loader  # noqa: F401
-
-            loader_namespaces.append("plugin")
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime plugin Hunyuan config loader unavailable: %s",
-                type(exc).__name__,
-            )
-        try:
-            from plugins.AITool import utils as _aitool_utils  # noqa: F401
-            from plugins.AITool.utils import ai_setting as _ai_setting  # noqa: F401
-            self._bind_runtime_ai_config()
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime local AI setting module unavailable: %s",
-                type(exc).__name__,
-            )
-        self._logger.info(
-            "[AgentRuntimeProviderTrace] phase=config_load loaders=%s",
-            ",".join(loader_namespaces) or "none",
-        )
-        self._runtime_ai_config_loaded = True
 
     def _bind_runtime_ai_config(self) -> None:
         """Bind providers to the canonical top-level Quasar configuration."""
 
-        self._synchronize_quasar_ai_settings_namespaces()
         try:
             from Quasar.ai_config.ai_config import get_ai_config
 
@@ -288,105 +307,6 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug(
                 "AgentRuntime canonical AI config unavailable: %s",
-                type(exc).__name__,
-            )
-        # Compatibility for old editor builds which imported Quasar only as a
-        # plugin-qualified package.
-        self._mirror_plugin_ai_settings_to_runtime_namespace()
-
-    def _synchronize_quasar_ai_settings_namespaces(self) -> None:
-        """Keep duplicate Quasar import namespaces on one authoritative config.
-
-        The editor historically imports Quasar both as ``Quasar`` and as
-        ``plugins.AITool.Quasar``.  Python treats their module globals as
-        separate singletons, so settings registered by ``ai_setting`` can be
-        invisible to tool discovery in the other namespace.  The top-level
-        Runtime namespace is authoritative; the plugin-qualified namespace is
-        synchronized for compatibility with old loaders and warmup code.
-        """
-
-        try:
-            from Quasar.ai_service.entrance import ai_entrance as runtime_entrance
-            from plugins.AITool.Quasar.ai_service.entrance import ai_entrance as plugin_entrance
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime AI setting namespace synchronization unavailable: %s",
-                type(exc).__name__,
-            )
-            return
-
-        runtime_settings = runtime_entrance.collector.AI_SETTINGS
-        plugin_settings = plugin_entrance.collector.AI_SETTINGS
-        source_settings = runtime_settings if isinstance(runtime_settings, dict) and runtime_settings else plugin_settings
-        if not isinstance(source_settings, dict) or not source_settings:
-            return
-
-        synchronized: list[str] = []
-        for namespace, entrance in (
-            ("runtime", runtime_entrance),
-            ("plugin", plugin_entrance),
-        ):
-            collector = entrance.collector
-            try:
-                collector._ai_settings.update(copy.deepcopy(source_settings))
-                for key, value in source_settings.items():
-                    source = getattr(runtime_entrance.collector, "_setting_sources", {}).get(
-                        key,
-                        "plugins.AITool.utils.ai_setting",
-                    )
-                    collector._setting_sources[key] = source
-                    loader = collector._ai_load.get(key)
-                    normalized = loader(copy.deepcopy(value)) if loader is not None else copy.deepcopy(value)
-                    setattr(collector._ai_config, key, normalized)
-                synchronized.append(namespace)
-            except Exception as exc:  # noqa: BLE001
-                self._logger.warning(
-                    "AgentRuntime AI setting namespace synchronization failed namespace=%s error_type=%s",
-                    namespace,
-                    type(exc).__name__,
-                )
-
-        runtime_hunyuan = getattr(runtime_entrance.collector.AIConfig, "hunyuan3d", None)
-        plugin_hunyuan = getattr(plugin_entrance.collector.AIConfig, "hunyuan3d", None)
-        runtime_enabled = bool(
-            getattr(runtime_hunyuan, "enable", runtime_hunyuan.get("enable", False) if isinstance(runtime_hunyuan, dict) else False)
-        )
-        plugin_enabled = bool(
-            getattr(plugin_hunyuan, "enable", plugin_hunyuan.get("enable", False) if isinstance(plugin_hunyuan, dict) else False)
-        )
-        self._logger.info(
-            "[AgentRuntimeProviderTrace] phase=config_namespace_sync namespaces=%s hunyuan_enabled=runtime:%s,plugin:%s",
-            ",".join(synchronized) or "none",
-            runtime_enabled,
-            plugin_enabled,
-        )
-
-    def _mirror_plugin_ai_settings_to_runtime_namespace(self) -> None:
-        """Bridge plugin-qualified Quasar settings into the Runtime Quasar namespace."""
-
-        try:
-            from plugins.AITool.Quasar.ai_service.entrance import ai_entrance as plugin_entrance
-            from Quasar.ai_service.entrance import ai_entrance as runtime_entrance
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime AI setting namespace bridge unavailable: %s",
-                type(exc).__name__,
-            )
-            return
-        plugin_settings = plugin_entrance.collector.AI_SETTINGS
-        if not isinstance(plugin_settings, dict) or not plugin_settings:
-            return
-        runtime_collector = runtime_entrance.collector
-        try:
-            runtime_collector._ai_settings.update(plugin_settings)
-            for key, value in plugin_settings.items():
-                loader = runtime_collector._ai_load.get(key)
-                if loader is not None:
-                    setattr(runtime_collector._ai_config, key, loader(value))
-            self._runtime_ai_config_override = runtime_collector.AIConfig
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug(
-                "AgentRuntime AI setting namespace bridge failed: %s",
                 type(exc).__name__,
             )
 
@@ -404,10 +324,7 @@ class LANChatAgentWorker:
             }
             if required_sources.issubset(existing_sources):
                 return
-            try:
-                from Quasar.ai_tools.load_tools import register_extra_builtin_registrar
-            except Exception:
-                from plugins.AITool.Quasar.ai_tools.load_tools import register_extra_builtin_registrar
+            from Quasar.ai_tools.load_tools import register_extra_builtin_registrar
             from plugins.AITool.cai_extensions.engine_tools import register_engine_loaders
 
             register_extra_builtin_registrar(register_engine_loaders)
@@ -464,6 +381,7 @@ class LANChatAgentWorker:
                 if image_tool is not None:
                     kwargs["image_resource_provider"] = make_image_resource_provider(
                         image_tool=image_tool,
+                        media_resolver=self._resolve_runtime_media_file,
                     )
                     note_provider("image_resource", requested=True, status="enabled")
                 else:
@@ -596,6 +514,7 @@ class LANChatAgentWorker:
                         model_tool=model_tool,
                         max_concurrency=model_concurrency,
                         wait_for_ready=mesh_ready_waiter if callable(mesh_ready_waiter) else None,
+                        require_image_input=self._agent_runtime_flags.strict_image_to_model_pipeline,
                     )
                     model_resource_provider_enabled = True
                     note_provider("model_resource", requested=True, status="enabled")
@@ -719,6 +638,9 @@ class LANChatAgentWorker:
                 "[AgentRuntimeProviderTrace] phase=runtime_created providers=%s",
                 json.dumps(safe_provider_diagnostics, ensure_ascii=False, sort_keys=True),
             )
+        kwargs["strict_image_to_model_pipeline"] = bool(
+            self._agent_runtime_flags.strict_image_to_model_pipeline
+        )
         return AgentRuntime(**kwargs)
 
     def start(self) -> None:
@@ -942,6 +864,8 @@ class LANChatAgentWorker:
         """
         if not isinstance(message, dict):
             return False
+        message = dict(message)
+        message["message_id"] = self._dispatch_message_id(message)
         message_kind = str(message.get("message_kind") or "chat").lower()
         sender_type = str(message.get("sender_type") or "user").lower()
         dedupe_key = self._coordinator_sync_dedupe_key(message, source=source)
@@ -1019,7 +943,40 @@ class LANChatAgentWorker:
             )
             self._remember_coordinator_seen_message_id(dedupe_key)
             return False
+        metadata = self._coordinator_sync_metadata(message, source=source)
+        metadata = self._normalize_coordinator_target_metadata(message, text, metadata)
+        if self._native_queue_should_defer_to_agent_trigger(message, text, source=source):
+            self._logger.info(
+                "[LANChatDispatchLedger] phase=native_observer_deferred owner=agent_trigger "
+                "source=%s room=%s message_id=%s route=agent_chat business_mutation=false",
+                source,
+                room_id,
+                message.get("message_id") or "",
+            )
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
+        if source == "lanchat_native_queue":
+            target_agent_id = str(metadata.get("target_agent_id") or "").strip().lower()
+            target_agent_name = str(metadata.get("target_agent_name") or "").strip().lower()
+            native_route = (
+                "gm_control"
+                if target_agent_id == "gm"
+                or target_agent_name in {"gm", "主持人", "裁判", "game master"}
+                else "native_chat"
+            )
+            if not self._claim_message_execution(
+                message,
+                owner="native_queue",
+                route=native_route,
+            ):
+                self._remember_coordinator_seen_message_id(dedupe_key)
+                return True
+        message["_conversation_turn_context"] = self._record_conversation_turn_context(message, text)
         self._apply_generation_options_from_message(message)
+        if self._handle_gm_pending_planning_confirmation(message):
+            self._remember_gm_control_message_id(str(message.get("message_id") or ""))
+            self._remember_coordinator_seen_message_id(dedupe_key)
+            return True
         pending_discussion_reply = self._pending_discussion_confirmation_reply(message)
         if pending_discussion_reply is not None:
             message_id = str(message.get("message_id") or "")
@@ -1204,8 +1161,9 @@ class LANChatAgentWorker:
                 self._remember_coordinator_seen_message_id(dedupe_key)
                 return True
         runtime_plan_update_reply = self._handle_active_runtime_plan_context_update(message, text)
-        if runtime_plan_update_reply:
-            self._send_coordinator_sync_system_reply(message, runtime_plan_update_reply)
+        if runtime_plan_update_reply is not None:
+            if runtime_plan_update_reply:
+                self._send_coordinator_sync_system_reply(message, runtime_plan_update_reply)
             self._log_scene_route(
                 room_id=room_id,
                 sender=str(message.get("sender_name") or message.get("sender_id") or ""),
@@ -1235,8 +1193,6 @@ class LANChatAgentWorker:
         try:
             coordinator = self._get_interaction_coordinator()
             disclosure_start = len(coordinator.disclosure_events)
-            metadata = self._coordinator_sync_metadata(message, source=source)
-            metadata = self._normalize_coordinator_target_metadata(message, text, metadata)
             active = coordinator.active_plan_for_room(room_id)
             self._logger.info(
                 "[LANChatSyncTrace] phase=route_start source=%s dedupe=%s room=%s active=%s plan=%s draft_action=%s target_scope=%s target_agent=%s/%s metadata_keys=%s",
@@ -1529,33 +1485,35 @@ class LANChatAgentWorker:
             or str(getattr(plan, "owner_agent", "") or "").strip()
             or str(metadata.get("target_agent_name") or metadata.get("target_agent_id") or "").strip()
         )
-        source_agents = list(getattr(plan, "source_context_agents", []) or [])
-        source_context_agent = str(metadata.get("source_context_agent") or "").strip()
-        if source_context_agent and source_context_agent not in source_agents:
-            source_agents.append(source_context_agent)
+        mapped_plan_ref = self._mapped_runtime_context_plan_ref(room_id, external_plan_id)
         try:
             runtime_result = self._agent_runtime.handle_message(
                 room_id=str(room_id or trigger.get("room_id") or "default"),
-                external_plan_id=external_plan_id,
+                external_plan_id=mapped_plan_ref,
                 text=design_text,
                 sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
                 owner_agent=owner_agent,
-                source_context_agents=source_agents,
-                action="plan",
+                action="runtime.plan_context.record",
                 reply_to=str(trigger.get("message_id") or ""),
             )
-            runtime_plan = dict(runtime_result.get("plan") or {})
-            runtime_plan_id = str(runtime_plan.get("plan_id") or "")
+            context = dict(runtime_result.get("context") or {})
+            runtime_plan_id = str(context.get("runtime_plan_id") or "")
+            recorded = bool(context.get("recorded"))
             self._logger.info(
-                "[LANChatRuntimeTrace] phase=planning_context_mirrored room=%s external_plan=%s runtime_plan=%s status=%s text=%s",
+                "[LANChatRuntimeTrace] phase=planning_context_recorded room=%s external_plan=%s runtime_plan=%s status=%s text=%s",
                 room_id,
-                external_plan_id,
+                mapped_plan_ref,
                 runtime_plan_id,
                 getattr(status, "value", status),
                 _trace_preview(design_text),
             )
-            return {"mirrored": bool(runtime_plan_id), "runtime_plan_id": runtime_plan_id}
+            return {
+                "mirrored": recorded,
+                "recorded": recorded,
+                "runtime_plan_id": runtime_plan_id,
+                "context_id": str(context.get("context_id") or ""),
+            }
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime planning context mirror failed: %s", type(exc).__name__)
             return {"mirrored": False, "reason": "internal_exception", "error_type": type(exc).__name__}
@@ -1582,47 +1540,8 @@ class LANChatAgentWorker:
             or trigger.get("seed_plan_id")
             or ""
         ).strip()
-        if not external_plan_id:
-            external_plan_id = self._active_runtime_external_plan_id(room)
-        if not external_plan_id and self._agent_runtime_flags.can_call_legacy_main_workflow():
-            try:
-                coordinator = self._get_interaction_coordinator()
-                active = coordinator.active_plan_for_room(room)
-                external_plan_id = str(getattr(active, "plan_id", "") or "").strip()
-            except Exception:  # noqa: BLE001
-                external_plan_id = ""
+        external_plan_id = self._mapped_runtime_context_plan_ref(room, external_plan_id)
         try:
-            should_promote = self._should_promote_agent_reply_to_runtime_plan(trigger, reply_text)
-            if should_promote and not external_plan_id:
-                handled = runtime.handle_message(
-                    room_id=room,
-                    external_plan_id="",
-                    text=reply_text,
-                    sender_id=str(agent_id or ""),
-                    sender_name=str(agent_name or ""),
-                    owner_agent=str(agent_name or ""),
-                    reply_to=str(trigger.get("message_id") or ""),
-                    action="plan",
-                )
-                plan = dict(handled.get("plan", {}) or {}) if isinstance(handled, dict) else {}
-                runtime_plan_id = str(plan.get("plan_id") or "")
-                recorded = bool(runtime_plan_id)
-                if recorded:
-                    self._logger.info(
-                        "[LANChatRuntimeTrace] phase=agent_reply_plan_promoted room=%s runtime_plan=%s agent=%s/%s reply_to=%s text=%s",
-                        room,
-                        runtime_plan_id,
-                        agent_id,
-                        agent_name,
-                        trigger.get("message_id") or "",
-                        _trace_preview(reply_text),
-                    )
-                return {
-                    "recorded": recorded,
-                    "runtime_plan_id": runtime_plan_id,
-                    "context_id": "",
-                    "updated_plan_brief": recorded,
-                }
             handled = runtime.handle_message(
                 room_id=room,
                 external_plan_id=external_plan_id,
@@ -1631,7 +1550,7 @@ class LANChatAgentWorker:
                 sender_name=str(agent_name or ""),
                 owner_agent=str(agent_name or ""),
                 reply_to=str(trigger.get("message_id") or ""),
-                action="agent_reply" if should_promote else "agent_context",
+                action="runtime.agent_reply_context.record",
             )
             result = dict(handled.get("context", {}) or {}) if isinstance(handled, dict) else {}
             if result.get("recorded"):
@@ -1807,12 +1726,13 @@ class LANChatAgentWorker:
             or getattr(plan, "plan_id", "")
             or ""
         ).strip()
+        external_plan_id = self._mapped_runtime_context_plan_ref(room_id, external_plan_id)
         try:
             handled = runtime.handle_message(
                 room_id=str(room_id or trigger.get("room_id") or "default"),
                 external_plan_id=external_plan_id,
                 text=user_text,
-                action="user_discussion",
+                action="runtime.plan_context.record",
                 sender_id=str(trigger.get("sender_id") or trigger.get("from") or ""),
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
                 reply_to=str(trigger.get("message_id") or ""),
@@ -1901,6 +1821,23 @@ class LANChatAgentWorker:
                 _trace_preview(text),
             )
             return "blocked_non_host_agent"
+        if (
+            draft_action == "chat"
+            and (target_agent_id or target_agent_name or target_scope == "agent")
+            and source == "lanchat_native_queue"
+            and target_agent_id.strip().lower() != "gm"
+            and target_agent_name.strip().lower() not in {"gm", "主持人", "裁判", "game master"}
+        ):
+            self._logger.info(
+                "[LANChatAgentTrace] phase=defer_structured_agent_route source=%s message_id=%s room=%s target_agent=%s/%s text=%s",
+                source,
+                message.get("message_id") or "",
+                message.get("room_id") or "",
+                target_agent_id,
+                target_agent_name,
+                _trace_preview(text),
+            )
+            return "agent_chat"
         if draft_action == "chat" and self._structured_chat_should_defer_to_runtime_route(text):
             return ""
         if draft_action == "gm_control" or target_scope == "gm" or target_agent_name.upper() == "GM":
@@ -1924,6 +1861,7 @@ class LANChatAgentWorker:
                 message_id,
                 "routed",
             )
+            trigger["_dispatch_owner"] = owner
             handled = bool(self._process_trigger(trigger))
             self._message_dispatch_ledger.transition(
                 str(message.get("room_id") or "default"),
@@ -1940,17 +1878,6 @@ class LANChatAgentWorker:
                 self._process_trigger(trigger)
             return "group_chat"
         if draft_action == "chat" and (target_agent_id or target_agent_name or target_scope == "agent"):
-            if source == "lanchat_native_queue":
-                self._logger.info(
-                    "[LANChatAgentTrace] phase=defer_structured_agent_route source=%s message_id=%s room=%s target_agent=%s/%s text=%s",
-                    source,
-                    message.get("message_id") or "",
-                    message.get("room_id") or "",
-                    target_agent_id,
-                    target_agent_name,
-                    _trace_preview(text),
-                )
-                return "agent_chat"
             agent_id = target_agent_id or target_agent_name or "agent"
             agent_name = target_agent_name or target_agent_id or "Agent"
             trigger = self._structured_trigger(message, metadata, agent_id=agent_id, agent_name=agent_name)
@@ -2035,22 +1962,16 @@ class LANChatAgentWorker:
             agent_id=str(metadata.get("target_agent_id") or agent_name),
             agent_name=str(agent_name),
         )
+        reference_reader = getattr(runtime, "pending_planning_reference", None)
+        reference = reference_reader(agent_name) if callable(reference_reader) else {}
+        if reference:
+            trigger["agent_plan_id"] = str(reference.get("agent_plan_id") or "")
+            trigger["proposal_id"] = str(reference.get("agent_plan_id") or "")
+            trigger["artifact_ref"] = str(reference.get("artifact_ref") or "")
+        handled = self._send_runtime_planning_action(trigger, action, payload, str(agent_name))
         if action == "reply":
-            self._send_final_reply(str(trigger.get("agent_id") or agent_name), str(agent_name), str(payload or ""), trigger)
-            return "planning_reply"
-        if self._execute_runtime_planning_compose(trigger, str(payload or text), str(agent_name)):
-            return "planning_compose"
-        if not self._agent_runtime_flags.can_call_legacy_main_workflow():
-            self._send_final_reply(
-                "gm-system",
-                "绯荤粺",
-                "AgentRuntime 暂不可用，旧生成链路已关闭，已阻止直接生成。",
-                trigger,
-            )
-            return "planning_compose_blocked"
-        trigger["text"] = str(payload or text)
-        self._process_trigger(trigger)
-        return "planning_compose"
+            return "planning_reply" if handled else ""
+        return "planning_compose" if handled else "planning_compose_blocked"
 
     def _structured_trigger(
         self,
@@ -2111,24 +2032,16 @@ class LANChatAgentWorker:
         trigger.setdefault("agent_name", str(agent_name))
         trigger.setdefault("target_agent_id", str(agent_name))
         trigger.setdefault("target_agent_name", str(agent_name))
-        self._seed_agent_trigger_planning_context_in_runtime(trigger)
+        reference_reader = getattr(get_lanchat_scene_runtime(), "pending_planning_reference", None)
+        reference = reference_reader(agent_name) if callable(reference_reader) else {}
+        if reference:
+            trigger["agent_plan_id"] = str(reference.get("agent_plan_id") or "")
+            trigger["proposal_id"] = str(reference.get("agent_plan_id") or "")
+            trigger["artifact_ref"] = str(reference.get("artifact_ref") or "")
+        handled = self._send_runtime_planning_action(trigger, action, payload, str(agent_name))
         if action == "reply":
-            self._mirror_runtime_planning_reply_context(trigger, str(payload or ""), str(agent_name))
-            self._send_final_reply(str(agent_name), str(agent_name), str(payload or ""), trigger)
-            return "reply"
-        if self._execute_runtime_planning_compose(trigger, str(payload or text), str(agent_name)):
-            return "compose"
-        if not self._agent_runtime_flags.can_call_legacy_main_workflow():
-            self._send_final_reply(
-                "gm-system",
-                "绯荤粺",
-                "AgentRuntime 暂不可用，旧生成链路已关闭，已阻止直接生成。",
-                trigger,
-            )
-            return "compose_blocked"
-        trigger["text"] = str(payload or text)
-        self._process_trigger(trigger)
-        return "compose"
+            return "reply" if handled else ""
+        return "compose" if handled else "compose_blocked"
 
     def _handle_agent_trigger_planning_gate(self, trigger: dict[str, Any]) -> bool:
         text = str(trigger.get("text") or "").strip()
@@ -2151,6 +2064,28 @@ class LANChatAgentWorker:
 
         metadata = self._metadata_from_trigger(trigger)
         draft_action = str(metadata.get("draft_action") or "").strip().lower()
+        decision = get_intent_understanding_service().classify(text, allow_llm=False)
+        planning_text = text
+        planning_draft_action = draft_action
+        if decision.intent == "plan_drafting" and planning_draft_action in {"", "chat"}:
+            planning_draft_action = "plan"
+        if (
+            decision.intent == "plan_drafting"
+            and self._conversation_turn_contexts.is_instruction_only(text)
+        ):
+            context = self._conversation_turn_contexts.get(str(trigger.get("room_id") or "default"))
+            if not context.accumulated_goal:
+                return bool(self._send_final_reply(
+                    "gm-system",
+                    "GM",
+                    "当前还没有可继承的场景目标。请先说明要设计的场景、风格和核心内容。",
+                    trigger,
+                ))
+            planning_text = self._conversation_turn_contexts.effective_planning_text(
+                str(trigger.get("room_id") or "default"),
+                text,
+            )
+            planning_draft_action = "plan"
         targets = [
             str(metadata.get("target_plan_id") or "").strip(),
             str(metadata.get("target_agent_name") or "").strip(),
@@ -2162,17 +2097,67 @@ class LANChatAgentWorker:
         ]
         try:
             runtime = get_lanchat_scene_runtime()
+            reference_reader = getattr(runtime, "pending_planning_reference", None)
+            explicit_targets = [target for target in targets if target]
             for target in targets:
                 if not target:
                     continue
+                reference_before = reference_reader(target) if callable(reference_reader) else {}
+                if decision.intent == "generation_start" and reference_before:
+                    self._bind_confirmation_identity(reference_before, trigger)
+                if (
+                    decision.intent == "generation_start"
+                    and reference_before
+                    and not self._proposal_confirmation_matches(reference_before, trigger)
+                ):
+                    trigger["reply_contract"] = "generation_confirmation"
+                    trigger["resolved_intent"] = "generation_start"
+                    return bool(self._send_final_reply(
+                        str(trigger.get("agent_id") or target),
+                        str(trigger.get("agent_name") or target),
+                        "确认引用的方案版本或 hash 已过期，请重新查看当前方案后再确认。",
+                        trigger,
+                    ))
                 action, payload, agent_name = runtime.handle_targeted_planning_message(
                     target,
-                    text,
-                    draft_action=draft_action,
+                    planning_text,
+                    draft_action=planning_draft_action,
                     source_context_agent=str(metadata.get("source_context_agent") or ""),
                 )
                 if action in {"reply", "compose"} and agent_name:
+                    reference_after = reference_reader(agent_name) if callable(reference_reader) else {}
+                    reference = reference_after or reference_before
+                    if reference:
+                        trigger["agent_plan_id"] = str(reference.get("agent_plan_id") or "")
+                        trigger["proposal_id"] = str(reference.get("agent_plan_id") or "")
+                        trigger["artifact_ref"] = str(reference.get("artifact_ref") or "")
+                        trigger["proposal_version"] = int(reference.get("proposal_version") or 1)
+                        trigger["proposal_hash"] = str(reference.get("proposal_hash") or "")
+                        trigger["artifact_refs"] = list(reference.get("artifact_refs") or ())
+                        self._conversation_turn_contexts.bind_plan(
+                            room_id=str(trigger.get("room_id") or "default"),
+                            target_agent_id=str(trigger.get("target_agent_id") or trigger.get("agent_id") or ""),
+                            target_agent_name=str(agent_name),
+                            agent_plan_id=trigger["agent_plan_id"],
+                            artifact_ref=trigger["artifact_ref"],
+                            proposal_version=trigger["proposal_version"],
+                            proposal_hash=trigger["proposal_hash"],
+                            artifact_refs=tuple(trigger["artifact_refs"]),
+                        )
                     return self._send_runtime_planning_action(trigger, action, payload, agent_name)
+            if explicit_targets and decision.intent == "generation_start":
+                target_name = str(
+                    metadata.get("target_agent_name")
+                    or trigger.get("target_agent_name")
+                    or trigger.get("agent_name")
+                    or explicit_targets[0]
+                ).strip()
+                return bool(self._send_final_reply(
+                    "gm-system",
+                    "GM",
+                    f"未找到 {target_name} 可确认的方案。请先让该 Agent 产出方案，再使用对应方案引用确认。",
+                    trigger,
+                ))
             action, payload, agent_name = runtime.handle_pending_planning_message(text)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Failed to handle agent planning gate: %s", type(exc).__name__)
@@ -2193,7 +2178,22 @@ class LANChatAgentWorker:
         if not text:
             return {"recorded": False, "reason": "empty payload"}
         room_id = str((trigger or {}).get("room_id") or "default")
-        external_plan_id = self._runtime_planning_external_id(trigger or {}, agent_name)
+        requested_plan_ref = self._runtime_planning_external_id(trigger or {}, agent_name)
+        formal_reference = bool(
+            str((trigger or {}).get("artifact_ref") or "").strip()
+            or str((trigger or {}).get("proposal_id") or "").strip()
+            or str((trigger or {}).get("agent_plan_id") or "").strip()
+        )
+        external_plan_id = self._mapped_runtime_context_plan_ref(
+            room_id,
+            requested_plan_ref,
+            allow_active_fallback=not formal_reference,
+        )
+        if formal_reference and not external_plan_id:
+            return {
+                "recorded": False,
+                "reason": "formal proposal is not linked to Runtime until confirmation",
+            }
         metadata = self._metadata_from_trigger(trigger or {})
         source_context_agent = str(metadata.get("source_context_agent") or "").strip()
         try:
@@ -2205,7 +2205,7 @@ class LANChatAgentWorker:
                 sender_name=str(agent_name or (trigger or {}).get("agent_name") or ""),
                 owner_agent=str(agent_name or (trigger or {}).get("agent_name") or ""),
                 source_context_agents=[source_context_agent] if source_context_agent else [],
-                action="plan_supplement",
+                action="runtime.agent_reply_context.record",
                 reply_to=str((trigger or {}).get("message_id") or ""),
             )
             return {"recorded": True, "runtime": result}
@@ -2247,7 +2247,22 @@ class LANChatAgentWorker:
             return {"recorded": False, "reason": f"intent:{decision.intent}"}
         room_id = str(trigger.get("room_id") or "default")
         agent_name = str(trigger.get("agent_name") or trigger.get("target_agent_name") or decision.target_agent or "")
-        external_plan_id = self._runtime_planning_external_id(trigger, agent_name)
+        requested_plan_ref = self._runtime_planning_external_id(trigger, agent_name)
+        formal_reference = bool(
+            str(trigger.get("artifact_ref") or "").strip()
+            or str(trigger.get("proposal_id") or "").strip()
+            or str(trigger.get("agent_plan_id") or "").strip()
+        )
+        external_plan_id = self._mapped_runtime_context_plan_ref(
+            room_id,
+            requested_plan_ref,
+            allow_active_fallback=not formal_reference,
+        )
+        if formal_reference and not external_plan_id:
+            return {
+                "recorded": False,
+                "reason": "formal proposal is not linked to Runtime until confirmation",
+            }
         metadata = self._metadata_from_trigger(trigger)
         source_context_agent = (
             str(metadata.get("source_context_agent") or "").strip()
@@ -2262,10 +2277,11 @@ class LANChatAgentWorker:
                 sender_name=str(trigger.get("sender_name") or trigger.get("from") or ""),
                 owner_agent=agent_name,
                 source_context_agents=[source_context_agent] if source_context_agent else [],
-                action="plan",
+                action="runtime.plan_context.record",
                 reply_to=str(trigger.get("message_id") or ""),
             )
-            action = "plan_context"
+            context = dict(result.get("context") or {}) if isinstance(result, dict) else {}
+            action = "runtime.plan_context.record"
             self._logger.info(
                 "[LANChatRuntimeTrace] phase=agent_trigger_planning_seeded room=%s external_plan=%s action=%s intent=%s text=%s",
                 room_id,
@@ -2274,7 +2290,7 @@ class LANChatAgentWorker:
                 decision.intent,
                 _trace_preview(text),
             )
-            return {"recorded": True, "action": action, "runtime": result}
+            return {"recorded": bool(context.get("recorded")), "action": action, "runtime": result}
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime planning seed failed: %s", type(exc).__name__)
             return {"recorded": False, "reason": "internal_exception", "error_type": type(exc).__name__}
@@ -2319,6 +2335,8 @@ class LANChatAgentWorker:
             "final_adjustment_request",
         } and not (decision.intent == "plan_drafting" and runtime_draft_recorded):
             return False
+        trigger["reply_contract"] = "runtime_write_blocked"
+        trigger["resolved_intent"] = str(decision.intent or "runtime_write")
         self._record_runtime_audit_event(
             event="legacy_role_agent_scene_write_blocked",
             room_id=room_id,
@@ -2340,6 +2358,15 @@ class LANChatAgentWorker:
             runtime_plan = runtime_result.get("plan")
             runtime_plan = runtime_plan if isinstance(runtime_plan, dict) else {}
             runtime_plan_id = str(runtime_plan.get("plan_id") or "").strip()
+            if not runtime_plan_id:
+                return bool(self._send_final_reply(
+                    "gm-system",
+                    "GM",
+                    f"已记录本轮场景需求上下文：{text}\n"
+                    "当前尚未冻结为可执行 Runtime 方案。"
+                    "请先让目标 Agent 产出带 agent_plan_id/artifact_ref 的方案，再由房主确认生成。",
+                    trigger,
+                ))
             plan_ref = f" {runtime_plan_id}" if runtime_plan_id else ""
             reply = (
                 f"AgentRuntime 方案草案{plan_ref}已记录，尚未执行生成。"
@@ -2362,15 +2389,85 @@ class LANChatAgentWorker:
         agent_id = str(trigger.get("agent_id") or trigger.get("target_agent_id") or agent_name)
         visible_name = str(agent_name or trigger.get("agent_name") or "璁捐鍔╂墜")
         if action == "reply":
+            trigger["reply_contract"] = "planning_proposal"
+            trigger["resolved_intent"] = "plan_drafting"
+            if trigger.get("agent_plan_id"):
+                trigger.setdefault("proposal_id", str(trigger.get("agent_plan_id") or ""))
+            planning_seed = self._seed_agent_trigger_planning_context_in_runtime(trigger)
+            runtime_seed = planning_seed.get("runtime") if isinstance(planning_seed, dict) else {}
+            runtime_seed = runtime_seed if isinstance(runtime_seed, dict) else {}
+            context = runtime_seed.get("context") if isinstance(runtime_seed.get("context"), dict) else {}
+            runtime_plan_id = str(context.get("runtime_plan_id") or "")
+            if runtime_plan_id:
+                trigger["runtime_plan_id"] = runtime_plan_id
             self._mirror_runtime_planning_reply_context(trigger, str(payload or ""), visible_name)
             return bool(self._send_final_reply(agent_id, visible_name, str(payload or ""), trigger))
         if action == "compose":
-            if self._execute_runtime_planning_compose(trigger, str(payload or ""), visible_name):
-                return True
-            if not self._agent_runtime_flags.can_call_legacy_main_workflow():
+            trigger["reply_contract"] = "generation_confirmation"
+            trigger["resolved_intent"] = "generation_start"
+            confirmation_ref = str(
+                trigger.get("artifact_ref")
+                or trigger.get("agent_plan_id")
+                or trigger.get("proposal_id")
+                or visible_name
+            )
+            structured_collaboration_confirmation = bool(
+                str(trigger.get("proposal_id") or trigger.get("agent_plan_id") or "").strip()
+                and str(trigger.get("proposal_hash") or "").strip()
+                and str(trigger.get("proposal_version") or "").strip() not in {"", "0"}
+            )
+            if (
+                structured_collaboration_confirmation
+                and not self._agent_runtime_flags.can_execute_collaboration_runtime_write()
+            ):
+                try:
+                    from .lanchat_scene_runtime import get_lanchat_scene_runtime
+
+                    get_lanchat_scene_runtime().finalize_planning_confirmation(
+                        confirmation_ref,
+                        succeeded=False,
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    self._logger.debug(
+                        "Planning confirmation rollback after Gate block failed: %s",
+                        type(exc).__name__,
+                    )
+                trigger["reply_contract"] = "runtime_write_blocked"
                 return bool(self._send_final_reply(
                     "gm-system",
-                    "绯荤粺",
+                    "GM",
+                    "当前 Full R3 Gate 仍为 Red；已核对方案 ID、版本和 hash，"
+                    "但本轮不会消费待确认方案，也不会创建 Runtime 写入。",
+                    trigger,
+                ))
+            sent = self._execute_runtime_planning_compose(
+                trigger,
+                str(payload or ""),
+                visible_name,
+                reply_agent_id=agent_id,
+                reply_agent_name=visible_name,
+            )
+            try:
+                from .lanchat_scene_runtime import get_lanchat_scene_runtime
+
+                get_lanchat_scene_runtime().finalize_planning_confirmation(
+                    confirmation_ref,
+                    succeeded=bool(trigger.get("_runtime_enqueue_succeeded")),
+                )
+                if bool(trigger.get("_runtime_enqueue_succeeded")):
+                    self._freeze_collaboration_proposal(trigger)
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "Planning confirmation finalize failed: %s",
+                    type(exc).__name__,
+                )
+            if sent:
+                return True
+            if not self._agent_runtime_flags.can_call_legacy_main_workflow():
+                trigger["reply_contract"] = "runtime_write_blocked"
+                return bool(self._send_final_reply(
+                    "gm-system",
+                    "系统",
                     "AgentRuntime 暂不可用，旧生成链路已关闭，已阻止直接生成。",
                     trigger,
                 ))
@@ -2382,6 +2479,9 @@ class LANChatAgentWorker:
         trigger: dict[str, Any],
         compose_text: str,
         agent_name: str,
+        *,
+        reply_agent_id: str = "",
+        reply_agent_name: str = "",
     ) -> bool:
         text = str(compose_text or "").strip()
         if not text:
@@ -2393,7 +2493,13 @@ class LANChatAgentWorker:
             or trigger.get("target_agent_name")
             or ""
         ).strip()
-        effective_owner_agent = explicit_target_agent or str(agent_name or "")
+        effective_owner_agent = str(
+            trigger.get("_planning_owner_agent")
+            or explicit_target_agent
+            or agent_name
+            or ""
+        )
+        trigger["_runtime_enqueue_succeeded"] = False
         self._remember_room_id(room_id)
         try:
             result = self._agent_runtime.handle_message(
@@ -2406,6 +2512,14 @@ class LANChatAgentWorker:
                 external_plan_id=self._runtime_planning_external_id(trigger, agent_name),
                 scene_name=self._runtime_scene_name_from_trigger(trigger),
             )
+            runtime_plan = result.get("plan") if isinstance(result, dict) else {}
+            runtime_plan = runtime_plan if isinstance(runtime_plan, dict) else {}
+            runtime_plan_id = str(runtime_plan.get("plan_id") or "")
+            if runtime_plan_id:
+                trigger["runtime_plan_id"] = runtime_plan_id
+            batches = self._agent_runtime_batches_from_result(result) if isinstance(result, dict) else []
+            graphs = self._agent_runtime_graphs_from_result(result) if isinstance(result, dict) else []
+            trigger["_runtime_enqueue_succeeded"] = bool(runtime_plan_id and batches and graphs)
             reply = self._format_agent_runtime_execution_reply(result)
             self._logger.info(
                 "[LANChatGenerationTrace] phase=runtime_planning_compose_executed room=%s external_plan=%s agent=%s text=%s",
@@ -2414,7 +2528,12 @@ class LANChatAgentWorker:
                 effective_owner_agent,
                 _trace_preview(text),
             )
-            return bool(self._send_final_reply("gm-system", "绯荤粺", reply, trigger))
+            return bool(self._send_final_reply(
+                str(reply_agent_id or trigger.get("agent_id") or "gm-system"),
+                str(reply_agent_name or trigger.get("agent_name") or agent_name or "系统"),
+                reply,
+                trigger,
+            ))
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("AgentRuntime planning compose failed, falling back to Coordinator: %s", type(exc).__name__)
             if not self._agent_runtime_flags.can_call_legacy_main_workflow():
@@ -2449,7 +2568,7 @@ class LANChatAgentWorker:
             return False
         if reply is None:
             return False
-        return bool(self._send_final_reply("gm-system", "绯荤粺", reply, trigger))
+        return bool(self._send_final_reply("gm-system", "系统", reply, trigger))
 
     def _runtime_status_snapshot(self, room_id: str) -> dict[str, Any]:
         try:
@@ -2465,13 +2584,29 @@ class LANChatAgentWorker:
         return dict(status) if isinstance(status, dict) else {}
 
     def _runtime_planning_external_id(self, trigger: dict[str, Any], agent_name: str) -> str:
-        for value in (
-            trigger.get("target_plan_id"),
-            trigger.get("proposal_id"),
-        ):
-            text = str(value or "").strip()
-            if text:
-                return f"planning:{text}"
+        proposal_id = str(
+            trigger.get("proposal_id") or trigger.get("agent_plan_id") or ""
+        ).strip()
+        proposal_hash = str(trigger.get("proposal_hash") or "").strip()
+        try:
+            proposal_version = int(trigger.get("proposal_version") or 0)
+        except (TypeError, ValueError):
+            proposal_version = 0
+        if proposal_id and proposal_version > 0 and proposal_hash.startswith("sha256:"):
+            return (
+                f"{proposal_id}@{proposal_version}:"
+                f"{proposal_hash.removeprefix('sha256:')}"
+            )
+        artifact_ref = str(trigger.get("artifact_ref") or "").strip()
+        if artifact_ref:
+            return artifact_ref
+        for key in ("agent_plan_id", "proposal_id"):
+            value = str(trigger.get(key) or "").strip()
+            if value:
+                return value if value.startswith("legacy-plan:") else f"legacy-plan:{value}"
+        target_plan_id = str(trigger.get("target_plan_id") or "").strip()
+        if target_plan_id:
+            return target_plan_id
         room_id = str(trigger.get("room_id") or "default").strip() or "default"
         discussion_external_plan_id = self._active_runtime_discussion_external_plan_id(room_id)
         if discussion_external_plan_id:
@@ -2504,6 +2639,61 @@ class LANChatAgentWorker:
                 return str(external_plan_id or "").strip()
         plan = dict(dict(runtime_room.get("scene_plans") or {}).get(discussion_plan_id) or {})
         return str(plan.get("external_plan_id") or discussion_plan_id).strip()
+
+    def _mapped_runtime_context_plan_ref(
+        self,
+        room_id: str,
+        preferred_ref: str = "",
+        *,
+        allow_active_fallback: bool = True,
+    ) -> str:
+        """Return only a plan reference already backed by RuntimeState."""
+
+        room = str(room_id or "default")
+        try:
+            snapshot = self._agent_runtime.query_state(room)
+        except Exception:  # noqa: BLE001
+            return ""
+        runtime_room = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        scene_plans = dict(runtime_room.get("scene_plans") or {})
+        external_links = dict(runtime_room.get("external_plan_links") or {})
+        preferred = str(preferred_ref or "").strip()
+        if preferred in external_links or preferred in scene_plans:
+            return preferred
+        if preferred and not allow_active_fallback:
+            return ""
+        for plan_id_key in ("active_discussion_plan_id", "active_plan_id"):
+            runtime_plan_id = str(runtime_room.get(plan_id_key) or "").strip()
+            if not runtime_plan_id or runtime_plan_id not in scene_plans:
+                continue
+            for external_plan_id, mapped_plan_id in external_links.items():
+                if str(mapped_plan_id or "").strip() == runtime_plan_id:
+                    return str(external_plan_id or "").strip()
+            return runtime_plan_id
+        return ""
+
+    def _runtime_plan_version_for_trigger(self, trigger: dict[str, Any]) -> int:
+        room = str((trigger or {}).get("room_id") or "default")
+        preferred = str(
+            (trigger or {}).get("target_plan_id")
+            or (trigger or {}).get("plan_id")
+            or (trigger or {}).get("seed_plan_id")
+            or ""
+        ).strip()
+        ref = self._mapped_runtime_context_plan_ref(room, preferred)
+        if not ref:
+            return 0
+        try:
+            snapshot = self._agent_runtime.query_state(room)
+        except Exception:  # noqa: BLE001
+            return 0
+        runtime_room = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        runtime_plan_id = str(dict(runtime_room.get("external_plan_links") or {}).get(ref) or ref)
+        plan = dict(dict(runtime_room.get("scene_plans") or {}).get(runtime_plan_id) or {})
+        try:
+            return max(0, int(plan.get("version") or 0))
+        except (TypeError, ValueError):
+            return 0
 
     def _active_runtime_external_plan_id(self, room_id: str) -> str:
         room = str(room_id or "default")
@@ -3204,6 +3394,9 @@ class LANChatAgentWorker:
             ),
             "resource_image_requested_count": int(image_resource.get("requested_count") or 0),
             "resource_image_failed_count": int(image_resource.get("failed_count") or 0),
+            "resource_image_failure_code_counts": dict(
+                image_resource.get("failure_code_counts") or {}
+            ),
             "resource_model_requested_count": int(model_resource.get("requested_count") or 0),
             "resource_model_failed_count": int(model_resource.get("failed_count") or 0),
             "geometry_fact_count": int(geometry_summary.get("fact_count") or 0),
@@ -3217,6 +3410,101 @@ class LANChatAgentWorker:
             "asset_transfer_failed_count": int(asset_transfer_summary.get("asset_transfer_failed_count") or 0),
             "batch_execution_completed_count": int(batch_execution_summary.get("completed_count") or 0),
         }
+
+    @staticmethod
+    def _runtime_media_lineage_rows(
+        room: dict[str, Any],
+        plan_id: str,
+    ) -> list[dict[str, str]]:
+        active_plan_id = str(plan_id or "").strip()
+        image_plans = dict(room.get("image_resource_plans") or {})
+        model_plans = dict(room.get("model_resource_plans") or {})
+        assets = {
+            str(key): dict(value)
+            for key, value in dict(room.get("assets") or {}).items()
+            if isinstance(value, dict)
+        }
+        actors = [
+            dict(value)
+            for value in dict(room.get("actors") or {}).values()
+            if isinstance(value, dict)
+        ]
+        rows: list[dict[str, str]] = []
+        for batch_id, raw_models in sorted(model_plans.items()):
+            models = dict(raw_models or {})
+            images = dict(image_plans.get(batch_id) or {})
+            for resource_name, raw_model in sorted(models.items()):
+                model = dict(raw_model or {})
+                image = dict(images.get(resource_name) or {})
+                asset = dict(assets.get(resource_name) or {})
+                if active_plan_id and str(asset.get("plan_id") or "") != active_plan_id:
+                    continue
+                actor = next(
+                    (
+                        candidate
+                        for candidate in actors
+                        if str(candidate.get("plan_id") or "") == active_plan_id
+                        and str(candidate.get("asset_id") or candidate.get("name") or "")
+                        in {
+                            str(asset.get("asset_id") or resource_name),
+                            str(resource_name),
+                        }
+                    ),
+                    {},
+                )
+                if not actor:
+                    continue
+                rows.append({
+                    "phase": "actor_import_ready",
+                    "plan_id": active_plan_id,
+                    "batch_id": str(batch_id),
+                    "asset_id": str(asset.get("asset_id") or resource_name),
+                    "image_mode": str(image.get("mode") or ""),
+                    "image_ref": str(image.get("resource_ref") or ""),
+                    "image_hash": str(image.get("content_hash") or ""),
+                    "image_source": str(image.get("source") or ""),
+                    "model_mode": str(model.get("generation_mode") or ""),
+                    "source_image_ref": str(model.get("source_image_ref") or ""),
+                    "source_image_hash": str(model.get("source_image_hash") or ""),
+                    "model_ref": str(model.get("model_ref") or ""),
+                    "actor_id": str(actor.get("actor_id") or ""),
+                    "actor_source": str(actor.get("source") or ""),
+                    "actor_status": str(
+                        actor.get("engine_lifecycle_status")
+                        or actor.get("status")
+                        or ""
+                    ),
+                })
+        return rows
+
+    def _log_media_lineage_evidence(self, *, room_id: str, plan_id: str) -> None:
+        runtime = self._agent_runtime
+        if runtime is None or not callable(getattr(runtime, "query_state", None)):
+            return
+        try:
+            snapshot = runtime.query_state(str(room_id or "default"))
+            room = dict(snapshot.get("room") or {}) if isinstance(snapshot, dict) else {}
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Runtime media lineage evidence unavailable: %s", type(exc).__name__)
+            return
+        for row in self._runtime_media_lineage_rows(room, plan_id):
+            lineage_key = tuple(str(row.get(key) or "") for key in (
+                "plan_id",
+                "batch_id",
+                "asset_id",
+                "image_ref",
+                "image_hash",
+                "model_ref",
+                "source_image_hash",
+                "actor_id",
+            ))
+            if lineage_key in self._logged_media_lineage_keys:
+                continue
+            self._logged_media_lineage_keys.add(lineage_key)
+            self._logger.info(
+                "[R3MediaLineageTrace] %s",
+                json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
 
     def _log_agent_runtime_evidence(
         self,
@@ -3244,7 +3532,7 @@ class LANChatAgentWorker:
             "batch_tooling=facts:%s,created:%s,prioritized:%s,merged:%s,absorbed:%s "
             "engine_bridge=%s/%s/%s engine_statuses=%s engine_sources=%s "
             "import_failures=%s env_import_failures=%s bridge_errors=%s "
-            "resources=image:%s/%s,model:%s/%s geometry=facts:%s,aabb:%s,overlap:%s "
+            "resources=image:%s/%s,model:%s/%s image_failures=%s geometry=facts:%s,aabb:%s,overlap:%s "
             "vlm=checkpoints:%s,advisories:%s sync=recorded:%s,failed:%s "
             "asset_transfer=progress:%s,failed:%s batch_completed=%s",
             phase,
@@ -3312,6 +3600,7 @@ class LANChatAgentWorker:
             summary.get("resource_image_failed_count", 0),
             summary.get("resource_model_requested_count", 0),
             summary.get("resource_model_failed_count", 0),
+            summary.get("resource_image_failure_code_counts", {}),
             summary.get("geometry_fact_count", 0),
             summary.get("geometry_aabb_actor_count", 0),
             summary.get("geometry_overlap_issue_count", 0),
@@ -3323,6 +3612,7 @@ class LANChatAgentWorker:
             summary.get("asset_transfer_failed_count", 0),
             summary.get("batch_execution_completed_count", 0),
         )
+        self._log_media_lineage_evidence(room_id=room_id, plan_id=runtime_plan_id)
 
     @staticmethod
     def _format_agent_runtime_intervention_reply(result: dict[str, Any]) -> str:
@@ -3826,48 +4116,115 @@ class LANChatAgentWorker:
             return 0.0
         if not events:
             return 0.0
+        latest_event_id = str(events[-1].get("event_id") or "")
+        if latest_event_id:
+            with self._runtime_event_disclosure_lock:
+                self._runtime_event_disclosure_cursor_by_room[str(room_id)] = latest_event_id
         try:
             return float(events[-1].get("timestamp") or 0)
         except (TypeError, ValueError):
             return 0.0
 
     def _emit_agent_runtime_events_since(self, room_id: str, *, after_timestamp: float) -> int:
-        try:
-            result = self._agent_runtime.handle_message(
-                room_id=str(room_id),
-                text="",
-                action="runtime_events",
-                sync_event={
-                    "limit": MAX_AGENT_RUNTIME_DISCLOSURE_EVENT_LOOKBACK,
-                    "after_timestamp": float(after_timestamp or 0),
-                },
-            )
-            events = result.get("runtime_events", []) if isinstance(result, dict) else []
-        except Exception as exc:  # noqa: BLE001
-            self._logger.debug("AgentRuntime event disclosure skipped for room %s: %s", room_id, type(exc).__name__)
-            return 0
-        fresh_events: list[dict[str, Any]] = []
-        for event in events:
-            if not isinstance(event, dict):
-                continue
+        room = str(room_id)
+        with self._runtime_event_disclosure_lock:
             try:
-                event_timestamp = float(event.get("timestamp") or 0)
-            except (TypeError, ValueError):
-                event_timestamp = 0.0
-            if event_timestamp > float(after_timestamp or 0):
-                fresh_events.append(event)
-        disclose_events: list[dict[str, Any]] = []
-        for event in fresh_events:
-            if self._should_auto_disclose_agent_runtime_event(event):
-                disclose_events.append(event)
-            else:
-                self._record_skipped_agent_runtime_event_disclosure(room_id, event)
-        rows = self._format_agent_runtime_event_rows(disclose_events)
-        sent = 0
-        for line, event in rows:
-            if self._send_agent_runtime_system_event(room_id, line, runtime_event=event):
-                sent += 1
-        return sent
+                result = self._agent_runtime.handle_message(
+                    room_id=room,
+                    text="",
+                    action="runtime_events",
+                    sync_event={"limit": 50},
+                )
+                events = result.get("runtime_events", []) if isinstance(result, dict) else []
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "AgentRuntime event disclosure skipped for room %s: %s",
+                    room,
+                    type(exc).__name__,
+                )
+                return 0
+            ordered_events = [event for event in events if isinstance(event, dict)]
+            cursor = self._runtime_event_disclosure_cursor_by_room.get(room, "")
+            fresh_events: list[dict[str, Any]] = []
+            if cursor:
+                cursor_index = next(
+                    (
+                        index
+                        for index, event in enumerate(ordered_events)
+                        if str(event.get("event_id") or "") == cursor
+                    ),
+                    -1,
+                )
+                if cursor_index >= 0:
+                    fresh_events = ordered_events[cursor_index + 1 :]
+            if not cursor or (cursor and not fresh_events and not any(
+                str(event.get("event_id") or "") == cursor for event in ordered_events
+            )):
+                for event in ordered_events:
+                    try:
+                        event_timestamp = float(event.get("timestamp") or 0)
+                    except (TypeError, ValueError):
+                        event_timestamp = 0.0
+                    if event_timestamp > float(after_timestamp or 0):
+                        fresh_events.append(event)
+
+            sent = 0
+            report_ready_keys = self._runtime_event_report_ready_keys_by_room.setdefault(room, set())
+            terminal_prerequisites = {
+                "scene_snapshot_refreshed",
+                "scene_entity_registry_ready",
+                "runtime_scene_world_consistency_audited",
+                "scene_world_snapshot_ready",
+            }
+            for event in fresh_events:
+                event_id = str(event.get("event_id") or "")
+                event_type = str(event.get("event_type") or "")
+                payload = dict(event.get("payload") or {})
+                terminal_key = (
+                    f"{str(event.get('plan_id') or '')}:"
+                    f"{int(payload.get('scene_version') or 0)}"
+                )
+                if event_type in terminal_prerequisites and terminal_key in report_ready_keys:
+                    self._logger.error(
+                        "[LANChatRuntimeDisclosure] phase=terminal_order_violation room=%s "
+                        "event_id=%s event_type=%s terminal_key=%s",
+                        room,
+                        event_id,
+                        event_type,
+                        terminal_key,
+                    )
+                    self._record_runtime_audit_event(
+                        event="runtime_event_disclosure_terminal_violation",
+                        room_id=room,
+                        message=event_type,
+                        payload={
+                            "runtime_event_id": event_id,
+                            "runtime_event_type": event_type,
+                            "runtime_plan_id": str(event.get("plan_id") or ""),
+                            "scene_version": int(payload.get("scene_version") or 0),
+                        },
+                        runtime_plan_id=str(event.get("plan_id") or ""),
+                    )
+                    if event_id:
+                        self._runtime_event_disclosure_cursor_by_room[room] = event_id
+                    continue
+                if self._should_auto_disclose_agent_runtime_event(event):
+                    rows = self._format_agent_runtime_event_rows([event])
+                    if rows and not self._send_agent_runtime_system_event(
+                        room,
+                        rows[0][0],
+                        runtime_event=event,
+                    ):
+                        break
+                    if rows:
+                        sent += 1
+                else:
+                    self._record_skipped_agent_runtime_event_disclosure(room, event)
+                if event_type == "report_ready":
+                    report_ready_keys.add(terminal_key)
+                if event_id:
+                    self._runtime_event_disclosure_cursor_by_room[room] = event_id
+            return sent
 
     @staticmethod
     def _should_auto_disclose_agent_runtime_event(event: dict[str, Any]) -> bool:
@@ -3948,7 +4305,7 @@ class LANChatAgentWorker:
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
                 sent = bool(self._corona_engine.network_send_system_message_ex(
                     "system",
-                    "绯荤粺",
+                    "系统",
                     safe_text,
                     "runtime_status",
                     "",
@@ -3964,7 +4321,7 @@ class LANChatAgentWorker:
                 )
                 return sent
             if hasattr(self._corona_engine, "network_send_system_message"):
-                sent = bool(self._corona_engine.network_send_system_message("system", "绯荤粺", safe_text))
+                sent = bool(self._corona_engine.network_send_system_message("system", "系统", safe_text))
                 self._record_runtime_system_event_send_in_agent_runtime(
                     phase="runtime_system_event_send_succeeded" if sent else "runtime_system_event_send_failed",
                     room_id=room,
@@ -4177,7 +4534,8 @@ class LANChatAgentWorker:
 
     def _process_trigger(self, trigger: dict[str, Any]) -> bool:
         self._apply_generation_options_from_message(trigger)
-        message_id = str(trigger.get("message_id") or "").strip()
+        message_id = self._dispatch_message_id(trigger)
+        trigger["message_id"] = message_id
         room_id = str(trigger.get("room_id") or "default")
         dispatch_entry = self._message_dispatch_ledger.entry(room_id, message_id)
         if str(dispatch_entry.get("state") or "") in {"executed", "replied"}:
@@ -4221,6 +4579,54 @@ class LANChatAgentWorker:
                 _trace_preview(trigger.get("text")),
             )
             return False
+        route = (
+            "collaboration_readonly"
+            if self._is_collaboration_start_project_trigger(trigger)
+            else "gm_control"
+            if (
+                agent_id.strip().lower() == "gm"
+                or agent_name.strip().lower() in {"gm", "主持人", "裁判", "game master"}
+            )
+            else "agent_chat"
+        )
+        dispatch_owner = str(trigger.get("_dispatch_owner") or "agent_trigger")
+        dispatch_entry = self._message_dispatch_ledger.entry(room_id, message_id)
+        preclaimed = bool(
+            trigger.get("_dispatch_owner")
+            and
+            dispatch_entry
+            and str(dispatch_entry.get("execution_owner") or dispatch_entry.get("owner") or "") == dispatch_owner
+            and str(dispatch_entry.get("state") or "") in {"claimed", "routed", "executing"}
+        )
+        if preclaimed:
+            self._message_dispatch_ledger.transition(room_id, message_id, "executing")
+        elif not self._claim_message_execution(trigger, owner=dispatch_owner, route=route):
+            dispatch_entry = self._message_dispatch_ledger.entry(room_id, message_id)
+            self._logger.info(
+                "[LANChatAgentTrace] phase=message_dispatch_deduped message_id=%s room=%s owner=%s route=%s",
+                message_id,
+                room_id,
+                dispatch_entry.get("execution_owner") or dispatch_entry.get("owner") or "",
+                dispatch_entry.get("route") or "",
+            )
+            return True
+        trigger["_conversation_turn_context"] = self._record_conversation_turn_context(
+            trigger,
+            str(trigger.get("text") or ""),
+        )
+        if not trigger.get("resolved_intent"):
+            try:
+                intent_decision = get_intent_understanding_service().classify(
+                    str(trigger.get("text") or ""),
+                    allow_llm=False,
+                    generation_active=bool(self._active_runtime_execution_plan_id(room_id)),
+                )
+                trigger["resolved_intent"] = str(intent_decision.intent or "discussion")
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "LANChat reply intent metadata unavailable: %s",
+                    type(exc).__name__,
+                )
         self._logger.info(
             "[LANChatAgentTrace] phase=process_start message_id=%s correlation=%s room=%s agent=%s/%s sender=%s/%s kind=%s text=%s",
             trigger.get("message_id") or "",
@@ -4272,19 +4678,6 @@ class LANChatAgentWorker:
                 trigger,
                 action_payload,
             ))
-        if (
-            self._interaction_coordinator is not None
-            and str(trigger.get("message_id") or "").strip()
-            and self._is_generation_start_text(str(trigger.get("text") or ""))
-        ):
-            self._logger.info(
-                "[LANChatGenerationTrace] phase=agent_trigger_generation_deferred_to_authoritative_sync "
-                "room=%s message_id=%s",
-                trigger.get("room_id") or "",
-                trigger.get("message_id") or "",
-            )
-            return True
-
         def _send_progress(message: str) -> None:
             text = str(message or "").strip()
             if not text:
@@ -4400,6 +4793,9 @@ class LANChatAgentWorker:
         runtime_replay_reply = self._handle_agent_runtime_operation_replay_query(trigger)
         if runtime_replay_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", runtime_replay_reply, trigger))
+        status_reply = self._handle_coordinator_status_query(trigger)
+        if status_reply is not None:
+            return bool(self._send_final_reply("gm-system", "GM", status_reply, trigger))
         runtime_report_reply = self._handle_agent_runtime_report_query(trigger)
         if runtime_report_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", runtime_report_reply, trigger))
@@ -4409,12 +4805,27 @@ class LANChatAgentWorker:
         runtime_gm_summary_reply = self._handle_agent_runtime_gm_summary_query(trigger)
         if runtime_gm_summary_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", runtime_gm_summary_reply, trigger))
-        status_reply = self._handle_coordinator_status_query(trigger)
-        if status_reply is not None:
-            return bool(self._send_final_reply(agent_id, agent_name, status_reply, trigger))
         runtime_enqueue_reply = self._handle_agent_runtime_enqueue_generation_query(trigger)
         if runtime_enqueue_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", runtime_enqueue_reply, trigger))
+        if (
+            not self._is_gm_target_trigger(trigger)
+            and self._is_pure_generation_confirmation_text(str(trigger.get("text") or ""))
+        ):
+            if self._handle_agent_trigger_planning_gate(trigger):
+                return True
+            trigger["reply_contract"] = "generation_confirmation"
+            trigger["resolved_intent"] = "generation_start"
+            if self._corona_engine is None:
+                return True
+            return bool(self._send_final_reply(
+                str(trigger.get("agent_id") or trigger.get("target_agent_id") or "gm"),
+                str(trigger.get("agent_name") or trigger.get("target_agent_name") or "GM"),
+                "当前没有可确认的三职能方案。请先讨论并形成带 proposal_id、版本和 hash 的方案。",
+                trigger,
+            ))
+        if self._handle_gm_pending_planning_confirmation(trigger):
+            return True
         generation_start_reply = self._handle_coordinator_generation_start(trigger)
         if generation_start_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", generation_start_reply, trigger))
@@ -4481,9 +4892,16 @@ class LANChatAgentWorker:
         ):
             self._message_dispatch_ledger.transition(room_id, message_id, "failed")
             return True
-        planning_seed = self._seed_agent_trigger_planning_context_in_runtime(trigger)
+        collaboration_reply = self._handle_collaboration_start_project(trigger)
+        if collaboration_reply is not None:
+            return bool(self._send_final_reply("collaboration-system", "系统", collaboration_reply, trigger))
+        if self._handle_collaboration_proposal(trigger):
+            return True
+        if self._handle_tool_free_discussion(trigger):
+            return True
         if self._handle_agent_trigger_planning_gate(trigger):
             return True
+        planning_seed = self._seed_agent_trigger_planning_context_in_runtime(trigger)
         if self._handle_agent_trigger_runtime_write_gate(trigger, planning_seed=planning_seed):
             return True
 
@@ -4576,6 +4994,52 @@ class LANChatAgentWorker:
         trigger: dict[str, Any],
         action_payload: dict[str, Any] | None = None,
     ) -> bool:
+        room_id = str(trigger.get("room_id") or "default")
+        message_id = self._dispatch_message_id(trigger)
+        trigger["message_id"] = message_id
+        trigger.setdefault("reply_contract", "discussion_reply")
+        record_runtime_context = not bool(trigger.get("_control_plane_only"))
+        execution_owner = str(trigger.get("_dispatch_owner") or "agent_trigger")
+        if not self._message_dispatch_ledger.entry(room_id, message_id):
+            if not self._claim_message_execution(
+                trigger,
+                owner=execution_owner,
+                route="agent_chat",
+            ):
+                return False
+        reply_owner = f"{execution_owner}:{str(agent_id or agent_name or 'reply').strip()}"
+        system_reply = (
+            str(agent_id or "").strip().lower() in {"system", "gm", "gm-system"}
+            or str(agent_name or "").strip().lower() in {"system", "gm", "主持人", "裁判", "game master", "系统", "绯荤粺"}
+        )
+        if not self._message_dispatch_ledger.claim_reply(
+            room_id,
+            message_id,
+            owner=reply_owner,
+            agent_id=agent_id,
+            agent_name=agent_name,
+            system_reply=system_reply,
+        ):
+            dispatch_entry = self._message_dispatch_ledger.entry(room_id, message_id)
+            self._logger.info(
+                "[LANChatReplyTrace] phase=final_reply_suppressed message_id=%s correlation=%s owner=%s rejection=%s",
+                message_id,
+                self._correlation_id(trigger),
+                reply_owner,
+                dispatch_entry.get("reply_rejection") or "already_claimed_or_replied",
+            )
+            return False
+
+        def _complete_reply(sent: bool, reply_text: str) -> None:
+            self._message_dispatch_ledger.complete_reply(
+                room_id,
+                message_id,
+                owner=reply_owner,
+                sent=sent,
+                reply=reply_text if sent else "",
+            )
+            self._record_model_call_summary(trigger)
+
         if action_payload and (
             action_payload.get("status") in {"pending_host_confirmation", "pending"}
             or action_payload.get("requires_host_confirm")
@@ -4583,6 +5047,29 @@ class LANChatAgentWorker:
             proposal_id = str(action_payload.get("proposal_id") or self._correlation_id(trigger))
             metadata = self._sanitize_control_payload(action_payload)
             metadata.setdefault("requires_host_confirm", True)
+            metadata.setdefault("reply_to", message_id)
+            metadata.setdefault("origin_message_id", message_id)
+            metadata.setdefault("origin_correlation_id", self._correlation_id(trigger))
+            metadata.setdefault("reply_contract", str(trigger.get("reply_contract") or "planning_proposal"))
+            for key in (
+                "proposal_id",
+                "agent_plan_id",
+                "artifact_ref",
+                "runtime_plan_id",
+                "reply_contract",
+                "resolved_intent",
+            ):
+                if trigger.get(key):
+                    metadata.setdefault(key, str(trigger.get(key) or ""))
+            if trigger.get("proposal_version"):
+                metadata.setdefault("proposal_version", int(trigger.get("proposal_version") or 0))
+            if trigger.get("proposal_hash"):
+                metadata.setdefault("proposal_hash", str(trigger.get("proposal_hash") or ""))
+            if trigger.get("artifact_refs"):
+                metadata.setdefault(
+                    "artifact_refs",
+                    [str(value) for value in list(trigger.get("artifact_refs") or []) if str(value)],
+                )
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
                 self._logger.info(
                     "[LANChatReplyTrace] phase=send_system_message_ex message_id=%s correlation=%s proposal=%s agent=%s/%s text_len=%s action=%s status=%s text=%s",
@@ -4603,7 +5090,6 @@ class LANChatAgentWorker:
                     or trigger.get("target_plan_id")
                     or ""
                 )
-                room_id = str(trigger.get("room_id") or "default")
                 self._record_gm_proposal_send_in_agent_runtime(
                     phase="gm_proposal_send_requested",
                     room_id=room_id,
@@ -4613,14 +5099,18 @@ class LANChatAgentWorker:
                     agent_name=agent_name,
                     message=safe_text,
                 )
-                sent = bool(self._corona_engine.network_send_system_message_ex(
-                    agent_id,
-                    agent_name,
-                    safe_text,
-                    "gm_proposal",
-                    proposal_id,
-                    json.dumps(metadata, ensure_ascii=False),
-                ))
+                try:
+                    sent = bool(self._corona_engine.network_send_system_message_ex(
+                        agent_id,
+                        agent_name,
+                        safe_text,
+                        "gm_proposal",
+                        proposal_id,
+                        json.dumps(metadata, ensure_ascii=False),
+                    ))
+                except Exception:
+                    _complete_reply(False, safe_text)
+                    raise
                 self._record_gm_proposal_send_in_agent_runtime(
                     phase="gm_proposal_send_succeeded" if sent else "gm_proposal_send_failed",
                     room_id=room_id,
@@ -4639,6 +5129,7 @@ class LANChatAgentWorker:
                         agent_id=agent_id,
                         agent_name=agent_name,
                     )
+                _complete_reply(sent, safe_text)
                 return sent
         if hasattr(self._corona_engine, "network_send_agent_reply_ex"):
             self._logger.info(
@@ -4651,36 +5142,62 @@ class LANChatAgentWorker:
                 len(str(text or "")),
                 _trace_preview(text),
             )
-            room_id = str(trigger.get("room_id") or "default")
-            self._record_agent_reply_send_in_agent_runtime(
-                phase="agent_reply_send_requested",
-                room_id=room_id,
-                trigger=trigger,
-                agent_id=agent_id,
-                agent_name=agent_name,
-                message=text,
-                message_kind="agent_reply",
-            )
-            sent = bool(self._corona_engine.network_send_agent_reply_ex(
-                agent_id,
-                agent_name,
-                text,
-                "agent_reply",
-                agent_id,
-                self._correlation_id(trigger),
-                json.dumps({"reply_to": str(trigger.get("message_id") or "")}, ensure_ascii=False),
-            ))
-            self._record_agent_reply_send_in_agent_runtime(
-                phase="agent_reply_send_succeeded" if sent else "agent_reply_send_failed",
-                room_id=room_id,
-                trigger=trigger,
-                agent_id=agent_id,
-                agent_name=agent_name,
-                message=text,
-                message_kind="agent_reply",
-                sent=sent,
-            )
-            if sent:
+            if record_runtime_context:
+                self._record_agent_reply_send_in_agent_runtime(
+                    phase="agent_reply_send_requested",
+                    room_id=room_id,
+                    trigger=trigger,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                    message=text,
+                    message_kind="agent_reply",
+                )
+            try:
+                reply_metadata = {"reply_to": str(trigger.get("message_id") or "")}
+                for key in (
+                    "proposal_id",
+                    "agent_plan_id",
+                    "artifact_ref",
+                    "runtime_plan_id",
+                    "reply_contract",
+                    "resolved_intent",
+                ):
+                    if trigger.get(key):
+                        reply_metadata[key] = str(trigger.get(key) or "")
+                if trigger.get("proposal_version"):
+                    reply_metadata["proposal_version"] = int(trigger.get("proposal_version") or 0)
+                if trigger.get("proposal_hash"):
+                    reply_metadata["proposal_hash"] = str(trigger.get("proposal_hash") or "")
+                if trigger.get("artifact_refs"):
+                    reply_metadata["artifact_refs"] = [
+                        str(value)
+                        for value in list(trigger.get("artifact_refs") or [])
+                        if str(value)
+                    ]
+                sent = bool(self._corona_engine.network_send_agent_reply_ex(
+                    agent_id,
+                    agent_name,
+                    text,
+                    "agent_reply",
+                    agent_id,
+                    self._correlation_id(trigger),
+                    json.dumps(reply_metadata, ensure_ascii=False),
+                ))
+            except Exception:
+                _complete_reply(False, text)
+                raise
+            if record_runtime_context:
+                self._record_agent_reply_send_in_agent_runtime(
+                    phase="agent_reply_send_succeeded" if sent else "agent_reply_send_failed",
+                    room_id=room_id,
+                    trigger=trigger,
+                    agent_id=agent_id,
+                    agent_name=agent_name,
+                    message=text,
+                    message_kind="agent_reply",
+                    sent=sent,
+                )
+            if sent and record_runtime_context:
                 self._mirror_agent_reply_context_in_agent_runtime(
                     room_id=room_id,
                     text=text,
@@ -4688,6 +5205,7 @@ class LANChatAgentWorker:
                     agent_id=agent_id,
                     agent_name=agent_name,
                 )
+            _complete_reply(sent, text)
             return sent
         self._logger.info(
             "[LANChatReplyTrace] phase=send_agent_reply message_id=%s correlation=%s agent=%s/%s text_len=%s text=%s",
@@ -4698,28 +5216,33 @@ class LANChatAgentWorker:
             len(str(text or "")),
             _trace_preview(text),
         )
-        room_id = str(trigger.get("room_id") or "default")
-        self._record_agent_reply_send_in_agent_runtime(
-            phase="agent_reply_send_requested",
-            room_id=room_id,
-            trigger=trigger,
-            agent_id=agent_id,
-            agent_name=agent_name,
-            message=text,
-            message_kind="agent_reply",
-        )
-        sent = bool(self._corona_engine.network_send_agent_reply(agent_id, agent_name, text))
-        self._record_agent_reply_send_in_agent_runtime(
-            phase="agent_reply_send_succeeded" if sent else "agent_reply_send_failed",
-            room_id=room_id,
-            trigger=trigger,
-            agent_id=agent_id,
-            agent_name=agent_name,
-            message=text,
-            message_kind="agent_reply",
-            sent=sent,
-        )
-        if sent:
+        if record_runtime_context:
+            self._record_agent_reply_send_in_agent_runtime(
+                phase="agent_reply_send_requested",
+                room_id=room_id,
+                trigger=trigger,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                message=text,
+                message_kind="agent_reply",
+            )
+        try:
+            sent = bool(self._corona_engine.network_send_agent_reply(agent_id, agent_name, text))
+        except Exception:
+            _complete_reply(False, text)
+            raise
+        if record_runtime_context:
+            self._record_agent_reply_send_in_agent_runtime(
+                phase="agent_reply_send_succeeded" if sent else "agent_reply_send_failed",
+                room_id=room_id,
+                trigger=trigger,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                message=text,
+                message_kind="agent_reply",
+                sent=sent,
+            )
+        if sent and record_runtime_context:
             self._mirror_agent_reply_context_in_agent_runtime(
                 room_id=room_id,
                 text=text,
@@ -4727,6 +5250,7 @@ class LANChatAgentWorker:
                 agent_id=agent_id,
                 agent_name=agent_name,
             )
+        _complete_reply(sent, text)
         return sent
 
     def _remember_room_id(self, room_id: str) -> None:
@@ -4865,8 +5389,322 @@ class LANChatAgentWorker:
             )
         return self._orchestrator
 
-    def _run_agent(self, trigger: dict[str, Any]):
+    def _model_call_provider_and_model(self, trigger: dict[str, Any]) -> tuple[str, str]:
+        metadata = self._metadata_from_trigger(trigger or {})
+        provider = str(
+            metadata.get("model_provider")
+            or metadata.get("provider")
+            or (trigger or {}).get("model_provider")
+            or "quasar"
+        ).strip()
+        model = str(
+            metadata.get("model_name")
+            or metadata.get("model")
+            or (trigger or {}).get("model_name")
+            or "configured_chat_model"
+        ).strip()
+        return provider or "unknown", model or "unknown"
+
+    def _select_collaboration_model(self, purpose: str) -> CollaborationModelSelection:
+        selection = self._collaboration_model_selector.select(str(purpose or "").strip())
+        if not isinstance(selection, CollaborationModelSelection):
+            raise TypeError("collaboration model selector returned an invalid selection")
+        return selection
+
+    def _record_model_call_summary(self, trigger: dict[str, Any]) -> dict[str, Any]:
+        room_id = str((trigger or {}).get("room_id") or "default")
+        message_id = self._dispatch_message_id(trigger or {})
+        correlation_id = self._correlation_id(trigger or {})
+        summary = self._model_call_ledger.summary(
+            room_id=room_id,
+            message_id=message_id,
+            correlation_id=correlation_id,
+        )
+        if not self._model_call_ledger.claim_summary(room_id=room_id, message_id=message_id):
+            return summary
+        self._logger.info(
+            "[LANChatModelCallSummary] message_id=%s correlation=%s room=%s calls=%s purposes=%s",
+            message_id,
+            correlation_id,
+            room_id,
+            summary["call_count"],
+            ",".join(summary["purposes"]),
+        )
+        if bool((trigger or {}).get("_control_plane_only")):
+            return summary
+        try:
+            self._agent_runtime.operation_log.append(
+                "model_call_summary",
+                room_id=room_id,
+                plan_id=self._mapped_runtime_context_plan_ref(room_id),
+                payload={
+                    "message_id": message_id,
+                    "correlation_id": correlation_id,
+                    "call_count": summary["call_count"],
+                    "purposes": list(summary["purposes"]),
+                    "calls": list(summary["calls"]),
+                },
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Model call summary persistence skipped: %s", type(exc).__name__)
+        return summary
+
+    def _run_agent(
+        self,
+        trigger: dict[str, Any],
+        *,
+        purpose: str = "agent_visible_reasoning",
+        max_calls: int = 1,
+    ):
+        room_id = str((trigger or {}).get("room_id") or "default")
+        message_id = self._dispatch_message_id(trigger or {})
+        correlation_id = self._correlation_id(trigger or {})
+        provider, model = self._model_call_provider_and_model(trigger or {})
+        claim = self._model_call_ledger.claim(
+            room_id=room_id,
+            message_id=message_id,
+            correlation_id=correlation_id,
+            purpose=purpose,
+            provider=provider,
+            model=model,
+            plan_version=self._runtime_plan_version_for_trigger(trigger or {}),
+            max_calls=max_calls,
+        )
+        if not claim.allowed:
+            self._logger.warning(
+                "[LANChatModelCallBudget] message_id=%s correlation=%s room=%s purpose=%s result=%s",
+                message_id,
+                correlation_id,
+                room_id,
+                claim.evidence.purpose,
+                claim.evidence.dedupe_result,
+            )
+            raise RuntimeError("model call budget exhausted for message")
+        self._logger.info(
+            "[LANChatModelCall] message_id=%s correlation=%s room=%s purpose=%s provider=%s model=%s plan_version=%s dedupe=%s",
+            message_id,
+            correlation_id,
+            room_id,
+            claim.evidence.purpose,
+            claim.evidence.provider,
+            claim.evidence.model,
+            claim.evidence.plan_version,
+            claim.evidence.dedupe_result,
+        )
         return self._get_orchestrator().handle_trigger(trigger)
+
+    @staticmethod
+    def _chat_response_text(response: Any) -> str:
+        content = getattr(response, "content", response)
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    value = item.get("text") or item.get("content_text") or item.get("content")
+                    if value:
+                        parts.append(str(value))
+            return "\n".join(part.strip() for part in parts if part.strip()).strip()
+        return str(content or "").strip()
+
+    def _complete_tool_free_chat(
+        self,
+        trigger: dict[str, Any],
+        *,
+        purpose: str,
+        system_prompt: str,
+        user_prompt: str,
+        max_calls: int,
+        deadline_at: float | None = None,
+    ) -> str:
+        """Invoke the canonical chat model without tools, personas, or Runtime history."""
+
+        room_id = str((trigger or {}).get("room_id") or "default")
+        message_id = self._dispatch_message_id(trigger or {})
+        correlation_id = self._correlation_id(trigger or {})
+        model_selection = self._select_collaboration_model(purpose)
+        provider = model_selection.provider_name
+        model_name = model_selection.model_name
+        configured_timeout = float(model_selection.request_timeout)
+        remaining_budget = (
+            max(0.0, float(deadline_at) - time.monotonic())
+            if deadline_at is not None
+            else configured_timeout
+        )
+        deadline_s = min(configured_timeout, remaining_budget)
+        stage_token = hashlib.sha256(
+            f"{message_id}|{purpose}".encode("utf-8")
+        ).hexdigest()[:16]
+        claim = self._model_call_ledger.claim(
+            room_id=room_id,
+            message_id=message_id,
+            correlation_id=correlation_id,
+            purpose=purpose,
+            provider=provider,
+            model=model_name,
+            plan_version=0,
+            max_calls=max_calls,
+        )
+        if not claim.allowed:
+            raise RuntimeError("model call budget exhausted for message")
+        self._logger.info(
+            "[LANChatModelCall] message_id=%s correlation=%s room=%s purpose=%s "
+            "provider=%s model=%s output_mode=%s timeout_s=%s max_retries=%s "
+            "attempt_id=%s stage_token=%s deadline_s=%s plan_version=0 dedupe=%s",
+            message_id,
+            correlation_id,
+            room_id,
+            purpose,
+            provider,
+            model_name,
+            model_selection.output_mode,
+            deadline_s,
+            model_selection.max_retries,
+            message_id,
+            stage_token,
+            deadline_s,
+            claim.evidence.dedupe_result,
+        )
+        started_at = time.monotonic()
+        stage = purpose.split("_", 1)[0]
+        normalized_stage = stage if stage in {"planning", "program", "art", "narration"} else "narration"
+        try:
+            self._ensure_runtime_quasar_import_path()
+            self._ensure_runtime_ai_config_loaded()
+            from langchain_core.messages import HumanMessage, SystemMessage
+            from Quasar.ai_models.base_pool.registry import get_chat_model
+
+            def invoke_model() -> Any:
+                with self._agent_call_lock:
+                    model = get_chat_model(
+                        provider_name=model_selection.provider_name,
+                        model_name=model_selection.model_name,
+                        temperature=model_selection.temperature,
+                        request_timeout=configured_timeout,
+                        max_retries=model_selection.max_retries,
+                    )
+                    if model_selection.output_mode == "json_object":
+                        bind = getattr(model, "bind", None)
+                        if not callable(bind):
+                            from .agent_collaboration.production_reasoners import CollaborationReasoningError
+
+                            raise CollaborationReasoningError(
+                                "selected collaboration model does not support structured output",
+                                stage=normalized_stage,
+                                error_code="structured_output_unavailable",
+                            )
+                        try:
+                            model = bind(response_format={"type": "json_object"})
+                        except Exception as exc:  # noqa: BLE001
+                            from .agent_collaboration.production_reasoners import CollaborationReasoningError
+
+                            raise CollaborationReasoningError(
+                                "selected collaboration model rejected structured output mode",
+                                stage=normalized_stage,
+                                error_code="structured_output_unavailable",
+                            ) from exc
+                    return model.invoke([
+                        SystemMessage(content=str(system_prompt or "")),
+                        HumanMessage(content=str(user_prompt or "")),
+                    ])
+
+            def log_late_result(state: Any) -> None:
+                self._logger.warning(
+                    "[LANChatModelCallLateResult] message_id=%s correlation=%s room=%s "
+                    "purpose=%s attempt_id=%s stage_token=%s result=discarded error_code=%s",
+                    message_id,
+                    correlation_id,
+                    room_id,
+                    purpose,
+                    str(getattr(state, "attempt_id", "") or ""),
+                    str(getattr(state, "stage_token", "") or ""),
+                    type(getattr(state, "error", None)).__name__
+                    if getattr(state, "error", None) is not None
+                    else "",
+                )
+
+            invocation_timeout = deadline_s - (time.monotonic() - started_at)
+            if invocation_timeout <= 0:
+                raise TimeoutError("collaboration model deadline expired during setup")
+            response = self._collaboration_model_invoker.invoke(
+                room_id=room_id,
+                attempt_id=message_id,
+                stage_token=stage_token,
+                deadline_s=invocation_timeout,
+                call=invoke_model,
+                on_late_result=log_late_result,
+            )
+        except Exception as exc:  # noqa: BLE001
+            elapsed_ms = int((time.monotonic() - started_at) * 1000)
+            message = str(exc or "").lower()
+            is_timeout = isinstance(exc, TimeoutError) or "timeout" in message or "timed out" in message
+            error_code = str(getattr(exc, "error_code", "") or "")
+            if is_timeout:
+                from .agent_collaboration.production_reasoners import CollaborationReasoningError
+
+                error_code = "collaboration_stage_timeout"
+                exc = CollaborationReasoningError(
+                    f"{normalized_stage} collaboration model exceeded the stage timeout",
+                    stage=normalized_stage,
+                    error_code=error_code,
+                )
+            elif isinstance(exc, CollaborationInvocationSaturated):
+                from .agent_collaboration.production_reasoners import CollaborationReasoningError
+
+                error_code = "collaboration_invoker_saturated"
+                exc = CollaborationReasoningError(
+                    f"{normalized_stage} collaboration model invoker is saturated",
+                    stage=normalized_stage,
+                    error_code=error_code,
+                )
+            self._logger.warning(
+                "[LANChatModelCallResult] message_id=%s correlation=%s room=%s purpose=%s "
+                "provider=%s model=%s output_mode=%s timeout_s=%s max_retries=%s "
+                "attempt_id=%s stage_token=%s deadline_s=%s elapsed_ms=%s "
+                "result=failed error_code=%s",
+                message_id,
+                correlation_id,
+                room_id,
+                purpose,
+                provider,
+                model_name,
+                model_selection.output_mode,
+                deadline_s,
+                model_selection.max_retries,
+                message_id,
+                stage_token,
+                deadline_s,
+                elapsed_ms,
+                error_code or type(exc).__name__,
+            )
+            raise exc
+        elapsed_ms = int((time.monotonic() - started_at) * 1000)
+        self._logger.info(
+            "[LANChatModelCallResult] message_id=%s correlation=%s room=%s purpose=%s "
+            "provider=%s model=%s output_mode=%s timeout_s=%s max_retries=%s "
+            "attempt_id=%s stage_token=%s deadline_s=%s elapsed_ms=%s "
+            "result=completed error_code=",
+            message_id,
+            correlation_id,
+            room_id,
+            purpose,
+            provider,
+            model_name,
+            model_selection.output_mode,
+            deadline_s,
+            model_selection.max_retries,
+            message_id,
+            stage_token,
+            deadline_s,
+            elapsed_ms,
+        )
+        text = self._chat_response_text(response)
+        if not text:
+            raise RuntimeError("chat model returned an empty response")
+        return text
 
     def _handle_coordinator_gm_control(self, trigger: dict[str, Any]) -> str | None:
         action = self._gm_pace_action_from_trigger(trigger)
@@ -4928,6 +5766,9 @@ class LANChatAgentWorker:
         if self._is_runtime_r3_gate_query(trigger):
             self._remember_room_id(room_id)
             return self._agent_runtime_r3_gate_reply(room_id=room_id)
+        collaboration_status = self._collaboration_attempt_status_reply(trigger)
+        if collaboration_status is not None:
+            return collaboration_status
         runtime_gm_summary_query = self._is_runtime_gm_summary_query(trigger)
         if runtime_gm_summary_query:
             runtime_external_plan_id = self._active_runtime_external_plan_id(room_id)
@@ -9616,7 +10457,7 @@ class LANChatAgentWorker:
         if not isinstance(events, list):
             return []
         rows: list[tuple[str, dict[str, Any]]] = []
-        for event in events[-3:]:
+        for event in events:
             if not isinstance(event, dict):
                 continue
             title = str(event.get("title") or "").strip()
@@ -9707,6 +10548,115 @@ class LANChatAgentWorker:
         agent_name = str((trigger or {}).get("agent_name") or (trigger or {}).get("target_agent_name") or "").strip().lower()
         return agent_id == "gm" or agent_name in {"gm", "主持人", "裁判", "game master"}
 
+    def _handle_gm_pending_planning_confirmation(self, trigger: dict[str, Any]) -> bool:
+        text = str(trigger.get("text") or "").strip()
+        if (
+            not text
+            or not self._is_gm_target_trigger(trigger)
+            or not self._is_pure_generation_confirmation_text(text)
+        ):
+            return False
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+
+            scene_runtime = get_lanchat_scene_runtime()
+            pending = scene_runtime.pending_planning_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Pending planning confirmation lookup failed: %s", type(exc).__name__)
+            return False
+        metadata = self._metadata_from_trigger(trigger)
+        room_id = str(trigger.get("room_id") or "default")
+        context = self._conversation_turn_contexts.get(room_id)
+        candidates = [
+            str(metadata.get("artifact_ref") or "").strip(),
+            str(metadata.get("agent_plan_id") or "").strip(),
+            str(metadata.get("target_plan_id") or "").strip(),
+            str(trigger.get("artifact_ref") or "").strip(),
+            str(trigger.get("agent_plan_id") or "").strip(),
+            str(context.artifact_ref or "").strip(),
+            str(context.active_agent_plan_id or "").strip(),
+        ]
+        target_ref = next(
+            (candidate for candidate in candidates if candidate and scene_runtime.pending_planning_reference(candidate)),
+            "",
+        )
+        if not target_ref:
+            if len(pending) == 1:
+                target_ref = str(pending[0].get("artifact_ref") or pending[0].get("agent_plan_id") or "")
+            elif len(pending) > 1:
+                refs = [str(item.get("artifact_ref") or item.get("agent_plan_id") or "") for item in pending]
+                trigger["reply_contract"] = "generation_confirmation"
+                trigger["resolved_intent"] = "generation_start"
+                return bool(self._send_final_reply(
+                    "gm",
+                    "GM",
+                    "当前有多个待确认方案，请指定 artifact_ref 后再确认：" + "、".join(refs),
+                    trigger,
+                ))
+            else:
+                return False
+        reference = scene_runtime.pending_planning_reference(target_ref)
+        if not reference:
+            return False
+        self._bind_confirmation_identity(reference, trigger)
+        if not self._proposal_confirmation_matches(reference, trigger):
+            trigger["reply_contract"] = "generation_confirmation"
+            trigger["resolved_intent"] = "generation_start"
+            return bool(self._send_final_reply(
+                "gm",
+                "GM",
+                "确认引用的方案版本或 hash 已过期，请重新查看当前方案后再确认。",
+                trigger,
+            ))
+        if not self._agent_runtime_flags.can_execute_collaboration_runtime_write():
+            trigger["reply_contract"] = "runtime_write_blocked"
+            trigger["resolved_intent"] = "generation_start"
+            return bool(self._send_final_reply(
+                "gm",
+                "GM",
+                "当前 Full R3 Gate 仍为 Red；方案引用已核对，"
+                "但待确认方案会继续保留，本轮不创建 Runtime 写入。",
+                trigger,
+            ))
+        action, payload, target_agent = scene_runtime.handle_targeted_planning_message(
+            target_ref,
+            text,
+            draft_action="generate",
+        )
+        if action != "compose" or not target_agent:
+            return False
+        trigger["agent_plan_id"] = str(reference.get("agent_plan_id") or "")
+        trigger["proposal_id"] = str(reference.get("agent_plan_id") or "")
+        trigger["artifact_ref"] = str(reference.get("artifact_ref") or "")
+        trigger["proposal_version"] = int(reference.get("proposal_version") or context.proposal_version or 1)
+        trigger["proposal_hash"] = str(reference.get("proposal_hash") or context.proposal_hash or "")
+        trigger["artifact_refs"] = list(reference.get("artifact_refs") or context.artifact_refs)
+        trigger["_planning_owner_agent"] = str(reference.get("target_agent") or target_agent)
+        trigger["reply_contract"] = "generation_confirmation"
+        trigger["resolved_intent"] = "generation_start"
+        sent = self._execute_runtime_planning_compose(
+            trigger,
+            str(payload or ""),
+            str(reference.get("target_agent") or target_agent),
+            reply_agent_id="gm",
+            reply_agent_name="GM",
+        )
+        scene_runtime.finalize_planning_confirmation(
+            str(reference.get("artifact_ref") or reference.get("agent_plan_id") or target_ref),
+            succeeded=bool(trigger.get("_runtime_enqueue_succeeded")),
+        )
+        if bool(trigger.get("_runtime_enqueue_succeeded")):
+            self._freeze_collaboration_proposal(trigger)
+        if sent:
+            return True
+        trigger["reply_contract"] = "runtime_write_blocked"
+        return bool(self._send_final_reply(
+            "gm",
+            "GM",
+            "当前方案未能进入 Runtime 生成队列，方案仍保留为待确认状态。",
+            trigger,
+        ))
+
     def _handle_coordinator_generation_start(self, trigger: dict[str, Any]) -> str | None:
         text = str(trigger.get("text") or "").strip()
         if not text:
@@ -9739,6 +10689,12 @@ class LANChatAgentWorker:
                 runtime_plan = runtime_result.get("plan")
                 runtime_plan = runtime_plan if isinstance(runtime_plan, dict) else {}
                 runtime_plan_id = str(runtime_plan.get("plan_id") or "").strip()
+                if not runtime_plan_id:
+                    return (
+                        f"已记录本轮场景需求上下文：{text}\n"
+                        "当前尚未冻结为可执行 Runtime 方案。"
+                        "请先让目标 Agent 产出带 agent_plan_id/artifact_ref 的方案，再由房主确认生成。"
+                    )
                 plan_ref = f" {runtime_plan_id}" if runtime_plan_id else ""
                 return (
                     f"AgentRuntime 方案草案{plan_ref}已记录，尚未执行生成。"
@@ -10286,7 +11242,7 @@ class LANChatAgentWorker:
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
                 sent = bool(self._corona_engine.network_send_system_message_ex(
                     "system",
-                    "绯荤粺",
+                    "系统",
                     safe_text,
                     "action_status",
                     reply_to,
@@ -10302,7 +11258,7 @@ class LANChatAgentWorker:
                 )
                 return sent
             if hasattr(self._corona_engine, "network_send_system_message"):
-                sent = bool(self._corona_engine.network_send_system_message("system", "绯荤粺", safe_text))
+                sent = bool(self._corona_engine.network_send_system_message("system", "系统", safe_text))
                 self._record_coordinator_system_reply_send_in_agent_runtime(
                     phase="coordinator_system_reply_send_succeeded" if sent else "coordinator_system_reply_send_failed",
                     room_id=room_id,
@@ -11332,6 +12288,792 @@ class LANChatAgentWorker:
             return {}
         return parsed if isinstance(parsed, dict) else {}
 
+    @classmethod
+    def _is_collaboration_start_project_trigger(cls, trigger: dict[str, Any]) -> bool:
+        metadata = cls._metadata_from_trigger(trigger)
+        payload = metadata.get("payload") if isinstance(metadata.get("payload"), dict) else {}
+        command_type = str(
+            trigger.get("command_type")
+            or metadata.get("command_type")
+            or payload.get("command_type")
+            or ""
+        ).strip().lower()
+        text = str(trigger.get("text") or "").strip().lower()
+        return command_type == "start_project" or text.startswith("/start_project")
+
+    @staticmethod
+    def _stable_collaboration_id(prefix: str, value: Any, *, seed: str) -> str:
+        candidate = str(value or "").strip().lower()
+        if re.fullmatch(r"[a-z][a-z0-9_.-]{2,63}", candidate):
+            return candidate
+        digest = hashlib.sha256(str(seed or candidate or prefix).encode("utf-8")).hexdigest()[:20]
+        return f"{prefix}.{digest}"
+
+    def _get_collaboration_readonly_entry(self) -> Any:
+        if self._collaboration_readonly_entry is None:
+            from .collaboration_readonly_entry import CollaborationReadOnlyEntry
+
+            self._collaboration_readonly_entry = CollaborationReadOnlyEntry()
+        return self._collaboration_readonly_entry
+
+    def _make_production_collaboration_entry(
+        self,
+        trigger: dict[str, Any],
+        *,
+        stage_observer: Any = None,
+        deadline_at: float | None = None,
+    ) -> Any:
+        from .agent_collaboration.production_reasoners import (
+            ProductionArtReasoner,
+            ProductionPlanningReasoner,
+            ProductionProgramReasoner,
+        )
+        from .collaboration_readonly_entry import CollaborationReadOnlyEntry
+
+        def complete(purpose: str, system_prompt: str, user_prompt: str) -> str:
+            return self._complete_tool_free_chat(
+                trigger,
+                purpose=purpose,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                max_calls=4,
+                deadline_at=deadline_at,
+            )
+
+        def observe(event: Any) -> None:
+            if str(getattr(event, "status", "") or "") != "not_started":
+                self._emit_collaboration_stage_event(trigger, event)
+            if callable(stage_observer):
+                stage_observer(event)
+
+        return CollaborationReadOnlyEntry(
+            planning_reasoner=ProductionPlanningReasoner(complete),
+            program_reasoner=ProductionProgramReasoner(complete),
+            art_reasoner=ProductionArtReasoner(complete),
+            retry_failed_agents=False,
+            stage_observer=observe,
+        )
+
+    def _get_collaboration_coordinator(self) -> Any:
+        if self._collaboration_coordinator is None:
+            from .agent_collaboration.coordinator import CollaborationCoordinator
+
+            self._collaboration_coordinator = CollaborationCoordinator(
+                readonly_entry=self._get_collaboration_readonly_entry(),
+            )
+        return self._collaboration_coordinator
+
+    @staticmethod
+    def _collaboration_blocked_reply(report: Any, error: Exception) -> str:
+        stage = str(getattr(error, "stage", "") or "")
+        error_code = str(getattr(error, "error_code", "") or "collaboration_contract_failed")
+        if report is not None:
+            blocked = next(
+                (item for item in tuple(getattr(report, "stages", ()) or ()) if item.status == "blocked"),
+                None,
+            )
+            if blocked is not None:
+                stage = str(blocked.stage or stage)
+                error_code = str(blocked.error_code or error_code)
+        stage_name = {
+            "planning": "策划 Agent",
+            "program": "程序 Agent",
+            "art": "美术 Agent",
+            "narration": "GM 方案汇总",
+        }.get(stage, "三职能协作")
+        reason = {
+            "invalid_json_object": "没有返回可解析的 JSON 对象",
+            "typed_artifacts_missing": "缺少要求的强类型 Artifact",
+            "required_field_missing": "缺少必填字段",
+            "invalid_field_type": "字段类型不符合契约",
+            "invalid_field_value": "字段包含无效值",
+            "unsupported_primitive": "使用了非白名单玩法原语",
+            "unknown_slot": "玩法原语引用了未知实体槽位",
+            "capability_mismatch": "实体槽位能力与玩法原语不匹配",
+            "invalid_parameters": "玩法原语参数不符合白名单",
+            "cyclic_reference": "实体槽位依赖形成了循环",
+            "duplicate_identity": "方案中存在重复 ID",
+            "structured_output_unavailable": "当前模型不支持要求的结构化输出模式",
+            "duplicate_slot_id": "\u5b9e\u4f53\u69fd\u4f4d ID \u91cd\u590d",
+            "duplicate_semantic_role": "\u8bed\u4e49\u89d2\u8272 ID \u91cd\u590d",
+            "duplicate_primitive_id": "\u73a9\u6cd5\u539f\u8bed ID \u91cd\u590d",
+            "invalid_semantic_role": "\u8bed\u4e49\u89d2\u8272\u4e0d\u662f\u89c4\u8303\u673a\u5668\u6807\u8bc6",
+            "collaboration_stage_timeout": "\u804c\u80fd\u6a21\u578b\u8c03\u7528\u8d85\u8fc7\u9636\u6bb5\u65f6\u9650",
+            "collaboration_invoker_saturated": "\u4e0a\u4e00\u6b21\u8d85\u65f6\u8c03\u7528\u4ecd\u672a\u9000\u51fa",
+        }.get(error_code, "未通过强类型契约校验")
+        return (
+            f"{stage_name}受阻：{reason}（{error_code}）。\n"
+            "本次没有创建可确认方案，也没有写入场景；修正契约后可以重试。"
+        )
+
+    def _collaboration_attempt_status_reply(self, trigger: dict[str, Any]) -> str | None:
+        text = str(trigger.get("text") or "").strip()
+        if not text:
+            return None
+        explicit_runtime_tokens = (
+            "runtime", "engine", "\u573a\u666f\u6267\u884c", "\u5b9e\u4f53", "/status runtime",
+        )
+        lowered = text.lower()
+        if any(token in lowered for token in explicit_runtime_tokens):
+            return None
+        room_id = str(trigger.get("room_id") or "default")
+        project_id = self._stable_collaboration_id("project", "", seed=room_id)
+        coordinator = self._get_collaboration_coordinator()
+        proposal = coordinator.current(project_id)
+        report = coordinator.last_attempt(project_id)
+        status_tokens = (
+            "\u65b9\u6848", "\u8ba1\u5212", "\u8bbe\u8ba1", "\u60c5\u51b5", "\u8fdb\u5ea6", "\u5230\u54ea", "\u5728\u54ea",
+        )
+        if not any(token in text for token in status_tokens):
+            return None
+        if report is None:
+            return None
+        trigger["reply_contract"] = "discussion_reply"
+        trigger["resolved_intent"] = "status_query"
+        trigger["_control_plane_only"] = True
+        if proposal is not None and report is not None and report.overall_status == "completed":
+            return (
+                "当前三职能方案：待确认。\n"
+                f"版本：{proposal.proposal_version}；Artifact：{len(proposal.artifact_refs)} 个。\n"
+                "策划、程序、美术和 GM 汇总均已完成。\n"
+                "尚未生成图片、模型或写入场景。"
+            )
+        labels = {"planning": "策划", "program": "程序", "art": "美术", "narration": "GM汇总"}
+        status_labels = {
+            "completed": "已完成",
+            "blocked": "阻断",
+            "not_started": "未启动",
+            "in_progress": "处理中",
+        }
+        lines = [
+            "当前三职能方案：生成中。"
+            if report.overall_status == "in_progress"
+            else "当前三职能方案：生成受阻。"
+        ]
+        for stage_status in report.stages:
+            suffix = (
+                f"（{stage_status.error_code}）"
+                if stage_status.status == "blocked" and stage_status.error_code
+                else ""
+            )
+            lines.append(
+                f"{labels.get(stage_status.stage, stage_status.stage)}："
+                f"{status_labels.get(stage_status.status, stage_status.status)}{suffix}"
+            )
+        lines.append(
+            "当前尝试尚未创建可确认方案，也未写入场景。"
+            if report.overall_status == "in_progress"
+            else "未创建可确认方案，也未写入场景。"
+        )
+        return "\n".join(lines[:6])
+
+    def _freeze_collaboration_proposal(self, trigger: dict[str, Any]) -> bool:
+        room_id = str(trigger.get("room_id") or "default")
+        project_id = self._stable_collaboration_id("project", "", seed=room_id)
+        proposal_id = str(trigger.get("proposal_id") or trigger.get("agent_plan_id") or "").strip()
+        proposal_hash = str(trigger.get("proposal_hash") or "").strip()
+        try:
+            proposal_version = int(trigger.get("proposal_version") or 0)
+        except (TypeError, ValueError):
+            proposal_version = 0
+        if not proposal_id or proposal_version <= 0 or not proposal_hash:
+            return False
+        try:
+            coordinator = self._get_collaboration_coordinator()
+            current = coordinator.current(project_id)
+            if current is None or current.proposal_id != proposal_id:
+                return False
+            coordinator.freeze(
+                project_id=project_id,
+                proposal_id=proposal_id,
+                proposal_version=proposal_version,
+                proposal_hash=proposal_hash,
+            )
+            self._conversation_turn_contexts.transition(room_id, "generating")
+            return True
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "[CollaborationCoordinator] proposal freeze failed room=%s proposal=%s error=%s",
+                room_id,
+                proposal_id,
+                type(exc).__name__,
+            )
+            return False
+
+    @staticmethod
+    def _proposal_confirmation_matches(
+        reference: dict[str, Any],
+        trigger: dict[str, Any],
+    ) -> bool:
+        metadata = LANChatAgentWorker._metadata_from_trigger(trigger)
+        provided_id = str(
+            metadata.get("proposal_id")
+            or metadata.get("agent_plan_id")
+            or trigger.get("proposal_id")
+            or trigger.get("agent_plan_id")
+            or ""
+        ).strip()
+        provided_hash = str(
+            metadata.get("proposal_hash")
+            or trigger.get("proposal_hash")
+            or ""
+        ).strip()
+        try:
+            provided_version = int(
+                metadata.get("proposal_version")
+                or trigger.get("proposal_version")
+                or 0
+            )
+        except (TypeError, ValueError):
+            return False
+        expected_hash = str(reference.get("proposal_hash") or "").strip()
+        expected_id = str(
+            reference.get("proposal_id") or reference.get("agent_plan_id") or ""
+        ).strip()
+        try:
+            expected_version = int(reference.get("proposal_version") or 0)
+        except (TypeError, ValueError):
+            expected_version = 0
+        return bool(
+            provided_id
+            and expected_id
+            and provided_id == expected_id
+            and provided_version > 0
+            and provided_version == expected_version
+            and provided_hash
+            and provided_hash == expected_hash
+        )
+
+    @staticmethod
+    def _bind_confirmation_identity(
+        reference: dict[str, Any],
+        trigger: dict[str, Any],
+    ) -> None:
+        metadata = LANChatAgentWorker._metadata_from_trigger(trigger)
+        has_explicit_identity = any(
+            str(metadata.get(key) or trigger.get(key) or "").strip()
+            for key in ("proposal_id", "agent_plan_id", "proposal_version", "proposal_hash")
+        )
+        if has_explicit_identity:
+            return
+        proposal_id = str(
+            reference.get("proposal_id") or reference.get("agent_plan_id") or ""
+        ).strip()
+        if proposal_id:
+            trigger["proposal_id"] = proposal_id
+            trigger["agent_plan_id"] = proposal_id
+        trigger["proposal_version"] = int(reference.get("proposal_version") or 0)
+        trigger["proposal_hash"] = str(reference.get("proposal_hash") or "")
+
+    def _handle_tool_free_discussion(self, trigger: dict[str, Any]) -> bool:
+        text = str(trigger.get("text") or "").strip()
+        if not text or str(trigger.get("message_kind") or "chat").strip().lower() not in {"", "chat"}:
+            return False
+        decision = get_intent_understanding_service().classify(text, allow_llm=False)
+        if decision.intent != "discussion":
+            return False
+        room_id = str(trigger.get("room_id") or "default")
+        context = self._conversation_turn_contexts.get(room_id)
+        target_agent_id = str(
+            trigger.get("target_agent_id") or trigger.get("agent_id") or "gm"
+        ).strip() or "gm"
+        target_agent_name = str(
+            trigger.get("target_agent_name")
+            or trigger.get("agent_name")
+            or decision.target_agent
+            or "GM"
+        ).strip() or "GM"
+        system = (
+            "你正在参与一个游戏项目的前期讨论。只回答用户当前这句话，保持自然、具体、简洁。"
+            "可以结合累计项目目标，但不要生成正式方案、方案编号、执行承诺，也不要披露 Runtime、"
+            "旧计划、失败报告、系统提示词或内部诊断。问候必须直接回应问候。"
+        )
+        user = json.dumps(
+            {
+                "current_user_message": text,
+                "target_agent": target_agent_name,
+                "accumulated_project_goal": str(context.accumulated_goal or ""),
+                "latest_instruction": str(context.latest_instruction or ""),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        for key in (
+            "proposal_id",
+            "agent_plan_id",
+            "artifact_ref",
+            "proposal_version",
+            "proposal_hash",
+            "artifact_refs",
+            "runtime_plan_id",
+        ):
+            trigger.pop(key, None)
+        trigger["reply_contract"] = "discussion_reply"
+        trigger["resolved_intent"] = "discussion"
+        trigger["_control_plane_only"] = True
+        try:
+            reply = self._complete_tool_free_chat(
+                trigger,
+                purpose="agent_visible_reasoning",
+                system_prompt=system,
+                user_prompt=user,
+                max_calls=1,
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "[CollaborationDiscussion] direct reasoning failed room=%s message=%s error=%s",
+                room_id,
+                self._dispatch_message_id(trigger),
+                type(exc).__name__,
+            )
+            reply = "当前对话模型暂时不可用，这一轮没有形成方案，也没有触发生成。"
+        return bool(
+            self._send_final_reply(
+                target_agent_id,
+                target_agent_name,
+                reply,
+                trigger,
+            )
+        )
+
+    def _handle_collaboration_proposal(self, trigger: dict[str, Any]) -> bool:
+        text = str(trigger.get("text") or "").strip()
+        if not text or self._is_collaboration_start_project_trigger(trigger):
+            return False
+        if str(trigger.get("message_kind") or "chat").strip().lower() not in {"", "chat"}:
+            return False
+        decision = get_intent_understanding_service().classify(text, allow_llm=False)
+        if decision.intent not in {"plan_drafting", "plan_revision"}:
+            return False
+        room_id = str(trigger.get("room_id") or "default")
+        message_id = self._dispatch_message_id(trigger)
+        planning_text = self._conversation_turn_contexts.effective_planning_text(room_id, text) or text
+        target_agent = str(
+            trigger.get("target_agent_name")
+            or trigger.get("agent_name")
+            or decision.target_agent
+            or "策划"
+        ).strip()
+        from .frontend_adapter import UserCommand
+        from .schema_versions import FRONTEND_INTERACTION_SCHEMA_VERSION
+
+        command_id = self._stable_collaboration_id(
+            "command",
+            message_id,
+            seed=f"{room_id}|{message_id}|{planning_text}",
+        )
+        project_id = self._stable_collaboration_id(
+            "project",
+            self._metadata_from_trigger(trigger).get("project_id"),
+            seed=room_id,
+        )
+        coordinator = self._get_collaboration_coordinator()
+        current_proposal = coordinator.current(project_id)
+        effective_proposal_intent = (
+            "plan_revision"
+            if current_proposal is not None and decision.intent == "plan_revision"
+            else "plan_drafting"
+        )
+        proposal_deadline_at = time.monotonic() + 180.0
+        if current_proposal is not None and (
+            decision.intent == "plan_revision"
+            or self._conversation_turn_contexts.is_instruction_only(text)
+        ) and not coordinator.matches_current_request(project_id, planning_text):
+            planning_text = (
+                f"{planning_text}；本轮需要形成语义不同的替代修订，"
+                f"由{target_agent or '当前顾问'}提供新的侧重点。"
+            )
+        scenario_id = self._stable_collaboration_id(
+            "scenario",
+            "single-player",
+            seed=f"{room_id}|single-player",
+        )
+        command = UserCommand(
+            schema_version=FRONTEND_INTERACTION_SCHEMA_VERSION,
+            command_id=command_id,
+            room_id=room_id,
+            command_type="start_project",
+            payload={
+                "project_id": project_id,
+                "scenario_id": scenario_id,
+                "project_goal": planning_text,
+                "requested_by": str(trigger.get("sender_id") or trigger.get("sender_name") or "host"),
+            },
+        )
+        try:
+            result = coordinator.create_proposal(
+                command,
+                readonly_entry=self._make_production_collaboration_entry(
+                    trigger,
+                    stage_observer=lambda event: coordinator.observe_stage(project_id, event),
+                    deadline_at=proposal_deadline_at,
+                ),
+            )
+        except Exception as exc:  # noqa: BLE001
+            report = coordinator.last_attempt(project_id)
+            self._logger.warning(
+                "[CollaborationCoordinator] proposal blocked room=%s message=%s error=%s "
+                "stage=%s error_code=%s field_path=%s response_hash=%s",
+                room_id,
+                message_id,
+                type(exc).__name__,
+                str(getattr(exc, "stage", "") or ""),
+                str(getattr(exc, "error_code", "") or ""),
+                str(getattr(exc, "field_path", "") or ""),
+                str(getattr(exc, "response_hash", "") or ""),
+            )
+            trigger["reply_contract"] = "collaboration_blocked"
+            trigger["resolved_intent"] = effective_proposal_intent
+            trigger["_control_plane_only"] = True
+            return bool(self._send_final_reply(
+                "gm",
+                "GM",
+                self._collaboration_blocked_reply(report, exc),
+                trigger,
+            ))
+        proposal = result.proposal
+        for event in result.progress_events:
+            self._emit_collaboration_progress_event(event)
+        payloads = proposal.artifact_payloads
+        composition = payloads.get("SceneCompositionPlan", {})
+        proposed_items = [
+            str(item).strip()
+            for item in composition.get("entity_requirements", ())
+            if str(item).strip()
+        ]
+        try:
+            from .lanchat_scene_runtime import get_lanchat_scene_runtime
+
+            get_lanchat_scene_runtime().register_structured_proposal(
+                target_agent=target_agent,
+                proposal_id=proposal.proposal_id,
+                proposal_version=proposal.proposal_version,
+                proposal_hash=proposal.proposal_hash,
+                scene_goal=planning_text,
+                proposed_items=proposed_items,
+                artifact_refs=list(proposal.artifact_refs),
+            )
+        except Exception as exc:  # noqa: BLE001
+            self._logger.warning(
+                "[CollaborationCoordinator] compatibility proposal registration failed: %s",
+                type(exc).__name__,
+            )
+            return False
+        narration_error: Exception | None = None
+        if result.revision_status == "unchanged":
+            reply = (
+                "当前请求与已保存方案一致，继续使用现有方案，不重复调用三职能模型。\n\n"
+                f"{proposal.summary}\n\n当前仍是待确认方案，尚未生成图片、模型或写入场景。"
+            )
+        else:
+            try:
+                from .agent_collaboration.production_reasoners import ProposalNarrator
+
+                coordinator.mark_narration(project_id=project_id, status="in_progress")
+                from .agent_collaboration.walking_skeleton import CollaborationStageEvent
+
+                self._emit_collaboration_stage_event(trigger, CollaborationStageEvent(
+                    stage="narration",
+                    status="in_progress",
+                ))
+
+                narrator = ProposalNarrator(
+                    lambda purpose, system_prompt, user_prompt: self._complete_tool_free_chat(
+                        trigger,
+                        purpose=purpose,
+                        system_prompt=system_prompt,
+                        user_prompt=user_prompt,
+                        max_calls=4,
+                        deadline_at=proposal_deadline_at,
+                    )
+                )
+                reply = narrator.narrate(
+                    project_goal=planning_text,
+                    proposal_id=proposal.proposal_id,
+                    proposal_version=proposal.proposal_version,
+                    proposal_hash=proposal.proposal_hash,
+                    artifact_payloads=proposal.artifact_payloads,
+                )
+            except Exception as exc:  # noqa: BLE001
+                narration_error = exc
+                self._logger.warning(
+                    "[CollaborationCoordinator] proposal narration failed error=%s error_code=%s",
+                    type(exc).__name__,
+                    str(getattr(exc, "error_code", "") or ""),
+                )
+                reply = ""
+        if not reply:
+            coordinator.mark_narration(
+                project_id=project_id,
+                status="blocked",
+                error=narration_error,
+            )
+            from .agent_collaboration.walking_skeleton import CollaborationStageEvent
+
+            self._emit_collaboration_stage_event(trigger, CollaborationStageEvent(
+                stage="narration",
+                status="blocked",
+                error_code=str(getattr(narration_error, "error_code", "") or "narration_failed"),
+                field_path=str(getattr(narration_error, "field_path", "") or ""),
+                safe_summary=str(getattr(narration_error, "safe_summary", "") or ""),
+            ))
+            coordinator.discard_proposal(
+                project_id=project_id,
+                proposal_id=proposal.proposal_id,
+                proposal_version=proposal.proposal_version,
+                proposal_hash=proposal.proposal_hash,
+            )
+            try:
+                from .lanchat_scene_runtime import get_lanchat_scene_runtime
+
+                get_lanchat_scene_runtime().discard_planning_confirmation(
+                    proposal.artifact_ref,
+                )
+            except Exception as exc:  # noqa: BLE001
+                self._logger.debug(
+                    "Failed to discard non-narrated proposal: %s",
+                    type(exc).__name__,
+                )
+            self._conversation_turn_contexts.invalidate_plan(room_id)
+            trigger["reply_contract"] = "collaboration_blocked"
+            trigger["resolved_intent"] = effective_proposal_intent
+            trigger["_control_plane_only"] = True
+            return bool(self._send_final_reply(
+                "gm",
+                "GM",
+                "三职能 Artifact 已形成，但方案叙述模型当前不可用；本轮方案不可确认，也不会进入生成队列。",
+                trigger,
+            ))
+        if result.revision_status != "unchanged":
+            coordinator.mark_narration(project_id=project_id, status="completed")
+            from .agent_collaboration.walking_skeleton import CollaborationStageEvent
+
+            self._emit_collaboration_stage_event(trigger, CollaborationStageEvent(
+                stage="narration",
+                status="completed",
+            ))
+        self._conversation_turn_contexts.bind_plan(
+            room_id=room_id,
+            target_agent_id=str(trigger.get("target_agent_id") or trigger.get("agent_id") or "planning"),
+            target_agent_name=target_agent,
+            agent_plan_id=proposal.proposal_id,
+            artifact_ref=proposal.artifact_ref,
+            proposal_version=proposal.proposal_version,
+            proposal_hash=proposal.proposal_hash,
+            artifact_refs=proposal.artifact_refs,
+        )
+        trigger.update({
+            "proposal_id": proposal.proposal_id,
+            "agent_plan_id": proposal.proposal_id,
+            "artifact_ref": proposal.artifact_ref,
+            "proposal_version": proposal.proposal_version,
+            "proposal_hash": proposal.proposal_hash,
+            "artifact_refs": list(proposal.artifact_refs),
+            "supersedes": list(proposal.supersedes),
+            "reply_contract": "planning_proposal",
+            "resolved_intent": effective_proposal_intent,
+            "reply_to": message_id,
+            "origin_message_id": message_id,
+            "origin_correlation_id": self._correlation_id(trigger),
+        })
+        action_payload = {
+            "action_type": "planning_proposal",
+            "status": "pending_host_confirmation",
+            "requires_host_confirm": True,
+            "proposal_id": proposal.proposal_id,
+            "agent_plan_id": proposal.proposal_id,
+            "artifact_ref": proposal.artifact_ref,
+            "proposal_version": proposal.proposal_version,
+            "proposal_hash": proposal.proposal_hash,
+            "artifact_refs": list(proposal.artifact_refs),
+            "supersedes": list(proposal.supersedes),
+            "non_executable": True,
+            "reply_to": message_id,
+            "origin_message_id": message_id,
+            "origin_correlation_id": self._correlation_id(trigger),
+            "reply_contract": "planning_proposal",
+            "revision_status": result.revision_status,
+        }
+        return bool(self._send_final_reply("gm", "GM", reply, trigger, action_payload))
+
+    def _handle_collaboration_start_project(self, trigger: dict[str, Any]) -> str | None:
+        if not self._is_collaboration_start_project_trigger(trigger):
+            return None
+        metadata = self._metadata_from_trigger(trigger)
+        payload = metadata.get("payload") if isinstance(metadata.get("payload"), dict) else {}
+        text = str(trigger.get("text") or "").strip()
+        prefix = "/start_project"
+        text_goal = text[len(prefix):].strip() if text.lower().startswith(prefix) else text
+        project_goal = str(
+            payload.get("project_goal")
+            or metadata.get("project_goal")
+            or text_goal
+            or ""
+        ).strip()
+        if not project_goal:
+            return "请提供单人 Demo 的项目目标；当前没有创建 Artifact，也没有写入场景。"
+        room_seed = str(trigger.get("room_id") or "default")
+        message_seed = str(trigger.get("message_id") or self._dispatch_message_id(trigger))
+        command_id = self._stable_collaboration_id(
+            "command",
+            payload.get("command_id") or metadata.get("command_id"),
+            seed=f"{room_seed}|{message_seed}|{project_goal}",
+        )
+        room_id = self._stable_collaboration_id("room", room_seed, seed=room_seed)
+        project_id = self._stable_collaboration_id(
+            "project",
+            payload.get("project_id") or metadata.get("project_id"),
+            seed=f"{room_seed}|{project_goal}",
+        )
+        scenario_id = self._stable_collaboration_id(
+            "scenario",
+            payload.get("scenario_id") or metadata.get("scenario_id"),
+            seed=f"single-player|{project_goal}",
+        )
+        from .frontend_adapter import UserCommand
+        from .schema_versions import FRONTEND_INTERACTION_SCHEMA_VERSION
+
+        command = UserCommand(
+            schema_version=FRONTEND_INTERACTION_SCHEMA_VERSION,
+            command_id=command_id,
+            room_id=room_id,
+            command_type="start_project",
+            payload={
+                "project_id": project_id,
+                "scenario_id": scenario_id,
+                "project_goal": project_goal,
+                "requested_by": str(
+                    trigger.get("sender_id") or trigger.get("sender_name") or "host"
+                ),
+            },
+        )
+        result = self._get_collaboration_readonly_entry().run(command)
+        if result.status == "blocked":
+            blocker = result.blocked_result
+            return (
+                f"三职能协作入口已阻断：{str(getattr(blocker, 'error_code', '') or 'unknown')}。"
+                "本次没有创建可执行动作，也没有写入场景。"
+            )
+        for event in result.progress_events:
+            self._emit_collaboration_progress_event(event)
+        run_result = result.run_result
+        if run_result is None:
+            return "三职能协作结果不可用；本次没有写入场景。"
+        artifact_count = len(run_result.demo_result.artifact_refs)
+        if result.status == "replayed":
+            return (
+                f"该项目命令已处理，复用已有 {artifact_count} 个 Artifact；"
+                "没有重复执行 Agent，也没有写入场景。"
+            )
+        return (
+            f"三职能协作已生成 {artifact_count} 个强类型 Artifact，"
+            f"Preflight 状态为 {run_result.preflight.status}。"
+            "当前仅完成只读方案与预检，尚未构造 ActionProposal，也没有写入场景。"
+        )
+
+    def _emit_collaboration_progress_event(self, event: Any) -> None:
+        if self._corona_engine is None:
+            return
+        detail = dict(getattr(event, "detail", None) or {})
+        event_payload = {
+            "schema_version": str(getattr(event, "schema_version", "") or ""),
+            "event_id": str(getattr(event, "event_id", "") or ""),
+            "command_id": str(getattr(event, "command_id", "") or ""),
+            "room_id": str(getattr(event, "room_id", "") or ""),
+            "project_id": str(getattr(event, "project_id", "") or ""),
+            "task_id": str(getattr(event, "task_id", "") or ""),
+            "plan_id": str(getattr(event, "plan_id", "") or ""),
+            "scene_version": int(getattr(event, "scene_version", 0) or 0),
+            "event_type": str(getattr(event, "event_type", "") or ""),
+            "status": str(getattr(event, "status", "") or ""),
+            "detail": detail,
+        }
+        event_type = event_payload["event_type"]
+        text = str(detail.get("stage_text") or "").strip()
+        if not text:
+            text = (
+                "三职能项目请求已受理。"
+                if event_type == "project_start_requested"
+                else "三职能协作阶段已更新。"
+            )
+        metadata_json = json.dumps(
+            {"progress_event": event_payload},
+            ensure_ascii=False,
+        )
+        try:
+            if hasattr(self._corona_engine, "network_send_system_message_ex"):
+                self._corona_engine.network_send_system_message_ex(
+                    "system",
+                    "系统",
+                    text,
+                    "action_status",
+                    event_payload["event_id"],
+                    metadata_json,
+                )
+            elif hasattr(self._corona_engine, "network_send_system_message"):
+                self._corona_engine.network_send_system_message("system", "系统", text)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug(
+                "Failed to emit collaboration progress event: %s",
+                type(exc).__name__,
+            )
+
+    def _emit_collaboration_stage_event(self, trigger: dict[str, Any], event: Any) -> None:
+        from .frontend_adapter import ProgressEvent
+        from .schema_versions import FRONTEND_INTERACTION_SCHEMA_VERSION
+
+        stage = str(getattr(event, "stage", "") or "").strip()
+        status = str(getattr(event, "status", "") or "").strip()
+        if stage not in {"planning", "program", "art", "narration"}:
+            return
+        room_id = str(trigger.get("room_id") or "default")
+        message_id = self._dispatch_message_id(trigger)
+        command_id = self._stable_collaboration_id("command", "", seed=message_id)
+        project_id = self._stable_collaboration_id("project", "", seed=room_id)
+        stage_texts = {
+            ("planning", "in_progress"): "策划 Agent 正在整理目标和关卡结构。",
+            ("program", "in_progress"): "程序 Agent 正在定义玩法逻辑和必需实体槽位。",
+            ("art", "in_progress"): "美术 Agent 正在生成视觉方向和角色提示词。",
+            ("narration", "in_progress"): "GM 正在汇总可确认方案。",
+            ("planning", "completed"): "策划方案已完成。",
+            ("program", "completed"): "程序逻辑与必需实体槽位已完成。",
+            ("art", "completed"): "美术构图与图片提示词已完成。",
+            ("narration", "completed"): "GM 已完成方案汇总。",
+            ("planning", "blocked"): "策划 Agent 未通过契约校验。",
+            ("program", "blocked"): "程序 Agent 未通过契约校验。",
+            ("art", "blocked"): "美术 Agent 未通过契约校验。",
+            ("narration", "blocked"): "GM 方案汇总未通过校验。",
+        }
+        stage_text = stage_texts.get((stage, status), f"{stage} 阶段状态：{status}。")
+        progress = ProgressEvent(
+            schema_version=FRONTEND_INTERACTION_SCHEMA_VERSION,
+            event_id=f"event.{command_id}.progress",
+            command_id=command_id,
+            room_id=room_id,
+            project_id=project_id,
+            task_id=f"task.{command_id}.{stage}",
+            plan_id="",
+            scene_version=0,
+            event_type=(
+                f"{stage}_in_progress"
+                if status == "in_progress"
+                else f"{stage}_ready"
+                if status == "completed"
+                else "collaboration_stage_blocked"
+                if status == "blocked"
+                else "collaboration_stage_not_started"
+            ),
+            status=status,
+            detail={
+                "owner_role": "gm" if stage == "narration" else stage,
+                "artifact_refs": list(getattr(event, "artifact_refs", ()) or ()),
+                "error_code": str(getattr(event, "error_code", "") or ""),
+                "field_path": str(getattr(event, "field_path", "") or ""),
+                "stage_text": stage_text,
+            },
+        )
+        self._emit_collaboration_progress_event(progress)
+
     def _coordinator_sync_metadata(self, message: dict[str, Any], *, source: str) -> dict[str, Any]:
         metadata: dict[str, Any] = {
             "message_id": str(message.get("message_id") or ""),
@@ -11831,7 +13573,7 @@ class LANChatAgentWorker:
                     )
                     sent = bool(self._corona_engine.network_send_system_message_ex(
                         "system",
-                        "绯荤粺",
+                        "系统",
                         text,
                         "action_status",
                         str(payload.get("event_id") or ""),
@@ -11853,7 +13595,7 @@ class LANChatAgentWorker:
                         message_kind="action_status",
                         channel="broadcast",
                     )
-                    sent = bool(self._corona_engine.network_send_system_message("system", "绯荤粺", text))
+                    sent = bool(self._corona_engine.network_send_system_message("system", "系统", text))
                     self._record_disclosure_event_send_in_agent_runtime(
                         phase="disclosure_event_send_succeeded" if sent else "disclosure_event_send_failed",
                         payload=payload,
@@ -11902,7 +13644,7 @@ class LANChatAgentWorker:
                     sent = bool(sender(
                         target_sender_id,
                         "system",
-                        "绯荤粺",
+                        "系统",
                         text,
                         "action_status",
                         str(payload.get("event_id") or ""),
@@ -11911,7 +13653,7 @@ class LANChatAgentWorker:
                 else:
                     sent = bool(sender(
                         "system",
-                        "绯荤粺",
+                        "系统",
                         text,
                         "action_status",
                         str(payload.get("event_id") or ""),
@@ -12163,7 +13905,7 @@ class LANChatAgentWorker:
                 )
                 sent = bool(self._corona_engine.network_send_system_message_ex(
                     "system",
-                    "绯荤粺",
+                    "系统",
                     text,
                     "action_status",
                     disclosure_payload["event_id"],
@@ -12185,7 +13927,7 @@ class LANChatAgentWorker:
                     message_kind="action_status",
                     channel="scheduler_broadcast",
                 )
-                sent = bool(self._corona_engine.network_send_system_message("system", "绯荤粺", text))
+                sent = bool(self._corona_engine.network_send_system_message("system", "系统", text))
                 self._record_disclosure_event_send_in_agent_runtime(
                     phase="disclosure_event_send_succeeded" if sent else "disclosure_event_send_failed",
                     payload=disclosure_payload,
@@ -12448,14 +14190,28 @@ class LANChatAgentWorker:
         if not text or self._corona_engine is None:
             return
         room = str(room_id or "default")
-        now = time.time()
-        with self._progress_disclosure_lock:
-            last_text, last_at = self._progress_disclosure_last_by_room.get(room, ("", 0.0))
-            if text == last_text and now - float(last_at or 0.0) < 1.0:
-                return
-            self._progress_disclosure_last_by_room[room] = (text, now)
         stage, progress = self._generation_progress_stage_and_percent(text)
-        event_id = f"generation-progress-{room}-{int(now * 1000)}"
+        severity = "error" if any(
+            marker in text.lower()
+            for marker in ("失败", "错误", "异常", "failed", "error", "exception")
+        ) else "normal"
+        progress_value = progress if include_progress else -1
+        stable_key = f"{room}|{str(plan_id or '')}"
+        stable_event_id = f"generation-progress-{hashlib.sha256(stable_key.encode('utf-8')).hexdigest()[:16]}"
+        with self._progress_disclosure_lock:
+            last = dict(self._progress_disclosure_last_by_room.get(room) or {})
+            if str(last.get("plan_id") or "") != str(plan_id or ""):
+                last = {}
+            signature = (stage, progress_value, severity)
+            if tuple(last.get("signature") or ()) == signature:
+                return
+            event_id = str(last.get("event_id") or stable_event_id)
+            self._progress_disclosure_last_by_room[room] = {
+                "event_id": event_id,
+                "plan_id": str(plan_id or ""),
+                "signature": signature,
+                "text": text,
+            }
         disclosure = {
             "event_id": event_id,
             "room_id": room,
@@ -12476,21 +14232,21 @@ class LANChatAgentWorker:
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
                 self._corona_engine.network_send_system_message_ex(
                     "system",
-                    "绯荤粺",
+                    "系统",
                     text,
                     "action_status",
                     event_id,
                     metadata,
                 )
             elif hasattr(self._corona_engine, "network_send_system_message"):
-                self._corona_engine.network_send_system_message("system", "绯荤粺", text)
+                self._corona_engine.network_send_system_message("system", "系统", text)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Failed to emit generation progress disclosure: %s", type(exc).__name__)
 
     @staticmethod
     def _generation_progress_stage_and_percent(text: str) -> tuple[str, int]:
         progress = 0
-        match = re.search(r"鐢熸垚杩涘害\s*(\d{1,3})\s*%", str(text or ""))
+        match = re.search(r"(?:生成进度|鐢熸垚杩涘害)\s*(\d{1,3})\s*%", str(text or ""))
         if match:
             progress = max(0, min(100, int(match.group(1))))
         if "排队" in text or "鎺掗槦" in text:
@@ -12509,10 +14265,7 @@ class LANChatAgentWorker:
         try:
             from Quasar.ai_modules.three_d_generate.tools import model_tools
         except Exception:
-            try:
-                from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
-            except Exception:
-                return
+            return
         setter = getattr(model_tools, "set_deferred_download_scheduler", None)
         if callable(setter):
             try:
@@ -12524,10 +14277,7 @@ class LANChatAgentWorker:
         try:
             from Quasar.ai_modules.three_d_generate.tools import model_tools
         except Exception:
-            try:
-                from plugins.AITool.Quasar.ai_modules.three_d_generate.tools import model_tools
-            except Exception:
-                return
+            return
         getter = getattr(model_tools, "get_deferred_download_scheduler", None)
         setter = getattr(model_tools, "set_deferred_download_scheduler", None)
         if not callable(getter) or not callable(setter):
@@ -12542,10 +14292,7 @@ class LANChatAgentWorker:
         try:
             from Quasar.ai_media_resource import registry
         except Exception:
-            try:
-                from plugins.AITool.Quasar.ai_media_resource import registry
-            except Exception:
-                return
+            return
         setter = getattr(registry, "set_media_task_scheduler", None)
         if callable(setter):
             try:
@@ -12557,10 +14304,7 @@ class LANChatAgentWorker:
         try:
             from Quasar.ai_media_resource import registry
         except Exception:
-            try:
-                from plugins.AITool.Quasar.ai_media_resource import registry
-            except Exception:
-                return
+            return
         getter = getattr(registry, "get_media_task_scheduler", None)
         setter = getattr(registry, "set_media_task_scheduler", None)
         if not callable(getter) or not callable(setter):
@@ -12570,6 +14314,31 @@ class LANChatAgentWorker:
                 setter(None)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Failed to clear media task scheduler: %s", type(exc).__name__)
+
+    def _resolve_runtime_media_file(self, file_id: str, timeout: float = 120.0) -> dict[str, Any]:
+        """Resolve one canonical MediaRegistry file ID with byte-backed lineage."""
+
+        self._ensure_runtime_quasar_import_path()
+        from Quasar.ai_media_resource.registry import get_media_registry
+
+        registry = get_media_registry()
+        hash_location = registry.resolve(str(file_id), timeout=float(timeout))
+        model_location = registry.resolve(
+            str(file_id),
+            timeout=float(timeout),
+            return_original_url=True,
+        )
+        result: dict[str, Any] = {"image_url": str(model_location or hash_location or "")}
+        hash_text = str(hash_location or "")
+        if hash_text.startswith("data:") and "," in hash_text:
+            header, payload = hash_text.split(",", 1)
+            if ";base64" in header.lower():
+                result["content_bytes"] = base64.b64decode(payload, validate=True)
+        else:
+            path = Path(hash_text)
+            if path.is_file():
+                result["local_path"] = str(path)
+        return result
 
     def _prepare_confirmed_action_payload(
         self,
@@ -12662,6 +14431,141 @@ class LANChatAgentWorker:
         })
         structured.setdefault("intent_text", intent_text)
         return structured
+
+    @staticmethod
+    def _dispatch_message_id(payload: dict[str, Any]) -> str:
+        existing = str(payload.get("message_id") or payload.get("correlation_id") or "").strip()
+        if existing:
+            return existing
+        identity = {
+            "room_id": str(payload.get("room_id") or "default"),
+            "sender_id": str(payload.get("sender_id") or payload.get("from") or ""),
+            "timestamp_ms": int(payload.get("timestamp_ms") or 0),
+            "target_agent_id": str(payload.get("target_agent_id") or payload.get("agent_id") or ""),
+            "text": str(payload.get("text") or "").strip(),
+        }
+        canonical = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return f"derived:{hashlib.sha256(canonical.encode('utf-8')).hexdigest()[:24]}"
+
+    def _dispatch_target(self, payload: dict[str, Any]) -> tuple[str, str]:
+        metadata = self._metadata_from_trigger(payload)
+        return (
+            str(
+                payload.get("target_agent_id")
+                or payload.get("agent_id")
+                or metadata.get("target_agent_id")
+                or ""
+            ).strip(),
+            str(
+                payload.get("target_agent_name")
+                or payload.get("agent_name")
+                or metadata.get("target_agent_name")
+                or ""
+            ).strip(),
+        )
+
+    def _record_conversation_turn_context(
+        self,
+        payload: dict[str, Any],
+        text: str,
+    ) -> dict[str, Any]:
+        sender_type = str(payload.get("sender_type") or "user").strip().lower()
+        message_kind = str(payload.get("message_kind") or "chat").strip().lower()
+        if sender_type not in {"user", "host"} or message_kind not in {"", "chat"}:
+            return {}
+        target_agent_id, target_agent_name = self._dispatch_target(payload)
+        decision = get_intent_understanding_service().classify(text, allow_llm=False)
+        context = self._conversation_turn_contexts.record_turn(
+            room_id=str(payload.get("room_id") or "default"),
+            message_id=self._dispatch_message_id(payload),
+            text=text,
+            target_agent_id=target_agent_id,
+            target_agent_name=target_agent_name,
+            intent=decision.intent,
+        )
+        return {
+            "room_id": context.room_id,
+            "phase": context.phase,
+            "accumulated_goal": context.accumulated_goal,
+            "latest_instruction": context.latest_instruction,
+            "target_agent_id": context.target_agent_id,
+            "target_agent_name": context.target_agent_name,
+            "active_agent_plan_id": context.active_agent_plan_id,
+            "artifact_ref": context.artifact_ref,
+            "proposal_version": context.proposal_version,
+            "proposal_hash": context.proposal_hash,
+            "artifact_refs": list(context.artifact_refs),
+        }
+
+    def _claim_message_execution(self, payload: dict[str, Any], *, owner: str, route: str) -> bool:
+        message_id = self._dispatch_message_id(payload)
+        payload["message_id"] = message_id
+        target_agent_id, target_agent_name = self._dispatch_target(payload)
+        claimed = self._message_dispatch_ledger.claim_execution(
+            str(payload.get("room_id") or "default"),
+            message_id,
+            owner=owner,
+            route=route,
+            target_agent_id=target_agent_id,
+            target_agent_name=target_agent_name,
+        )
+        if claimed:
+            payload["_dispatch_owner"] = owner
+            self._message_dispatch_ledger.transition(
+                str(payload.get("room_id") or "default"),
+                message_id,
+                "executing",
+            )
+            self._logger.info(
+                "[LANChatDispatchLedger] phase=execution_claimed owner=%s route=%s "
+                "room=%s message_id=%s target_agent=%s/%s",
+                owner,
+                route,
+                payload.get("room_id") or "default",
+                message_id,
+                target_agent_id,
+                target_agent_name,
+            )
+        else:
+            current = self._message_dispatch_ledger.entry(
+                str(payload.get("room_id") or "default"),
+                message_id,
+            )
+            self._logger.info(
+                "[LANChatDispatchLedger] phase=execution_claim_rejected requested_owner=%s "
+                "owner=%s route=%s room=%s message_id=%s",
+                owner,
+                current.get("execution_owner") or current.get("owner") or "",
+                current.get("route") or route,
+                payload.get("room_id") or "default",
+                message_id,
+            )
+        return claimed
+
+    def _native_queue_should_defer_to_agent_trigger(
+        self,
+        message: dict[str, Any],
+        text: str,
+        *,
+        source: str,
+    ) -> bool:
+        if source != "lanchat_native_queue":
+            return False
+        metadata = self._normalize_coordinator_target_metadata(
+            message,
+            text,
+            self._metadata_from_trigger(message),
+        )
+        target_scope = str(metadata.get("target_scope") or "").strip().lower()
+        target_agent_id = str(metadata.get("target_agent_id") or "").strip()
+        target_agent_name = str(metadata.get("target_agent_name") or "").strip()
+        is_gm = target_agent_id.lower() == "gm" or target_agent_name.lower() in {
+            "gm",
+            "主持人",
+            "裁判",
+            "game master",
+        }
+        return target_scope == "agent" and bool(target_agent_id or target_agent_name) and not is_gm
 
     @staticmethod
     def _correlation_id(trigger: dict[str, Any]) -> str:

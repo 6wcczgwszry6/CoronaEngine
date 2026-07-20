@@ -7,16 +7,32 @@ snapshot, create a ToolCallGraph, or write RuntimeState.
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import asdict, dataclass, field, is_dataclass
 import hashlib
 import json
 import math
+import re
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
+from ..gameplay_contracts import (
+    ALLOWED_GAMEPLAY_PRIMITIVES,
+    GAMEPLAY_PRIMITIVE_PARAMETER_KEYS,
+)
 from ..schema_versions import COLLABORATION_SCHEMA_VERSION
 
 PRODUCER_ROLES = frozenset({"planning", "art", "program"})
+SEMANTIC_ROLE_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{2,63}$")
+GAMEPLAY_PRIMITIVE_CAPABILITY_REQUIREMENTS = MappingProxyType({
+    "on_enter": MappingProxyType({"subject_slot": "trigger_zone"}),
+    "on_collect": MappingProxyType({"subject_slot": "collectible"}),
+    "unlock": MappingProxyType({"target_slot": "lockable"}),
+})
+GAMEPLAY_PRIMITIVE_REQUIRED_PARAMETERS = MappingProxyType({
+    "set_state": frozenset({"state_key", "value"}),
+    "unlock": frozenset({"required_state"}),
+    "complete_objective": frozenset({"objective_id"}),
+})
 ARTIFACT_TYPES = frozenset(
     {
         "GameDesignBrief",
@@ -99,6 +115,21 @@ def _canonical_json(value: Any) -> str:
         sort_keys=True,
         separators=(",", ":"),
     )
+
+
+def compute_artifact_content_hash(artifact_type: str, payload: Any) -> str:
+    normalized_type = _text(artifact_type)
+    normalized_payload = _normalized_json_value(payload)
+    if normalized_type not in ARTIFACT_TYPES:
+        raise ValueError(f"unsupported artifact_type: {normalized_type}")
+    if not isinstance(normalized_payload, Mapping):
+        raise ValueError("Artifact payload must be a mapping or payload dataclass")
+    hash_input = {
+        "artifact_type": normalized_type,
+        "schema_version": COLLABORATION_SCHEMA_VERSION,
+        "payload": normalized_payload,
+    }
+    return "sha256:" + hashlib.sha256(_canonical_json(hash_input).encode("utf-8")).hexdigest()
 
 
 def _freeze(value: Any) -> Any:
@@ -189,15 +220,35 @@ class SceneCompositionPlan:
     environment_requirements: tuple[str, ...]
     entity_requirements: tuple[str, ...]
     layout_rules: tuple[str, ...]
+    image_prompts: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GameplayEntitySlot:
+    slot_id: str
+    semantic_role: str
+    required_capabilities: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class GameplayPrimitiveSpec:
+    primitive_id: str
+    kind: str
+    subject_slot: str
+    target_slot: str
+    parameters: Mapping[str, Any]
 
 
 @dataclass(frozen=True)
 class GameplayLogicPlan:
     states: tuple[str, ...]
-    triggers: tuple[str, ...]
-    rules: tuple[str, ...]
+    entity_slots: tuple[GameplayEntitySlot, ...]
+    primitives: tuple[GameplayPrimitiveSpec, ...]
     win_conditions: tuple[str, ...]
     lose_conditions: tuple[str, ...]
+    # Legacy narrative fields remain audit-only; primitives carry executable semantics.
+    triggers: tuple[str, ...] = ()
+    rules: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -215,6 +266,137 @@ def _required_text(payload: Mapping[str, Any], field: str, errors: list[str]) ->
 def _required_text_list(payload: Mapping[str, Any], field: str, errors: list[str]) -> None:
     if _text_list(payload.get(field)) is None:
         errors.append(f"{field}:required_nonempty_text_list")
+
+
+def _validate_gameplay_logic_plan(payload: Mapping[str, Any], errors: list[str]) -> None:
+    slots = payload.get("entity_slots")
+    primitives = payload.get("primitives")
+    if not isinstance(slots, list) or not slots:
+        errors.append("entity_slots:required_nonempty_list")
+        slots = []
+    if not isinstance(primitives, list) or not primitives:
+        errors.append("primitives:required_nonempty_list")
+        primitives = []
+
+    slot_capabilities: dict[str, frozenset[str]] = {}
+    semantic_roles: set[str] = set()
+    for index, slot in enumerate(slots):
+        if not isinstance(slot, Mapping):
+            errors.append(f"entity_slots[{index}]:required_mapping")
+            continue
+        slot_id = _text(slot.get("slot_id"))
+        semantic_role = _text(slot.get("semantic_role"))
+        capabilities = _text_list(slot.get("required_capabilities"))
+        if not slot_id:
+            errors.append(f"entity_slots[{index}].slot_id:required_text")
+            continue
+        if slot_id in slot_capabilities:
+            errors.append(f"entity_slots[{index}].slot_id:duplicate")
+            continue
+        if not semantic_role:
+            errors.append(f"entity_slots[{index}].semantic_role:required_text")
+        elif not SEMANTIC_ROLE_PATTERN.fullmatch(semantic_role):
+            errors.append(f"entity_slots[{index}].semantic_role:invalid_identifier")
+        elif semantic_role in semantic_roles:
+            errors.append(f"entity_slots[{index}].semantic_role:duplicate")
+        else:
+            semantic_roles.add(semantic_role)
+        if capabilities is None:
+            errors.append(f"entity_slots[{index}].required_capabilities:required_nonempty_text_list")
+            capabilities = []
+        slot_capabilities[slot_id] = frozenset(capabilities)
+
+    primitive_edges: dict[str, set[str]] = {}
+    primitive_ids: set[str] = set()
+    for index, primitive in enumerate(primitives):
+        if not isinstance(primitive, Mapping):
+            errors.append(f"primitives[{index}]:required_mapping")
+            continue
+        primitive_id = _text(primitive.get("primitive_id"))
+        kind = _text(primitive.get("kind"))
+        subject_slot = _text(primitive.get("subject_slot"))
+        target_slot = _text(primitive.get("target_slot"))
+        parameters = primitive.get("parameters")
+        if not primitive_id:
+            errors.append(f"primitives[{index}].primitive_id:required_text")
+        elif primitive_id in primitive_ids:
+            errors.append(f"primitives[{index}].primitive_id:duplicate")
+        else:
+            primitive_ids.add(primitive_id)
+        if kind not in ALLOWED_GAMEPLAY_PRIMITIVES:
+            errors.append(f"primitives[{index}].kind:unsupported")
+            continue
+        if subject_slot not in slot_capabilities:
+            errors.append(f"primitives[{index}].subject_slot:unknown")
+        if target_slot not in slot_capabilities:
+            errors.append(f"primitives[{index}].target_slot:unknown")
+        if subject_slot and target_slot:
+            primitive_edges.setdefault(subject_slot, set()).add(target_slot)
+        if not isinstance(parameters, Mapping):
+            errors.append(f"primitives[{index}].parameters:required_mapping")
+            parameters = {}
+        allowed_parameters = GAMEPLAY_PRIMITIVE_PARAMETER_KEYS[kind]
+        unknown_parameters = sorted(set(parameters) - allowed_parameters)
+        if unknown_parameters:
+            errors.append(f"primitives[{index}].parameters:unknown:{','.join(map(str, unknown_parameters))}")
+        for slot_field, capability in GAMEPLAY_PRIMITIVE_CAPABILITY_REQUIREMENTS.get(kind, {}).items():
+            slot_id = subject_slot if slot_field == "subject_slot" else target_slot
+            if capability not in slot_capabilities.get(slot_id, frozenset()):
+                errors.append(f"primitives[{index}].{slot_field}:requires_{capability}")
+        required_parameters = GAMEPLAY_PRIMITIVE_REQUIRED_PARAMETERS.get(kind, frozenset())
+        missing_parameters = sorted(
+            key
+            for key in required_parameters
+            if key not in parameters or (key != "value" and not _text(parameters.get(key)))
+        )
+        if missing_parameters:
+            errors.append(
+                f"primitives[{index}].parameters:requires_{'_and_'.join(missing_parameters)}"
+            )
+
+    visited: set[str] = set()
+    active: set[str] = set()
+
+    def has_cycle(slot_id: str) -> bool:
+        if slot_id in active:
+            return True
+        if slot_id in visited:
+            return False
+        visited.add(slot_id)
+        active.add(slot_id)
+        cyclic = any(has_cycle(target) for target in primitive_edges.get(slot_id, ()))
+        active.remove(slot_id)
+        return cyclic
+
+    if any(has_cycle(slot_id) for slot_id in primitive_edges):
+        errors.append("primitives:cyclic_slot_reference")
+
+
+def gameplay_logic_contract_manifest() -> Mapping[str, Any]:
+    """Return the prompt-facing view of the authoritative gameplay validator."""
+
+    return MappingProxyType({
+        "allowed_primitives": tuple(sorted(ALLOWED_GAMEPLAY_PRIMITIVES)),
+        "parameter_keys": MappingProxyType({
+            kind: tuple(sorted(keys))
+            for kind, keys in GAMEPLAY_PRIMITIVE_PARAMETER_KEYS.items()
+        }),
+        "required_parameters": MappingProxyType({
+            kind: tuple(sorted(keys))
+            for kind, keys in GAMEPLAY_PRIMITIVE_REQUIRED_PARAMETERS.items()
+        }),
+        "capability_requirements": MappingProxyType({
+            kind: MappingProxyType(dict(requirements))
+            for kind, requirements in GAMEPLAY_PRIMITIVE_CAPABILITY_REQUIREMENTS.items()
+        }),
+        "identity_rules": (
+            "slot_id values must be unique",
+            "semantic_role values must be unique canonical identifiers matching ^[a-z][a-z0-9_.-]{2,63}$",
+            "primitive_id values must be unique",
+            "subject_slot and target_slot must reference declared slot_id values",
+            "slot references must not form a cycle",
+        ),
+    })
 
 
 def validate_artifact_payload(artifact_type: str, payload: Any) -> ValidationResult:
@@ -248,13 +430,16 @@ def validate_artifact_payload(artifact_type: str, payload: Any) -> ValidationRes
             "entity_requirements",
             "layout_rules",
         ),
-        "GameplayLogicPlan": ("states", "triggers", "rules", "win_conditions", "lose_conditions"),
+        "GameplayLogicPlan": ("states", "win_conditions", "lose_conditions"),
         "EntityBindingPlan": (),
     }
     for field in text_fields.get(normalized_type, ()):
         _required_text(normalized, field, errors)
     for field in list_fields.get(normalized_type, ()):
         _required_text_list(normalized, field, errors)
+
+    if normalized_type == "GameplayLogicPlan":
+        _validate_gameplay_logic_plan(normalized, errors)
 
     if normalized_type == "EntityBindingPlan":
         try:
@@ -267,14 +452,53 @@ def validate_artifact_payload(artifact_type: str, payload: Any) -> ValidationRes
         if not isinstance(bindings, list) or not bindings:
             errors.append("bindings:required_nonempty_list")
         else:
+            slot_ids: set[str] = set()
+            entity_ids: set[str] = set()
+            allowed_binding_fields = {
+                "slot_id",
+                "semantic_role",
+                "entity_id",
+                "entity_version",
+                "asset_id",
+                "required_capabilities",
+            }
             for index, binding in enumerate(bindings):
                 if not isinstance(binding, Mapping):
                     errors.append(f"bindings[{index}]:required_mapping")
                     continue
-                if not _text(binding.get("entity_id")):
+                unknown_fields = sorted(set(binding) - allowed_binding_fields)
+                if unknown_fields:
+                    errors.append(
+                        f"bindings[{index}]:unknown_fields:{','.join(map(str, unknown_fields))}"
+                    )
+                slot_id = _text(binding.get("slot_id"))
+                entity_id = _text(binding.get("entity_id"))
+                if not slot_id:
+                    errors.append(f"bindings[{index}].slot_id:required_text")
+                elif slot_id in slot_ids:
+                    errors.append(f"bindings[{index}].slot_id:duplicate")
+                else:
+                    slot_ids.add(slot_id)
+                if not entity_id:
                     errors.append(f"bindings[{index}].entity_id:required_text")
+                elif entity_id in entity_ids:
+                    errors.append(f"bindings[{index}].entity_id:duplicate")
+                else:
+                    entity_ids.add(entity_id)
                 if not _text(binding.get("semantic_role")):
                     errors.append(f"bindings[{index}].semantic_role:required_text")
+                if not _text(binding.get("asset_id")):
+                    errors.append(f"bindings[{index}].asset_id:required_text")
+                try:
+                    entity_version = int(binding.get("entity_version") or 0)
+                except (TypeError, ValueError):
+                    entity_version = 0
+                if entity_version <= 0:
+                    errors.append(f"bindings[{index}].entity_version:required_positive_integer")
+                if _text_list(binding.get("required_capabilities")) is None:
+                    errors.append(
+                        f"bindings[{index}].required_capabilities:required_nonempty_text_list"
+                    )
 
     return ValidationResult(
         validator_id=f"agent_collaboration.{normalized_type or 'unknown'}.v1",
@@ -370,12 +594,7 @@ class ArtifactEnvelope:
             normalized_status = "invalid"
         elif normalized_status == "invalid":
             raise ValueError("a valid payload cannot be marked invalid")
-        hash_input = {
-            "artifact_type": normalized_type,
-            "schema_version": COLLABORATION_SCHEMA_VERSION,
-            "payload": normalized_payload,
-        }
-        content_hash = "sha256:" + hashlib.sha256(_canonical_json(hash_input).encode("utf-8")).hexdigest()
+        content_hash = compute_artifact_content_hash(normalized_type, normalized_payload)
 
         values = {
             "artifact_id": normalized_artifact_id,

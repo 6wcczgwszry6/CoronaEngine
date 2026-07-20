@@ -14,10 +14,19 @@ from enum import Enum
 import hashlib
 import json
 import re
+from threading import RLock
 import time
 import uuid
 from typing import Any, Callable, ClassVar, Iterable, Mapping
 
+from ..gameplay_contracts import (
+    gameplay_command_idempotency_key,
+    validate_gameplay_manifest_payload,
+)
+from ..schema_versions import (
+    ACTION_PROPOSAL_SCHEMA_VERSION,
+    PLAN_PATCH_PAYLOAD_SCHEMA_VERSION,
+)
 from .scene_world_consistency import (
     audit_scene_world_consistency as build_scene_world_consistency_audit,
     constrain_scene_world_snapshot_readiness,
@@ -608,7 +617,13 @@ class RuntimeEventValidator:
         "scene_entity_engine_write_pending_f5_count",
         "scene_entity_engine_write_verification_status_counts",
         "scene_entity_count",
+        "scene_version",
+        "terminal_key",
+        "terminal_status",
+        "world_fingerprint",
         "game_ready_entity_count",
+        "needs_review_entity_count",
+        "readiness_missing_field_counts",
         "environment_entity_count",
         "planned_substrate_count",
         "materialization_status_counts",
@@ -731,10 +746,14 @@ class RuntimeEventValidator:
         "total_bytes",
         "total_batches",
         "layout_transform_failure_code_counts",
+        "missing_terminal_evidence",
+        "terminal_report_candidate",
+        "terminal_prerequisites_ready",
         "transform_failed_count",
         "transform_result_count",
         "transform_success_count",
         "version",
+        "world_fingerprint",
     }
     _BLOCKED_PAYLOAD_KEYS = {
         "api_key",
@@ -849,6 +868,7 @@ class RuntimeEventValidator:
                 "grounding_status_counts",
                 "layout_transform_failure_code_counts",
                 "materialization_status_counts",
+                "readiness_missing_field_counts",
                 "review_status_counts",
                 "resource_phase_failure_code_counts",
                 "import_failure_code_counts",
@@ -870,6 +890,7 @@ class RuntimeEventValidator:
             elif normalized_key in {
                 "engine_write_readiness_mismatch_channels",
                 "engine_write_runtime_state_only_channels",
+                "missing_terminal_evidence",
                 "report_health_reasons",
             } and isinstance(value, list):
                 items = [
@@ -1262,8 +1283,11 @@ class ResourcePlanValidator:
     """Schema and normalization for image/model resource plan facts."""
 
     _IMAGE_ALLOWED_FIELDS = {
+        "content_hash",
         "failure_code",
         "image_request_id",
+        "prompt_hash",
+        "resource_ref",
         "name",
         "status",
         "mode",
@@ -1273,6 +1297,8 @@ class ResourcePlanValidator:
     }
     _MODEL_ALLOWED_FIELDS = {
         "failure_code",
+        "generation_mode",
+        "model_ref",
         "model_request_id",
         "name",
         "status",
@@ -1280,6 +1306,8 @@ class ResourcePlanValidator:
         "local_path",
         "model_path",
         "preview_images",
+        "source_image_hash",
+        "source_image_ref",
     }
     _BLOCKED_FIELDS = {
         "api_key",
@@ -1477,8 +1505,8 @@ class ActorFactValidator:
         "last_sync_status",
         "last_sync_timestamp",
         "lighting_profile",
-        "model_ref",
         "model_path",
+        "model_ref",
         "name",
         "physics_profile",
         "plan_id",
@@ -1493,6 +1521,9 @@ class ActorFactValidator:
         "semantic_role",
         "size",
         "source",
+        "source_image_hash",
+        "source_image_ref",
+        "generation_mode",
         "status",
         "support_type",
         "sync_status",
@@ -1866,6 +1897,7 @@ class AssetFactValidator:
         "last_sync_timestamp",
         "local_path",
         "model_path",
+        "model_ref",
         "name",
         "path",
         "plan_id",
@@ -1873,6 +1905,9 @@ class AssetFactValidator:
         "ready",
         "scene_name",
         "source",
+        "source_image_hash",
+        "source_image_ref",
+        "generation_mode",
         "status",
         "total_bytes",
         "transfer_status",
@@ -3529,6 +3564,7 @@ class ReportRecordValidator:
         "tool_queue_health_summary",
         "tool_graph_summary",
         "tool_execution_digest",
+        "terminal_prerequisite_status",
         "vlm_checkpoint_summary",
     }
     _BLOCKED_FIELDS = {
@@ -3855,6 +3891,10 @@ class PlanPatch:
     source_user: str = ""
     target_agent: str = ""
     idempotency_key: str = ""
+    payload_schema_version: str = ""
+    structured_payload: dict[str, Any] = field(default_factory=dict)
+    payload_hash: str = ""
+    proposal_id: str = ""
     risk_level: RiskLevel = RiskLevel.LOW
     status: PlanPatchStatus = PlanPatchStatus.PENDING
     deferred_reason: str = ""
@@ -3872,6 +3912,10 @@ class PlanPatch:
             "source_user": self.source_user,
             "target_agent": self.target_agent,
             "idempotency_key": self.idempotency_key,
+            "payload_schema_version": self.payload_schema_version,
+            "structured_payload": deepcopy(self.structured_payload),
+            "payload_hash": self.payload_hash,
+            "proposal_id": self.proposal_id,
             "risk_level": self.risk_level.value,
             "status": self.status.value,
             "deferred_reason": self.deferred_reason,
@@ -4845,6 +4889,7 @@ class PlanPatchValidator:
         "post_generation_add",
         "intervention_modify",
         "intervention_delete",
+        "gameplay_manifest_apply",
     }
     _PATCH_TYPES_REQUIRING_ITEMS = {"intervention_add", "post_generation_add"}
     _ALLOWED_FIELDS = {
@@ -4854,11 +4899,15 @@ class PlanPatchValidator:
         "idempotency_key",
         "patch_id",
         "patch_type",
+        "payload_hash",
+        "payload_schema_version",
         "plan_id",
+        "proposal_id",
         "risk_level",
         "room_id",
         "source_user",
         "status",
+        "structured_payload",
         "target_agent",
         "text",
         "updated_at",
@@ -4894,6 +4943,9 @@ class PlanPatchValidator:
             ("source_user", patch.source_user),
             ("target_agent", patch.target_agent),
             ("idempotency_key", patch.idempotency_key),
+            ("payload_schema_version", patch.payload_schema_version),
+            ("payload_hash", patch.payload_hash),
+            ("proposal_id", patch.proposal_id),
             ("deferred_reason", patch.deferred_reason),
         ):
             PlanPatchValidator._validate_safe_text(value, field_name)
@@ -4909,6 +4961,13 @@ class PlanPatchValidator:
             patch.items,
             "items",
             allow_empty=patch.patch_type not in PlanPatchValidator._PATCH_TYPES_REQUIRING_ITEMS,
+        )
+        PlanPatchValidator._validate_structured_payload(
+            patch_type=patch.patch_type,
+            payload_schema_version=patch.payload_schema_version,
+            structured_payload=patch.structured_payload,
+            payload_hash=patch.payload_hash,
+            proposal_id=patch.proposal_id,
         )
         if patch.status == PlanPatchStatus.DEFERRED and not str(patch.deferred_reason or "").strip():
             raise ValueError("deferred plan patch requires deferred_reason")
@@ -4931,7 +4990,19 @@ class PlanPatchValidator:
             raise ValueError("plan patch requires patch_id and room_id")
         if not isinstance(patch.get("text"), str) or not str(patch.get("text") or "").strip():
             raise ValueError("plan patch requires non-empty text")
-        for field in ("patch_id", "room_id", "plan_id", "text", "source_user", "target_agent", "idempotency_key", "deferred_reason"):
+        for field in (
+            "patch_id",
+            "room_id",
+            "plan_id",
+            "text",
+            "source_user",
+            "target_agent",
+            "idempotency_key",
+            "payload_schema_version",
+            "payload_hash",
+            "proposal_id",
+            "deferred_reason",
+        ):
             value = patch_id if field == "patch_id" else patch.get(field)
             if value is not None:
                 PlanPatchValidator._validate_safe_text(value, field)
@@ -4947,9 +5018,25 @@ class PlanPatchValidator:
             "items",
             allow_empty=patch_type not in PlanPatchValidator._PATCH_TYPES_REQUIRING_ITEMS,
         )
+        PlanPatchValidator._validate_structured_payload(
+            patch_type=patch_type,
+            payload_schema_version=patch.get("payload_schema_version", ""),
+            structured_payload=patch.get("structured_payload", {}),
+            payload_hash=patch.get("payload_hash", ""),
+            proposal_id=patch.get("proposal_id", ""),
+        )
         if str(patch.get("status") or "") == PlanPatchStatus.DEFERRED.value and not str(patch.get("deferred_reason") or "").strip():
             raise ValueError("deferred plan patch requires deferred_reason")
-        for field in ("plan_id", "source_user", "target_agent", "idempotency_key", "deferred_reason"):
+        for field in (
+            "plan_id",
+            "source_user",
+            "target_agent",
+            "idempotency_key",
+            "payload_schema_version",
+            "payload_hash",
+            "proposal_id",
+            "deferred_reason",
+        ):
             if field in patch and not isinstance(patch.get(field), str):
                 raise ValueError(f"plan patch {field} must be a string")
         for field in ("created_at", "updated_at"):
@@ -4966,6 +5053,29 @@ class PlanPatchValidator:
             if not isinstance(value, str) or not value.strip():
                 raise ValueError(f"plan patch {field_name} entries must be non-empty strings")
             PlanPatchValidator._validate_safe_text(value, field_name)
+
+    @staticmethod
+    def _validate_structured_payload(
+        *,
+        patch_type: str,
+        payload_schema_version: Any,
+        structured_payload: Any,
+        payload_hash: Any,
+        proposal_id: Any,
+    ) -> None:
+        if patch_type != "gameplay_manifest_apply":
+            if payload_schema_version or structured_payload or payload_hash or proposal_id:
+                raise ValueError("legacy plan patch cannot carry a structured gameplay payload")
+            return
+        if payload_schema_version != PLAN_PATCH_PAYLOAD_SCHEMA_VERSION:
+            raise ValueError("gameplay plan patch payload_schema_version is incompatible")
+        if not isinstance(structured_payload, Mapping):
+            raise ValueError("gameplay plan patch structured_payload must be a mapping")
+        normalized = validate_gameplay_manifest_payload(structured_payload)
+        if str(payload_hash or "") != str(normalized.get("content_hash") or ""):
+            raise ValueError("gameplay plan patch payload_hash mismatch")
+        if not isinstance(proposal_id, str) or not proposal_id.strip():
+            raise ValueError("gameplay plan patch requires proposal_id")
 
     @staticmethod
     def _validate_safe_text(value: Any, field_name: str) -> None:
@@ -5705,7 +5815,14 @@ class ReviewAdvisoryProposalValidator:
 
 class ToolCallGraphValidator:
     _ALLOWED_GRAPH_FIELDS = {"batch_id", "edges", "generation", "graph_id", "graph_role", "nodes", "plan_id", "status"}
-    _ALLOWED_GRAPH_ROLES = {"business_batch", "internal_state", "query_snapshot", "review", "finalizer"}
+    _ALLOWED_GRAPH_ROLES = {
+        "business_action",
+        "business_batch",
+        "internal_state",
+        "query_snapshot",
+        "review",
+        "finalizer",
+    }
     _ALLOWED_NODE_FIELDS = {
         "args",
         "confirmed",
@@ -7716,6 +7833,8 @@ class AgentRuntime:
         "retry_failed_plan",
     })
     _CONTEXT_ACTIONS = frozenset({
+        "runtime.plan_context.record",
+        "runtime.agent_reply_context.record",
         "user_context",
         "user_discussion",
         "discussion_context",
@@ -7901,12 +8020,14 @@ class AgentRuntime:
         environment_import_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         actor_import_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         actor_delete_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
+        gameplay_manifest_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         review_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         vlm_review_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         layout_transform_provider: Callable[[dict[str, Any]], dict[str, Any]] | None = None,
         provider_diagnostics: Mapping[str, Any] | None = None,
         require_engine_environment_import: bool = False,
         require_engine_actor_import: bool = False,
+        strict_image_to_model_pipeline: bool = False,
         max_queued_tool_graphs: int = 32,
     ) -> None:
         self.state = state or RuntimeState()
@@ -7920,12 +8041,14 @@ class AgentRuntime:
         self._environment_import_provider = environment_import_provider
         self._actor_import_provider = actor_import_provider
         self._actor_delete_provider = actor_delete_provider
+        self._gameplay_manifest_provider = gameplay_manifest_provider
         self._review_provider = review_provider
         self._vlm_review_provider = vlm_review_provider
         self._layout_transform_provider = layout_transform_provider
         self._provider_diagnostics = self._normalize_provider_diagnostics(provider_diagnostics)
         self._require_engine_environment_import = bool(require_engine_environment_import)
         self._require_engine_actor_import = bool(require_engine_actor_import)
+        self._strict_image_to_model_pipeline = bool(strict_image_to_model_pipeline)
         self._provider_summary = self._build_provider_summary()
         self._provider_readiness_event_rooms: set[str] = set()
         self._max_queued_tool_graphs = max(1, int(max_queued_tool_graphs))
@@ -7933,6 +8056,7 @@ class AgentRuntime:
         self._pending_sync_event_patches: dict[str, dict[str, Any]] = {}
         self._pending_engine_readiness_patches: dict[str, dict[str, Any]] = {}
         self._report_persist_tokens: set[str] = set()
+        self._finalizer_lock = RLock()
         self.scene_plans: dict[str, ScenePlan] = {}
         self.batch_plans: dict[str, BatchPlan] = {}
         self.plan_patches: dict[str, PlanPatch] = {}
@@ -7985,6 +8109,8 @@ class AgentRuntime:
         "scene_entity_engine_write_pending_f5_count",
         "scene_entity_engine_write_verification_status_counts",
         "scene_entity_count",
+        "scene_version",
+        "world_fingerprint",
         "game_ready_entity_count",
         "environment_entity_count",
         "planned_substrate_count",
@@ -8068,6 +8194,10 @@ class AgentRuntime:
                 else self._provider_mode(self._actor_import_provider, "mock_actor_import")
             ),
             "actor_delete": self._provider_mode(self._actor_delete_provider, "runtime_state_only"),
+            "gameplay_manifest": self._provider_mode(
+                self._gameplay_manifest_provider,
+                "engine_gameplay_manifest_unavailable",
+            ),
             "review": self._provider_mode(self._review_provider, "runtime_geometry_rules"),
             "vlm_review": self._provider_mode(self._vlm_review_provider, "disabled"),
             "layout_transform": self._provider_mode(self._layout_transform_provider, "runtime_state_only"),
@@ -8480,6 +8610,7 @@ class AgentRuntime:
             "environment_import",
             "actor_import",
             "actor_delete",
+            "gameplay_manifest",
             "review",
             "vlm_review",
             "layout_transform",
@@ -10836,6 +10967,7 @@ class AgentRuntime:
             room_id=plan.room_id,
             plan_id=plan.plan_id,
             text=brief,
+            plan_version=plan.version + 1,
         )
         concrete_object_items = list(extracted.get("concrete_object_items") or [])
         layout_items = list(extracted.get("layout_items") or [])
@@ -10865,6 +10997,7 @@ class AgentRuntime:
         room_id: str,
         plan_id: str,
         text: str,
+        plan_version: int = 0,
     ) -> dict[str, Any]:
         """Run the first decomposed planning tool before ScenePlan persistence.
 
@@ -10877,6 +11010,49 @@ class AgentRuntime:
         effective_plan_id = str(plan_id or _id("plan"))
         if not self.registry.has("scene.extract_objects"):
             return {}
+        normalized_text = str(text or "").strip()
+        if plan_version:
+            effective_plan_version = max(1, int(plan_version))
+        else:
+            plan_row = dict(
+                self.state.room(room).get("scene_plans", {}).get(effective_plan_id, {})
+                or {}
+            )
+            effective_plan_version = max(1, int(plan_row.get("version") or 1))
+        content_hash = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()
+        extraction_key = f"{effective_plan_id}:{effective_plan_version}:{content_hash}"
+        prior_entries = self.operation_log.query(
+            event="scene_plan_extracted_via_tool_graph",
+            room_id=room,
+            plan_id=effective_plan_id,
+        )
+        if any(str(entry.payload.get("extraction_key") or "") == extraction_key for entry in prior_entries):
+            extraction = dict(
+                self.state.room(room)
+                .get("plan_extractions", {})
+                .get(effective_plan_id, {})
+                or {}
+            )
+            model_items = list(
+                self.state.room(room)
+                .get("model_item_lists", {})
+                .get(effective_plan_id, [])
+                or []
+            )
+            if model_items:
+                extraction["concrete_object_items"] = model_items
+            self.operation_log.append(
+                "scene_plan_extraction_deduped",
+                room_id=room,
+                plan_id=effective_plan_id,
+                payload={
+                    "extraction_key": extraction_key,
+                    "plan_version": effective_plan_version,
+                    "content_hash": content_hash,
+                    "dedupe_result": "same_version_replay",
+                },
+            )
+            return extraction
         graph = ToolCallGraph(graph_id=_id("graph"), plan_id=effective_plan_id, batch_id="")
         extract_call = graph.add(
             ToolCall(
@@ -10885,7 +11061,7 @@ class AgentRuntime:
                 args={
                     "room_id": room,
                     "plan_id": effective_plan_id,
-                    "text": str(text or ""),
+                    "text": normalized_text,
                 },
                 risk_level=RiskLevel.LOW,
             )
@@ -11037,6 +11213,10 @@ class AgentRuntime:
             plan_id=effective_plan_id,
             payload={
                 "graph_id": executed.graph_id,
+                "extraction_key": extraction_key,
+                "plan_version": effective_plan_version,
+                "content_hash": content_hash,
+                "dedupe_result": "executed",
                 "item_count": len(extraction.get("concrete_object_items") or []),
                 "layout_count": len(extraction.get("layout_items") or []),
                 "classified": bool(model_items),
@@ -11050,6 +11230,7 @@ class AgentRuntime:
             room_id=plan.room_id,
             plan_id=plan.plan_id,
             text=brief,
+            plan_version=plan.version + 1,
         )
         plan.concrete_object_items = list(
             extracted.get("concrete_object_items")
@@ -11066,6 +11247,7 @@ class AgentRuntime:
             room_id=str(room_id or "default"),
             plan_id=plan_id,
             text=brief,
+            plan_version=int(plan_data.get("version") or 0) + 1,
         )
         plan_data["concrete_object_items"] = list(
             extracted.get("concrete_object_items")
@@ -11321,6 +11503,7 @@ class AgentRuntime:
         external_plan_id: str = "",
         reply_to: str = "",
         update_plan_brief: bool = False,
+        direct_persist: bool = False,
     ) -> dict[str, Any]:
         """Mirror an Agent reply into Runtime planning context without executing.
 
@@ -11391,13 +11574,22 @@ class AgentRuntime:
             changes["scene_plans"] = scene_plan_update
             changes["active_plan_id"] = plan_id
             changes["active_discussion_plan_id"] = plan_id
-        self._persist_planning_context_changes(
-            room_id=room,
-            plan_id=plan_id,
-            context_event=context_event,
-            changes=changes,
-            reason="record_agent_context_message",
-        )
+        if direct_persist:
+            self._persist_planning_context_changes_direct(
+                room_id=room,
+                plan_id=plan_id,
+                context_event=context_event,
+                changes=changes,
+                reason="record_agent_context_message",
+            )
+        else:
+            self._persist_planning_context_changes(
+                room_id=room,
+                plan_id=plan_id,
+                context_event=context_event,
+                changes=changes,
+                reason="record_agent_context_message",
+            )
         if scene_plan_update and plan_id in self.scene_plans:
             mirrored = scene_plan_update[plan_id]
             plan = self.scene_plans[plan_id]
@@ -11427,15 +11619,16 @@ class AgentRuntime:
                 "item_count": 1,
             },
         )
-        self.emit_runtime_event(
-            room_id=room,
-            plan_id=plan_id,
-            event_type="planning_context_recorded" if plan_id else "room_agent_reply_recorded",
-            phase="planning" if plan_id else "discussion",
-            title="已记录 Agent 方案意见" if plan_id else "已记录 Agent 普通回复",
-            message="已记录 Agent 的方案意见。" if plan_id else "已记录 Agent 的普通回复，不会创建生成方案。",
-            payload={"status": "agent_reply" if plan_id else "room_agent_reply", "item_count": 1},
-        )
+        if not direct_persist:
+            self.emit_runtime_event(
+                room_id=room,
+                plan_id=plan_id,
+                event_type="planning_context_recorded" if plan_id else "room_agent_reply_recorded",
+                phase="planning" if plan_id else "discussion",
+                title="已记录 Agent 方案意见" if plan_id else "已记录 Agent 普通回复",
+                message="已记录 Agent 的方案意见。" if plan_id else "已记录 Agent 的普通回复，不会创建生成方案。",
+                payload={"status": "agent_reply" if plan_id else "room_agent_reply", "item_count": 1},
+            )
         return {
             "recorded": True,
             "runtime_plan_id": plan_id,
@@ -11452,6 +11645,9 @@ class AgentRuntime:
         sender_name: str = "",
         external_plan_id: str = "",
         reply_to: str = "",
+        direct_persist: bool = False,
+        owner_agent: str = "",
+        source_context_agents: Iterable[str] | None = None,
     ) -> dict[str, Any]:
         """Mirror a user discussion turn into Runtime context without executing.
 
@@ -11471,8 +11667,8 @@ class AgentRuntime:
         room_state = snapshot["room"]
         scene_plans = dict(room_state.get("scene_plans") or {})
         plan_id = ""
-        owner_agent = ""
-        source_context_agents: list[str] = []
+        context_owner_agent = str(owner_agent or "")
+        context_source_agents = list(source_context_agents or [])
         candidate_plan_id = self._resolve_runtime_plan_id_from_state(
             room,
             external_plan_id=external,
@@ -11482,8 +11678,11 @@ class AgentRuntime:
             plan_data = dict(scene_plans.get(candidate_plan_id) or {})
             if plan_data:
                 plan_id = str(plan_data.get("plan_id") or candidate_plan_id)
-                owner_agent = str(plan_data.get("owner_agent") or "")
-                source_context_agents = list(plan_data.get("source_context_agents") or [])
+                context_owner_agent = str(plan_data.get("owner_agent") or context_owner_agent)
+                context_source_agents = self._merge_items(
+                    context_source_agents,
+                    list(plan_data.get("source_context_agents") or []),
+                )
         if external and not plan_id:
             return {"recorded": False, "reason": "no runtime plan"}
         context_type = "user_discussion" if plan_id else "room_chat"
@@ -11492,8 +11691,8 @@ class AgentRuntime:
             plan_id=plan_id,
             external_plan_id=external,
             text=brief,
-            owner_agent=owner_agent,
-            source_context_agents=source_context_agents,
+            owner_agent=context_owner_agent,
+            source_context_agents=context_source_agents,
             created=False,
             context_type=context_type,
             speaker_type="user",
@@ -11501,12 +11700,21 @@ class AgentRuntime:
             agent_name=sender_name,
             reply_to=reply_to,
         )
-        self._persist_planning_context_event(
-            room_id=room,
-            plan_id=plan_id,
-            context_event=context_event,
-            reason="record_user_context_message",
-        )
+        if direct_persist:
+            self._persist_planning_context_changes_direct(
+                room_id=room,
+                plan_id=plan_id,
+                context_event=context_event,
+                changes={"planning_context_events": [context_event]},
+                reason="record_user_context_message",
+            )
+        else:
+            self._persist_planning_context_event(
+                room_id=room,
+                plan_id=plan_id,
+                context_event=context_event,
+                reason="record_user_context_message",
+            )
         event_name = "user_context_message_recorded" if plan_id else "room_chat_message_recorded"
         self.operation_log.append(
             event_name,
@@ -11523,15 +11731,16 @@ class AgentRuntime:
                 "item_count": 1,
             },
         )
-        self.emit_runtime_event(
-            room_id=room,
-            plan_id=plan_id,
-            event_type="planning_context_recorded" if plan_id else "room_chat_recorded",
-            phase="planning" if plan_id else "discussion",
-            title="已记录用户方案补充" if plan_id else "已记录普通聊天",
-            message="已记录用户的方案补充。" if plan_id else "已记录普通聊天，不会创建生成方案。",
-            payload={"status": context_type, "item_count": 1},
-        )
+        if not direct_persist:
+            self.emit_runtime_event(
+                room_id=room,
+                plan_id=plan_id,
+                event_type="planning_context_recorded" if plan_id else "room_chat_recorded",
+                phase="planning" if plan_id else "discussion",
+                title="已记录用户方案补充" if plan_id else "已记录普通聊天",
+                message="已记录用户的方案补充。" if plan_id else "已记录普通聊天，不会创建生成方案。",
+                payload={"status": context_type, "item_count": 1},
+            )
         return {"recorded": True, "runtime_plan_id": plan_id, "context_id": context_event["context_id"]}
 
     def apply_runtime_command(
@@ -12026,6 +12235,53 @@ class AgentRuntime:
             return event
         return {}
 
+    def _terminal_report_prerequisite_status(
+        self,
+        room_id: str,
+        plan_id: str,
+        *,
+        scene_version: int,
+    ) -> dict[str, Any]:
+        """Summarize same-version facts required before publishing report_ready."""
+
+        required_events = (
+            "scene_entity_registry_ready",
+            "runtime_scene_world_consistency_audited",
+            "scene_world_snapshot_ready",
+        )
+        expected_scene_version = max(0, int(scene_version or 0))
+        evidence: dict[str, dict[str, Any]] = {}
+        missing_events: list[str] = []
+        for event_type in required_events:
+            matching_entry = next(
+                (
+                    entry
+                    for entry in reversed(
+                        self.operation_log.query(
+                            event=event_type,
+                            room_id=str(room_id or "default"),
+                            plan_id=str(plan_id or ""),
+                        )
+                    )
+                    if int(entry.payload.get("scene_version") or 0) == expected_scene_version
+                ),
+                None,
+            )
+            if matching_entry is None:
+                missing_events.append(event_type)
+                continue
+            evidence[event_type] = {
+                "scene_version": expected_scene_version,
+                "world_fingerprint": str(matching_entry.payload.get("world_fingerprint") or ""),
+            }
+        return {
+            "ready": not missing_events,
+            "scene_version": expected_scene_version,
+            "required_events": list(required_events),
+            "missing_events": missing_events,
+            "evidence": evidence,
+        }
+
     @staticmethod
     def _report_covers_current_plan_state(
         report: Mapping[str, Any] | None,
@@ -12053,6 +12309,85 @@ class AgentRuntime:
             if isinstance(row, Mapping) and str(row.get("batch_id") or "")
         }
         return expected_batch_ids == report_batch_ids
+
+    def _persisted_terminal_finalization(
+        self,
+        room_id: str,
+        *,
+        plan: ScenePlan,
+        batches: Iterable[BatchPlan],
+    ) -> dict[str, Any]:
+        """Return immutable terminal evidence without relying on mutable plan.version."""
+
+        candidate_event: dict[str, Any] = {}
+        rows = self.state.room(str(room_id or "default")).get("runtime_events") or []
+        for raw_event in reversed(rows if isinstance(rows, list) else []):
+            if not isinstance(raw_event, Mapping):
+                continue
+            event = dict(raw_event)
+            if (
+                str(event.get("event_type") or "") == "report_ready"
+                and str(event.get("plan_id") or "") == plan.plan_id
+                and str(dict(event.get("payload") or {}).get("world_fingerprint") or "").strip()
+            ):
+                candidate_event = event
+                break
+        if not candidate_event:
+            return {}
+        report = self._latest_persisted_report_for_plan(
+            str(room_id),
+            plan.plan_id,
+            terminal_only=True,
+        )
+        if not report:
+            return {}
+        plan_summary = dict(report.get("plan_summary") or {})
+        terminal_status = str(plan_summary.get("status") or "").strip().lower()
+        if terminal_status not in {
+            ScenePlanStatus.COMPLETED.value,
+            ScenePlanStatus.FAILED.value,
+            ScenePlanStatus.CANCELLED.value,
+        }:
+            return {}
+        expected_batches = {
+            str(batch.batch_id or ""): str(batch.status.value)
+            for batch in batches
+            if str(batch.batch_id or "")
+        }
+        report_rows = list(dict(report.get("batch_summary") or {}).get("batches") or [])
+        report_batches = {
+            str(row.get("batch_id") or ""): str(row.get("status") or "").strip().lower()
+            for row in report_rows
+            if isinstance(row, Mapping) and str(row.get("batch_id") or "")
+        }
+        if set(expected_batches) != set(report_batches):
+            return {}
+        if any(
+            report_batches.get(batch_id)
+            and report_batches.get(batch_id) != batch_status
+            for batch_id, batch_status in expected_batches.items()
+        ):
+            return {}
+        payload = dict(candidate_event.get("payload") or {})
+        fingerprint = str(payload.get("world_fingerprint") or "").strip()
+        event_status = str(payload.get("status") or terminal_status).strip().lower()
+        if event_status and event_status != terminal_status:
+            return {}
+        scene_version = max(0, int(payload.get("scene_version") or 0))
+        terminal_key = str(payload.get("terminal_key") or "").strip()
+        if not terminal_key:
+            terminal_key = f"{plan.plan_id}:{scene_version}:{fingerprint}:{terminal_status}"
+        return {
+            "plan_id": plan.plan_id,
+            "status": terminal_status,
+            "scene_version": scene_version,
+            "world_fingerprint": fingerprint,
+            "terminal_key": terminal_key,
+            "report_ready": True,
+            "idempotent": True,
+            "reason": "already_finalized_terminal_key",
+            "batch_count": len(expected_batches),
+        }
 
     def handle_message(
         self,
@@ -13293,6 +13628,12 @@ class AgentRuntime:
         if normalized_action in self._R3_READINESS_ACTIONS:
             raw_payload = dict(sync_event or {})
             requested_plan_id = str(plan_id or raw_payload.get("plan_id") or "").strip()
+            gate_profile = str(raw_payload.get("profile") or "full_r3").strip().lower()
+            demo_requirements = [
+                dict(item)
+                for item in list(raw_payload.get("demo_requirements") or [])
+                if isinstance(item, Mapping)
+            ]
             try:
                 expected_entity_count = max(0, int(raw_payload.get("expected_entity_count") or 0))
             except (TypeError, ValueError):
@@ -13302,6 +13643,9 @@ class AgentRuntime:
                 plan_id=requested_plan_id,
                 benchmark_profile=str(raw_payload.get("benchmark_profile") or ""),
                 expected_entity_count=expected_entity_count,
+                profile=gate_profile,
+                demo_requirements=demo_requirements,
+                project_mode=str(raw_payload.get("project_mode") or ""),
             )
         if normalized_action in self._SCENE_WORLD_CONSISTENCY_ACTIONS:
             raw_payload = dict(sync_event or {})
@@ -13554,15 +13898,28 @@ class AgentRuntime:
                 "command": result,
                 "message": str(result.get("message") or ""),
             }
-        if normalized_action in {"user_context", "user_discussion", "discussion_context", "room_chat"}:
+        if normalized_action in {
+            "runtime.plan_context.record",
+            "user_context",
+            "user_discussion",
+            "discussion_context",
+            "room_chat",
+        }:
             try:
+                context_kwargs = {
+                    "room_id": room,
+                    "external_plan_id": external_plan_id,
+                    "text": text,
+                    "sender_id": sender_id,
+                    "sender_name": sender_name,
+                    "reply_to": reply_to,
+                }
+                if normalized_action == "runtime.plan_context.record":
+                    context_kwargs["direct_persist"] = True
+                    context_kwargs["owner_agent"] = owner_agent
+                    context_kwargs["source_context_agents"] = source_context_agents
                 result = self.record_user_context_message(
-                    room_id=room,
-                    external_plan_id=external_plan_id,
-                    text=text,
-                    sender_id=sender_id,
-                    sender_name=sender_name,
-                    reply_to=reply_to,
+                    **context_kwargs,
                 )
             except Exception:  # noqa: BLE001
                 result = {
@@ -13590,17 +13947,26 @@ class AgentRuntime:
                     else f"AgentRuntime 未记录用户讨论上下文：{result.get('reason', 'unknown')}。"
                 ),
             }
-        if normalized_action in {"agent_context", "agent_reply", "agent_discussion", "room_agent_reply"}:
+        if normalized_action in {
+            "runtime.agent_reply_context.record",
+            "agent_context",
+            "agent_reply",
+            "agent_discussion",
+            "room_agent_reply",
+        }:
             try:
-                result = self.record_agent_context_message(
-                    room_id=room,
-                    external_plan_id=external_plan_id,
-                    text=text,
-                    agent_id=sender_id,
-                    agent_name=sender_name or owner_agent,
-                    reply_to=reply_to,
-                    update_plan_brief=normalized_action == "agent_reply",
-                )
+                context_kwargs = {
+                    "room_id": room,
+                    "external_plan_id": external_plan_id,
+                    "text": text,
+                    "agent_id": sender_id,
+                    "agent_name": sender_name or owner_agent,
+                    "reply_to": reply_to,
+                    "update_plan_brief": normalized_action == "agent_reply",
+                }
+                if normalized_action == "runtime.agent_reply_context.record":
+                    context_kwargs["direct_persist"] = True
+                result = self.record_agent_context_message(**context_kwargs)
             except Exception:  # noqa: BLE001
                 result = {
                     "recorded": False,
@@ -14574,6 +14940,255 @@ class AgentRuntime:
             },
         )
         return patch
+
+    def submit_gameplay_action_proposal(self, proposal: Mapping[str, Any] | Any) -> dict[str, Any]:
+        """Submit one validated gameplay proposal through PlanPatch and ToolCallGraph."""
+
+        raw = proposal.as_dict() if callable(getattr(proposal, "as_dict", None)) else proposal
+        proposal_data = self._validate_gameplay_action_proposal(raw)
+        room = proposal_data["room_id"]
+        plan_id = proposal_data["plan_id"]
+        manifest = proposal_data["gameplay_manifest"]
+        payload_hash = str(manifest["content_hash"])
+        idempotency_key = gameplay_command_idempotency_key(
+            proposal_data["command_id"],
+            payload_hash,
+        )
+        if proposal_data["idempotency_key"] != idempotency_key:
+            raise ValueError("ActionProposal idempotency_key mismatch")
+
+        room_state = self.state.room(room)
+        scene_plans = dict(room_state.get("scene_plans") or {})
+        if plan_id not in scene_plans:
+            raise ValueError("ActionProposal target ScenePlan does not exist")
+        snapshot_key = SceneWorldSnapshotRecordValidator.storage_key(
+            plan_id,
+            proposal_data["scene_version"],
+        )
+        snapshot = dict(dict(room_state.get("scene_world_snapshots") or {}).get(snapshot_key) or {})
+        if not snapshot or str(snapshot.get("world_readiness") or "") != "game_ready":
+            raise ValueError("ActionProposal requires the matching Game-ready SceneWorldSnapshot")
+        SceneWorldSnapshotRecordValidator.validate(snapshot)
+
+        replayed = self._gameplay_patch_by_idempotency_key(
+            room_state,
+            plan_id=plan_id,
+            idempotency_key=idempotency_key,
+        )
+        if replayed is not None:
+            self.plan_patches[replayed.patch_id] = replayed
+            self.operation_log.append(
+                "gameplay_manifest_idempotent_replay",
+                room_id=room,
+                plan_id=plan_id,
+                payload={
+                    "patch_id": replayed.patch_id,
+                    "proposal_id": replayed.proposal_id,
+                    "status": replayed.status.value,
+                },
+            )
+            return {
+                "status": replayed.status.value,
+                "patch_id": replayed.patch_id,
+                "graph_id": "",
+                "proposal_id": replayed.proposal_id,
+                "payload_hash": replayed.payload_hash,
+                "replayed": True,
+                "error_code": replayed.deferred_reason,
+            }
+        if self._gameplay_manifest_provider is None or not self.registry.has("gameplay.apply_manifest"):
+            self.operation_log.append(
+                "gameplay_manifest_submission_blocked",
+                room_id=room,
+                plan_id=plan_id,
+                payload={
+                    "proposal_id": proposal_data["proposal_id"],
+                    "status": "blocked",
+                },
+            )
+            return {
+                "status": "blocked",
+                "patch_id": "",
+                "graph_id": "",
+                "proposal_id": proposal_data["proposal_id"],
+                "payload_hash": payload_hash,
+                "replayed": False,
+                "error_code": "engine_gameplay_manifest_unavailable",
+            }
+
+        patch = PlanPatch(
+            patch_id=_id("patch-gameplay"),
+            room_id=room,
+            plan_id=plan_id,
+            text=f"Apply validated gameplay manifest {proposal_data['proposal_id']}",
+            patch_type="gameplay_manifest_apply",
+            items=[],
+            source_user="project_gate",
+            target_agent="program",
+            idempotency_key=idempotency_key,
+            payload_schema_version=PLAN_PATCH_PAYLOAD_SCHEMA_VERSION,
+            structured_payload=deepcopy(manifest),
+            payload_hash=payload_hash,
+            proposal_id=proposal_data["proposal_id"],
+            risk_level=RiskLevel.LOW,
+        )
+        PlanPatchValidator.validate(patch)
+        self._persist_plan_patch(patch, "pending_interventions")
+        self.plan_patches[patch.patch_id] = patch
+
+        graph = ToolCallGraph(
+            graph_id=_id("graph-gameplay-manifest"),
+            plan_id=plan_id,
+            graph_role="business_action",
+        )
+        graph.add(
+            ToolCall(
+                tool_call_id=_id("tool-gameplay-manifest"),
+                tool_name="gameplay.apply_manifest",
+                args={
+                    "room_id": room,
+                    "plan_id": plan_id,
+                    "proposal_id": patch.proposal_id,
+                    "patch_id": patch.patch_id,
+                    "manifest_schema_version": patch.payload_schema_version,
+                    "manifest": deepcopy(patch.structured_payload),
+                    "manifest_hash": patch.payload_hash,
+                    "idempotency_key": patch.idempotency_key,
+                },
+                risk_level=patch.risk_level,
+                requires_write=True,
+                confirmed=True,
+            )
+        )
+        executor = ToolCallGraphExecutor(
+            registry=self.registry,
+            guard=self.guard,
+            state=self.state,
+            operation_log=self.operation_log,
+        )
+        executor.execute(graph, room_id=room)
+        apply_call = next(iter(graph.nodes.values()))
+        applied = graph.status == "completed" and apply_call.status == ToolCallStatus.SUCCEEDED
+        patch.updated_at = _now()
+        if applied:
+            patch.status = PlanPatchStatus.ACCEPTED
+            patch.deferred_reason = ""
+            bucket = "accepted_interventions"
+        else:
+            patch.status = PlanPatchStatus.DEFERRED
+            patch.deferred_reason = str(apply_call.error or "gameplay_manifest_apply_failed")
+            bucket = "deferred_interventions"
+        PlanPatchValidator.validate(patch)
+        self._persist_plan_patch(patch, bucket)
+        self.operation_log.append(
+            "gameplay_manifest_submission_completed" if applied else "gameplay_manifest_submission_blocked",
+            room_id=room,
+            plan_id=plan_id,
+            tool_call_id=apply_call.tool_call_id,
+            payload={
+                "graph_id": graph.graph_id,
+                "patch_id": patch.patch_id,
+                "proposal_id": patch.proposal_id,
+                "status": patch.status.value,
+            },
+        )
+        return {
+            "status": patch.status.value,
+            "patch_id": patch.patch_id,
+            "graph_id": graph.graph_id,
+            "proposal_id": patch.proposal_id,
+            "payload_hash": patch.payload_hash,
+            "replayed": False,
+            "error_code": patch.deferred_reason,
+        }
+
+    @staticmethod
+    def _validate_gameplay_action_proposal(proposal: Any) -> dict[str, Any]:
+        if not isinstance(proposal, Mapping):
+            raise TypeError("ActionProposal must be a mapping or provide as_dict()")
+        data = deepcopy(dict(proposal))
+        allowed_fields = {
+            "schema_version",
+            "proposal_id",
+            "command_id",
+            "project_id",
+            "room_id",
+            "plan_id",
+            "scene_version",
+            "execution_scope",
+            "operation",
+            "gate_report_id",
+            "gate_profile",
+            "binding_artifact_id",
+            "binding_artifact_hash",
+            "gameplay_manifest",
+            "idempotency_key",
+            "risk_level",
+            "status",
+        }
+        if set(data) != allowed_fields:
+            raise ValueError("ActionProposal fields mismatch")
+        for field_name in (
+            "proposal_id",
+            "command_id",
+            "project_id",
+            "room_id",
+            "plan_id",
+            "gate_report_id",
+            "binding_artifact_id",
+            "binding_artifact_hash",
+            "idempotency_key",
+        ):
+            if not isinstance(data.get(field_name), str) or not str(data.get(field_name) or "").strip():
+                raise ValueError(f"ActionProposal requires {field_name}")
+            PlanPatchValidator._validate_safe_text(data[field_name], field_name)
+        if data.get("schema_version") != ACTION_PROPOSAL_SCHEMA_VERSION:
+            raise ValueError("ActionProposal schema_version is incompatible")
+        if data.get("execution_scope") != "single_player_local":
+            raise ValueError("ActionProposal execution_scope is unsupported")
+        if data.get("operation") != "gameplay.apply_manifest":
+            raise ValueError("ActionProposal operation is unsupported")
+        if data.get("gate_profile") != "single_player_demo":
+            raise ValueError("ActionProposal gate_profile is unsupported")
+        if data.get("risk_level") != "low" or data.get("status") != "validated":
+            raise ValueError("ActionProposal is not validated for low-risk execution")
+        scene_version = data.get("scene_version")
+        if isinstance(scene_version, bool) or not isinstance(scene_version, int) or scene_version <= 0:
+            raise ValueError("ActionProposal scene_version must be a positive int")
+        manifest = validate_gameplay_manifest_payload(data.get("gameplay_manifest"))
+        if (
+            manifest["project_id"] != data["project_id"]
+            or manifest["plan_id"] != data["plan_id"]
+            or manifest["scene_version"] != scene_version
+        ):
+            raise ValueError("ActionProposal and GameplayManifest world identity mismatch")
+        data["gameplay_manifest"] = manifest
+        return data
+
+    @staticmethod
+    def _gameplay_patch_by_idempotency_key(
+        room_state: Mapping[str, Any],
+        *,
+        plan_id: str,
+        idempotency_key: str,
+    ) -> PlanPatch | None:
+        for bucket_name in (
+            "accepted_interventions",
+            "deferred_interventions",
+            "pending_interventions",
+            "rejected_interventions",
+        ):
+            for patch_id, row in dict(room_state.get(bucket_name) or {}).items():
+                if not isinstance(row, Mapping):
+                    continue
+                if str(row.get("patch_type") or "") != "gameplay_manifest_apply":
+                    continue
+                if str(row.get("plan_id") or "") != plan_id:
+                    continue
+                if str(row.get("idempotency_key") or "") != idempotency_key:
+                    continue
+                return AgentRuntime._plan_patch_from_state_row(str(patch_id), row)
+        return None
 
     @staticmethod
     def _intervention_idempotency_key(
@@ -16883,6 +17498,18 @@ class AgentRuntime:
         }
 
     def _finalize_plan_after_queue_drain(self, *, room_id: str, plan_id: str) -> dict[str, Any]:
+        with self._finalizer_lock:
+            return self._finalize_plan_after_queue_drain_locked(
+                room_id=room_id,
+                plan_id=plan_id,
+            )
+
+    def _finalize_plan_after_queue_drain_locked(
+        self,
+        *,
+        room_id: str,
+        plan_id: str,
+    ) -> dict[str, Any]:
         """Finalize a plan only from persisted queue, batch, and import facts."""
 
         plan = self._runtime_plan_by_id_from_state(plan_id)
@@ -16905,6 +17532,79 @@ class AgentRuntime:
                 "active_graph_count": len(active_queue_rows),
             }
         finalizer_scene_version = max(1, int(plan.version or 1))
+        batches = self._planned_batches_for_plan(plan_id)
+        if not batches:
+            return {}
+        terminal_evidence = (
+            self._persisted_terminal_finalization(
+                str(room_id),
+                plan=plan,
+                batches=batches,
+            )
+            if plan.status in {
+                ScenePlanStatus.COMPLETED,
+                ScenePlanStatus.FAILED,
+                ScenePlanStatus.CANCELLED,
+            }
+            else {}
+        )
+        if terminal_evidence:
+            terminal_status = str(terminal_evidence.get("status") or "")
+            if plan.status.value != terminal_status:
+                plan.status = ScenePlanStatus(terminal_status)
+                plan.updated_at = _now()
+                self._persist_scene_plan_status(
+                    plan,
+                    reason="plan_finalizer:restore_terminal_key",
+                )
+                self.scene_plans[plan.plan_id] = plan
+            if str(room.get("active_execution_plan_id") or "") == plan_id:
+                self._persist_plan_identity_changes(
+                    room_id=str(room_id),
+                    plan_id=plan_id,
+                    changes={"active_execution_plan_id": ""},
+                    reason="plan_finalizer:terminal_key_already_ready",
+                )
+            return terminal_evidence
+        persisted_ready_event = self._persisted_runtime_event_for_plan_version(
+            str(room_id),
+            plan_id,
+            event_type="report_ready",
+            scene_version=finalizer_scene_version,
+        )
+        persisted_ready_payload = dict(persisted_ready_event.get("payload") or {})
+        persisted_fingerprint = str(
+            persisted_ready_payload.get("world_fingerprint") or ""
+        ).strip()
+        persisted_report = self._latest_persisted_report_for_plan(
+            str(room_id),
+            plan_id,
+            terminal_only=True,
+        )
+        if (
+            plan.status in {ScenePlanStatus.COMPLETED, ScenePlanStatus.FAILED}
+            and persisted_fingerprint
+            and self._terminal_report_prerequisite_status(
+                str(room_id),
+                plan_id,
+                scene_version=finalizer_scene_version,
+            ).get("ready") is True
+            and self._report_covers_current_plan_state(
+                persisted_report,
+                plan=plan,
+                batches=batches,
+            )
+        ):
+            return {
+                "plan_id": plan_id,
+                "status": plan.status.value,
+                "reason": "already_finalized_same_world",
+                "batch_count": len(batches),
+                "scene_version": finalizer_scene_version,
+                "world_fingerprint": persisted_fingerprint,
+                "report_ready": True,
+                "idempotent": True,
+            }
         self.operation_log.append(
             "finalizer_started",
             room_id=str(room_id),
@@ -16924,9 +17624,6 @@ class AgentRuntime:
             },
         )
         self._reconcile_partial_engine_readiness(room_id=str(room_id), plan_id=plan_id)
-        batches = self._planned_batches_for_plan(plan_id)
-        if not batches:
-            return {}
         batch_statuses = [batch.status for batch in batches]
         if any(status == BatchPlanStatus.FAILED for status in batch_statuses):
             next_status = ScenePlanStatus.FAILED
@@ -17174,14 +17871,30 @@ class AgentRuntime:
                         "status": str(dict(persisted_report.get("plan_summary") or {}).get("status") or ""),
                         "scene_version": scene_version,
                         "world_fingerprint": str(report_snapshot.get("world_fingerprint") or ""),
+                        "terminal_status": next_status.value,
+                        "terminal_key": (
+                            f"{plan_id}:{scene_version}:"
+                            f"{str(report_snapshot.get('world_fingerprint') or '')}:"
+                            f"{next_status.value}"
+                        ),
                         "pipeline_status": str(report_completion.get("pipeline_status") or "completed"),
                         "engine_materialization_status": str(
                             report_completion.get("engine_materialization_status") or "partial"
                         ),
                         "world_readiness": str(report_completion.get("world_readiness") or "needs_review"),
+                        "terminal_report_candidate": True,
+                        "terminal_prerequisites_ready": True,
+                        "missing_terminal_evidence": [],
                         "scene_entity_count": int(report_registry.get("entity_count") or 0),
                         "game_ready_entity_count": int(report_registry.get("game_ready_entity_count") or 0),
                         "needs_review_entity_count": int(report_registry.get("needs_review_entity_count") or 0),
+                        "readiness_missing_field_counts": dict(
+                            sorted(
+                                dict(
+                                    report_registry.get("readiness_missing_field_counts") or {}
+                                ).items()
+                            )
+                        ),
                         "report_health_status": str(report_health.get("status") or "unknown"),
                         "report_attention_required": bool(report_health.get("attention_required")),
                     },
@@ -18283,7 +18996,12 @@ class AgentRuntime:
                 ready_count = requested_count
                 if call.tool_name == "runtime.asset.image.prepare":
                     image_plans = dict(room.get("image_resource_plans") or {})
-                    ready_count = self._ready_resource_count(dict(image_plans.get(str(graph.batch_id or "")) or {}))
+                    image_rows = dict(image_plans.get(str(graph.batch_id or "")) or {})
+                    ready_count = (
+                        self._ready_image_resource_count(image_rows)
+                        if self._strict_image_to_model_pipeline
+                        else self._ready_resource_count(image_rows)
+                    )
                 elif call.tool_name == "runtime.asset.model.prepare":
                     model_plans = dict(room.get("model_resource_plans") or {})
                     ready_count = self._importable_model_resource_count(
@@ -18624,6 +19342,7 @@ class AgentRuntime:
     @staticmethod
     def _safe_runtime_event_row(event: Mapping[str, Any]) -> dict[str, Any]:
         row = {
+            "event_id": str(event.get("event_id") or ""),
             "room_id": str(event.get("room_id") or ""),
             "plan_id": str(event.get("plan_id") or ""),
             "batch_id": str(event.get("batch_id") or ""),
@@ -22104,6 +22823,9 @@ class AgentRuntime:
         plan_id: str = "",
         benchmark_profile: str = "",
         expected_entity_count: int = 0,
+        profile: str = "full_r3",
+        demo_requirements: Iterable[Mapping[str, Any]] = (),
+        project_mode: str = "",
     ) -> dict[str, Any]:
         """Aggregate the R3 gate without mutating Runtime or querying providers."""
 
@@ -22126,6 +22848,9 @@ class AgentRuntime:
                 engine_write_summary={},
                 multiplayer_evidence={},
                 state_version=int(self.state.version),
+                profile=profile,
+                demo_requirements=list(demo_requirements or []),
+                project_mode=project_mode,
             )
             return {
                 "handled": True,
@@ -22232,6 +22957,24 @@ class AgentRuntime:
             benchmark_profile=resolved_benchmark,
             expected_entity_count=resolved_expected_count,
             evaluated_at=max(timestamps, default=0.0),
+            profile=profile,
+            demo_requirements=list(demo_requirements or []),
+            project_mode=project_mode,
+        )
+
+    @staticmethod
+    def _ready_image_resource_count(resources: Mapping[str, Any]) -> int:
+        return sum(
+            1
+            for resource in dict(resources or {}).values()
+            if isinstance(resource, Mapping)
+            and str(resource.get("status") or "").strip().lower() == "ready"
+            and str(resource.get("mode") or "").strip().lower()
+            not in {"mock", "mock_reference", "fixture"}
+            and bool(str(resource.get("image_url") or resource.get("local_path") or "").strip())
+            and str(resource.get("resource_ref") or "").strip()
+            and str(resource.get("content_hash") or "").startswith("sha256:")
+            and str(resource.get("prompt_hash") or "").startswith("sha256:")
         )
         return {
             "handled": True,
@@ -22240,6 +22983,7 @@ class AgentRuntime:
             "found": bool(snapshot_result.get("found")),
             "plan_id": target_plan_id,
             "scene_version": scene_version,
+            "profile": str(profile or "full_r3"),
             "gate_report": report.as_dict(),
         }
 
@@ -23678,6 +24422,30 @@ class AgentRuntime:
                 "plan_id": active_plan_id,
                 "scene_version": 0,
             }
+        plan_status_value = str(plan.get("status") or "")
+        report_terminal_candidate = not batch_id and plan_status_value in {
+            ScenePlanStatus.COMPLETED.value,
+            ScenePlanStatus.FAILED.value,
+            ScenePlanStatus.CANCELLED.value,
+        }
+        terminal_prerequisite_status = (
+            self._terminal_report_prerequisite_status(
+                str(room_id),
+                active_plan_id,
+                scene_version=int((scene_world_snapshot or {}).get("scene_version") or 0),
+            )
+            if report_terminal_candidate
+            else {
+                "ready": False,
+                "scene_version": int((scene_world_snapshot or {}).get("scene_version") or 0),
+                "required_events": [],
+                "missing_events": [],
+                "evidence": {},
+            }
+        )
+        report_terminal = report_terminal_candidate and bool(
+            terminal_prerequisite_status.get("ready")
+        )
         report = {
             "room_id": str(room_id),
             "plan_id": active_plan_id,
@@ -23716,6 +24484,7 @@ class AgentRuntime:
             "scene_entity_registry": scene_entity_registry,
             "scene_world_consistency_audit": scene_world_consistency_audit,
             "scene_world_snapshot": scene_world_snapshot,
+            "terminal_prerequisite_status": terminal_prerequisite_status,
             "completion_status": completion_status,
             "tool_graph_domain_summary": tool_graph_domain_summary,
             "sync_readiness_summary": sync_readiness_summary,
@@ -23971,17 +24740,23 @@ class AgentRuntime:
                 report_event_message += (
                     f" {scene_entity_engine_write_pending_f5_count} 个场景实体仍待引擎写入/F5确认。"
                 )
-        plan_status_value = str(plan.get("status") or "")
-        report_terminal = not batch_id and plan_status_value in {
-            ScenePlanStatus.COMPLETED.value,
-            ScenePlanStatus.FAILED.value,
-            ScenePlanStatus.CANCELLED.value,
-        }
-        if not report_terminal:
+        if report_terminal_candidate and not report_terminal:
+            missing_terminal_evidence = list(
+                terminal_prerequisite_status.get("missing_events") or []
+            )
+            report_event_title = "正在确认最终场景事实"
+            report_event_message = (
+                "最终报告已生成，仍在等待实体清单、一致性审计和场景快照完成同版本确认。"
+            )
+            report_event_level = "warning"
+        elif not report_terminal:
+            missing_terminal_evidence = []
             report_event_title = "场景仍在等待引擎就绪"
             report_event_message = "模型或环境组件仍在进入场景，当前仅提供阶段性状态。"
             report_event_level = "info"
-        elif completion_status["world_readiness"] != "game_ready" and report_event_level == "info":
+        else:
+            missing_terminal_evidence = []
+        if report_terminal and completion_status["world_readiness"] != "game_ready" and report_event_level == "info":
             report_event_level = "warning"
             report_event_title = "生成流程已完成（实体世界仍需检查）"
             report_event_message = (
@@ -24002,6 +24777,11 @@ class AgentRuntime:
                 "status": str(plan.get("status") or ""),
                 "scene_version": int((scene_world_snapshot or {}).get("scene_version") or 0),
                 "world_fingerprint": str((scene_world_snapshot or {}).get("world_fingerprint") or ""),
+                "terminal_report_candidate": report_terminal_candidate,
+                "terminal_prerequisites_ready": bool(
+                    terminal_prerequisite_status.get("ready")
+                ),
+                "missing_terminal_evidence": missing_terminal_evidence,
                 "pipeline_status": completion_status["pipeline_status"],
                 "engine_materialization_status": completion_status["engine_materialization_status"],
                 "world_readiness": completion_status["world_readiness"],
@@ -24091,6 +24871,13 @@ class AgentRuntime:
                 ),
                 "needs_review_entity_count": int(
                     scene_entity_registry.get("needs_review_entity_count") or 0
+                ),
+                "readiness_missing_field_counts": dict(
+                    sorted(
+                        dict(
+                            scene_entity_registry.get("readiness_missing_field_counts") or {}
+                        ).items()
+                    )
                 ),
                 "environment_entity_count": int(
                     scene_entity_registry.get("environment_count") or 0
@@ -31931,24 +32718,34 @@ class AgentRuntime:
         if graph_status == "completed":
             runtime_event = self.emit_runtime_event(
                 room_id=room,
+                plan_id=target_plan_id,
                 event_type="scene_snapshot_refreshed",
                 title="场景快照已刷新",
                 message=f"已读取当前场景状态，观察到 {observed_count} 个 actor。",
                 phase="scene_snapshot",
                 audience="host",
                 level="success",
-                payload={"status": "completed", "actor_count": observed_count},
+                payload={
+                    "status": "completed",
+                    "actor_count": observed_count,
+                    "scene_version": resolved_scene_version,
+                },
             )
         else:
             runtime_event = self.emit_runtime_event(
                 room_id=room,
+                plan_id=target_plan_id,
                 event_type="scene_snapshot_refresh_failed",
                 title="场景快照刷新失败",
                 message="当前场景状态读取失败，稍后可重试。",
                 phase="scene_snapshot",
                 audience="host",
                 level="warning",
-                payload={"status": graph_status or "failed", "actor_count": observed_count},
+                payload={
+                    "status": graph_status or "failed",
+                    "actor_count": observed_count,
+                    "scene_version": resolved_scene_version,
+                },
             )
         return {
             "graph": {
@@ -33634,6 +34431,10 @@ class AgentRuntime:
         patch.source_user = str(state.get("source_user") or "")
         patch.target_agent = str(state.get("target_agent") or "")
         patch.idempotency_key = str(state.get("idempotency_key") or "")
+        patch.payload_schema_version = str(state.get("payload_schema_version") or "")
+        patch.structured_payload = deepcopy(dict(state.get("structured_payload") or {}))
+        patch.payload_hash = str(state.get("payload_hash") or "")
+        patch.proposal_id = str(state.get("proposal_id") or "")
         patch.risk_level = RiskLevel(str(state.get("risk_level") or RiskLevel.LOW.value))
         patch.status = PlanPatchStatus(str(state.get("status") or PlanPatchStatus.PENDING.value))
         patch.deferred_reason = str(state.get("deferred_reason") or "")
@@ -33732,6 +34533,10 @@ class AgentRuntime:
             source_user=str(row.get("source_user") or ""),
             target_agent=str(row.get("target_agent") or ""),
             idempotency_key=str(row.get("idempotency_key") or ""),
+            payload_schema_version=str(row.get("payload_schema_version") or ""),
+            structured_payload=deepcopy(dict(row.get("structured_payload") or {})),
+            payload_hash=str(row.get("payload_hash") or ""),
+            proposal_id=str(row.get("proposal_id") or ""),
             risk_level=RiskLevel(str(row.get("risk_level") or RiskLevel.LOW.value)),
             status=PlanPatchStatus(str(row.get("status") or PlanPatchStatus.PENDING.value)),
             deferred_reason=str(row.get("deferred_reason") or ""),
@@ -34042,6 +34847,149 @@ class AgentRuntime:
         )
         if not applied:
             raise RuntimeError(f"failed to persist planning context: {apply_reason}")
+
+    def _persist_planning_context_changes_direct(
+        self,
+        *,
+        room_id: str,
+        plan_id: str,
+        context_event: Mapping[str, Any],
+        changes: Mapping[str, Any],
+        reason: str,
+    ) -> None:
+        """Persist zero-execution context facts without creating a ToolCallGraph."""
+
+        room = str(room_id or "default")
+        applied, apply_reason = self.state.apply_patch(
+            StatePatch(
+                room_id=room,
+                changes=dict(changes or {}),
+                expected_version=self.state.version,
+            )
+        )
+        event = "planning_context_state_persisted" if applied else "planning_context_state_persist_failed"
+        self.operation_log.append(
+            event,
+            room_id=room,
+            plan_id=str(plan_id or ""),
+            message=apply_reason,
+            payload={
+                "reason": str(reason or ""),
+                "applied": applied,
+                "persistence_mode": "direct_context_record",
+                "context_type": str((context_event or {}).get("context_type") or ""),
+                "speaker_type": str((context_event or {}).get("speaker_type") or ""),
+                "updated_plan_brief": bool(dict(changes or {}).get("scene_plans")),
+                "state_version": self.state.version,
+            },
+        )
+
+    def _apply_gameplay_manifest_tool(self, call: ToolCall) -> ToolResult:
+        room = str(call.args.get("room_id") or "").strip()
+        plan_id = str(call.args.get("plan_id") or "").strip()
+        proposal_id = str(call.args.get("proposal_id") or "").strip()
+        patch_id = str(call.args.get("patch_id") or "").strip()
+        payload_schema_version = str(call.args.get("manifest_schema_version") or "").strip()
+        structured_payload = call.args.get("manifest")
+        payload_hash = str(call.args.get("manifest_hash") or "").strip()
+        idempotency_key = str(call.args.get("idempotency_key") or "").strip()
+        try:
+            PlanPatchValidator._validate_structured_payload(
+                patch_type="gameplay_manifest_apply",
+                payload_schema_version=payload_schema_version,
+                structured_payload=structured_payload,
+                payload_hash=payload_hash,
+                proposal_id=proposal_id,
+            )
+        except (TypeError, ValueError):
+            return ToolResult(
+                False,
+                "gameplay_manifest_payload_invalid",
+                error_code="gameplay_manifest_payload_invalid",
+                user_visible_message="Gameplay manifest validation failed; no Engine write was attempted.",
+            )
+        if not room or not plan_id or not patch_id or not idempotency_key:
+            return ToolResult(
+                False,
+                "gameplay_manifest_request_incomplete",
+                error_code="gameplay_manifest_request_incomplete",
+                user_visible_message="Gameplay manifest request is incomplete; no Engine write was attempted.",
+            )
+        if self._gameplay_manifest_provider is None:
+            return ToolResult(
+                False,
+                "engine_gameplay_manifest_unavailable",
+                error_code="engine_gameplay_manifest_unavailable",
+                user_visible_message="Engine gameplay capability is unavailable; the manifest remains unapplied.",
+            )
+        try:
+            provider_result = self._gameplay_manifest_provider(
+                {
+                    "room_id": room,
+                    "plan_id": plan_id,
+                    "proposal_id": proposal_id,
+                    "patch_id": patch_id,
+                    "manifest_schema_version": payload_schema_version,
+                    "manifest": deepcopy(dict(structured_payload or {})),
+                    "manifest_hash": payload_hash,
+                    "idempotency_key": idempotency_key,
+                }
+            )
+        except Exception:  # noqa: BLE001
+            provider_result = {
+                "success": False,
+                "error_code": "engine_gameplay_manifest_apply_failed",
+                "message": "gameplay manifest provider failed",
+            }
+        if not isinstance(provider_result, Mapping) or provider_result.get("success") is not True:
+            error_code = str(
+                provider_result.get("error_code")
+                if isinstance(provider_result, Mapping)
+                else "engine_gameplay_manifest_result_invalid"
+            ).strip() or "engine_gameplay_manifest_apply_failed"
+            try:
+                ToolResultValidator._validate_safe_error_code(error_code)
+            except ValueError:
+                error_code = "engine_gameplay_manifest_apply_failed"
+            return ToolResult(
+                False,
+                error_code,
+                error_code=error_code,
+                retryable=bool(provider_result.get("retryable")) if isinstance(provider_result, Mapping) else False,
+                user_visible_message="Engine did not confirm the gameplay manifest; no success was recorded.",
+            )
+        provider_payload = (
+            dict(provider_result.get("payload") or {})
+            if isinstance(provider_result.get("payload"), Mapping)
+            else {}
+        )
+        receipt_id = str(
+            provider_payload.get("receipt_id")
+            or provider_result.get("receipt_id")
+            or f"receipt-{payload_hash[7:23]}"
+        ).strip()
+        gameplay_fact = {
+            "status": "applied",
+            "proposal_id": proposal_id,
+            "plan_id": plan_id,
+            "payload_schema_version": payload_schema_version,
+            "payload_hash": payload_hash,
+            "idempotency_key": idempotency_key,
+            "receipt_id": receipt_id,
+        }
+        return ToolResult(
+            True,
+            "gameplay manifest applied",
+            state_patch=StatePatch(
+                room_id=room,
+                changes={"custom_gameplay_facts": {idempotency_key: gameplay_fact}},
+                expected_version=self.state.version,
+                source_tool_call_id=call.tool_call_id,
+            ),
+            payload={"status": "applied", "applied_count": 1, "receipt_id": receipt_id},
+        )
+        if not applied:
+            raise RuntimeError(f"failed to persist direct planning context: {apply_reason}")
 
     def _execute_planning_context_persist_graph(
         self,
@@ -34372,6 +35320,7 @@ class AgentRuntime:
             vlm_review_provider=self._vlm_review_provider,
             require_engine_environment_import=self._require_engine_environment_import,
             require_engine_actor_import=self._require_engine_actor_import,
+            strict_image_to_model_pipeline=self._strict_image_to_model_pipeline,
         )
         register_agent_runtime_scene_read_tools(self.registry, self._scene_snapshot_provider)
         if not self.registry.has("runtime.layout.apply_delta"):
@@ -34633,6 +35582,27 @@ class AgentRuntime:
                 ),
                 requires_user_visible_failure=True,
                 description="Record a user intervention PlanPatch into RuntimeState.",
+            )
+        if self._gameplay_manifest_provider is not None and not self.registry.has("gameplay.apply_manifest"):
+            self.registry.register(
+                "gameplay.apply_manifest",
+                self._apply_gameplay_manifest_tool,
+                category=ToolCategory.PLAN,
+                default_risk_level=RiskLevel.LOW,
+                requires_write=True,
+                required_args=(
+                    "room_id",
+                    "plan_id",
+                    "proposal_id",
+                    "patch_id",
+                    "manifest_schema_version",
+                    "manifest",
+                    "manifest_hash",
+                    "idempotency_key",
+                ),
+                produces_state=("custom_gameplay_facts",),
+                requires_user_visible_failure=True,
+                description="Apply a validated versioned GameplayManifest through the Engine write boundary.",
             )
         if not self.registry.has("runtime.batch.plan_record"):
             self.registry.register(
@@ -35484,6 +36454,7 @@ class AgentRuntime:
                 consumes=self._tool_consumes(
                     "runtime.actor.plan_import_batch",
                     "model_items",
+                    "image_resources",
                     "model_resources",
                     "placements",
                     "environment_components",
@@ -35508,6 +36479,7 @@ class AgentRuntime:
                 consumes=self._tool_consumes(
                     "runtime.actor.import_batch",
                     "model_items",
+                    "image_resources",
                     "model_resources",
                     "placements",
                     "environment_components",

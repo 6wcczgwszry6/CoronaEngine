@@ -13,6 +13,11 @@ from editor.plugins.AITool.services.agent_runtime.scene_world_consistency import
     audit_scene_world_consistency,
     scene_world_fingerprint,
 )
+from editor.plugins.AITool.services.agent_collaboration import (
+    GameplayEntitySlot,
+    derive_demo_readiness_requirements,
+)
+from editor.plugins.AITool.services.integration_contracts import DemoReadinessRequirement
 
 
 def _entity(index: int, *, game_ready: bool, environment: bool = False) -> dict:
@@ -196,6 +201,44 @@ def _gate_facts(*, game_ready_count: int) -> dict:
         "benchmark_profile": "bedroom_14",
         "expected_entity_count": 14,
         "evaluated_at": 7.0,
+    }
+
+
+def _apply_demo_roles(facts: dict, roles: list[tuple[str, tuple[str, ...]]]) -> None:
+    entities = facts["scene_entity_registry"]["entities"]
+    for offset, (semantic_role, capabilities) in enumerate(roles, start=2):
+        entities[offset]["semantic_role"] = semantic_role
+        entities[offset]["interaction_capability"] = list(capabilities)
+    snapshot = facts["snapshot_result"]["snapshot"]
+    fingerprint = scene_world_fingerprint(
+        [*snapshot["environment_entities"], *snapshot["actor_entities"]],
+        plan_id=facts["plan_id"],
+        scene_version=facts["scene_version"],
+    )
+    snapshot["world_fingerprint"] = fingerprint
+    facts["snapshot_result"]["world_fingerprint"] = fingerprint
+    facts["consistency_audit"] = audit_scene_world_consistency(
+        world_snapshot=snapshot,
+        engine_snapshot={
+            "snapshot_id": "engine-demo-snapshot",
+            "plan_id": facts["plan_id"],
+            "scene_version": facts["scene_version"],
+            "actors": [dict(entity) for entity in entities],
+        },
+    )
+    facts["consistency_audit"]["engine_snapshot_available"] = True
+    facts["multiplayer_evidence"] = {
+        "applicable": False,
+        "peer_count": 0,
+        "acknowledged_peer_count": 0,
+        "unacknowledged_peer_count": 0,
+        "comparison_mode": "none",
+        "entity_count": len(entities),
+        "verified_entity_count": len(entities),
+        "partial_entity_count": 0,
+        "identity_drift_count": 0,
+        "version_drift_count": 0,
+        "missing_fields_explicit": True,
     }
 
 
@@ -638,6 +681,115 @@ class R3ReadinessGateTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first["gate_report_id"], second["gate_report_id"])
 
+    def test_demo_requirements_are_derived_from_arbitrary_gameplay_slots(self) -> None:
+        requirements = derive_demo_readiness_requirements(
+            (
+                GameplayEntitySlot("hero", "hero_anchor", ("spawnable",)),
+                GameplayEntitySlot("token", "interactable_token", ("collectible", "inspectable")),
+            )
+        )
+
+        self.assertEqual(
+            [item.requirement_id for item in requirements],
+            ["demo.slot.hero", "demo.slot.token"],
+        )
+        self.assertEqual(requirements[0].semantic_role, "hero_anchor")
+        self.assertEqual(requirements[1].required_capabilities, ("collectible", "inspectable"))
+
+    def test_single_player_profile_matches_dynamic_game_ready_entities(self) -> None:
+        facts = _gate_facts(game_ready_count=14)
+        _apply_demo_roles(
+            facts,
+            [
+                ("hero_anchor", ("spawnable",)),
+                ("interactable_token", ("collectible", "inspectable")),
+            ],
+        )
+        requirements = derive_demo_readiness_requirements(
+            (
+                GameplayEntitySlot("hero", "hero_anchor", ("spawnable",)),
+                GameplayEntitySlot("token", "interactable_token", ("collectible", "inspectable")),
+            )
+        )
+
+        report = evaluate_r3_gate(
+            **facts,
+            profile="single_player_demo",
+            demo_requirements=requirements,
+            project_mode="single_player",
+        )
+
+        self.assertEqual(report.overall, "green")
+        self.assertEqual(
+            report.capability_unlocks,
+            (
+                "single_player_entity_binding",
+                "single_player_local_action",
+                "single_player_preview",
+            ),
+        )
+        self.assertEqual(report.metrics["gate_profile"], "single_player_demo")
+        self.assertTrue(report.metrics["requirements_fingerprint"].startswith("sha256:"))
+        matches = report.metrics["requirement_matches"]
+        self.assertEqual(matches["demo.slot.hero"], ["entity-02"])
+        self.assertEqual(matches["demo.slot.token"], ["entity-03"])
+        self.assertEqual(report.dimensions["multiplayer_consistency"].status, "green")
+
+    def test_single_player_profile_fails_closed_on_missing_capability(self) -> None:
+        facts = _gate_facts(game_ready_count=14)
+        _apply_demo_roles(facts, [("interactable_token", ("inspectable",))])
+        requirement = DemoReadinessRequirement(
+            requirement_id="demo.slot.token",
+            semantic_role="interactable_token",
+            required_capabilities=("collectible",),
+            min_count=1,
+        )
+
+        report = evaluate_r3_gate(
+            **facts,
+            profile="single_player_demo",
+            demo_requirements=(requirement,),
+            project_mode="single_player",
+        )
+
+        self.assertEqual(report.overall, "red")
+        self.assertIn(
+            "entity_readiness:demo_requirement:demo.slot.token",
+            report.blockers,
+        )
+        self.assertNotIn("single_player_local_action", report.capability_unlocks)
+
+    def test_single_player_requirements_cannot_reuse_one_entity(self) -> None:
+        facts = _gate_facts(game_ready_count=14)
+        _apply_demo_roles(facts, [("shared_anchor", ("activatable",))])
+        requirements = (
+            DemoReadinessRequirement("demo.slot.first", "shared_anchor", ("activatable",)),
+            DemoReadinessRequirement("demo.slot.second", "shared_anchor", ("activatable",)),
+        )
+
+        report = evaluate_r3_gate(
+            **facts,
+            profile="single_player_demo",
+            demo_requirements=requirements,
+            project_mode="single_player",
+        )
+
+        self.assertEqual(report.overall, "red")
+        matches = report.metrics["requirement_matches"]
+        self.assertEqual(sum(len(value) for value in matches.values()), 1)
+
+    def test_explicit_full_r3_profile_preserves_full_gate_result(self) -> None:
+        facts = _gate_facts(game_ready_count=8)
+        implicit = evaluate_r3_gate(**facts)
+        explicit = evaluate_r3_gate(**deepcopy(facts), profile="full_r3")
+
+        self.assertEqual(implicit.overall, explicit.overall)
+        self.assertEqual(implicit.capability_unlocks, explicit.capability_unlocks)
+        self.assertEqual(
+            {name: dimension.status for name, dimension in implicit.dimensions.items()},
+            {name: dimension.status for name, dimension in explicit.dimensions.items()},
+        )
+
     def test_public_runtime_action_is_read_only_and_does_not_create_room(self) -> None:
         runtime = AgentRuntime()
         before_rooms = deepcopy(runtime.state.rooms)
@@ -668,6 +820,38 @@ class R3ReadinessGateTests(unittest.TestCase):
         policy = runtime.message_action_policy("runtime.r3_readiness.evaluate")
         self.assertTrue(policy["read_only"])
         self.assertFalse(policy["may_create_plan"])
+
+    def test_single_player_runtime_action_is_read_only_without_snapshot(self) -> None:
+        runtime = AgentRuntime()
+        before_rooms = deepcopy(runtime.state.rooms)
+        before_version = runtime.state.version
+        before_log = [entry.as_dict() for entry in runtime.operation_log.entries()]
+
+        result = runtime.handle_message(
+            room_id="room-missing-single-player",
+            text="",
+            action="runtime.r3_readiness.evaluate",
+            sync_event={
+                "profile": "single_player_demo",
+                "project_mode": "single_player",
+                "demo_requirements": [
+                    DemoReadinessRequirement(
+                        "demo.slot.hero",
+                        "hero_anchor",
+                        ("spawnable",),
+                    ).as_dict()
+                ],
+            },
+        )
+
+        self.assertEqual(result["gate_report"]["overall"], "red")
+        self.assertEqual(result["gate_report"]["metrics"]["gate_profile"], "single_player_demo")
+        self.assertEqual(runtime.state.rooms, before_rooms)
+        self.assertEqual(runtime.state.version, before_version)
+        self.assertEqual(
+            [entry.as_dict() for entry in runtime.operation_log.entries()],
+            before_log,
+        )
 
     def test_public_runtime_action_does_not_mutate_existing_room(self) -> None:
         runtime = AgentRuntime()

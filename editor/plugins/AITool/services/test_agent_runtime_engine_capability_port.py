@@ -82,10 +82,10 @@ class EngineCapabilityPortTests(unittest.TestCase):
         self.assertTrue(result.next_action)
         self.assertTrue(result.missing_requirements)
 
-    def test_capability_fill_does_not_change_frozen_skeleton_contract_hash(self) -> None:
+    def test_capability_fill_preserves_the_b4_runner_skeleton_contract_hash(self) -> None:
         self.assertEqual(
             build_skeleton_manifest().contract_hash(),
-            "sha256:fd65eaf4f7067f011ed812d8eb57a79d0b78504ea9e394bd6927c90c73b48148",
+            "sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd",
         )
 
 

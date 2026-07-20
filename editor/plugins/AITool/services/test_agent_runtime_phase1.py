@@ -689,6 +689,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             ("AgentRuntime", "_persist_tool_graph_state"),
             ("AgentRuntime", "_mark_tool_graph_queue_item"),
             ("AgentRuntime", "emit_runtime_event"),
+            ("AgentRuntime", "_persist_planning_context_changes_direct"),
         }
         direct_writes: list[tuple[str, str, int]] = []
         for node in ast.walk(module):
@@ -5502,6 +5503,93 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         self.assertEqual(len(state["planning_context_events"]), 1)
         self.assertEqual(state["planning_context_events"][-1]["context_type"], "room_agent_reply")
         self.assertIn("room_agent_reply_recorded", runtime.operation_log.events())
+
+    def test_exact_context_record_actions_have_zero_scene_side_effects(self) -> None:
+        runtime = AgentRuntime()
+        plan = runtime.sync_external_plan_context(
+            room_id="room-exact-context-actions",
+            external_plan_id="seed-exact-context-actions",
+            text="Create a bedroom with a bed, desk, and wardrobe",
+            owner_agent="planning-agent",
+        )
+        before = runtime.query_state("room-exact-context-actions")["room"]
+        before_graphs = len(before["tool_graphs"])
+        before_patches = len(before.get("plan_patches") or {})
+        before_version = before["scene_plans"][plan.plan_id]["version"]
+        before_context_events = len(before["planning_context_events"])
+
+        user_result = runtime.handle_message(
+            room_id="room-exact-context-actions",
+            external_plan_id="seed-exact-context-actions",
+            text="Keep a clear path through the center of the room.",
+            sender_id="host-1",
+            sender_name="host",
+            action="runtime.plan_context.record",
+            reply_to="msg-user-context",
+        )
+        agent_result = runtime.handle_message(
+            room_id="room-exact-context-actions",
+            external_plan_id="seed-exact-context-actions",
+            text="Place the desk near the window and keep the door accessible.",
+            sender_id="art-agent",
+            sender_name="art-agent",
+            action="runtime.agent_reply_context.record",
+            reply_to="msg-agent-context",
+        )
+
+        after = runtime.query_state("room-exact-context-actions")["room"]
+        self.assertTrue(user_result["context"]["recorded"])
+        self.assertTrue(agent_result["context"]["recorded"])
+        self.assertFalse(agent_result["context"]["updated_plan_brief"])
+        self.assertEqual(len(after["tool_graphs"]), before_graphs)
+        self.assertEqual(len(after.get("plan_patches") or {}), before_patches)
+        self.assertEqual(after["scene_plans"][plan.plan_id]["version"], before_version)
+        self.assertEqual(len(after["planning_context_events"]), before_context_events + 2)
+
+    def test_scene_plan_extraction_same_version_and_hash_is_idempotent(self) -> None:
+        runtime = AgentRuntime()
+        brief = "Create a bedroom with a bed, desk, and wardrobe"
+        plan = runtime.propose_scene_plan(room_id="room-extraction-idempotent", text=brief)
+        before = runtime.query_state("room-extraction-idempotent")["room"]
+        before_graphs = len(before["tool_graphs"])
+
+        replay = runtime._extract_scene_plan_fields_via_tool_graph(
+            room_id="room-extraction-idempotent",
+            plan_id=plan.plan_id,
+            text=brief,
+            plan_version=plan.version,
+        )
+
+        after = runtime.query_state("room-extraction-idempotent")["room"]
+        self.assertTrue(replay)
+        self.assertEqual(len(after["tool_graphs"]), before_graphs)
+        deduped = runtime.operation_log.query(
+            event="scene_plan_extraction_deduped",
+            room_id="room-extraction-idempotent",
+            plan_id=plan.plan_id,
+        )
+        self.assertEqual(len(deduped), 1)
+        self.assertEqual(deduped[0].payload["plan_version"], plan.version)
+        self.assertEqual(deduped[0].payload["dedupe_result"], "same_version_replay")
+
+    def test_exact_context_record_failure_is_fail_closed_without_tool_graph(self) -> None:
+        runtime = AgentRuntime()
+        runtime.state.apply_patch = lambda patch: (False, "simulated context persistence failure")  # type: ignore[method-assign]
+
+        result = runtime.handle_message(
+            room_id="room-exact-context-failure",
+            text="Record this discussion only.",
+            sender_id="host-1",
+            sender_name="host",
+            action="runtime.plan_context.record",
+        )
+
+        state = runtime.query_state("room-exact-context-failure")["room"]
+        self.assertTrue(result["handled"])
+        self.assertFalse(result["context"]["recorded"])
+        self.assertEqual(state["scene_plans"], {})
+        self.assertEqual(state["tool_graphs"], {})
+        self.assertIn("planning_context_state_persist_failed", runtime.operation_log.events())
 
     def test_handle_message_room_chat_alias_records_room_level_context_only(self) -> None:
         runtime = AgentRuntime()
@@ -15456,6 +15544,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 "status": "ok",
                 "success": True,
                 "image_url": f"https://asset.example/{object_name}.png",
+                "content_hash": "sha256:" + "a" * 64,
             }
 
         runtime = AgentRuntime(image_resource_provider=make_image_resource_provider(image_tool=image_tool))
@@ -16436,6 +16525,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             image_tool=lambda payload: {
                 "success": "true",
                 "image_url": "https://asset.example/ref.png",
+                "content_hash": "sha256:" + "b" * 64,
             }
         )
         resources = true_success_provider({"batch_id": "batch-image-true", "model_items": ["鐏妸"]})
@@ -19743,6 +19833,7 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
                 self.calls.append(dict(payload))
                 return {
                     "image_url": f"https://example.test/{payload['object_name']}.png",
+                    "content_hash": "sha256:" + "c" * 64,
                     "source": "provider=secret-image-tool",
                     "metadata": {"object_id": payload["object_id"]},
                 }
@@ -19840,7 +19931,10 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         snapshot_events = [event for event in events if event["event_type"] == "scene_snapshot_refreshed"]
         self.assertEqual(len(snapshot_events), 1)
         self.assertEqual(snapshot_events[0]["level"], "success")
-        self.assertEqual(snapshot_events[0]["payload"], {"actor_count": 1, "status": "completed"})
+        self.assertEqual(
+            snapshot_events[0]["payload"],
+            {"actor_count": 1, "scene_version": 1, "status": "completed"},
+        )
         self.assertEqual(
             runtime.status_summary("room-snapshot-provider")["provider_summary"]["scene_snapshot"]["mode"],
             "adapter",
@@ -26239,11 +26333,12 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
             runtime.status_summary("room-import-provider-fail", plan_id=plan.plan_id)["import_summary"],
             expected_import_summary,
         )
-        report_ready_events = [event for event in events if event["event_type"] == "report_ready"]
-        self.assertTrue(report_ready_events)
-        self.assertEqual(report_ready_events[-1]["payload"]["requested_count"], 2)
-        self.assertEqual(report_ready_events[-1]["payload"]["imported_count"], 0)
-        self.assertEqual(report_ready_events[-1]["payload"]["failed_count"], 2)
+        report_pending_events = [event for event in events if event["event_type"] == "report_pending"]
+        self.assertTrue(report_pending_events)
+        terminal_event = report_pending_events[-1]
+        self.assertEqual(terminal_event["payload"]["requested_count"], 2)
+        self.assertEqual(terminal_event["payload"]["imported_count"], 0)
+        self.assertEqual(terminal_event["payload"]["failed_count"], 2)
 
     def test_runtime_injects_model_resources_into_engine_actor_import_provider(self) -> None:
         class FakeGate:
@@ -31602,6 +31697,33 @@ class AgentRuntimePhase1Tests(unittest.TestCase):
         }
         self.assertIn("\u5929\u7a7a", substrate_names)
         self.assertIn("\u8349\u5730", substrate_names)
+
+    def test_phase3_scene_extraction_rejects_command_fragments_as_entities(self) -> None:
+        runtime = AgentRuntime()
+        scene_text = "\u7269\u54c1\u6e05\u5355\uff1a\u8bf7\u4f60\u7ed9\u51fa\u4e00\u4e2a\u65b9\u6848\u3001\u5e8a\u3001\u4e66\u684c"
+        graph = ToolCallGraph(graph_id="graph-entity-name-safety", plan_id="plan-entity-name-safety")
+        graph.add(ToolCall(
+            tool_call_id="tool-objects",
+            tool_name="scene.extract_objects",
+            args={
+                "room_id": "room-entity-name-safety",
+                "plan_id": "plan-entity-name-safety",
+                "text": scene_text,
+            },
+        ))
+
+        executed = ToolCallGraphExecutor(
+            registry=runtime.registry,
+            guard=runtime.guard,
+            state=runtime.state,
+            operation_log=runtime.operation_log,
+        ).execute(graph, room_id="room-entity-name-safety")
+
+        self.assertEqual(executed.status, "completed")
+        extraction = runtime.state.snapshot("room-entity-name-safety")["room"]["plan_extractions"][
+            "plan-entity-name-safety"
+        ]
+        self.assertNotIn("\u8bf7\u4f60\u7ed9\u51fa\u4e00\u4e2a\u65b9\u6848", extraction["candidate_items"])
 
     def test_phase3_scene_constraints_tool_extracts_negative_and_style_constraints(self) -> None:
         runtime = AgentRuntime()

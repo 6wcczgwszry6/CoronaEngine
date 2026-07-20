@@ -11,7 +11,9 @@ from editor.plugins.AITool.services.agent_collaboration import (
     ArtifactEnvelope,
     ArtifactRegistry,
     GameDesignBrief,
+    GameplayEntitySlot,
     GameplayLogicPlan,
+    GameplayPrimitiveSpec,
     ProjectStatePatch,
     ProjectStateStore,
     TaskGraphAlreadyExistsError,
@@ -74,6 +76,13 @@ def _artifact(
     elif artifact_type == "GameplayLogicPlan":
         payload = GameplayLogicPlan(
             states=("ready", label),
+            entity_slots=(
+                GameplayEntitySlot("item", "collectible_item", ("collectible",)),
+                GameplayEntitySlot("player", "player_spawn", ("player",)),
+            ),
+            primitives=(
+                GameplayPrimitiveSpec("collect-item", "on_collect", "item", "player", {"state_key": "ready", "set_value": True}),
+            ),
             triggers=("enter",),
             rules=("authoritative state",),
             win_conditions=("goal reached",),

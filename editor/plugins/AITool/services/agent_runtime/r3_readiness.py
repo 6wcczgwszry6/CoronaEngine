@@ -12,6 +12,7 @@ import hashlib
 import json
 from typing import Any, Mapping, Sequence
 
+from ..integration_contracts import DemoReadinessRequirement
 from .scene_world_consistency import scene_world_fingerprint
 
 
@@ -689,6 +690,158 @@ def _entity_dimension(
     )
 
 
+def _normalized_demo_requirements(
+    values: Sequence[DemoReadinessRequirement | Mapping[str, Any]],
+) -> tuple[tuple[DemoReadinessRequirement, ...], tuple[str, ...]]:
+    requirements: list[DemoReadinessRequirement] = []
+    invalid: list[str] = []
+    for index, value in enumerate(list(values or [])):
+        try:
+            requirement = (
+                value
+                if isinstance(value, DemoReadinessRequirement)
+                else DemoReadinessRequirement(
+                    requirement_id=str(dict(value).get("requirement_id") or ""),
+                    semantic_role=str(dict(value).get("semantic_role") or ""),
+                    required_capabilities=tuple(
+                        dict(value).get("required_capabilities") or ()
+                    ),
+                    min_count=_safe_int(dict(value).get("min_count"), 1),
+                )
+            )
+        except (TypeError, ValueError):
+            invalid.append(f"demo_requirement[{index}]:invalid")
+            continue
+        requirements.append(requirement)
+    requirements.sort(key=lambda item: item.requirement_id)
+    if len({item.requirement_id for item in requirements}) != len(requirements):
+        invalid.append("demo_requirement_id_duplicate")
+    return tuple(requirements), tuple(_unique_text(invalid))
+
+
+def _demo_requirements_fingerprint(
+    requirements: Sequence[DemoReadinessRequirement],
+) -> str:
+    payload = [item.as_dict() for item in requirements]
+    return "sha256:" + hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _single_player_entity_dimension(
+    registry: Mapping[str, Any],
+    requirements: Sequence[DemoReadinessRequirement | Mapping[str, Any]],
+) -> R3GateDimension:
+    base = _entity_dimension(
+        registry,
+        benchmark_profile="generic",
+        expected_entity_count=_safe_int(_stable_mapping(registry).get("entity_count")),
+    )
+    normalized, invalid = _normalized_demo_requirements(requirements)
+    fingerprint = _demo_requirements_fingerprint(normalized)
+    entities = _stable_rows(_stable_mapping(registry).get("entities"))
+    missing = list(base.missing)
+    contradictions = [*base.contradictions, *invalid]
+    if not normalized:
+        missing.append("demo_readiness_requirements")
+    used_entity_ids: set[str] = set()
+    requirement_matches: dict[str, list[str]] = {}
+    requirement_diagnostics: list[dict[str, Any]] = []
+    for requirement in normalized:
+        role_candidates: list[dict[str, Any]] = []
+        capability_candidates: list[dict[str, Any]] = []
+        required_capabilities = set(requirement.required_capabilities)
+        for entity in entities:
+            if str(entity.get("semantic_role") or "").strip() != requirement.semantic_role:
+                continue
+            role_candidates.append(entity)
+            entity_capabilities = {
+                str(item or "").strip()
+                for item in list(entity.get("interaction_capability") or [])
+                if str(item or "").strip()
+            }
+            if not required_capabilities.issubset(entity_capabilities):
+                continue
+            entity_id = str(entity.get("entity_id") or "").strip()
+            identity_complete = bool(
+                entity_id
+                and str(entity.get("asset_id") or entity.get("model_ref") or "").strip()
+                and _safe_int(entity.get("version"), 0) > 0
+            )
+            verified_game_ready = bool(entity.get("game_ready")) and not _entity_hard_readiness_missing_fields(entity)
+            if identity_complete and verified_game_ready:
+                capability_candidates.append(entity)
+        available = sorted(
+            (
+                str(entity.get("entity_id") or "").strip()
+                for entity in capability_candidates
+                if str(entity.get("entity_id") or "").strip() not in used_entity_ids
+            )
+        )
+        matched = available[: requirement.min_count]
+        used_entity_ids.update(matched)
+        requirement_matches[requirement.requirement_id] = matched
+        if len(matched) < requirement.min_count:
+            missing.append(f"demo_requirement:{requirement.requirement_id}")
+        missing_capabilities = sorted(
+            capability
+            for capability in required_capabilities
+            if not any(
+                capability
+                in {
+                    str(item or "").strip()
+                    for item in list(entity.get("interaction_capability") or [])
+                    if str(item or "").strip()
+                }
+                for entity in role_candidates
+            )
+        )
+        requirement_diagnostics.append(
+            {
+                "requirement_id": requirement.requirement_id,
+                "semantic_role": requirement.semantic_role,
+                "required_capabilities": list(requirement.required_capabilities),
+                "min_count": requirement.min_count,
+                "role_candidate_count": len(role_candidates),
+                "game_ready_capability_candidate_count": len(capability_candidates),
+                "matched_entity_ids": matched,
+                "missing_capabilities": missing_capabilities,
+            }
+        )
+    matched_requirement_count = sum(
+        1
+        for requirement in normalized
+        if len(requirement_matches.get(requirement.requirement_id, [])) >= requirement.min_count
+    )
+    status = "green" if normalized and not missing and not contradictions else "red"
+    metrics = dict(base.metrics)
+    metrics.update(
+        {
+            "gate_profile": "single_player_demo",
+            "requirements_fingerprint": fingerprint,
+            "requirement_count": len(normalized),
+            "matched_requirement_count": matched_requirement_count,
+            "matched_entity_count": len(used_entity_ids),
+            "requirement_matches": requirement_matches,
+            "requirement_diagnostics": requirement_diagnostics,
+        }
+    )
+    return _dimension(
+        "entity_readiness",
+        status,
+        (
+            "Every dynamic demo requirement has enough distinct Game-ready entities."
+            if status == "green"
+            else "One or more dynamic demo requirements cannot be bound safely."
+        ),
+        metrics=metrics,
+        missing=missing,
+        contradictions=contradictions,
+        evidence_refs=[
+            "scene_entity_registry",
+            f"DemoReadinessRequirements:{fingerprint}",
+        ],
+    )
+
+
 def _finalizer_dimension(
     operation_entries: Sequence[Mapping[str, Any]],
     runtime_events: Sequence[Mapping[str, Any]],
@@ -1017,6 +1170,43 @@ def _multiplayer_dimension(multiplayer_evidence: Mapping[str, Any]) -> R3GateDim
     )
 
 
+def _single_player_multiplayer_dimension(
+    multiplayer_evidence: Mapping[str, Any],
+    *,
+    project_mode: str,
+) -> R3GateDimension:
+    evidence = _stable_mapping(multiplayer_evidence)
+    peer_count = _safe_int(evidence.get("peer_count"))
+    identity_drift_count = _safe_int(evidence.get("identity_drift_count"))
+    version_drift_count = _safe_int(evidence.get("version_drift_count"))
+    contradictions: list[str] = []
+    if str(project_mode or "").strip().lower() != "single_player":
+        contradictions.append("project_mode_not_single_player")
+    if peer_count != 0:
+        contradictions.append("single_player_peer_count_nonzero")
+    if identity_drift_count or version_drift_count:
+        contradictions.append("single_player_identity_or_version_drift")
+    status = "green" if not contradictions else "red"
+    return _dimension(
+        "multiplayer_consistency",
+        status,
+        (
+            "Single-player mode has no peer synchronization dependency."
+            if status == "green"
+            else "Single-player gate received multiplayer or identity-drift evidence."
+        ),
+        metrics={
+            "project_mode": str(project_mode or ""),
+            "peer_count": peer_count,
+            "identity_drift_count": identity_drift_count,
+            "version_drift_count": version_drift_count,
+            "comparison_mode": "single_player_local",
+        },
+        contradictions=contradictions,
+        evidence_refs=["RuntimeState.project_mode", "RuntimeState.sync_state"],
+    )
+
+
 def _write_safety_dimension(
     registry: Mapping[str, Any],
     engine_write_summary: Mapping[str, Any],
@@ -1098,9 +1288,15 @@ def evaluate_r3_gate(
     benchmark_profile: str = "generic",
     expected_entity_count: int = 0,
     evaluated_at: float = 0.0,
+    profile: str = "full_r3",
+    demo_requirements: Sequence[DemoReadinessRequirement | Mapping[str, Any]] = (),
+    project_mode: str = "",
 ) -> R3GateReport:
     """Build one deterministic R3GateReport from immutable fact snapshots."""
 
+    gate_profile = str(profile or "full_r3").strip().lower()
+    if gate_profile not in {"full_r3", "single_player_demo"}:
+        raise ValueError(f"unsupported R3 gate profile: {gate_profile}")
     dimensions = {
         "snapshot_integrity": _snapshot_dimension(
             snapshot_result,
@@ -1110,14 +1306,25 @@ def evaluate_r3_gate(
         "environment_readiness": _environment_dimension(
             snapshot_result, required_environment_components
         ),
-        "entity_readiness": _entity_dimension(
-            scene_entity_registry,
-            benchmark_profile=benchmark_profile,
-            expected_entity_count=max(0, int(expected_entity_count or 0)),
+        "entity_readiness": (
+            _single_player_entity_dimension(scene_entity_registry, demo_requirements)
+            if gate_profile == "single_player_demo"
+            else _entity_dimension(
+                scene_entity_registry,
+                benchmark_profile=benchmark_profile,
+                expected_entity_count=max(0, int(expected_entity_count or 0)),
+            )
         ),
         "finalizer_completeness": _finalizer_dimension(operation_entries, runtime_events),
         "business_graph_consistency": _business_graph_dimension(batch_plans, tool_graphs),
-        "multiplayer_consistency": _multiplayer_dimension(multiplayer_evidence),
+        "multiplayer_consistency": (
+            _single_player_multiplayer_dimension(
+                multiplayer_evidence,
+                project_mode=project_mode,
+            )
+            if gate_profile == "single_player_demo"
+            else _multiplayer_dimension(multiplayer_evidence)
+        ),
         "runtime_write_safety": _write_safety_dimension(
             scene_entity_registry, engine_write_summary, operation_entries
         ),
@@ -1131,7 +1338,13 @@ def evaluate_r3_gate(
             for item in (*dimensions[name].missing, *dimensions[name].contradictions)
         ]
     )
-    if overall == "red":
+    if overall == "green" and gate_profile == "single_player_demo":
+        capability_unlocks = (
+            "single_player_entity_binding",
+            "single_player_local_action",
+            "single_player_preview",
+        )
+    elif overall == "red":
         capability_unlocks = ("runtime_repair", "artifact_contract_development")
     elif overall == "yellow":
         capability_unlocks = (
@@ -1170,6 +1383,7 @@ def evaluate_r3_gate(
         "overall": overall,
         "dimensions": {name: dimensions[name].as_dict() for name in R3_DIMENSION_NAMES},
         "metrics": {
+            "gate_profile": gate_profile,
             "state_version": max(0, int(state_version)),
             "entity_count": _safe_int(entity_metrics.get("entity_count")),
             "game_ready_entity_count": _safe_int(
@@ -1205,6 +1419,12 @@ def evaluate_r3_gate(
             "dimension_status_counts": {
                 status: statuses.count(status) for status in ("red", "yellow", "green")
             },
+            "requirements_fingerprint": str(
+                entity_metrics.get("requirements_fingerprint") or ""
+            ),
+            "requirement_matches": dict(
+                entity_metrics.get("requirement_matches") or {}
+            ),
         },
         "blockers": blockers,
         "capability_unlocks": list(capability_unlocks),

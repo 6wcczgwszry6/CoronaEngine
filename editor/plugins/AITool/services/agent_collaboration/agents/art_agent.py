@@ -18,7 +18,14 @@ from ..task_graph import AgentTaskGraphStore, TaskTransitionError
 ART_DIRECTION_ID = ARTIFACT_LINEAGE_IDS["ArtDirection"]
 SCENE_COMPOSITION_PLAN_ID = ARTIFACT_LINEAGE_IDS["SceneCompositionPlan"]
 ART_OUTPUT_TYPES = frozenset({"ArtDirection", "SceneCompositionPlan"})
-ART_INPUT_TYPES = frozenset({"GameDesignBrief", "LevelPlan"})
+ART_REQUIRED_INPUT_TYPES = frozenset({"GameDesignBrief", "LevelPlan"})
+ART_OPTIONAL_INPUT_TYPES = frozenset({"GameplayLogicPlan"})
+ART_INPUT_TYPES = ART_REQUIRED_INPUT_TYPES | ART_OPTIONAL_INPUT_TYPES
+ART_INPUT_PRODUCERS = {
+    "GameDesignBrief": "planning",
+    "LevelPlan": "planning",
+    "GameplayLogicPlan": "program",
+}
 
 
 class ArtAgentError(RuntimeError):
@@ -113,7 +120,22 @@ class ArtInputArtifactContext:
 class ArtContext:
     project_id: str
     project_version: int
-    planning_artifacts: tuple[ArtInputArtifactContext, ...]
+    input_artifacts: tuple[ArtInputArtifactContext, ...]
+
+    @property
+    def planning_artifacts(self) -> tuple[ArtInputArtifactContext, ...]:
+        return tuple(
+            item
+            for item in self.input_artifacts
+            if item.artifact_type in {"GameDesignBrief", "LevelPlan"}
+        )
+
+    @property
+    def gameplay_logic_artifact(self) -> ArtInputArtifactContext | None:
+        for item in self.input_artifacts:
+            if item.artifact_type == "GameplayLogicPlan":
+                return item
+        return None
 
 
 @dataclass(frozen=True)
@@ -232,8 +254,8 @@ class ArtAgent:
                     SCENE_COMPOSITION_PLAN_ID,
                     composition_version,
                 )
-                planning_refs = tuple(
-                    item.artifact_ref for item in context.planning_artifacts
+                input_refs = tuple(
+                    item.artifact_ref for item in context.input_artifacts
                 )
                 direction = ArtifactEnvelope(
                     artifact_id=ART_DIRECTION_ID,
@@ -243,7 +265,7 @@ class ArtAgent:
                     source_task_id=request.task_id,
                     base_project_version=context.project_version,
                     base_world_version=0,
-                    dependencies=planning_refs,
+                    dependencies=input_refs,
                     snapshot_source="none",
                     non_executable=True,
                     status="validated",
@@ -257,7 +279,7 @@ class ArtAgent:
                     source_task_id=request.task_id,
                     base_project_version=context.project_version,
                     base_world_version=0,
-                    dependencies=(*planning_refs, str(direction_ref)),
+                    dependencies=(*input_refs, str(direction_ref)),
                     snapshot_source="none",
                     non_executable=True,
                     status="validated",
@@ -319,9 +341,10 @@ class ArtAgent:
                 raise ArtInputValidationError(
                     f"art Agent cannot consume {artifact.artifact_type} input {value}"
                 )
-            if artifact.producer_role != "planning":
+            expected_producer = ART_INPUT_PRODUCERS[artifact.artifact_type]
+            if artifact.producer_role != expected_producer:
                 raise ArtInputValidationError(
-                    f"{value}: expected planning producer, got {artifact.producer_role}"
+                    f"{value}: expected {expected_producer} producer, got {artifact.producer_role}"
                 )
             if artifact.snapshot_source != "none":
                 raise ArtIsolationError(
@@ -336,7 +359,7 @@ class ArtAgent:
                 )
             records_by_type[artifact.artifact_type] = record
 
-        missing_types = ART_INPUT_TYPES - set(records_by_type)
+        missing_types = ART_REQUIRED_INPUT_TYPES - set(records_by_type)
         if missing_types:
             raise ArtInputValidationError(
                 f"art task is missing required planning inputs {sorted(missing_types)}"
@@ -357,7 +380,7 @@ class ArtAgent:
         return ArtContext(
             project_id=project.project_id,
             project_version=project.project_version,
-            planning_artifacts=contexts,
+            input_artifacts=contexts,
         )
 
     def _next_version(self, project_id: str, artifact_id: str) -> int:

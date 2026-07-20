@@ -32,6 +32,8 @@ class AgentRuntimeFlags:
     use_engine_actor_import_provider: bool = False
     use_engine_actor_delete_provider: bool = False
     use_engine_layout_transform_provider: bool = False
+    strict_image_to_model_pipeline: bool = False
+    collaboration_runtime_write_enabled: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "AgentRuntimeFlags":
@@ -51,6 +53,12 @@ class AgentRuntimeFlags:
             use_engine_actor_import_provider=_env_bool(values, "AGENT_RUNTIME_USE_ENGINE_IMPORT_PROVIDER", False),
             use_engine_actor_delete_provider=_env_bool(values, "AGENT_RUNTIME_USE_ENGINE_DELETE_PROVIDER", False),
             use_engine_layout_transform_provider=_env_bool(values, "AGENT_RUNTIME_USE_ENGINE_TRANSFORM_PROVIDER", False),
+            strict_image_to_model_pipeline=_env_bool(values, "AGENT_RUNTIME_STRICT_IMAGE_TO_MODEL", False),
+            collaboration_runtime_write_enabled=_env_bool(
+                values,
+                "AGENT_RUNTIME_ENABLE_COLLABORATION_WRITE",
+                False,
+            ),
         )
 
     def can_route_user_entry_to_runtime(self) -> bool:
@@ -104,6 +112,9 @@ class AgentRuntimeFlags:
     def can_use_engine_layout_transform_provider(self) -> bool:
         return self.can_call_legacy_function_adapter() and self.use_engine_layout_transform_provider
 
+    def can_execute_collaboration_runtime_write(self) -> bool:
+        return self.agent_runtime_enabled and self.collaboration_runtime_write_enabled
+
 
 def install_f5_runtime_provider_env_defaults(env: MutableMapping[str, str] | None = None) -> None:
     """Install narrow Runtime provider defaults for the editor/F5 entrypoint.
@@ -122,6 +133,8 @@ def install_f5_runtime_provider_env_defaults(env: MutableMapping[str, str] | Non
         "ALLOW_LEGACY_FUNCTION_ADAPTER": "1",
         "ALLOW_LEGACY_MAIN_WORKFLOW": "0",
         "AGENT_RUNTIME_USE_MODEL_PROVIDER": "1",
+        "AGENT_RUNTIME_USE_IMAGE_PROVIDER": "1",
+        "AGENT_RUNTIME_STRICT_IMAGE_TO_MODEL": "1",
         "AGENT_RUNTIME_USE_ENGINE_IMPORT_PROVIDER": "1",
         "AGENT_RUNTIME_USE_ENGINE_ENVIRONMENT_IMPORT_PROVIDER": "1",
         "AGENT_RUNTIME_USE_SCENE_SNAPSHOT_PROVIDER": "1",

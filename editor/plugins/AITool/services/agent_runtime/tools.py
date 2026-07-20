@@ -100,6 +100,7 @@ def register_agent_runtime_planning_tools(
     vlm_review_provider: ResourceProvider | None = None,
     require_engine_environment_import: bool = False,
     require_engine_actor_import: bool = False,
+    strict_image_to_model_pipeline: bool = False,
 ) -> None:
     """Register no-side-effect planning/classification tools."""
 
@@ -393,7 +394,10 @@ def register_agent_runtime_planning_tools(
     if not registry.has("runtime.asset.image.prepare"):
         registry.register(
             "runtime.asset.image.prepare",
-            _make_image_resource_tool(image_resource_provider),
+            _make_image_resource_tool(
+                image_resource_provider,
+                strict_image_to_model=bool(strict_image_to_model_pipeline),
+            ),
             category=ToolCategory.ASSET,
             default_risk_level=RiskLevel.LOW,
             required_args=("room_id", "batch_id", "asset_requests"),
@@ -413,7 +417,10 @@ def register_agent_runtime_planning_tools(
     if not registry.has("runtime.asset.model.prepare"):
         registry.register(
             "runtime.asset.model.prepare",
-            _make_model_resource_tool(model_resource_provider),
+            _make_model_resource_tool(
+                model_resource_provider,
+                strict_image_to_model=bool(strict_image_to_model_pipeline),
+            ),
             category=ToolCategory.ASSET,
             default_risk_level=RiskLevel.LOW,
             required_args=("room_id", "batch_id", "asset_requests"),
@@ -470,6 +477,10 @@ def register_agent_runtime_planning_tools(
                     "state_key": "model_item_lists",
                     "scope": "batch",
                 },
+                "image_resources": {
+                    "state_key": "image_resource_plans",
+                    "scope": "batch",
+                },
                 "model_resources": {
                     "state_key": "model_resource_plans",
                     "scope": "batch",
@@ -500,6 +511,10 @@ def register_agent_runtime_planning_tools(
             consumes_state={
                 "model_items": {
                     "state_key": "model_item_lists",
+                    "scope": "batch",
+                },
+                "image_resources": {
+                    "state_key": "image_resource_plans",
                     "scope": "batch",
                 },
                 "model_resources": {
@@ -865,8 +880,30 @@ def _explicit_substrate_candidates_from_text(text: str) -> list[str]:
     return list(dict.fromkeys(out))
 
 
+def _validate_entity_names(
+    items: list[str],
+    *,
+    source_text: str,
+) -> tuple[list[str], list[dict[str, str]]]:
+    from ..runtime_action_intent import EntityNameValidator
+
+    valid: list[str] = []
+    rejected: list[dict[str, str]] = []
+    for item in items:
+        canonical, reason = EntityNameValidator.validate(item, source_text=source_text)
+        if not canonical:
+            rejected.append({"raw_name": str(item or ""), "reason": reason or "invalid entity name"})
+            continue
+        if canonical not in valid:
+            valid.append(canonical)
+    return valid, rejected
+
+
 def route_candidate_model_names(text: str, items: list[str] | None = None) -> list[str]:
-    candidates = list(items or extract_candidate_items(text))
+    candidates, _ = _validate_entity_names(
+        list(items or extract_candidate_items(text)),
+        source_text=text,
+    )
     rows = [{"name": item} for item in candidates]
     classifier = _load_scene_element_classifier()
     route_model_items = classifier.route_model_items
@@ -882,7 +919,8 @@ def route_candidate_model_names(text: str, items: list[str] | None = None) -> li
             return known_candidates
         if len(routed) <= len(known_candidates):
             return known_candidates[:len(routed)]
-    return routed
+    validated, _ = _validate_entity_names(routed, source_text=text)
+    return validated
 
 
 def _looks_like_mojibake_name(name: str) -> bool:
@@ -895,7 +933,10 @@ def _looks_like_mojibake_name(name: str) -> bool:
 def _extract_scene_plan_tool(call: ToolCall) -> ToolResult:
     room_id = str(call.args.get("room_id") or "")
     text = str(call.args.get("text") or "")
-    candidates = _filter_abstract_items(extract_candidate_items(text))
+    candidates, rejected_items = _validate_entity_names(
+        _filter_abstract_items(extract_candidate_items(text)),
+        source_text=text,
+    )
     layout_items = _derive_layout_items(text)
     extraction_id = str(call.args.get("plan_id") or call.tool_call_id)
     item_count = len([item for item in candidates if str(item or "")])
@@ -920,6 +961,7 @@ def _extract_scene_plan_tool(call: ToolCall) -> ToolResult:
             "layout_items": layout_items,
             "item_count": item_count,
             "component_count": component_count,
+            "rejected_entity_items": rejected_items,
         },
         user_visible_message=f"方案提炼完成：识别出 {item_count} 个候选物体，{component_count} 个布局/环境要素。",
     )
@@ -929,7 +971,10 @@ def _scene_extract_objects_tool(call: ToolCall) -> ToolResult:
     room_id = str(call.args.get("room_id") or "")
     text = str(call.args.get("text") or "")
     extraction_id = str(call.args.get("plan_id") or call.args.get("extraction_id") or call.tool_call_id)
-    candidates = _filter_abstract_items(extract_candidate_items(text))
+    candidates, rejected_items = _validate_entity_names(
+        _filter_abstract_items(extract_candidate_items(text)),
+        source_text=text,
+    )
     object_items = route_candidate_model_names(text, candidates)
     layout_items = _derive_layout_items(text)
     return ToolResult(
@@ -951,6 +996,7 @@ def _scene_extract_objects_tool(call: ToolCall) -> ToolResult:
             "object_items": list(object_items),
             "layout_items": list(layout_items),
             "item_count": len(object_items),
+            "rejected_entity_items": rejected_items,
         },
         user_visible_message=f"物体提炼完成：准备生成模型 {len(object_items)} 个。",
     )
@@ -3018,7 +3064,11 @@ def _is_outdoor_environment_text(text: str) -> bool:
     return any(term.lower() in text for term in outdoor_terms)
 
 
-def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
+def _make_image_resource_tool(
+    provider: ResourceProvider | None,
+    *,
+    strict_image_to_model: bool = False,
+) -> Callable[[ToolCall], ToolResult]:
     effective_provider = provider or _default_image_resource_provider
 
     def _tool(call: ToolCall) -> ToolResult:
@@ -3030,6 +3080,17 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
             payload,
             asset_requests=dict(payload.get("asset_requests") or {}),
         )
+        requested_count = len(requested_items)
+        if strict_image_to_model and provider is None:
+            return _resource_provider_failure_tool_result(
+                "image",
+                RuntimeError("real image resource provider is required"),
+                room_id=room_id,
+                batch_id=batch_id,
+                plan_id=plan_id,
+                requested_items=requested_items,
+                user_visible_message="真实图片生成能力不可用，本批已阻断，不会继续生成模型。",
+            )
         try:
             image_resources = ResourcePlanValidator.safe_image_resource_map(dict(effective_provider(payload) or {}))
         except Exception as exc:  # noqa: BLE001
@@ -3042,7 +3103,6 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 requested_items=requested_items,
                 user_visible_message="图片资源准备失败，系统会稍后重试或降级处理。",
             )
-        requested_count = len(requested_items)
         if requested_count and not image_resources:
             failed_resources = _failed_resource_entries(
                 requested_items,
@@ -3077,6 +3137,36 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 },
                 user_visible_message="图片资源准备没有返回可用结果，系统会稍后重试或降级处理。",
             )
+        ready_count = _ready_image_resource_count(image_resources)
+        if strict_image_to_model and ready_count < requested_count:
+            return ToolResult(
+                False,
+                "image resources are incomplete for strict image-to-model generation",
+                error_code="image_resource_lineage_incomplete",
+                retryable=True,
+                state_patch=StatePatch(
+                    room_id=room_id,
+                    changes={
+                        "image_resource_plans": {batch_id: image_resources},
+                        "custom_resource_phase_facts": {
+                            _resource_phase_fact_key(batch_id, "image"): _resource_phase_fact(
+                                batch_id=batch_id,
+                                plan_id=plan_id,
+                                phase="image",
+                                resources=image_resources,
+                                requested_count=requested_count,
+                            )
+                        },
+                    },
+                ),
+                payload={
+                    "image_resources": image_resources,
+                    "requested_count": requested_count,
+                    "ready_count": ready_count,
+                    "failed_count": max(0, requested_count - ready_count),
+                },
+                user_visible_message="图片资源未形成完整可追溯结果，本批不会进入图生模型。",
+            )
         return ToolResult(
             True,
             "batch image resources prepared",
@@ -3098,13 +3188,13 @@ def _make_image_resource_tool(provider: ResourceProvider | None) -> Callable[[To
             payload={
                 "image_resources": image_resources,
                 "requested_count": requested_count,
-                "ready_count": _ready_resource_count(image_resources),
-                "failed_count": max(0, requested_count - _ready_resource_count(image_resources)),
+                "ready_count": ready_count,
+                "failed_count": max(0, requested_count - ready_count),
             },
             user_visible_message=_resource_ready_user_message(
                 "图片资源",
                 requested_count=requested_count,
-                ready_count=_ready_resource_count(image_resources),
+                ready_count=ready_count,
             ),
         )
 
@@ -3169,7 +3259,11 @@ def _promote_adapter_model_resource_handles(resources: Mapping[str, Any]) -> dic
     return promoted
 
 
-def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[ToolCall], ToolResult]:
+def _make_model_resource_tool(
+    provider: ResourceProvider | None,
+    *,
+    strict_image_to_model: bool = False,
+) -> Callable[[ToolCall], ToolResult]:
     effective_provider = provider or _default_model_resource_provider
 
     def _tool(call: ToolCall) -> ToolResult:
@@ -3181,6 +3275,29 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
             payload,
             asset_requests=dict(payload.get("asset_requests") or {}),
         )
+        requested_count = len(requested_items)
+        image_resources = dict(payload.get("image_resources") or {})
+        if strict_image_to_model:
+            missing_image_items = [
+                name
+                for name in requested_items
+                if not _image_resource_has_lineage(image_resources.get(name))
+            ]
+            if provider is None or missing_image_items:
+                reason = (
+                    "real model resource provider is required"
+                    if provider is None
+                    else "missing ready image lineage: " + ",".join(missing_image_items)
+                )
+                return _resource_provider_failure_tool_result(
+                    "model",
+                    RuntimeError(reason),
+                    room_id=room_id,
+                    batch_id=batch_id,
+                    plan_id=plan_id,
+                    requested_items=requested_items,
+                    user_visible_message="缺少真实图片血缘，本批模型生成已阻断，不会降级为文生 3D。",
+                )
         try:
             raw_model_resources = dict(effective_provider(payload) or {})
             if provider is not None:
@@ -3198,7 +3315,50 @@ def _make_model_resource_tool(provider: ResourceProvider | None) -> Callable[[To
                 requested_items=requested_items,
                 user_visible_message="模型资源准备失败，系统会稍后重试或降级处理。",
             )
-        requested_count = len(requested_items)
+        if strict_image_to_model:
+            invalid_lineage = []
+            for name in requested_items:
+                model_resource = model_resources.get(name)
+                image_resource = image_resources.get(name)
+                if (
+                    not isinstance(model_resource, Mapping)
+                    or str(model_resource.get("generation_mode") or "") != "image_to_3d"
+                    or str(model_resource.get("source_image_ref") or "")
+                    != str((image_resource or {}).get("resource_ref") or "")
+                    or str(model_resource.get("source_image_hash") or "")
+                    != str((image_resource or {}).get("content_hash") or "")
+                ):
+                    invalid_lineage.append(name)
+            if invalid_lineage:
+                return ToolResult(
+                    False,
+                    "model resources do not preserve strict source-image lineage",
+                    error_code="model_source_image_lineage_mismatch",
+                    retryable=True,
+                    state_patch=StatePatch(
+                        room_id=room_id,
+                        changes={
+                            "model_resource_plans": {batch_id: model_resources},
+                            "custom_resource_phase_facts": {
+                                _resource_phase_fact_key(batch_id, "model"): _resource_phase_fact(
+                                    batch_id=batch_id,
+                                    plan_id=plan_id,
+                                    phase="model",
+                                    resources=model_resources,
+                                    requested_count=requested_count,
+                                )
+                            },
+                        },
+                    ),
+                    payload={
+                        "model_resources": model_resources,
+                        "requested_count": requested_count,
+                        "ready_count": 0,
+                        "failed_count": requested_count,
+                        "lineage_mismatch_items": invalid_lineage,
+                    },
+                    user_visible_message="模型结果未保留对应图片血缘，本批已阻断，不会导入 Actor。",
+                )
         if requested_count and not model_resources:
             failed_resources = _failed_resource_entries(
                 requested_items,
@@ -3431,6 +3591,30 @@ def _ready_resource_count(resources: dict[str, Any]) -> int:
     )
 
 
+def _image_resource_has_lineage(resource: Mapping[str, Any] | None) -> bool:
+    if not isinstance(resource, Mapping):
+        return False
+    status = str(resource.get("status") or "").strip().lower()
+    mode = str(resource.get("mode") or "").strip().lower()
+    location = str(
+        resource.get("image_url")
+        or resource.get("local_path")
+        or ""
+    ).strip()
+    return bool(
+        status == "ready"
+        and mode not in {"mock", "mock_reference", "fixture"}
+        and location
+        and str(resource.get("resource_ref") or "").strip()
+        and str(resource.get("content_hash") or "").startswith("sha256:")
+        and str(resource.get("prompt_hash") or "").startswith("sha256:")
+    )
+
+
+def _ready_image_resource_count(resources: Mapping[str, Any]) -> int:
+    return sum(1 for resource in resources.values() if _image_resource_has_lineage(resource))
+
+
 def _model_resource_has_importable_path(resource: Mapping[str, Any] | None) -> bool:
     if not isinstance(resource, Mapping):
         return False
@@ -3474,7 +3658,33 @@ def _model_resource_has_importable_path(resource: Mapping[str, Any] | None) -> b
         return True
 
 
-def _model_resource_import_failure_code(resource: Mapping[str, Any] | None) -> str:
+def _model_resource_matches_image_lineage(
+    resource: Mapping[str, Any] | None,
+    image_resource: Mapping[str, Any] | None,
+) -> bool:
+    if not isinstance(resource, Mapping):
+        return False
+    generation_mode = str(resource.get("generation_mode") or "").strip().lower()
+    if generation_mode != "image_to_3d":
+        return not (
+            str(resource.get("source_image_ref") or "").strip()
+            or str(resource.get("source_image_hash") or "").strip()
+        )
+    if not isinstance(image_resource, Mapping):
+        return False
+    return bool(
+        _image_resource_has_lineage(image_resource)
+        and str(resource.get("source_image_ref") or "").strip()
+        == str(image_resource.get("resource_ref") or "").strip()
+        and str(resource.get("source_image_hash") or "").strip()
+        == str(image_resource.get("content_hash") or "").strip()
+    )
+
+
+def _model_resource_import_failure_code(
+    resource: Mapping[str, Any] | None,
+    image_resource: Mapping[str, Any] | None = None,
+) -> str:
     if not isinstance(resource, Mapping) or not resource:
         return "missing_ready_model_resource"
     status = str(resource.get("status") or "").strip().lower()
@@ -3485,6 +3695,11 @@ def _model_resource_import_failure_code(resource: Mapping[str, Any] | None) -> s
             or f"model_resource_{status or 'failed'}",
             fallback="missing_ready_model_resource",
         )
+    if image_resource is not None and not _model_resource_matches_image_lineage(
+        resource,
+        image_resource,
+    ):
+        return "source_image_lineage_mismatch"
     return "missing_ready_model_resource"
 
 
@@ -3526,6 +3741,10 @@ def _assets_from_model_resources(
             "transfer_status": "failed" if failed else "runtime_state_only",
             "progress": 0 if failed else 100,
             "source": str(raw_resource.get("source") or "runtime_model_resource"),
+            "model_ref": str(raw_resource.get("model_ref") or raw_resource.get("model_request_id") or ""),
+            "generation_mode": str(raw_resource.get("generation_mode") or ""),
+            "source_image_ref": str(raw_resource.get("source_image_ref") or ""),
+            "source_image_hash": str(raw_resource.get("source_image_hash") or ""),
         }
         if local_path:
             assets[name]["model_path"] = local_path
@@ -3657,6 +3876,11 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         for key, value in dict(call.args.get("model_resources") or {}).items()
         if isinstance(value, dict)
     }
+    image_resources = {
+        str(key): dict(value)
+        for key, value in dict(call.args.get("image_resources") or {}).items()
+        if isinstance(value, dict)
+    }
     placements = {
         str(key): dict(value)
         for key, value in dict(call.args.get("placements") or {}).items()
@@ -3673,7 +3897,11 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         resource = dict(model_resources.get(name) or {})
         placement = dict(placements.get(name) or {})
         status = str(resource.get("status") or "").strip().lower()
-        has_importable_model = _model_resource_has_importable_path(resource)
+        image_resource = dict(image_resources.get(name) or {})
+        has_importable_model = (
+            _model_resource_has_importable_path(resource)
+            and _model_resource_matches_image_lineage(resource, image_resource)
+        )
         model_ready = (
             bool(resource)
             and status not in {"failed", "error", "missing"}
@@ -3681,7 +3909,7 @@ def _plan_actor_import_batch_tool(call: ToolCall) -> ToolResult:
         )
         failure_code = ""
         if not model_ready:
-            failure_code = _model_resource_import_failure_code(resource)
+            failure_code = _model_resource_import_failure_code(resource, image_resource)
             failure_code_counts[failure_code] = failure_code_counts.get(failure_code, 0) + 1
         planned_actors.append({
             "actor_name": name,
@@ -3756,11 +3984,20 @@ def _make_actor_import_tool(
             for key, value in dict(payload.get("model_resources") or {}).items()
             if isinstance(value, dict)
         }
+        image_resources = {
+            str(key): dict(value)
+            for key, value in dict(payload.get("image_resources") or {}).items()
+            if isinstance(value, dict)
+        }
         if requested_items and model_resources:
             ready_items = [
                 name
                 for name in requested_items
                 if _model_resource_has_importable_path(model_resources.get(name))
+                and _model_resource_matches_image_lineage(
+                    model_resources.get(name),
+                    image_resources.get(name),
+                )
             ]
             payload["model_items"] = ready_items
         elif requested_items and explicit_model_resources:
@@ -3770,7 +4007,10 @@ def _make_actor_import_tool(
                 {
                     "actor_name": name,
                     "status": "failed",
-                    "failure_code": _model_resource_import_failure_code(model_resources.get(name)),
+                    "failure_code": _model_resource_import_failure_code(
+                        model_resources.get(name),
+                        image_resources.get(name),
+                    ),
                     "reason": "missing ready model resource",
                 }
                 for name in requested_items

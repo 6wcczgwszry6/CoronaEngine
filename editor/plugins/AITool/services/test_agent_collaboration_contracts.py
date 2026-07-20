@@ -9,11 +9,14 @@ from editor.plugins.AITool.services.agent_collaboration import (
     EntityBindingPlan,
     GameDesignBrief,
     GameProjectState,
+    GameplayEntitySlot,
     GameplayLogicPlan,
+    GameplayPrimitiveSpec,
     LevelPlan,
     NonExecutableArtifactError,
     SceneCompositionPlan,
     assert_executable,
+    validate_artifact_payload,
 )
 
 
@@ -180,6 +183,13 @@ class AgentCollaborationContractTests(unittest.TestCase):
                 "program",
                 GameplayLogicPlan(
                     states=("searching", "complete"),
+                    entity_slots=(
+                        GameplayEntitySlot("treasure", "collectible_treasure", ("collectible",)),
+                        GameplayEntitySlot("player", "player_spawn", ("player",)),
+                    ),
+                    primitives=(
+                        GameplayPrimitiveSpec("collect-treasure", "on_collect", "treasure", "player", {"state_key": "complete", "set_value": True}),
+                    ),
                     triggers=("treasure_found",),
                     rules=("host owns authoritative state",),
                     win_conditions=("treasure found",),
@@ -192,7 +202,14 @@ class AgentCollaborationContractTests(unittest.TestCase):
                 EntityBindingPlan(
                     snapshot_plan_id="plan-fixture",
                     snapshot_version=3,
-                    bindings=({"entity_id": "entity-1", "semantic_role": "treasure_chest"},),
+                    bindings=({
+                        "slot_id": "treasure",
+                        "entity_id": "entity-1",
+                        "entity_version": 1,
+                        "asset_id": "asset-treasure-1",
+                        "semantic_role": "treasure_chest",
+                        "required_capabilities": ["collectible"],
+                    },),
                 ),
             ),
         )
@@ -217,6 +234,104 @@ class AgentCollaborationContractTests(unittest.TestCase):
         binding = artifacts["EntityBindingPlan"]
         with self.assertRaises(NonExecutableArtifactError):
             assert_executable(binding)
+
+    def test_gameplay_logic_plan_v1_1_validates_the_demo_primitive_chain(self) -> None:
+        artifact = ArtifactEnvelope(
+            artifact_id="program.gameplay-logic-plan",
+            artifact_type="GameplayLogicPlan",
+            version=1,
+            producer_role="program",
+            source_task_id="task-program-1",
+            base_project_version=1,
+            base_world_version=0,
+            snapshot_source="none",
+            non_executable=True,
+            status="validated",
+            payload=GameplayLogicPlan(
+                states=("key_collected", "door_unlocked", "objective_complete"),
+                entity_slots=(
+                    GameplayEntitySlot("player", "player_spawn", ("player",)),
+                    GameplayEntitySlot("key", "collectible_key", ("collectible",)),
+                    GameplayEntitySlot("door", "locked_door", ("lockable",)),
+                    GameplayEntitySlot("goal", "goal_zone", ("trigger_zone",)),
+                ),
+                primitives=(
+                    GameplayPrimitiveSpec("collect-key", "on_collect", "key", "player", {"state_key": "key_collected", "set_value": True}),
+                    GameplayPrimitiveSpec("set-door-state", "set_state", "key", "player", {"state_key": "door_unlocked", "value": True}),
+                    GameplayPrimitiveSpec("unlock-door", "unlock", "key", "door", {"required_state": "key_collected"}),
+                    GameplayPrimitiveSpec("enter-goal", "on_enter", "goal", "player", {}),
+                    GameplayPrimitiveSpec("complete-objective", "complete_objective", "goal", "player", {"objective_id": "reach_goal"}),
+                ),
+                win_conditions=("objective_complete",),
+                lose_conditions=("none",),
+            ),
+        )
+
+        self.assertTrue(artifact.validation_result.valid)
+        self.assertEqual(artifact.status, "validated")
+
+    def test_gameplay_logic_plan_v1_1_rejects_unknown_parameters_and_slot_cycles(self) -> None:
+        result = validate_artifact_payload(
+            "GameplayLogicPlan",
+            {
+                "states": ["ready"],
+                "entity_slots": [
+                    {"slot_id": "key", "semantic_role": "collectible_key", "required_capabilities": ["collectible"]},
+                    {"slot_id": "door", "semantic_role": "locked_door", "required_capabilities": ["lockable"]},
+                ],
+                "primitives": [
+                    {
+                        "primitive_id": "collect-key",
+                        "kind": "on_collect",
+                        "subject_slot": "key",
+                        "target_slot": "door",
+                        "parameters": {"unexpected": True},
+                    },
+                    {
+                        "primitive_id": "unlock-key",
+                        "kind": "unlock",
+                        "subject_slot": "door",
+                        "target_slot": "key",
+                        "parameters": {"required_state": "ready"},
+                    },
+                ],
+                "win_conditions": ["ready"],
+                "lose_conditions": ["none"],
+            },
+        )
+
+        self.assertFalse(result.valid)
+        self.assertIn("primitives[0].parameters:unknown:unexpected", result.errors)
+        self.assertIn("primitives[1].target_slot:requires_lockable", result.errors)
+        self.assertIn("primitives:cyclic_slot_reference", result.errors)
+
+    def test_legacy_gameplay_logic_payload_is_retained_for_audit_but_invalid_for_new_use(self) -> None:
+        legacy = ArtifactEnvelope(
+            artifact_id="program.gameplay-logic-plan",
+            artifact_type="GameplayLogicPlan",
+            version=1,
+            producer_role="program",
+            source_task_id="task-program-legacy",
+            base_project_version=1,
+            base_world_version=0,
+            snapshot_source="none",
+            non_executable=True,
+            status="validated",
+            payload={
+                "states": ["searching", "complete"],
+                "triggers": ["treasure_found"],
+                "rules": ["host owns progress"],
+                "win_conditions": ["complete"],
+                "lose_conditions": ["timeout"],
+            },
+        )
+
+        self.assertEqual(legacy.status, "invalid")
+        self.assertFalse(legacy.validation_result.valid)
+        self.assertIn("entity_slots:required_nonempty_list", legacy.validation_result.errors)
+        self.assertEqual(legacy.as_dict()["payload"]["triggers"], ["treasure_found"])
+        with self.assertRaises(NonExecutableArtifactError):
+            assert_executable(legacy)
 
     def test_project_and_task_contracts_validate_without_runtime_dependencies(self) -> None:
         project = GameProjectState(

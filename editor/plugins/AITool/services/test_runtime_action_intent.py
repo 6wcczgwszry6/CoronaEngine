@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from editor.plugins.AITool.services.runtime_action_intent import (
+    EntityNameValidator,
     MessageDispatchLedger,
     RuntimeActionIntentService,
 )
@@ -81,6 +82,12 @@ class RuntimeActionIntentServiceTests(unittest.TestCase):
         self.assertEqual(intent.route, "runtime_write")
         self.assertTrue(intent.requires_confirmation)
 
+    def test_entity_name_validator_rejects_generic_user_instructions(self) -> None:
+        canonical, reason = EntityNameValidator.validate("请你给出一个方案")
+
+        self.assertEqual(canonical, "")
+        self.assertIn("用户指令", reason)
+
 
 class MessageDispatchLedgerTests(unittest.TestCase):
     def test_message_can_only_have_one_authoritative_owner(self) -> None:
@@ -90,6 +97,69 @@ class MessageDispatchLedgerTests(unittest.TestCase):
         self.assertFalse(ledger.claim("room-1", "msg-1", owner="agent", route="runtime_read"))
         ledger.transition("room-1", "msg-1", "replied", reply="ready")
         self.assertEqual(ledger.entry("room-1", "msg-1")["reply"], "ready")
+
+    def test_execution_claim_is_strict_even_for_the_same_owner(self) -> None:
+        ledger = MessageDispatchLedger()
+
+        self.assertTrue(ledger.claim_execution("room-1", "msg-1", owner="agent", route="agent_chat"))
+        self.assertFalse(ledger.claim_execution("room-1", "msg-1", owner="agent", route="agent_chat"))
+        self.assertFalse(ledger.claim_execution("room-1", "msg-1", owner="native", route="planning"))
+
+    def test_reply_claim_freezes_explicit_target_and_allows_failed_send_retry(self) -> None:
+        ledger = MessageDispatchLedger()
+        self.assertTrue(ledger.claim_execution(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger",
+            route="agent_chat",
+            target_agent_id="elder-id",
+            target_agent_name="长者",
+        ))
+
+        self.assertFalse(ledger.claim_reply(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger:girl-id",
+            agent_id="girl-id",
+            agent_name="小女孩",
+        ))
+        self.assertTrue(ledger.claim_reply(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger:elder-id",
+            agent_id="elder-id",
+            agent_name="长者",
+        ))
+        ledger.complete_reply(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger:elder-id",
+            sent=False,
+        )
+        self.assertTrue(ledger.claim_reply(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger:elder-id",
+            agent_id="elder-id",
+            agent_name="长者",
+        ))
+        ledger.complete_reply(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger:elder-id",
+            sent=True,
+            reply="ready",
+        )
+        self.assertFalse(ledger.claim_reply(
+            "room-1",
+            "msg-1",
+            owner="agent_trigger:elder-id",
+            agent_id="elder-id",
+            agent_name="长者",
+        ))
+        entry = ledger.entry("room-1", "msg-1")
+        self.assertTrue(entry["final_reply_sent"])
+        self.assertEqual(entry["reply"], "ready")
 
 
 if __name__ == "__main__":

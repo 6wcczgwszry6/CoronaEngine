@@ -7,15 +7,28 @@ letting old SceneComposer/ProgressiveWorkflow regain control of the runtime.
 
 from __future__ import annotations
 
+import base64
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 import hashlib
 import os
 from pathlib import Path
+import re
 import threading
 import time
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
+from urllib.parse import unquote, urlparse
 
+from ..gameplay_contracts import validate_gameplay_manifest_payload
+from ..schema_versions import (
+    ENGINE_SNAPSHOT_INPUT_CONTRACT_VERSION,
+    PLAN_PATCH_PAYLOAD_SCHEMA_VERSION,
+)
+from .engine_snapshot_input import (
+    EngineSnapshotInputContractError,
+    current_unversioned_v1_schema_fingerprint,
+    validate_current_unversioned_v1_snapshot,
+)
 from .support_semantics import classify_support_type
 from .tools import ResourceProvider
 
@@ -230,6 +243,112 @@ class RuntimeCppBridge:
         )
 
 
+def make_engine_gameplay_manifest_provider(
+    *,
+    engine_gate: Any,
+    gameplay_apply_tool: Any,
+    capability_manifest_reader: Callable[[], Any],
+    parse_result: Callable[[Any], dict[str, Any]] | None = None,
+) -> Callable[[dict[str, Any]], dict[str, Any]]:
+    """Route a validated GameplayManifest through EngineWriteGate only."""
+
+    if engine_gate is None:
+        raise ValueError("engine_gate is required")
+    if gameplay_apply_tool is None:
+        raise ValueError("gameplay_apply_tool is required")
+    if not callable(capability_manifest_reader):
+        raise ValueError("capability_manifest_reader is required")
+    bridge = RuntimeCppBridge(engine_gate=engine_gate, parse_result=parse_result)
+
+    def provider(request: dict[str, Any]) -> dict[str, Any]:
+        try:
+            manifest = validate_gameplay_manifest_payload(request.get("manifest"))
+        except (TypeError, ValueError):
+            return {
+                "success": False,
+                "error_code": "gameplay_manifest_payload_invalid",
+                "message": "Gameplay manifest payload is invalid.",
+            }
+        if (
+            str(request.get("manifest_schema_version") or "") != PLAN_PATCH_PAYLOAD_SCHEMA_VERSION
+            or str(request.get("manifest_hash") or "") != str(manifest.get("content_hash") or "")
+            or str(request.get("plan_id") or "") != str(manifest.get("plan_id") or "")
+        ):
+            return {
+                "success": False,
+                "error_code": "gameplay_manifest_envelope_mismatch",
+                "message": "Gameplay manifest envelope does not match the validated payload.",
+            }
+        try:
+            raw_capabilities = capability_manifest_reader()
+        except Exception:  # noqa: BLE001
+            return {
+                "success": False,
+                "error_code": "engine_capability_manifest_unavailable",
+                "message": "Engine capability manifest is unavailable.",
+            }
+        if isinstance(raw_capabilities, dict):
+            capabilities = dict(raw_capabilities)
+        elif callable(getattr(raw_capabilities, "as_dict", None)):
+            capabilities = dict(raw_capabilities.as_dict())
+        else:
+            capabilities = {
+                "supported_operations": getattr(raw_capabilities, "supported_operations", ()),
+                "supported_gameplay_primitives": getattr(
+                    raw_capabilities,
+                    "supported_gameplay_primitives",
+                    (),
+                ),
+            }
+        operations = {str(item or "").strip() for item in capabilities.get("supported_operations") or ()}
+        supported_primitives = {
+            str(item or "").strip()
+            for item in capabilities.get("supported_gameplay_primitives") or ()
+        }
+        required_primitives = {
+            str(item.get("kind") or "").strip()
+            for item in manifest.get("primitives") or ()
+            if isinstance(item, dict)
+        }
+        if "gameplay.apply_manifest" not in operations:
+            return {
+                "success": False,
+                "error_code": "engine_gameplay_operation_unsupported",
+                "message": "Engine does not advertise gameplay.apply_manifest.",
+            }
+        if not required_primitives.issubset(supported_primitives):
+            return {
+                "success": False,
+                "error_code": "engine_gameplay_primitives_unsupported",
+                "message": "Engine does not advertise every required gameplay primitive.",
+            }
+        bridge_result = bridge.invoke_tool(
+            gameplay_apply_tool,
+            {
+                "operation": "gameplay.apply_manifest",
+                "patch_type": "gameplay_manifest_apply",
+                "room_id": str(request.get("room_id") or ""),
+                "plan_id": str(request.get("plan_id") or ""),
+                "proposal_id": str(request.get("proposal_id") or ""),
+                "payload_schema_version": str(request.get("manifest_schema_version") or ""),
+                "structured_payload": manifest,
+                "payload_hash": str(request.get("manifest_hash") or ""),
+                "idempotency_key": str(request.get("idempotency_key") or ""),
+            },
+            error_code="engine_gameplay_manifest_apply_failed",
+        )
+        return {
+            "success": bridge_result.success,
+            "payload": dict(bridge_result.payload or {}),
+            "error_code": bridge_result.error_code,
+            "message": bridge_result.message,
+            "boundary_fact": dict(bridge_result.boundary_fact or {}),
+        }
+
+    provider.__name__ = "engine_gameplay_manifest_provider"
+    return provider
+
+
 class EngineCapabilityManifestReadError(RuntimeError):
     """A sanitized failure from the read-only Engine capability boundary."""
 
@@ -238,11 +357,19 @@ class EngineCapabilityManifestReadError(RuntimeError):
         self.error_code = str(error_code or "engine_capability_manifest_read_failed")
 
 
+class ImageResourceProviderError(RuntimeError):
+    def __init__(self, error_code: str, message: str) -> None:
+        super().__init__(message)
+        self.error_code = str(error_code or "image_resource_resolve_failed")
+
+
 def make_image_resource_provider(
     *,
     image_tool: Any,
     parse_result: Callable[[Any], dict[str, Any]] | None = None,
     resolution: str = "1:1",
+    media_resolver: Callable[..., Any] | None = None,
+    resolve_timeout: float = 120.0,
 ) -> ResourceProvider:
     """Create a Runtime image-resource provider from a function-sized image tool.
 
@@ -269,6 +396,16 @@ def make_image_resource_provider(
             }
             try:
                 raw = _invoke_image_tool(image_tool, tool_payload)
+            except Exception as exc:  # noqa: BLE001
+                resources[name] = _failed_image_resource(
+                    name=name,
+                    batch_id=batch_id,
+                    index=index,
+                    failure_code="image_tool_call_failed",
+                    failure_message=str(exc) or "image tool call failed",
+                )
+                continue
+            try:
                 parsed = parse_result(raw) if parse_result is not None else _parse_tool_result(raw)
                 resources[name] = _normalize_image_result(
                     parsed,
@@ -276,12 +413,24 @@ def make_image_resource_provider(
                     batch_id=batch_id,
                     index=index,
                     prompt=prompt,
+                    media_resolver=media_resolver,
+                    resolve_timeout=resolve_timeout,
                 )
-            except Exception:  # noqa: BLE001
+            except ImageResourceProviderError as exc:
                 resources[name] = _failed_image_resource(
                     name=name,
                     batch_id=batch_id,
                     index=index,
+                    failure_code=exc.error_code,
+                    failure_message=str(exc),
+                )
+            except Exception as exc:  # noqa: BLE001
+                resources[name] = _failed_image_resource(
+                    name=name,
+                    batch_id=batch_id,
+                    index=index,
+                    failure_code="image_resource_resolve_failed",
+                    failure_message=str(exc) or "image resource resolve failed",
                 )
         return resources
 
@@ -294,6 +443,7 @@ def make_model_resource_provider(
     parse_result: Callable[[Any], dict[str, Any]] | None = None,
     max_concurrency: int = 3,
     wait_for_ready: Callable[[str], Any] | None = None,
+    require_image_input: bool = False,
 ) -> ResourceProvider:
     """Create a Runtime model-resource provider from a function-sized model tool.
 
@@ -314,7 +464,22 @@ def make_model_resource_provider(
 
         def _prepare_one(index: int, name: str) -> tuple[str, dict[str, Any]]:
             prompt_text = str(_item_value(payload, name, "prompt_text") or name)
+            image_resource = _image_resource_entry(payload, name)
             image_url = str(_item_value(payload, name, "image_url") or _image_resource_value(payload, name) or "")
+            source_image_ref = str(image_resource.get("resource_ref") or "")
+            source_image_hash = str(image_resource.get("content_hash") or "")
+            if require_image_input and (
+                not image_url
+                or not source_image_ref
+                or not source_image_hash.startswith("sha256:")
+            ):
+                return name, _failed_model_resource(
+                    name=name,
+                    batch_id=batch_id,
+                    index=index,
+                    source="model_resource",
+                    failure_code="source_image_lineage_missing",
+                )
             tool_payload = {
                 # Hunyuan3D's narrow tool schema is mode/images/prompt.  Keep no
                 # provider-private object/path fields here; RuntimeState receives
@@ -342,6 +507,9 @@ def make_model_resource_provider(
                     name=name,
                     batch_id=batch_id,
                     index=index,
+                    generation_mode="image_to_3d" if image_url else "text_to_3d",
+                    source_image_ref=source_image_ref,
+                    source_image_hash=source_image_hash,
                 )
             except Exception:  # noqa: BLE001
                 return name, _failed_model_resource(
@@ -421,6 +589,55 @@ def make_scene_snapshot_provider(
         )
 
     return _provider
+
+
+def make_current_unversioned_v1_scene_snapshot_reader(
+    *,
+    snapshot_tool: Any,
+    build_fingerprint: str,
+    scene_name: str = "",
+    wait_for_bounds: bool = True,
+    parse_result: Callable[[Any], dict[str, Any]] | None = None,
+) -> Callable[[Any], dict[str, Any]]:
+    """Read one current-build native Snapshot through the strict input contract."""
+
+    if snapshot_tool is None:
+        raise ValueError("snapshot_tool is required")
+
+    def _reader(request: Any) -> dict[str, Any]:
+        if isinstance(request, dict):
+            room_id = str(request.get("room_id") or "")
+            effective_scene_name = str(request.get("scene_name") or scene_name or "")
+            native_scene_route = str(
+                request.get("scene_route")
+                or request.get("native_scene_route")
+                or scene_name
+                or ""
+            )
+        else:
+            room_id = str(request or "")
+            effective_scene_name = scene_name
+            native_scene_route = scene_name
+        payload = {
+            "scene_name": native_scene_route,
+            "wait_for_bounds": bool(wait_for_bounds),
+        }
+        try:
+            raw = _invoke_tool(snapshot_tool, payload)
+        except Exception as exc:  # noqa: BLE001
+            raise EngineSnapshotInputContractError(
+                "engine_snapshot_read_failed",
+                "Engine scene snapshot read failed.",
+            ) from exc
+        parsed = parse_result(raw) if parse_result is not None else _parse_tool_result(raw)
+        return normalize_current_unversioned_v1_scene_snapshot(
+            parsed,
+            room_id=str(room_id or "default"),
+            scene_name=effective_scene_name,
+            build_fingerprint=build_fingerprint,
+        )
+
+    return _reader
 
 
 def make_engine_capability_manifest_reader(
@@ -1442,6 +1659,53 @@ def _normalize_scene_snapshot_result(parsed: dict[str, Any], *, room_id: str, sc
         "actor_count": len(safe_actors),
         "actors": safe_actors,
         "source": "scene_snapshot_tool",
+    }
+
+
+def normalize_current_unversioned_v1_scene_snapshot(
+    raw_snapshot: dict[str, Any],
+    *,
+    room_id: str,
+    scene_name: str,
+    build_fingerprint: str,
+) -> dict[str, Any]:
+    """Strictly validate the current native DTO before Runtime normalization."""
+
+    validated = validate_current_unversioned_v1_snapshot(
+        raw_snapshot,
+        build_fingerprint=build_fingerprint,
+    )
+    actors = tuple(validated.get("actors") or ())
+    plan_ids = {str(actor.get("source_plan_id") or "").strip() for actor in actors}
+    scene_versions = {int(actor.get("source_scene_version") or 0) for actor in actors}
+    actor_ids = [str(actor.get("actor_guid") or "").strip() for actor in actors]
+    entity_ids = [str(actor.get("entity_id") or "").strip() for actor in actors]
+    if len(plan_ids) > 1:
+        raise EngineSnapshotInputContractError(
+            "engine_snapshot_plan_identity_drift",
+            "Native snapshot actors do not share one source_plan_id.",
+        )
+    if len(scene_versions) > 1:
+        raise EngineSnapshotInputContractError(
+            "engine_snapshot_scene_version_drift",
+            "Native snapshot actors do not share one source_scene_version.",
+        )
+    if len(set(actor_ids)) != len(actor_ids) or len(set(entity_ids)) != len(entity_ids):
+        raise EngineSnapshotInputContractError(
+            "engine_snapshot_actor_identity_drift",
+            "Native snapshot contains duplicate actor or entity identity.",
+        )
+    return {
+        "input_contract_version": ENGINE_SNAPSHOT_INPUT_CONTRACT_VERSION,
+        "build_fingerprint": str(build_fingerprint),
+        "schema_fingerprint": current_unversioned_v1_schema_fingerprint(),
+        "plan_id": next(iter(plan_ids), ""),
+        "scene_version": next(iter(scene_versions), 0),
+        "snapshot": _normalize_scene_snapshot_result(
+            validated,
+            room_id=str(room_id or "default"),
+            scene_name=str(scene_name or ""),
+        ),
     }
 
 
@@ -2529,6 +2793,8 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "observed_position",
         "overlap_resolved",
         "position",
+        "proposal_id",
+        "receipt_id",
         "render_failed",
         "render_ready",
         "render_status_observed",
@@ -2542,6 +2808,7 @@ def _safe_cpp_success_payload(parsed: dict[str, Any]) -> dict[str, Any]:
         "status",
         "status_info",
         "success",
+        "payload_hash",
         "surface",
         "sync_lifecycle_status",
         "sync_status",
@@ -2642,6 +2909,13 @@ def _unwrap_tool_envelope(parsed: dict[str, Any]) -> dict[str, Any]:
                             return payload
                     except Exception:  # noqa: BLE001
                         continue
+                content_url = str(part.get("content_url") or "").strip()
+                if content_url:
+                    return {
+                        "content_url": content_url,
+                        "content_type": str(part.get("content_type") or "image"),
+                        "parameter": part.get("parameter"),
+                    }
     return parsed
 
 
@@ -3079,12 +3353,17 @@ def _normalize_image_result(
     batch_id: str,
     index: int,
     prompt: str,
+    media_resolver: Callable[..., Any] | None,
+    resolve_timeout: float,
 ) -> dict[str, Any]:
     status = str(parsed.get("status") or "").strip().lower()
     success = _coerce_adapter_bool(parsed.get("success"), default=True)
     if status in {"error", "failed", "failure", "fail"} or not success or parsed.get("error"):
-        raise RuntimeError(_safe_adapter_error_message(parsed, fallback="image resource failed"))
-    image_url = str(
+        raise ImageResourceProviderError(
+            "image_tool_call_failed",
+            _safe_adapter_error_message(parsed, fallback="image resource failed"),
+        )
+    source_url = str(
         _first_present(
             parsed.get("image_url"),
             parsed.get("url"),
@@ -3095,25 +3374,195 @@ def _normalize_image_result(
         or ""
     )
     image_paths = parsed.get("image_paths") or parsed.get("images") or []
-    if not image_url and isinstance(image_paths, list) and image_paths:
-        image_url = str(image_paths[0] or "")
-    if not image_url:
-        raise RuntimeError(f"{name}: image provider returned no image url/path")
-    return {
-        "image_request_id": f"image-resource-{batch_id}-{index:02d}" if batch_id else f"image-resource-{index:02d}",
+    if not source_url and isinstance(image_paths, list) and image_paths:
+        source_url = str(image_paths[0] or "")
+    if not source_url:
+        raise ImageResourceProviderError(
+            "image_resource_resolve_failed",
+            f"{name}: image provider returned no image url/path",
+        )
+    resolved = _resolve_image_resource(
+        source_url,
+        media_resolver=media_resolver,
+        resolve_timeout=resolve_timeout,
+    )
+    image_url = str(resolved.get("image_url") or "")
+    local_path = str(resolved.get("local_path") or "")
+    if not image_url and not local_path:
+        raise ImageResourceProviderError(
+            "image_resource_resolve_failed",
+            f"{name}: resolved image has no usable path or URL",
+        )
+    image_request_id = (
+        f"image-resource-{batch_id}-{index:02d}" if batch_id else f"image-resource-{index:02d}"
+    )
+    content_hash = _authoritative_image_content_hash(
+        provider_hash=str(parsed.get("content_hash") or resolved.get("content_hash") or ""),
+        content_bytes=resolved.get("content_bytes"),
+        local_path=local_path,
+        image_url=image_url,
+    )
+    if not content_hash:
+        raise ImageResourceProviderError(
+            "image_content_hash_missing",
+            f"{name}: resolved image has no authoritative content hash",
+        )
+    resource = {
+        "image_request_id": image_request_id,
+        "resource_ref": str(parsed.get("resource_ref") or source_url or image_request_id),
         "name": name,
         "status": "ready",
-        "image_url": image_url,
+        "mode": "text_to_image",
+        "prompt_hash": _sha256_resource_value(prompt),
+        "content_hash": content_hash,
         "source": "image_resource",
+    }
+    if image_url:
+        resource["image_url"] = image_url
+    if local_path:
+        resource["local_path"] = local_path
+    return resource
+
+
+def _resolve_image_resource(
+    source_url: str,
+    *,
+    media_resolver: Callable[..., Any] | None,
+    resolve_timeout: float,
+) -> dict[str, Any]:
+    source = str(source_url or "").strip()
+    if not source.startswith("fileid://"):
+        local_path = _local_path_from_image_location(source)
+        return {
+            "image_url": "" if local_path else source,
+            "local_path": local_path,
+        }
+    if media_resolver is None:
+        raise ImageResourceProviderError(
+            "image_resource_resolve_failed",
+            "fileid image requires a MediaRegistry resolver",
+        )
+    file_id = source[len("fileid://"):].strip()
+    if not file_id:
+        raise ImageResourceProviderError(
+            "image_resource_resolve_failed",
+            "fileid image reference is empty",
+        )
+    try:
+        try:
+            raw = media_resolver(file_id, timeout=float(resolve_timeout))
+        except TypeError:
+            raw = media_resolver(file_id, float(resolve_timeout))
+    except TimeoutError as exc:
+        raise ImageResourceProviderError(
+            "image_resource_timeout",
+            f"media resource {file_id} did not become ready before timeout",
+        ) from exc
+    except Exception as exc:  # noqa: BLE001
+        raise ImageResourceProviderError(
+            "image_resource_resolve_failed",
+            f"media resource {file_id} could not be resolved",
+        ) from exc
+    if isinstance(raw, Mapping):
+        resolved = dict(raw)
+        location = str(
+            _first_present(
+                resolved.get("local_path"),
+                resolved.get("image_url"),
+                resolved.get("url"),
+                resolved.get("path"),
+            )
+            or ""
+        )
+        local_path = str(resolved.get("local_path") or _local_path_from_image_location(location))
+        return {
+            "image_url": "" if local_path else location,
+            "local_path": local_path,
+            "content_hash": str(resolved.get("content_hash") or ""),
+            "content_bytes": resolved.get("content_bytes"),
+        }
+    location = str(raw or "").strip()
+    if not location:
+        raise ImageResourceProviderError(
+            "image_resource_resolve_failed",
+            f"media resource {file_id} resolved to an empty location",
+        )
+    local_path = _local_path_from_image_location(location)
+    return {
+        "image_url": "" if local_path else location,
+        "local_path": local_path,
     }
 
 
-def _failed_image_resource(*, name: str, batch_id: str, index: int) -> dict[str, Any]:
+def _local_path_from_image_location(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if text.lower().startswith("file://"):
+        parsed = urlparse(text)
+        candidate = unquote(parsed.path or "")
+        if parsed.netloc:
+            candidate = f"//{parsed.netloc}{candidate}"
+        if re.fullmatch(r"/[A-Za-z]:/.*", candidate):
+            candidate = candidate[1:]
+        path = Path(candidate)
+        return str(path) if path.is_file() else ""
+    path = Path(text)
+    return str(path) if path.is_file() else ""
+
+
+def _data_uri_bytes(value: str) -> bytes | None:
+    text = str(value or "").strip()
+    if not text.startswith("data:") or "," not in text:
+        return None
+    header, payload = text.split(",", 1)
+    try:
+        if ";base64" in header.lower():
+            return base64.b64decode(payload, validate=True)
+        return unquote(payload).encode("utf-8")
+    except (ValueError, TypeError):
+        return None
+
+
+def _authoritative_image_content_hash(
+    *,
+    provider_hash: str,
+    content_bytes: Any,
+    local_path: str,
+    image_url: str,
+) -> str:
+    digest = str(provider_hash or "").strip()
+    if digest.startswith("sha256:") and len(digest) == 71:
+        return digest
+    if isinstance(content_bytes, (bytes, bytearray)):
+        return "sha256:" + hashlib.sha256(bytes(content_bytes)).hexdigest()
+    path = Path(str(local_path or ""))
+    if str(local_path or "") and path.is_file():
+        try:
+            return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            return ""
+    data = _data_uri_bytes(image_url)
+    if data is not None:
+        return "sha256:" + hashlib.sha256(data).hexdigest()
+    return ""
+
+
+def _failed_image_resource(
+    *,
+    name: str,
+    batch_id: str,
+    index: int,
+    failure_code: str = "image_resource_resolve_failed",
+    failure_message: str = "",
+) -> dict[str, Any]:
     return {
         "image_request_id": f"image-resource-{batch_id}-{index:02d}" if batch_id else f"image-resource-{index:02d}",
         "name": name,
         "status": "failed",
         "source": "image_resource",
+        "failure_code": str(failure_code or "image_resource_resolve_failed"),
+        "failure_message": str(failure_message or "")[:240],
     }
 
 
@@ -3155,6 +3604,9 @@ def _normalize_model_tool_result(
     name: str,
     batch_id: str,
     index: int,
+    generation_mode: str = "text_to_3d",
+    source_image_ref: str = "",
+    source_image_hash: str = "",
 ) -> dict[str, Any]:
     status = str(parsed.get("status") or "").strip().lower()
     success = _coerce_adapter_bool(parsed.get("success"), default=True)
@@ -3183,13 +3635,20 @@ def _normalize_model_tool_result(
         for item in (parsed.get("preview_images") or parsed.get("images") or [])
         if isinstance(item, str) and item
     ]
+    model_request_id = (
+        f"model-resource-{batch_id}-{index:02d}" if batch_id else f"model-resource-{index:02d}"
+    )
     return {
-        "model_request_id": f"model-resource-{batch_id}-{index:02d}" if batch_id else f"model-resource-{index:02d}",
+        "model_request_id": model_request_id,
+        "model_ref": model_request_id,
         "name": name,
         "status": "ready",
         "local_path": local_path,
         "source": _safe_model_resource_source(parsed.get("source") or "generation"),
         "preview_images": preview_images,
+        "generation_mode": generation_mode,
+        "source_image_ref": source_image_ref,
+        "source_image_hash": source_image_hash,
     }
 
 
@@ -3351,6 +3810,8 @@ def _safe_model_failure_code(value: Any) -> str:
         "legacy_model_adapter_unavailable",
         "legacy_model_acquire_exception",
         "legacy_model_invalid_result",
+        "model_resource_tool_failed",
+        "source_image_lineage_missing",
     }
     if code in allowed:
         return code
@@ -3358,11 +3819,8 @@ def _safe_model_failure_code(value: Any) -> str:
 
 
 def _image_resource_value(payload: dict[str, Any], name: str) -> Any:
-    image_resources = payload.get("image_resources")
-    if not isinstance(image_resources, dict):
-        return None
-    resource = image_resources.get(name)
-    if not isinstance(resource, dict):
+    resource = _image_resource_entry(payload, name)
+    if not resource:
         return None
     if str(resource.get("status") or "").strip().lower() in {"failed", "failure", "error", "missing"}:
         return None
@@ -3372,6 +3830,25 @@ def _image_resource_value(payload: dict[str, Any], name: str) -> Any:
         resource.get("local_path"),
         resource.get("path"),
     )
+
+
+def _image_resource_entry(payload: dict[str, Any], name: str) -> dict[str, Any]:
+    image_resources = payload.get("image_resources")
+    if not isinstance(image_resources, dict):
+        return {}
+    resource = image_resources.get(name)
+    return dict(resource) if isinstance(resource, dict) else {}
+
+
+def _sha256_resource_value(value: Any) -> str:
+    text = str(value or "").strip()
+    path = Path(text)
+    if text and path.is_file():
+        try:
+            return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            pass
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _result_value(result: Any, key: str, default: Any = None) -> Any:

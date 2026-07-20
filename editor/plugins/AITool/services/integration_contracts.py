@@ -12,6 +12,7 @@ from .schema_versions import (
     COLLABORATION_SCHEMA_VERSION,
     ENGINE_ADAPTER_CONTRACT_VERSION,
     FRONTEND_INTERACTION_SCHEMA_VERSION,
+    PLAN_PATCH_PAYLOAD_SCHEMA_VERSION,
     R3_GATE_SCHEMA_VERSION,
     SCENE_WORLD_SNAPSHOT_SCHEMA_VERSION,
     SKELETON_CONTRACT_VERSION,
@@ -29,6 +30,7 @@ PUBLIC_SCHEMA_VERSIONS = (
     ("collaboration", COLLABORATION_SCHEMA_VERSION),
     ("engine_adapter", ENGINE_ADAPTER_CONTRACT_VERSION),
     ("frontend_interaction", FRONTEND_INTERACTION_SCHEMA_VERSION),
+    ("plan_patch_payload", PLAN_PATCH_PAYLOAD_SCHEMA_VERSION),
     ("r3_gate", R3_GATE_SCHEMA_VERSION),
     ("scene_world_snapshot", SCENE_WORLD_SNAPSHOT_SCHEMA_VERSION),
     ("skeleton", SKELETON_CONTRACT_VERSION),
@@ -98,6 +100,33 @@ class MissingRequirement:
         object.__setattr__(self, "requirement_id", _machine_id(self.requirement_id, "requirement_id"))
         object.__setattr__(self, "owner_domain", _owner_domain(self.owner_domain))
         object.__setattr__(self, "description", _required_text(self.description, "description"))
+
+
+@dataclass(frozen=True)
+class DemoReadinessRequirement:
+    requirement_id: str
+    semantic_role: str
+    required_capabilities: tuple[str, ...]
+    min_count: int = 1
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "requirement_id", _machine_id(self.requirement_id, "requirement_id"))
+        object.__setattr__(self, "semantic_role", _required_text(self.semantic_role, "semantic_role"))
+        capabilities = tuple(
+            sorted(set(_text_tuple(self.required_capabilities, "required_capabilities")))
+        )
+        object.__setattr__(self, "required_capabilities", capabilities)
+        if int(self.min_count) <= 0:
+            raise ValueError("min_count must be positive")
+        object.__setattr__(self, "min_count", int(self.min_count))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "requirement_id": self.requirement_id,
+            "semantic_role": self.semantic_role,
+            "required_capabilities": list(self.required_capabilities),
+            "min_count": self.min_count,
+        }
 
 
 @dataclass(frozen=True)

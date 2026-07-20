@@ -96,6 +96,11 @@ class EntityNameValidator:
         r"(?:到场景(?:里|中)?)?(?:一个|一只|一座|一张|一件|一组|1个)?\s*"
     )
     _LEADING_QUANTITY = re.compile(r"^(?:一个|一只|一座|一张|一件|一组|1个)\s*")
+    _COMMAND_FRAGMENT = re.compile(
+        r"^(?:请(?:你)?|麻烦|帮我|给我)?(?:先|再|现在)?"
+        r"(?:给出|提供|制定|整理|展开|说明|说说|讨论|确认|开始|继续|执行|生成|完成)"
+        r"(?:一个|一下|当前|这个)?(?:方案|计划|设计|内容|场景|生成)?(?:吧|呢|一下)?$"
+    )
     _TYPO_ALIASES = {"切比特": "丘比特"}
 
     @classmethod
@@ -106,6 +111,8 @@ class EntityNameValidator:
         value = cls._QUESTION_SUFFIX.sub("", value).strip(" \t，,。.!！?？")
         if re.search(r"(?:已经|是否|有没有|有没)$", value):
             return "", "实体名称包含未完成的问句片段"
+        if cls._COMMAND_FRAGMENT.fullmatch(value):
+            return "", "实体名称包含用户指令而不是场景对象"
         if not value or value in cls._INVALID_NAMES:
             return "", "实体名称只包含语法片段"
         for typo, canonical in cls._TYPO_ALIASES.items():
@@ -348,7 +355,7 @@ class RuntimeActionIntentService:
 class MessageDispatchLedger:
     """Process-local atomic ownership for duplicate native/agent message ingress."""
 
-    _TERMINAL = {"executed", "replied"}
+    _TERMINAL = {"replied", "failed_terminal"}
 
     def __init__(self, max_entries: int = 4096) -> None:
         self._max_entries = max(64, int(max_entries))
@@ -359,22 +366,112 @@ class MessageDispatchLedger:
     def key(room_id: str, message_id: str) -> str:
         return f"{str(room_id or 'default')}:{str(message_id or '').strip()}"
 
-    def claim(self, room_id: str, message_id: str, *, owner: str, route: str) -> bool:
+    def claim_execution(
+        self,
+        room_id: str,
+        message_id: str,
+        *,
+        owner: str,
+        route: str,
+        target_agent_id: str = "",
+        target_agent_name: str = "",
+    ) -> bool:
         if not str(message_id or "").strip():
-            return True
+            return False
         key = self.key(room_id, message_id)
         with self._lock:
-            current = self._entries.get(key)
-            if current is not None:
-                return str(current.get("owner") or "") == owner and str(current.get("state") or "") not in self._TERMINAL
+            if key in self._entries:
+                return False
             self._entries[key] = {
                 "state": "claimed",
                 "owner": owner,
+                "execution_owner": owner,
                 "route": route,
+                "target_agent_id": str(target_agent_id or "").strip(),
+                "target_agent_name": str(target_agent_name or "").strip(),
+                "reply_owner": "",
+                "final_reply_sent": False,
                 "updated_at": time.time(),
             }
             self._trim()
             return True
+
+    def claim(self, room_id: str, message_id: str, *, owner: str, route: str) -> bool:
+        """Compatibility claim for branches continuing an already-owned execution."""
+
+        if not str(message_id or "").strip():
+            return False
+        key = self.key(room_id, message_id)
+        with self._lock:
+            current = self._entries.get(key)
+            if current is None:
+                return self.claim_execution(room_id, message_id, owner=owner, route=route)
+            execution_owner = str(current.get("execution_owner") or current.get("owner") or "")
+            return execution_owner == owner and str(current.get("state") or "") not in self._TERMINAL
+
+    def claim_reply(
+        self,
+        room_id: str,
+        message_id: str,
+        *,
+        owner: str,
+        agent_id: str = "",
+        agent_name: str = "",
+        system_reply: bool = False,
+    ) -> bool:
+        if not str(message_id or "").strip():
+            return False
+        key = self.key(room_id, message_id)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or bool(entry.get("final_reply_sent")):
+                return False
+            if str(entry.get("state") or "") == "reply_claimed":
+                return False
+            expected_id = str(entry.get("target_agent_id") or "").strip()
+            expected_name = str(entry.get("target_agent_name") or "").strip()
+            actual_id = str(agent_id or "").strip()
+            actual_name = str(agent_name or "").strip()
+            if not system_reply and (expected_id or expected_name):
+                id_matches = bool(expected_id and actual_id and expected_id == actual_id)
+                name_matches = bool(expected_name and actual_name and expected_name == actual_name)
+                if not id_matches and not name_matches:
+                    entry["reply_rejection"] = "target_agent_mismatch"
+                    entry["rejected_reply_owner"] = owner
+                    entry["updated_at"] = time.time()
+                    return False
+            entry["state"] = "reply_claimed"
+            entry["reply_owner"] = owner
+            entry["updated_at"] = time.time()
+            return True
+
+    def complete_reply(
+        self,
+        room_id: str,
+        message_id: str,
+        *,
+        owner: str,
+        sent: bool,
+        reply: str = "",
+    ) -> None:
+        if not str(message_id or "").strip():
+            return
+        key = self.key(room_id, message_id)
+        with self._lock:
+            entry = self._entries.get(key)
+            if entry is None or str(entry.get("reply_owner") or "") != owner:
+                return
+            entry["updated_at"] = time.time()
+            if sent:
+                entry["state"] = "replied"
+                entry["final_reply_sent"] = True
+                if reply:
+                    entry["reply"] = reply
+            else:
+                entry["state"] = "reply_failed"
+                entry["last_reply_owner"] = owner
+                entry["reply_owner"] = ""
+            self._trim()
 
     def transition(self, room_id: str, message_id: str, state: str, *, reply: str = "") -> None:
         if not str(message_id or "").strip():
@@ -382,6 +479,8 @@ class MessageDispatchLedger:
         key = self.key(room_id, message_id)
         with self._lock:
             entry = self._entries.setdefault(key, {})
+            if bool(entry.get("final_reply_sent")) and state != "replied":
+                return
             entry["state"] = state
             entry["updated_at"] = time.time()
             if reply:

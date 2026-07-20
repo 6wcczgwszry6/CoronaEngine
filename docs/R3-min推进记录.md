@@ -1,6 +1,6 @@
 # R3-min 推进记录
 
-更新时间：2026-07-18
+更新时间：2026-07-21
 
 ## 0. 当前执行锚点
 
@@ -10,34 +10,40 @@
 执行约束：docs/Agent任务约束循环_R3三职能协同版.md
 
 当前分支：agent-native
-当前 AI 基准 HEAD：7d441c9e
-当前 origin/main：bfa66766
+当前 AI 基准 HEAD：3d849a9a
+当前 origin/main：6721de43
+Engine 当前实机参考：HEAD 3d849a9a + working-tree patch fingerprint 0c651bd4（非稳定跨版本 SHA）
 Engine 候选集成 SHA：待 Engine 组冻结
 Frontend 候选集成 SHA：待 Frontend 组冻结
 
-当前工作块：B2 Engine Test Double
-当前任务：B2.2 Adapter 双版本兼容
-任务状态：interface_change_required
-里程碑状态：not_ready
-当前执行角色：填充 AI
+当前工作块：B7.1 三职能契约与控制面收敛
+当前任务：B7.1 六消息独立 Session F5
+任务状态：E6.0-E6.5 code_complete / pending_independent_f5 [待F5/实机验证]
+里程碑状态：B7.1 blocked / collaboration_program_contract_failed；B7.2 blocked_by_B7.1
+当前执行角色：实机验证
 
-Skeleton contract version：r3-skeleton-week1-v1（已冻结）
-Skeleton contract hash：sha256:fd65eaf4f7067f011ed812d8eb57a79d0b78504ea9e394bd6927c90c73b48148
-当前 Skeleton 节点：engine_capability_port（B1.1 已填充，仍待 F5）
-当前节点 owner：engine
+Skeleton contract version：r3-skeleton-week1-v6（Planning -> Program -> Art 依赖与 Program 接口变更后冻结）
+Skeleton contract hash：sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd
+当前 Skeleton 节点：demo_result（B4.2 已填充）
+当前节点 owner：integration
 待 F5 Skeleton 节点数：1
 待 F5 Adapter 项：2（Engine capability、Frontend 业务协议）
 未决 InterfaceChangeRequest：1（request.b2.2-engine-dto-version）
-最新 InterfaceChangeDecision：pending_architecture_review
+最新 InterfaceChangeDecision：accepted / request.b6.4-gameplay-plan-patch-payload
 
 Full R3 Gate：red / pending_reevaluation
-Single-player Demo Gate：unavailable / not_evaluated
+Single-player Demo Gate：evaluator_available / not_evaluated
 
-最新自动证据：Engine Test Double 11 + Frontend adapter 6 + B1.1 capability port 4 + Skeleton 6 + integration contracts 10 + schema version 3 + Track B 81 + R3 readiness 21，同一命令 142 passed
+最新自动证据：E6 Track B 123 passed；E6 聚焦组合 59 passed；辅助控制面 26 passed；受影响 Runtime Guard 15 passed；Python syntax compile passed
 已知门禁噪声：无；3 项 sys.modules 顺序污染误报已改为目标模块 AST import 检查
-最新实机边界：2026-07-17 修复批次仍待最小 F5
-最新记录章节：77
-下一 ready 任务：架构 AI 决定 request.b2.2-engine-dto-version
+最新总门禁：E5 收口后 `verify_ultimate_plan.py` 运行一次，在 900 秒上限超时；输出 134 个连续通过点，未出现断言失败，门禁未完整结束
+最新实机边界：2026-07-21 04:20 F5 已完成 Discussion 与 Planning；Program 调用耗时 260770ms 后因 duplicate semantic_role 阻断，Art/Narrator/Proposal/Runtime 均未进入
+最新实机日志：build/examples/engine/RelWithDebInfo/logs/2026-07-21_04-20-32_corona.log
+最新 LANChat history：build/examples/engine/RelWithDebInfo/Saved/LANChat/history/single-default__session__1784578872125__1.jsonl
+最新控制面探针：B7_1_CONTROL_BLOCKED / PASS=13 WARN=1 FAIL=4（E6 Probe 口径）
+最新 Scene Runtime 探针：B7_2_SCENE_BLOCKED / PASS=1 WARN=0 FAIL=5
+最新记录章节：106
+下一 ready 任务：使用全新 Session 原样执行 B7.1 六消息验收
 ```
 
 维护规则：
@@ -46,6 +52,8 @@ Single-player Demo Gate：unavailable / not_evaluated
 - 从第 67 节起使用紧凑任务记录，不再追加长篇 Progress Update。
 - 后续 AI 默认只读取本锚点、最近 2-3 条记录和当前任务引用的历史章节。
 - 每次任务结束更新本锚点；只有工作块收口时增加阶段总结。
+- 第 1-81 节保留为黑盒阶段审计；其中 `verified` 表示自动契约验证，不等于生产接入或 Engine 实机验证。
+- 第 82 节起同时记录 `contract_status` 与 `production_integration_status`，不得互相替代。
 
 ## 1. 当前结论
 
@@ -2990,3 +2998,1198 @@ Full R3 Gate：red / pending_reevaluation（不变）
 ```
 
 本轮没有把[文档假设]误写为真实 Engine 差异。待架构 AI 接受或拒绝该请求后，再决定是否升级契约并恢复 B2.2；真实 Engine DTO 归一化仍为 **[待F5/实机验证]**。
+
+## 78. 2026-07-19 B3.1 强类型 slot 与 primitive 完成
+
+```text
+时间 / commit：2026-07-19 / agent-native@3d849a9a，origin/main@6721de43
+任务 ID：B3.1
+执行角色：架构 AI + 填充 AI
+接口变化：接受；GameplayLogicPlan 1.1 加入强类型 slot/primitive
+状态 before -> after：ready -> verified
+Skeleton contract version/hash：r3-skeleton-week1-v2 / sha256:754042409f4adda073e696fea0b65eb6d7466885e36bb8de155ddff9434fc7ef
+```
+
+事实核验：
+
+- 权威计划第 4.2-4.3 节已定义 GameplayLogicPlan 1.1，是本次公开契约演进的架构依据。
+- 新增 `GameplayEntitySlot(slot_id/semantic_role/required_capabilities)` 与 `GameplayPrimitiveSpec(primitive_id/kind/subject_slot/target_slot/parameters)`；GameplayLogicPlan 现有 `entity_slots/primitives`。
+- `triggers/rules` 保留为历史审计的非执行叙述字段；结构化 primitive 是后续 Gate/Manifest 的唯一玩法语义来源。
+- Manifest 现在显式包含三个 Gameplay DTO；旧 v1 hash 的下游节点需要在 B3.2/B4 前使用 v2 重新验证。
+
+InterfaceChangeDecision：
+
+```text
+request_id：request.b3.1-gameplay-logic-plan-v1-1
+decision：accepted
+changed_interfaces：GameplayLogicPlan、GameplayEntitySlot、GameplayPrimitiveSpec、SkeletonContractManifest.public_dtos
+new_contract_version/hash：r3-skeleton-week1-v2 / sha256:754042409f4adda073e696fea0b65eb6d7466885e36bb8de155ddff9434fc7ef
+affected_nodes：program_agent、artifact_bundle、project_gate_preflight、demo_scenario_runner
+required_revalidation：B0.4 skeleton、ProgramAgent、ArtifactRegistry、TaskGraph、five-Artifact workflow
+evidence_refs：docs/R3黑盒期单人垂直切片推进计划.md:4.2-4.3；editor/plugins/AITool/services/agent_collaboration/contracts.py；editor/plugins/AITool/services/agent_collaboration/walking_skeleton.py
+```
+
+验证证据：
+
+```text
+GameplayLogicPlan 白名单完整链：on_collect/set_state/unlock/on_enter/complete_objective 通过
+非法参数、非 lockable 解锁目标、循环 slot 引用：被 validator 拒绝
+python -m unittest（contracts/program-agent/artifact-registry/task-graph/five-workflow/walking-skeleton）：61 passed
+build_skeleton_manifest().contract_hash()：sha256:754042409f4adda073e696fea0b65eb6d7466885e36bb8de155ddff9434fc7ef
+未修改 Runtime、Engine、Frontend、CMakeLists.txt 或任何执行写路径；本任务不需要 F5
+Full R3 Gate：red / pending_reevaluation（不变）
+```
+
+`CMakeLists.txt` 的 MSVC/Ninja showIncludes 修复为独立未提交工作，已识别并保持不触碰；合并 `origin/main` 带入的历史 docs 删除不构成 B3.1 代码事实，文档恢复策略另行决策。下一项为 B3.2：对现有 ArtifactRegistry 的依赖失效机制补充 GameplayLogicPlan 1.0 -> 1.1 的显式审计/拒绝规则。
+
+## 79. 2026-07-19 B3.2 GameplayLogicPlan 版本与 stale 传播完成
+
+```text
+时间 / commit：2026-07-19 / agent-native@3d849a9a，origin/main@6721de43
+任务 ID：B3.2
+执行角色：填充 AI
+接口变化：无；复用 ArtifactRegistry 的已存在依赖版本图
+状态 before -> after：ready -> verified
+Skeleton contract version/hash：r3-skeleton-week1-v2 / sha256:754042409f4adda073e696fea0b65eb6d7466885e36bb8de155ddff9434fc7ef
+```
+
+完成断点：
+
+- 旧 GameplayLogicPlan 1.0 字符串 payload 保留原始 payload 用于审计，但缺少 `entity_slots/primitives` 时 validation 为 invalid，不能注册为新的 Artifact、不能跨越执行边界。
+- GameplayLogicPlan 1.1 版本更新时，ArtifactRegistry 的通用 `dependency_superseded -> dependency_stale` 传播会将依赖旧 logic ref 的 EntityBindingPlan 标为 stale；它不再可作为后续绑定/执行输入。
+- 没有通过名称、路径或 Snapshot 字段猜测绑定，也没有创建 EntityBindingPlan 的生产写入路径。
+
+验证证据：
+
+```text
+legacy gameplay audit/reject test：passed
+GameplayLogicPlan revision -> EntityBindingPlan stale test：passed
+python -m unittest（contracts/artifact-registry/program-agent/task-graph/five-workflow/walking-skeleton）：63 passed
+Full R3 Gate：red / pending_reevaluation（不变）
+待 F5：无新增；本任务为纯协作层版本事实
+```
+
+下一 ready 任务：B4.1 ProjectGatePreflight。B2.2 `request.b2.2-engine-dto-version` 继续等待 Engine/架构侧显式 DTO 版本决策。
+
+## 80. 2026-07-19 B4.1 ProjectGatePreflight 完成
+
+```text
+时间 / commit：2026-07-19 / agent-native@3d849a9a，origin/main@6721de43
+任务 ID：B4.1
+执行角色：架构 AI + 填充 AI
+接口变化：接受 PreflightStatus 枚举扩展；evaluate(bundle) 节点签名不变
+状态 before -> after：ready -> verified
+Skeleton contract version/hash：r3-skeleton-week1-v3 / sha256:015cf2e5a38c68530c1d7a897bbda67745d46fa7993edb5514f2b9e87b7cc0c0
+```
+
+完成断点：
+
+- ProjectGatePreflight 真实检查五 Artifact bundle/hash/internal dependencies/non-executable 边界。
+- 通过 B1.1 的只读 EngineCapabilityPort 查询 capability manifest，不 import Runtime internals、不写 Engine。
+- Runtime Gate/manifest 不可用时返回 `pending_runtime_verification` 且 `executable=false`；已获得 manifest 但缺 required operation 或 gameplay primitive 时返回 `blocked/engine_capability_missing`。
+- 默认 Runner 继续零 ActionProposal、PlanPatch、ToolCallGraph、Provider 和 Engine 写入。
+
+验证证据：
+
+```text
+unavailable manifest -> pending_runtime_verification：passed
+full required manifest -> completed：passed
+declared but incomplete manifest -> engine_capability_missing：passed
+python -m unittest（contracts/artifact-registry/program-agent/task-graph/five-workflow/walking-skeleton/engine-capability-port）：69 passed
+本任务为黑盒只读验证；真实 Engine capability manifest 仍 [待F5/实机验证]
+```
+
+下一 ready 任务：B4.2 无 UI Demo Runner。B2.2 `request.b2.2-engine-dto-version` 继续等待 Engine/架构侧显式 DTO 版本决策。
+
+## 81. 2026-07-19 B4.2 无 UI Demo Runner 完成
+
+```text
+时间 / commit：2026-07-19 / agent-native@3d849a9a，origin/main@6721de43
+任务 ID：B4.2
+执行角色：架构 AI + 填充 AI
+接口变化：接受 DemoResult 扩展（project/task graph/preflight/required capabilities/pending runtime verifications）
+状态 before -> after：ready -> verified
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+```
+
+完成断点：
+
+- Runner 通过正式 ProjectState、ArtifactRegistry、AgentTaskGraph、三个职能 Agent 和 ProjectGatePreflight，确定性生成五 Artifact bundle；无 UI、无 Provider、无场景写入。
+- DemoResult 公开 `project_id/task_graph_id/artifact_refs/required_capabilities/preflight_result/pending_runtime_verifications`；`executable` 固定为 false。
+- 同一 `project_id + command_id` 重放返回同一结果；同 ID 内容变化拒绝，避免二次生成。
+- 任务图 `max_attempts=2`；短暂 Agent 异常会调用既有 retry_task，成功重试后继续，不重放已完成上游。
+- Capability unavailable 保持 integration_ready + 明确 pending runtime verification；缺已声明能力则 blocked。该状态不是 Engine-ready、Game-ready 或 F5 Green。
+
+验证证据：
+
+```text
+正常 five-Artifact bundle：passed
+transient ArtAgent failure -> TaskGraph retry -> success：passed
+Artifact stale propagation：由 B3.2 目标测试覆盖
+capability unavailable/full/missing：passed
+identical command replay / changed command ID reuse rejection：passed
+python -m unittest（contracts/artifact-registry/program-agent/task-graph/five-workflow/walking-skeleton/engine-capability-port）：71 passed
+本任务不写 Engine；所有 Runtime/Engine 事实继续 [待F5/实机验证]
+```
+
+下一状态：B5.1 依赖 B2（含 B2.2 Adapter 双版本兼容），目前只剩 `request.b2.2-engine-dto-version` 的外部 Engine/架构决策。连续推进在此暂停。
+
+## 82. 2026-07-20 最新 F5 校准与黑盒成果收敛决策
+
+```text
+时间 / 证据：2026-07-20 / 2026-07-19_15-51-42_corona.log + 对应 LANChat history
+任务 ID / 状态：B5.0 前置决策 / ready
+执行角色：架构 AI
+contract_status：B0-B4 verified（保留）
+production_integration_status：not_ready
+Full R3 Gate：red / pending_reevaluation
+Single-player Demo Gate：unavailable / blocked_by_runtime_control_plane
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+### 实机正向事实
+
+```text
+business BatchPlan：3/3 completed
+business ToolGraph：3/3 completed
+Tool nodes：54/54 succeeded
+Runtime 最终摘要：11 entities / 11 reported game-ready / 11 engine-verified
+Engine scene：4 environment + 7 model actors
+Engine bridge：18/18 success，0 bridge error
+```
+
+上述事实证明 ScenePlan -> BatchPlan -> business ToolGraph -> Engine import 主链已明显打通，但 `11 reported game-ready` 仍不是 R3 Green。Registry/Snapshot/Report 的终态可信度、消息控制面和语义边界尚未同时通过。
+
+### P0 问题
+
+| 问题 | 实机证据 | 影响 |
+|---|---|---|
+| 同一消息重复执行与回复 | `@长者 请你给出一个方案` 先由“小女孩”回复，再由“长者”回复 | route、target 和 reply authority 未原子收口 |
+| 固定模板替代真实回答 | 方案回复来自 `lanchat_scene_runtime` 固定角色开场和固定四段结构 | DMX 调用成本没有转化为问题对应回答 |
+| 上下文丢失 | “请你给出一个方案”没有继承“迪士尼风格卧室” | 方案目标被短指令覆盖 |
+| 语法片段成为实体 | 回复出现“准备生成模型：请你给出一个方案” | 初始 ScenePlan 未统一经过 EntityNameValidator |
+| 方案身份混淆 | “长者确认开始”执行已有 `plan-d37bebb0578d`，未验证目标 Agent 方案引用 | 不同 Agent 的计划可能互相覆盖或误执行 |
+| 系统口径矛盾 | Runtime 先报告方案已更新和 7 个模型，Agent/GM 又报告方案尚未形成 | 用户无法判断真实状态 |
+| Quasar 双路径初始化 | 同一进程出现 `Quasar.*` 与 `plugins.AITool.Quasar.*` 两套入口和路径 | Provider、模型目录、PoolRegistry 可能分裂 |
+
+### P1 问题
+
+| 问题 | 实机证据 | 影响 |
+|---|---|---|
+| 重复 heartbeat | 47 条 history 中 25 条 action_status，同一句资源准备消息重复 20 次 | 聊天刷屏、终态事件被淹没 |
+| 内部诊断倾倒 | 一条方案更新包含 Runtime/Replay/Provider/Guard 数十行指标 | 用户回复不可读且暴露内部实现 |
+| 用户可见乱码 | 系统名称持久化为“绯荤粺”，部分状态字段同样乱码 | 前端体验和自动文本判断不稳定 |
+| Scene Contract 漂移 | 明确卧室目标仍为 `mixed/mixed`，并导入 terrain/transition_zone | 场景语义和环境分流不可信 |
+| 终态披露顺序异常 | history 先显示 report_ready，随后才显示 scene_snapshot_refreshed | 用户无法确认报告是否基于最新 Engine 事实 |
+| 中间 Readiness 不连续 | 前两批导入完成时仍为 entities=0，最终一次跳为 11/11 | GM 进度、上层 Agent 和多人状态无法消费连续事实 |
+| 材质/纹理降级 | 多次 default white 与 embedded texture fallback | Demo 视觉质量不稳定 |
+
+### 黑盒成果保留与生产缺口
+
+| 工作块 | contract_status | production_integration_status | 决策 |
+|---|---|---|---|
+| B0 Walking Skeleton | verified | disconnected | 保留 v4，不重新实现 |
+| B1.1 Engine capability port | code_complete | pending_runtime_verification | 在 B6.2 接真实 manifest/fixture |
+| B1.2 Frontend Adapter | code_complete | bypassed_by_current_runtime | 在 B6.1/B5.4 接真实入口与进度事件 |
+| B2.1 Engine Test Double | verified | insufficient_for_message_flow | B5.0 增加真实 history replay，不扩大通用 Mock |
+| B2.2 Adapter version | pending | blocks cross-SHA only | 拆为 B2.2a/B2.2b |
+| B3 GameplayLogicPlan 1.1 | verified | no real Snapshot binding | 保留，等待 B6.3/B6.4 |
+| B4 Preflight/Runner | verified | not production entry | B6.1 只读接入 |
+
+### B2.2 拆分决策
+
+```text
+B2.2a current-unversioned-v1 strict fixture：ready
+  - 以本轮真实字段集合、必填身份字段和 build fingerprint 精确匹配
+  - 当前 SHA 可用于只读 Adapter/Gate 对账
+  - 未知变化 fail closed
+
+B2.2b Engine explicit input_dto_version：deferred_to_B7
+  - 等待 capability manifest
+  - 只阻断跨 SHA 迁移和最终集成
+```
+
+原 `request.b2.2-engine-dto-version` 保持未决，但不再阻断 B5 或 B6.3 的纯逻辑开发。
+
+### 新执行队列
+
+```text
+B5.0 F5 fixture 与自动诊断
+-> B5.1 单消息单执行单回复
+-> B5.2 语义上下文 / 方案身份 / 实体校验
+-> B5.3 零模型上下文记录
+-> B5.4 进度 / Finalizer / 双初始化
+
+并行：
+B2.2a 严格当前版本 fixture
+-> B6.3 single_player_demo Gate evaluator
+
+汇合：
+B5 完成 + B6.1/B6.2/B6.3
+-> B7.1 控制面 F5
+-> B7.2 Runtime 最小 F5
+-> B6.4 EntityBindingPlan / GameplayManifest 边界
+-> B7.3 两个独立 Session 完整 Demo
+```
+
+### 当前任务与边界
+
+```text
+当前唯一主线任务：B5.0 F5 证据基线
+可并行纯逻辑任务：B2.2a 或 B6.3（不得修改 lanchat_agent_worker.py）
+旧 persona：兼容入口，不再扩建项目规划或 Engine 执行能力
+Engine/Frontend/材质/Readiness 效果：[待F5/实机验证]
+```
+
+B5.0 完成标准：任意 AI 只读取推进记录顶部、本节和新推进计划，即可明确当前 Gate、黑盒已完成项、F5 推翻的假设、唯一主线任务、可并行任务、F5 阻断项以及 B2.2 不再全局阻断的原因。
+
+## 83. 2026-07-20 B5.0 F5 证据基线完成
+
+```text
+任务 ID / 状态：B5.0 / verified
+执行角色：架构 AI
+contract_status：联合探针与回归 fixture verified
+production_integration_status：unchanged / not_ready
+Full R3 Gate：red / pending_reevaluation
+Single-player Demo Gate：unavailable / blocked_by_runtime_control_plane
+公共 Runtime / LANChat / Frontend / Engine 代码变化：无
+```
+
+完成断点：
+
+- 扩展 `docs/probes/r3_f5_log_check.py`，新增 `--history`，可联合分析 Corona 日志与 LANChat JSONL history。
+- 保持原 Runtime Gate/Batch/ToolGraph/Render 检查兼容；未提供 history 时行为不变。
+- 新增逐消息控制面证据：目标 Agent、route、processing owner、final reply、progress/action status、模型调用 purpose 证据、plan/artifact ref 和诊断码。
+- 新增会话级检查：重复 heartbeat、命令片段实体、方案 owner 串线、Finalizer 披露顺序、Quasar import root、模型 purpose 可观测性、Runtime/回复矛盾、乱码和内部诊断倾倒。
+- 将本轮关键证据缩减为只读 fixture：
+  - `docs/probes/fixtures/2026-07-19_b5_control_plane_corona.log`
+  - `docs/probes/fixtures/2026-07-19_b5_control_plane_history.jsonl`
+
+聚焦验证：
+
+```text
+python -m unittest docs.probes.test_r3_f5_log_check
+结果：4 passed
+
+真实证据：2026-07-19_15-51-42_corona.log + 对应 47 条 LANChat history
+结果：R3_F5_BLOCKED，PASS=1 / WARN=1 / FAIL=12
+```
+
+真实 F5 自动复现结果：
+
+```text
+用户消息：5 条
+@长者“请你给出一个方案”：final reply 2 条，sender=[小女孩, 长者]
+重复处理 owner：首轮小女孩消息与 @长者方案消息均出现 native_queue + agent_trigger
+错误实体片段：请你给出一个方案
+方案身份串线：plan-d37bebb0578d owner 小女孩 -> 确认目标 长者
+重复 heartbeat：同一文本 20 次
+Finalizer 披露：report_ready@42 -> report_ready@43 -> scene_snapshot_refreshed@46
+Quasar root：plugins.AITool.Quasar + Quasar
+用户可见乱码 sender：37 条
+内部诊断倾倒：1 条
+模型调用 purpose：5 条推断证据，0 条显式 purpose 字段
+R3GateTrace：日志中缺失
+```
+
+结论：B5.0 已把本轮实机问题转换为稳定、机器可读的回归证据，但没有修改或验证生产控制面。下一唯一主线任务为 **B5.1 单消息单执行单回复**；B2.2a/B6.3 仍可在不修改 `lanchat_agent_worker.py` 的前提下并行。B5.1 完成并通过聚焦并发/重放测试前不运行下一轮 F5。
+
+## 84. 2026-07-20 B5.1 单消息单执行单回复代码收口
+
+```text
+任务 ID / 状态：B5.1 / code_complete [待F5/实机验证]
+执行角色：填充 AI
+里程碑状态：not_ready
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：unavailable / blocked_by_runtime_control_plane -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- `MessageDispatchLedger` 新增严格 `claim_execution`、原子 `claim_reply/complete_reply`，第一次认领冻结 execution owner、route 和显式目标 Agent。
+- 同一 owner 的重复 execution claim 也会被拒绝；旧分支只能在已拥有执行权时继续使用兼容 `claim`，不能取得第二份执行权。
+- `_send_final_reply()` 内部强制取得 final reply claim；错误非系统 Agent、并发第二回复和成功后的重放均被拒绝。
+- 回复发送失败只释放 reply claim，允许重试回复，不允许重新执行 Agent。
+- 缺失 `message_id` 时优先使用 `correlation_id`，两者都缺失时使用 room/sender/timestamp/target/text 的规范化 hash 形成稳定 dispatch identity。
+- Native Queue 收到显式非 GM `@Agent` 消息时不再进入旧 pending planning gate 或 active Runtime plan update，统一交给 Agent Trigger；GM 控制继续保持 Native 权威 owner。
+- `_process_trigger` 在任何 Agent 推理前取得 execution claim；Native 内部已认领的 GM handoff 通过显式 `_dispatch_owner` 继续，不开放外部重放旁路。
+
+验证证据：
+
+```text
+execution strict claim / target freeze / failed reply retry：passed
+Native-first explicit Agent deferral：passed
+Agent Trigger 真并发与 replay：1 execution / 1 final reply，passed
+错误 Agent reply -> 正确 Agent reply -> duplicate：passed
+无 message_id correlation identity：passed
+GM Native ownership 与 R3 query 兼容：passed
+python -m unittest 聚焦入口/并发：22 passed
+Probe + ActionIntent + Native sync + Game-ready 回归：57 passed
+Python syntax compile：passed
+```
+
+未验证与边界：
+
+- 真实 C++ Native Queue 与 Agent Trigger 的线程时序仍为 `[待F5/实机验证]`，在 B7.1 固定五轮对话中验收。
+- 完整 `test_lanchat_runtime_guard` 单文件包含既有 Quasar 慢启动路径，本轮组合运行在 240 秒超时前未出现断言失败；按测试预算未扩大为无关全量修复。
+- 本任务没有修改 RuntimeGuard、EngineWriteGate、ToolCallGraph、Frontend 或 C++。
+
+下一唯一主线任务：**B5.2 语义上下文、方案身份和实体名称安全**。并行候选仍为 B2.2a/B6.3；任何涉及真实双入口时序的结论继续等待 B7.1。
+
+## 85. 2026-07-20 B5.2 语义上下文、方案身份和实体名称安全代码收口
+
+```text
+任务 ID / 状态：B5.2 / code_complete [待F5/实机验证]
+执行角色：填充 AI
+里程碑状态：not_ready
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：unavailable / blocked_by_runtime_control_plane -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- 新增房间级强类型 `ConversationTurnContext/Store`，保存活动场景目标、目标历史、最新指令、目标 Agent、活动方案引用和来源消息 ID。
+- Native/Trigger 对同一 message 的上下文记录幂等；“请给出方案”等短指令继承当前活动目标，不再覆盖“迪士尼风格卧室”。
+- 新的明确场景目标替换活动目标，旧目标仅保留在 history；从乐园/混合切到卧室时不会继续把旧场景类别拼入活动目标。
+- 兼容 planning confirmation 暴露稳定 `agent_plan_id` 与 `artifact_ref=legacy-plan:<agent_plan_id>`，并通过回复 metadata 和确认 compose text 继续传递。
+- 确认首先按 `target_plan_id/target_agent` 查找；显式目标 Agent 没有待确认方案时返回澄清，不再回退执行房间中另一 Agent 的 pending/active plan。
+- `EntityNameValidator` 增加通用命令片段判断；初始 ScenePlan 与 `scene.extract_objects` 候选统一过滤用户指令，拒绝原因保留在 ToolResult payload，不扩张 RuntimeState schema。
+- 旧小女孩/长者/商人仅作为兼容回复入口，本任务没有把它们接入三职能 Artifact 或新增 Engine 执行权限。
+
+验证证据：
+
+```text
+Disney 乐园讨论 -> Disney 卧室目标 -> @长者短方案指令：活动目标保持卧室，passed
+新场景目标替换旧类型 / 同 message 幂等：passed
+稳定 agent_plan_id/artifact_ref 生成、metadata 传递和 context binding：passed
+@长者确认不得执行小女孩 pending plan：passed
+无上文的空泛方案指令返回澄清：covered by deterministic branch
+“请你给出一个方案” EntityNameValidator 拒绝：passed
+scene.extract_objects 不产生命令片段实体且正常对象仍保留：passed
+语义/方案/实体聚焦：21 passed
+Probe + Context + ActionIntent + Native sync + Game-ready 回归：61 passed
+Python syntax compile：passed
+Skeleton Manifest hash 重算：e60094df...（不变）
+```
+
+未验证与边界：
+
+- 真实五轮 LANChat history 是否持续携带方案 metadata、卧室 Scene Contract 是否不再为 mixed，均为 `[待F5/实机验证]`，在 B7.1/B7.2 核对。
+- 本任务没有实现正式三职能 EntityBindingPlan，也没有放开 ActionProposal。
+
+下一唯一主线任务：**B5.3 上下文记录零模型调用与调用预算**。
+
+## 86. 2026-07-20 B5.3 上下文记录零模型调用与调用预算代码收口
+
+```text
+任务 ID / 状态：B5.3 / code_complete [待F5/实机验证]
+执行角色：填充 AI
+里程碑状态：not_ready
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：unavailable / blocked_by_runtime_control_plane -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- AgentRuntime 注册精确纯记录动作 `runtime.plan_context.record` 与 `runtime.agent_reply_context.record`；两个动作只写 RuntimeState/OperationLog，不创建 ScenePlan、PlanPatch、RuntimeEvent ToolGraph 或业务 ToolGraph。
+- LANChat 的 SeedPlan 镜像、用户讨论、Agent 回复和 planning reply 全部改走精确纯记录动作；普通回复不再自动提升为 Runtime ScenePlan，也不再覆盖已冻结方案 brief。
+- 只有已经存在 RuntimeState 映射的 plan reference 才能附着到具体 ScenePlan；未映射的 SeedPlan/聊天引用只记录为 room context，禁止借 Coordinator fallback 猜测绑定。
+- 直接场景请求在未产出稳定 `agent_plan_id/artifact_ref` 时 fail closed：保留需求上下文，但明确提示尚未冻结为可执行 Runtime 方案，不能直接确认写入。
+- 场景提取新增 `plan_id + plan_version + content_hash` 幂等键；同版本同内容重放返回已有提取事实，零新增提取 ToolGraph。
+- 新增 `ModelCallLedger`，为每消息记录 `message_id/correlation_id/purpose/provider/model/plan_version/dedupe_result`；显式 Agent 用户可见推理预算为 1，第二次调用硬阻断。
+- 每条 final reply 产出一次 `model_call_summary`；确定性 GM/查询/上下文记录自然得到 0 次调用摘要，发送重试不会重复生成摘要。
+
+验证证据：
+
+```text
+精确 context action：ToolGraph/PlanPatch/ScenePlan version 均不变，passed
+精确 context state 写入失败：fail closed、零 ToolGraph，passed
+相同 plan version + content hash 提取重放：零新增 ToolGraph，passed
+确定性回复模型调用摘要：0 calls，passed
+显式 Agent 推理调用预算：1 call；第二次 budget_exhausted，passed
+SeedPlan/user/Agent reply 生产镜像：room context only；已有 Runtime plan 可精确附着，passed
+直接生成请求未冻结方案：禁止形成可确认 Runtime draft，passed
+B5.3 聚焦上下文/调用预算回归：23 passed
+Context + ActionIntent + Game-ready + Native sync 回归：59 passed
+Walking Skeleton：10 passed
+Python syntax compile：passed
+Skeleton Manifest hash 重算：e60094df...（不变）
+```
+
+未验证与边界：
+
+- 真实 F5 中每条消息是否只出现一个 `LANChatModelCallSummary`、确定性查询是否稳定为 0、显式 Agent 讨论是否最多 1 次，均为 `[待F5/实机验证]`，在 B7.1 核对。
+- `test_agent_runtime_phase1` 全文件包含既有长时运行路径；本轮 240 秒门限前未出现断言失败，按测试预算未扩成无关慢测试治理。
+- 本任务没有放开 ActionProposal、EntityBindingPlan、Provider 场景生成或 Engine 写入；Full R3/Single-player Gate 均未改变。
+
+下一唯一主线任务：**B5.4 进度、Finalizer、报告和启动路径收口**。
+
+## 87. 2026-07-20 B5.4 进度、Finalizer、报告和启动路径代码收口
+
+```text
+任务 ID / 状态：B5.4 / code_complete [待F5/实机验证]
+执行角色：填充 AI
+里程碑状态：not_ready
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：unavailable / blocked_by_runtime_control_plane -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- 同一 `room_id + plan_id` 的生成进度使用稳定 event ID；只有阶段、进度或错误级别变化才发布，文本变化和相同 heartbeat 不再追加消息。
+- 生成进度与系统状态的用户可见 sender 统一为“系统”；旧乱码名称仅保留为历史输入识别，不再用于生产发送。
+- Runtime AI 配置使用 canonical `Quasar` 根；同一进程首次加载后，其余 Worker 只记录 `config_load_deduped`，正常路径不再加载 plugin-qualified Hunyuan loader。
+- `generate_report()` 对终态计划增加同版本证据门禁：`scene_entity_registry_ready`、`runtime_scene_world_consistency_audited`、`scene_world_snapshot_ready` 任一缺失时只发布 `report_pending`。
+- Finalizer 在同版本 Registry、Consistency、Snapshot 证据齐全后发布或恢复 `report_ready`；最终事件显式包含实体数、Game-ready、needs-review、缺失字段计数、scene version 和 world fingerprint。
+- 未修改 RuntimeGuard、EngineWriteGate、ToolCallGraph 执行边界、Skeleton DTO 或 C++。
+
+验证证据：
+
+```text
+Game-ready / Snapshot / Finalizer：39 passed
+Quasar canonical/once、稳定 progress event、heartbeat、late finalizer：8 passed
+Native sync + Walking Skeleton：15 passed
+F5 probe：4 passed
+actor import failure 阶段报告回归：1 passed
+Python syntax compile：passed
+Skeleton Manifest hash：sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1（不变）
+```
+
+总门禁事实：
+
+- 首轮 `verify_ultimate_plan.py` 在 900 秒上限超时，并定位到一个旧断言仍要求未经过 Finalizer 的失败批次直接发布 `report_ready`。
+- 该断言已按新终态顺序改为 `report_pending`，对应单测通过。
+- 修复后第二轮总门禁运行 1800 秒，仍停留在既有 `test_agent_runtime_phase1.py` 长时路径；输出未出现新的失败，但全门禁没有在时限内结束，因此不得记为总门禁通过。
+- 按测试预算不继续第三次重跑，不把慢测试治理扩入 B5.4。
+
+未验证与边界：
+
+- 真实 LANChat 是否原位更新同一进度事件、同进程是否只有一次 Quasar 服务初始化、用户披露是否严格按 Snapshot/Registry/Consistency/Report 顺序，均为 `[待F5/实机验证]`，在 B7.1/B7.2 验收。
+- B5.1-B5.4 均已达到代码完成，但控制面 P0 只有 B7.1 固定五轮实机通过后才能标记 verified。
+- 历史阻断 `request.b2.2-engine-dto-version` 保留：B2.2a ready，B2.2b deferred_to_B7。
+
+下一唯一主线任务：**B2.2a current-unversioned-v1 严格 fixture**。
+
+## 88. 2026-07-20 B2.2a current-unversioned-v1 严格 fixture 完成
+
+```text
+任务 ID / 状态：B2.2a / code_complete
+执行角色：填充 AI
+contract_status：current-unversioned-v1 strict fixture verified
+production_integration_status：pending B6.2 [待F5/实机验证]
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：unavailable / blocked_by_runtime_control_plane -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- 在 `schema_versions.py` 集中登记 `ENGINE_SNAPSHOT_INPUT_CONTRACT_VERSION=current-unversioned-v1`，未在 Adapter 模块重复声明版本字符串。
+- 新增严格 native Snapshot 输入契约，冻结当前 C++ `get_editor_scene_snapshot_from_python()` 顶层字段、`actor_to_json()` 必填/条件字段、Camera/Geometry/AABB 嵌套字段和 schema fingerprint。
+- 当前 Engine build fingerprint 冻结为 `3d849a9a+patch-0c651bd4`；不匹配 build 直接返回 `engine_snapshot_build_fingerprint_mismatch`。
+- 成功输入必须具有稳定 `actor_guid/entity_id/asset_id/model_ref/source_plan_id/source_batch_id`、正版本、actual world AABB 和显式 render observation；缺失事实不通过别名或默认值猜测。
+- 未知顶层字段、未知 Actor 字段、AABB 缺失、actor/version 不一致和稳定身份缺失均 fail closed。
+- 严格验证通过后才复用现有 `_normalize_scene_snapshot_result()`；未改变生产 Snapshot Provider 的宽兼容入口，本契约将在 B6.2 接入当前 SHA 的只读对账路径。
+
+验证证据：
+
+```text
+strict current fixture：5 passed
+Capability port + strict fixture + collaboration contracts：22 passed
+既有 Snapshot Provider 归一化/scene context/route/count：4 passed
+Python syntax compile：passed
+Schema fingerprint：确定性 sha256
+Skeleton Manifest hash：sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1（不变）
+```
+
+未验证与边界：
+
+- 本任务没有声称 Engine 已提供显式 `input_dto_version`；`request.b2.2-engine-dto-version` 与 B2.2b 继续保留并推迟到 B7 跨 SHA 集成。
+- build fingerprint 由当前集成配置注入，真实 bridge 尚未把该值随 Snapshot 传递；B6.2 只能对当前冻结 SHA 做严格只读对账。
+- current-unversioned-v1 不代表通用旧/新 DTO 兼容，也不允许字段存在性猜版本。
+
+下一唯一主线任务：**B6.3 single_player_demo Gate profile**。
+
+## 89. 2026-07-20 B6.3 single_player_demo Gate profile 完成
+
+```text
+任务 ID / 状态：B6.3 / verified（纯 evaluator）
+执行角色：填充 AI
+production_integration_status：not_connected，等待 B6.1/B6.2
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：unavailable / blocked_by_runtime_control_plane -> evaluator_available / not_evaluated
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- 新增中立强类型 `DemoReadinessRequirement(requirement_id/semantic_role/required_capabilities/min_count)`；Runtime 与协作层均可引用，Runtime 不读取 GameplayLogicPlan。
+- 协作层从任意 `GameplayEntitySlot` 动态派生 requirements；Gate 实现中不存在 `player_spawn/collectible_key/locked_door/goal_zone` 场景硬编码。
+- `evaluate_r3_gate()` 新增 `profile=full_r3|single_player_demo`；默认 `full_r3` 的七维状态和 capability unlock 语义保持不变。
+- 单人 entity readiness 只匹配具有稳定身份、已验证 Game-ready 且满足 capability 的实体，并要求不同 slot 使用不同 entity_id。
+- GateReport metrics 记录 requirements fingerprint、逐 requirement 匹配 entity IDs 和诊断；相同事实产生确定性结果。
+- 单人 multiplayer 维度要求 `project_mode=single_player`、peer count 为 0 且无身份/版本漂移。
+- Single-player Green 只解锁 `single_player_entity_binding/single_player_local_action/single_player_preview`，不解锁多人或完整 R3 capability。
+- `runtime.r3_readiness.evaluate` 接受结构化 profile/requirements/project_mode，调用前后 RuntimeState、OperationLog、ToolGraph 和 PlanPatch 保持不变。
+
+验证证据：
+
+```text
+R3 readiness + single-player profile：27 passed
+Integration contracts + collaboration contracts + ProgramAgent + Gate：67 passed
+动态 role/capability、缺能力、实体不可复用、Full R3 不变、零副作用：passed
+Gate 源码禁用四个场景特定 role 字符串：无匹配
+Python syntax compile：passed
+Skeleton Manifest hash：sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1（不变）
+```
+
+未验证与边界：
+
+- 本任务只证明 evaluator；没有读取真实 Snapshot、没有构造 EntityBindingPlan/ActionProposal，也没有改变 Full R3 Gate。
+- 当前单人 Gate 尚未对生产 Runtime 世界执行，实际状态为 `evaluator_available / not_evaluated`。
+- requirements 必须由后续 ProjectGate/协作入口从已验证 GameplayLogicPlan 派生，禁止聊天文本或显示名称直接构造绑定。
+
+下一唯一主线任务：**B6.1 真实 UserCommand -> DemoRunner 只读接入**。
+
+## 90. 2026-07-20 B6.1 真实 UserCommand -> DemoRunner 只读接入完成
+
+```text
+任务 ID / 状态：B6.1 / code_complete [待F5/实机验证]
+执行角色：填充 AI
+contract_status：只读协作入口与生产兼容 LANChat 路由已验证
+production_integration_status：LANChat/Frontend 实际收发待 B7.1 F5
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：evaluator_available / not_evaluated -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- 新增生产兼容、非执行型 `CollaborationReadOnlyEntry`：正式链路为 `UserCommand -> FrontendBusinessProtocolAdapter -> UserCommandFixture -> DemoScenarioRunner -> Artifact bundle / Preflight / DemoResult -> ProgressEvent`。
+- 入口仅接受 `start_project`；返回结果永久 `executable=False`，不构造 ActionProposal、EntityBindingPlan、PlanPatch、ToolCallGraph，也不写 Engine。
+- `command_id` 相同且内容相同的重放直接复用缓存结果，零新增 Agent 运行和进度事件；相同 ID 不同内容 fail closed。
+- LANChat 只显式识别结构化 `command_type=start_project` 与 `/start_project <goal>`，普通聊天不会被协作入口认领。
+- 结构化命令使用稳定 command/project/scenario ID，产生两条 `action_status`：项目请求受理与 Artifact/Preflight 结果就绪。
+- 命令只产生一条 final reply；同一 `message_id` 重放由 MessageDispatchLedger 拦截，不重复执行、不重复回复。
+- 缺少项目目标时只返回澄清，零 Artifact、零进度事件、零 Runtime/Engine 写入。
+- 协作只读入口本身不 import AgentRuntime、LANChat、Frontend 组件或 C++ 实现；LANChat 仅作为兼容命令接入层。
+
+验证证据：
+
+```text
+CollaborationReadOnlyEntry：5 passed
+LANChat start_project 生产兼容路由：4 passed
+Walking Skeleton：10 passed
+Frontend Adapter：6 passed
+B5.1 消息执行/最终回复去重回归：3 passed
+组合门禁：28 passed
+Python syntax compile：passed
+Skeleton Manifest hash：sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1（不变）
+```
+
+未验证与边界：
+
+- 真实 Frontend 是否发送结构化 `start_project`、C++ LANChat 是否保持 metadata/payload、两条 `action_status` 是否原位正确展示，均为 `[待F5/实机验证]`，在 B7.1 验收。
+- 本任务没有读取真实或 Mock Snapshot；测试 fixture 只进入非执行型 Artifact 链，没有冒充 Runtime 世界事实。
+- Full R3 Gate 保持 Red；Single-player Demo Gate 仍只是 evaluator available，未对生产 Snapshot 执行。
+
+下一唯一主线任务：**B6.2 current Engine Adapter 严格对账**。
+
+## 91. 2026-07-20 B6.2 current Engine Adapter 严格对账完成
+
+```text
+任务 ID / 状态：B6.2 / code_complete [待F5/实机验证]
+执行角色：填充 AI
+contract_status：current-unversioned-v1 strict reconciliation verified
+production_integration_status：当前 SHA integration_ready；真实 C++ reader/capability 输出待 B7.2 F5
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：evaluator_available / not_evaluated -> evaluator_available / awaiting_current_engine_f5
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+公共 Skeleton 接口变化：无
+```
+
+完成断点：
+
+- 新增 `make_current_unversioned_v1_scene_snapshot_reader()`：当前 build 的 native Snapshot 必须先经过严格字段/build/actual fact 校验，再进入既有 Runtime 归一化。
+- 新增 `CurrentEngineAdapterReconciler`，只读组合 Engine capability manifest 与严格 Snapshot；输出 capability、input/schema/build fingerprint、稳定 `plan_id + scene_version` 和归一化 Snapshot。
+- 对账要求 Engine 明确支持 `scene_snapshot.read`、`actual_aabb`、`render_ready`；缺任一项时在读取 Snapshot 前 fail closed。
+- 当前 Snapshot 的所有 Actor 必须共享一个 `source_plan_id` 和一个 `source_scene_version`；actor/entity identity 不得重复。
+- unknown field、build mismatch、缺 actual AABB/render observation、plan/version drift 和 identity drift 均返回结构化 `BlockedResult`，不使用默认值或别名猜测事实。
+- 语义 scene name 与 native scene route 分离；严格 reader 只把显式 `scene_route` 传给 C++，避免只读对账触发场景反复 reload。
+- 对账结果永久 `executable=False`；未新增 EngineWriteGate、RuntimeCppBridge 或任何公共写方法。
+
+验证证据：
+
+```text
+Current Engine reconciliation + strict fixture：9 passed
+Capability port + R3/single-player Gate + Walking Skeleton + Snapshot identity/render 回归：52 passed
+未知字段/build、缺 capability、plan/version/entity drift：全部 fail closed
+Python syntax compile：passed
+Skeleton Manifest hash：sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1（不变）
+```
+
+未验证与边界：
+
+- 当前 Engine 仍未提供显式 `input_dto_version`；B2.2b 继续推迟到跨 SHA 集成，不把 current-unversioned-v1 宣称为通用契约。
+- 真实 capability manifest 是否包含三项 observation operation、native Snapshot 是否精确匹配冻结字段/build fingerprint，均为 `[待F5/实机验证]`。
+- 本任务没有把严格对账结果写入 RuntimeState，也没有执行 Single-player Demo Gate；真实 Gate 仍保持 Red。
+
+下一唯一主线任务：**B7.1 控制面 F5 证据包**。
+
+## 92. 2026-07-20 B7.1 控制面 F5 证据包完成
+
+```text
+任务 ID / 状态：B7.1-evidence / verified（自动探针）
+实机任务状态：B7.1 / ready_for_f5 [待F5/实机验证]
+执行角色：填充 AI
+Full R3 Gate：red / pending_reevaluation
+Single-player Demo Gate：evaluator_available / awaiting_current_engine_f5
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+```
+
+完成断点：
+
+- `r3_f5_log_check.py` 新增独立 `--profile control-plane`，B7.1 不再被 Scene Runtime/R3 Gate 结果混淆。
+- 固定检查计划中的五轮原始对话，缺失、重复或临时改写任一轮均 fail closed。
+- 每轮要求恰好一个 processing owner、一条 final reply、正确目标 Agent 和显式 `LANChatModelCallSummary`。
+- 模型预算固定为：讨论/方案消息最多 1 次；确认消息 0 次。
+- 确认消息必须能观察到稳定 plan/artifact 引用；同时复用重复回复、目标权威、heartbeat、实体片段、Quasar 根、编码和诊断披露检查。
+- 新增 `docs/probes/B7.1控制面F5验收包.md`，冻结执行前提、五轮输入、唯一命令、通过口径和推进记录回写字段。
+
+验证证据：
+
+```text
+B7.1 probe 单元测试：6 passed
+历史 2026-07-19 fixture：可自动判定固定轮次缺失及既有控制面失败
+显式 0-call LANChatModelCallSummary：可被识别为 explicit
+Python syntax compile：passed
+```
+
+当前硬边界：
+
+- 代码侧已到真实 F5 边界；在取得新 log/history 前不得标记 B7.1 verified，也不得进入 B7.2。
+- 下一次 F5 只执行控制面五轮，不同时扩大到最小 Scene Runtime 或完整玩法 Demo。
+- 若摘要不是 `B7_1_CONTROL_READY`，只修对应 control check，不修改 B6.4 或玩法执行链。
+
+下一动作：按 `docs/probes/B7.1控制面F5验收包.md` 执行 F5，并提供本次 `_corona.log` 与 LANChat `history.jsonl`。
+
+## 93. 2026-07-20 B6.4 契约层完成与 Runtime 传输接口变更请求
+
+```text
+任务 ID / 状态：B6.4-contracts / code_complete
+Runtime submit 状态：interface_change_required
+执行角色：填充 AI
+Full R3 Gate：red / pending_reevaluation
+Single-player Demo Gate：evaluator_available / awaiting_current_engine_f5
+Skeleton contract version/hash：r3-skeleton-week1-v4 / sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1
+InterfaceChangeRequest：request.b6.4-gameplay-plan-patch-payload
+```
+
+完成断点：
+
+- 新增 `GameplayEntityBinding`、`GameplayManifest` 和 `ActionProposal` 强类型契约；版本常量集中登记在 `schema_versions.py`。
+- `GameplayManifest` 只接受 `on_enter/on_collect/set_state/unlock/complete_objective`，拒绝未知 primitive、未知参数、未绑定 slot、重复 entity 和不一致 objective。
+- `EntityBindingPlan` 的 binding 行现在强制包含 `slot_id/entity_id/entity_version/asset_id/semantic_role/required_capabilities`，并拒绝未知字段、重复 slot 和重复 entity。
+- `ActionProposal` 构造阶段实际调用 `assert_executable()`；Mock、non-executable、非 runtime Snapshot、stale world version、Red Gate 和错误 execution scope 均无法构造。
+- 新增 `ProjectGateService`：真实检查 Artifact schema/content hash/status/dependency、Snapshot plan/version/fingerprint/Game-ready、实体 ID/version/asset/role/capability 和 single-player Gate unlock。
+- 合法纯契约输入可确定性形成 `GameplayManifest` 与 `ActionProposal(operation=gameplay.apply_manifest, execution_scope=single_player_local)`；该结果只表示提交资格，不表示 Runtime 或 Engine 已执行。
+- 协作层新模块不 import AgentRuntime、LANChat、RuntimeGuard、EngineWriteGate 或 RuntimeCppBridge；没有新增生产写入口。
+
+验证证据：
+
+```text
+B6.4 ProjectGate/ActionProposal 正常与失败路径：6 passed
+Contracts/ArtifactRegistry/ProgramAgent/Five Artifact/Skeleton 回归：61 passed
+Mock 构造 ActionProposal：硬拒绝
+Red/stale/needs-review/未知 primitive：结构化 blocked 或 invalid
+Python syntax compile：passed
+Skeleton Manifest hash：sha256:e60094df4323164cf2461f670e9a0bfafd18ba6cfbf3c67762ea3c09304fc7a1（不变）
+```
+
+接口阻断：
+
+- 现有 `PlanPatch` 仅有文本和字符串 `items`，没有承载结构化 `GameplayManifest` 的字段或批准的 payload reference。
+- 将 Manifest 编码进 `text/items` 会破坏强类型契约、审计能力和 RuntimeGuard 边界，禁止采用。
+- 已生成 `request.b6.4-gameplay-plan-patch-payload`，要求架构 AI 决定结构化 gameplay payload 如何从 ActionProposal 进入 PlanPatch/ToolCallGraph。
+- 在该请求决策前，不得注册 `gameplay.apply_manifest` 生产 ToolDefinition，也不得声称 B6.4 Runtime submit code_complete。
+
+保留阻断：
+
+- `request.b2.2-engine-dto-version` 继续存在，未被覆盖或清除。
+- B7.1 控制面 F5 证据包已经 ready；B7.2/B7.3 证据包尚未落盘，因为本轮触发冻结接口硬停止条件。
+
+下一动作：架构 AI 审批、拒绝或改写 `request.b6.4-gameplay-plan-patch-payload`；决策前停止后续运行时接线。
+
+## 94. 2026-07-20 B6.4 PlanPatch v5 接口变更与 Runtime 提交链完成
+
+```text
+任务 ID / 状态：B6.4-runtime-submit / code_complete [待F5/实机验证]
+执行角色：架构 AI
+InterfaceChangeDecision：accepted / request.b6.4-gameplay-plan-patch-payload
+contract_status：versioned PlanPatch + guarded Runtime submit verified
+production_integration_status：provider_not_injected / blocked_by_B7.2
+Full R3 Gate before / after：red / pending_reevaluation -> 无变化
+Single-player Demo Gate before / after：evaluator_available / awaiting_current_engine_f5 -> 无变化
+Skeleton contract version/hash：r3-skeleton-week1-v5 / sha256:ba41ac25b17559369fb79778fbaa061adf74d543c9f8262dd6dd8f34de2b98c8
+```
+
+完成断点：
+
+- 接受并记录 `request.b6.4-gameplay-plan-patch-payload`；Skeleton 从 v4 升至 v5，Manifest 明确登记 `ActionProposal`、`GameplayManifest` 和完整 `PlanPatch` 公共字段。
+- `PlanPatch` 新增 `patch_type=gameplay_manifest_apply`、`payload_schema_version`、`structured_payload`、`payload_hash`、`proposal_id`，旧文本型 Patch 缺少这些字段时仍可读取、恢复和回放。
+- `structured_payload` 由 Runtime 独立执行严格 schema、白名单 primitive、未知字段、entity slot、objective 和 canonical SHA-256 校验；不能只信任协作层 Validator。
+- `ActionProposal` 的幂等身份统一为 `command_id + payload_hash`；同一已提交请求重放时零新增 PlanPatch、业务 ToolGraph 和 Engine manifest apply。
+- 新代码路径为 `ActionProposal -> versioned PlanPatch -> business_action ToolCallGraph -> RuntimeGuard -> gameplay.apply_manifest -> EngineWriteGate/RuntimeCppBridge -> StatePatch receipt`。
+- `make_engine_gameplay_manifest_provider()` 在 EngineWriteGate 前检查 capability manifest；缺少 `gameplay.apply_manifest`、缺少任一白名单 primitive 或缺少 Engine tool 时 fail closed。
+- 默认 AgentRuntime 在没有真实 gameplay provider 时不注册 `gameplay.apply_manifest`，提交返回 blocked，且零 PlanPatch、零 ToolGraph、零 Engine 写入；因此未越过 B7.2 激活门槛。
+- 成功 receipt 只记录稳定 proposal/hash/idempotency/status 事实，不把原始 Engine payload 或任意脚本写入 RuntimeState。
+
+接口变更重验：
+
+```text
+旧 v4/hash 消费者：stale / revalidation_required
+B0.4 Walking Skeleton + public Manifest/hash：passed
+协作层 Runtime/Frontend/C++ import isolation：passed
+legacy PlanPatch compatibility：passed
+normal gameplay PlanPatch + canonical hash：passed
+hash tamper / unknown primitive：blocked
+RuntimeGuard + EngineWriteGate spy：passed
+same command_id + payload_hash replay：zero duplicate business graph/apply
+missing provider / unadvertised capability：fail closed
+聚焦回归：82 tests passed
+Python syntax compile：passed
+```
+
+未验证与边界：
+
+- 真实 Engine capability manifest 是否广告 `gameplay.apply_manifest` 和五项 primitive、C++ gameplay tool 是否返回稳定 receipt，均为 **[待 F5/实机验证]**。
+- 当前未把 provider 注入 LANChat/F5 生产 Runtime；B7.2 最小 Scene Runtime F5 和 Single-player Gate Green 前不得激活。
+- `request.b2.2-engine-dto-version` 继续保留，未被本次 PlanPatch 变更覆盖。
+- B7.3 仍需两个独立 Session，并在 Session A 内验证相同 command/hash 重放零重复。
+
+下一动作：执行 B7.1 控制面 F5；不依赖实机结果的并行任务为准备 B7.2 Scene Runtime 和 B6.4 gameplay write receipt 验收包。
+
+## 95. 2026-07-20 单人垂直切片 F5 边界证据包收口
+
+```text
+任务 ID / 状态：B7-evidence-packages / verified（文档与代码位置核对）
+执行角色：架构 AI
+contract_status：M1/M2/M5 non-F5 work exhausted
+production_integration_status：awaiting staged F5
+Full R3 Gate：red / pending_reevaluation
+Single-player Demo Gate：evaluator_available / not_evaluated
+Skeleton contract version/hash：r3-skeleton-week1-v5 / sha256:ba41ac25b17559369fb79778fbaa061adf74d543c9f8262dd6dd8f34de2b98c8
+```
+
+新增证据包：
+
+- `docs/probes/B7.2最小SceneRuntime_F5验收包.md`：固定 `room_box + room_floor + 1 actor`，核对身份、actual AABB、render observation、Registry/Snapshot/Finalizer 和终态顺序。
+- `docs/probes/B6.4Gameplay写入回执_F5验收包.md`：核对 capability manifest、versioned PlanPatch、RuntimeGuard、EngineWriteGate、receipt 与同 command/hash 零重复。
+- `docs/probes/B7.3单人垂直切片双Session_F5验收包.md`：两个独立 Session 各完成 40-50 秒流程，并在 Session A 内执行一次同 command/hash 重放。
+
+当前任务审计：
+
+```text
+B5.1-B5.4：code_complete [待F5]
+B2.2a：code_complete
+B6.3：verified（纯 evaluator）
+B6.1-B6.2：code_complete [待F5]
+B6.4 contract/runtime submit：code_complete [待F5]
+B7.1/B7.2/B6.4 receipt/B7.3：证据包 ready，等待分阶段 F5
+```
+
+未解决 blocked：
+
+- `request.b2.2-engine-dto-version`：等待 Engine 显式 input DTO version，仅阻断跨 SHA 最终集成。
+- B7.1：等待控制面五轮 F5。
+- B7.2：等待最小 Scene Runtime F5。
+- B6.4 production activation：等待 B7.2 通过、single-player Gate Green 和真实 gameplay capability/tool。
+- B7.3：等待前述门槛通过后执行两个独立 Session。
+
+边界结论：
+
+- 当前没有剩余可独立推进的非 F5 代码任务；继续修改将依赖尚未观察到的真实 Engine/Frontend 事实。
+- 单人切片已达到“代码层 integration-ready，只差分阶段 F5 与真实 Engine gameplay receipt”的状态，但尚未达到实机 verified。
+- 原连续目标中的 `fd65...` 基准已被用户批准的 B6.4 公共接口变更替代；当前权威 hash 为 v5 `ba41...`，旧 v4 消费者已标 stale 并完成重验。
+
+下一动作：严格先执行 `docs/probes/B7.1控制面F5验收包.md`；通过后依次执行 B7.2、B6.4 write receipt、B7.3，不合并为一次长跑。
+
+## 96. 2026-07-20 B7.1 固定五轮控制面 F5 失败校准
+
+```text
+任务 ID / 状态：B7.1-F0 / verified（失败证据已固化）
+执行角色：架构 AI
+B7.1：blocked / control_plane_f5_failed
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v5 / sha256:ba41ac25b17559369fb79778fbaa061adf74d543c9f8262dd6dd8f34de2b98c8
+```
+
+实机证据：
+
+```text
+log：build/examples/engine/RelWithDebInfo/logs/2026-07-20_12-54-21_corona.log
+history：build/examples/engine/RelWithDebInfo/Saved/LANChat/history/single-default__session__1784523561529__1.jsonl
+probe：B7_1_CONTROL_BLOCKED / PASS=10 WARN=0 FAIL=5
+失败检查：
+  control-target-authority
+  control-single-processing-owner
+  control-finalizer-disclosure-order
+  control-quasar-import-root
+  b7.1-turn-contract
+```
+
+五轮诊断摘要：
+
+| 轮次 | 路由/owner 事实 | final reply | 模型调用 | 方案引用与结果 |
+|---|---|---|---|---|
+| `@小女孩 围绕迪士尼乐园主题讨论一下` | Native Queue 先更新 `seed-91cc7143f47c`，Agent Trigger 再处理回复 | 1，小女孩 | 0 | 回复引用无关 `plan-6099e4ac` |
+| `@小女孩 按照迪士尼风格的卧室来设计呢` | Native Queue 与 Agent Trigger 均参与业务处理 | 1，固定 Runtime 警告 | 1 | 模型结果未形成可确认方案，缺稳定 artifact ref |
+| `@GM 确认生成` | Native GM 路由被去重 | 0，仅 action status | 0，但缺显式 summary | 返回“当前没有可确认事项” |
+| `@长者 请你给出一个方案` | Native Queue 仍触碰 SeedPlan，Agent Trigger 产出方案 | 1，长者 | 0 | 方案为 `plan-b42d336d` |
+| `@长者 确认开始` | 实际进入 Runtime 生成 | 1，但 sender 为系统 | 0 | 执行文本引用 `plan-b42d336d`，Runtime 新建 `plan-21b28a665a24` |
+
+终态与启动问题：
+
+- 用户可见顺序出现 `report_ready -> 后续内部调用 -> scene_snapshot_refreshed`，同版本终态披露不可信。
+- 同进程同时初始化 `Quasar` 与 `plugins.AITool.Quasar`，AI 配置、媒体注册表和路径单例存在分裂风险。
+- 底层执行仍有正向证据：3/3 业务 Batch、3/3 业务 ToolGraph、54/54 业务节点、Engine bridge 16/16、9 个 reported Game-ready；因控制面与终态失败，不作为 B7.2 或 R3 Green 证据。
+
+下一唯一主线：`B7.1-F1 入口单一认领`。修复顺序固定为 F1 消息 owner -> F2 方案身份/确认事务 -> F3 回复契约 -> F4 终态披露 -> F5 Quasar 单根 -> F6 probe/组合门禁；在新的五轮 F5 输出 `B7_1_CONTROL_READY` 前不得进入 B7.2。
+
+## 97. 2026-07-20 B7.1 控制面失败修复代码收口
+
+```text
+任务 ID / 状态：B7.1-F1..F6 / code_complete [待F5/实机验证]
+执行角色：架构 AI
+B7.1：repair_code_complete / ready_for_f5
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v5 / sha256:ba41ac25b17559369fb79778fbaa061adf74d543c9f8262dd6dd8f34de2b98c8（不变）
+```
+
+完成断点：
+
+- 显式非 GM Agent 的 Native Queue 副本在 ConversationTurnContext、Coordinator、SeedPlan、Runtime 和生成配置修改前退出；正式执行 owner 由 `MessageDispatchLedger.claim_execution()` 记录。
+- GM Native 路径在业务副作用前 claim；同消息 Agent Trigger 重放只命中 dedupe，零重复 final reply、零重复 Runtime enqueue。
+- 方案外部身份统一为 `proposal_id == agent_plan_id`、`artifact_ref=legacy-plan:<proposal_id>`；Runtime `external_plan_links[artifact_ref]` 显式指向内部 `runtime_plan_id`。
+- 普通讨论不创建 Runtime ScenePlan；`plan_drafting` 即使 UI metadata 为 `draft_action=chat`，仍产出正式规划方案并绑定稳定 artifact。
+- 确认改为 `pending -> confirming -> confirmed/pending` 事务；Runtime enqueue 失败时方案恢复 pending，不会被提前消费。
+- GM 唯一方案确认由 GM final reply；显式 Agent 确认由目标 Agent final reply。回复 metadata 增加 `proposal_id/agent_plan_id/artifact_ref/runtime_plan_id/reply_contract/resolved_intent`。
+- RuntimeEvent 披露改为每房间 event-id 游标和串行锁；重叠 watcher 不重复发送，终态事件不再截断为最后三条。
+- `scene_snapshot_refreshed` 携带 `plan_id + scene_version`；同版本 `report_ready` 后若观察到终态前置事件，记录 `runtime_event_disclosure_terminal_violation` 并阻止错误披露。
+- Editor warmup 与 Worker 生产路径统一使用 canonical `Quasar`；删除 plugin-qualified fallback 和双命名空间同步，canonical 不可用时 fail closed。
+- 控制面 probe 改为读取 Ledger 正式 owner，新增 `control-native-defer-zero-mutation`，并校验 `reply_contract + resolved_intent`；旧 2026-07-20 实机证据仍稳定输出 blocked，typed 五轮 fixture 输出 ready。
+
+验证证据：
+
+```text
+B7.1 控制面/方案/终态/Quasar/probe 聚焦组合：26 passed
+RuntimeActionIntent：11 passed
+Native GM owner + Agent Trigger replay：1 passed
+合计聚焦证据：38 passed
+Python syntax compile：passed
+旧 2026-07-20 log/history 更新后 probe：B7_1_CONTROL_BLOCKED / PASS=10 WARN=0 FAIL=6
+固定五轮 typed fixture：B7_1_CONTROL_READY / WARN=0 FAIL=0
+verify_ultimate_plan.py：运行一次，900 秒超时；仅输出连续通过点，无断言失败，未完整结束
+```
+
+未验证与边界：
+
+- C++ Native Queue 与 Agent Trigger 的真实线程时序、Frontend metadata 保留、同进程 Quasar 单根初始化和 Finalizer 用户披露顺序仍为 **[待F5/实机验证]**。
+- 旧日志不会因代码修复变为通过证据；必须使用全新独立 Session 重跑固定五轮。
+- B7.2、Gameplay write receipt 和 B7.3 继续阻断，不因自动测试通过提前解锁。
+
+下一动作：严格按 `docs/probes/B7.1控制面F5验收包.md` 使用全新 Session 原样执行五轮对话；只有真实 log/history 的 probe 输出 `B7_1_CONTROL_READY` 且 WARN/FAIL 均为 0，才将 B7.1 标记 verified 并进入 B7.2。
+
+## 98. 2026-07-20 C1-C5 真实讨论、三职能协作与严格媒体链代码收口
+
+```text
+任务 ID / 状态：C1-C5 / code_complete [待F5/实机验证]
+执行角色：架构 AI
+B7.1：blocked / ready_for_retest
+B7.2：code_complete / blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd
+```
+
+完成断点：
+
+- `ConversationPhase` 已建立；讨论/问候不再创建 Proposal 或 Runtime ScenePlan，方案请求进入正式三职能 Coordinator。
+- 生产依赖固定为 `Planning -> Program logic -> Art`，五个强类型 Artifact 由 GM 单一汇总回复；旧 persona 只保留兼容 sender。
+- 方案和确认统一携带 `proposal_id/proposal_version/proposal_hash/artifact_refs`；修订递增版本，确认事务只消费当前匹配 hash 的 pending proposal。
+- Skeleton 因 Program 公共接口和节点依赖变化升至 v6；旧 v5 下游视为 stale，v6 Walking Skeleton 已重验。
+- F5 默认启用真实 image provider 和 strict image-to-model；缺图、Mock 图、hash 不符或 `text_to_3d` 降级均 fail closed。
+- Runtime 新增只读 `R3MediaLineageTrace`，逐实体披露图片 ref/hash、模型 source image ref/hash 和 Engine Actor 事实，供 B7.2 自动探针核验。
+- Finalizer 增加同世界锁与 `plan_id + scene_version + fingerprint` 短路；重复 watcher/后续聊天不得增加终态事件或 internal graph。
+- B7.1 probe 升级为五个业务回合加一个问候探针；B7.2 新增独立 `scene-runtime` profile。
+
+验证证据：
+
+```text
+C1-C5 + B7.1/B7.2 probe 聚焦组合：55 passed
+B7.1 六消息 typed fixture：B7_1_CONTROL_READY / WARN=0 / FAIL=0
+B7.2 严格媒体 fixture：B7_2_SCENE_READY / WARN=0 / FAIL=0
+旧 18:30 F5 控制面：B7_1_CONTROL_BLOCKED / PASS=12 / WARN=0 / FAIL=4
+旧 18:30 F5 Scene Runtime：B7_2_SCENE_BLOCKED / PASS=2 / WARN=0 / FAIL=4（无 R3MediaLineageTrace）
+```
+
+未验证与边界：
+
+- 真实 Reasoner 是否针对讨论/问候作答、Frontend 是否完整保留版本化 metadata，仍为 `[待F5/实机验证]`。
+- 真实图片 Provider 是否返回可用图片路径、模型 Provider 是否执行 `image_to_3d`、Actor 是否携带匹配血缘，仍为 `[待F5/实机验证]`。
+- B7.1 未通过前不得用 B7.2 自动测试解锁 Gameplay provider、EntityBindingPlan 或 B7.3。
+
+下一动作：按 `docs/probes/B7.1控制面F5验收包.md` 在全新 Session 严格执行六条固定消息；通过后立即按 `docs/probes/B7.2最小SceneRuntime_F5验收包.md` 执行最小真实媒体链 F5。
+
+## 99. 2026-07-20 D1-D5 方案权威、真实三职能与媒体链修复收口
+
+```text
+任务 ID / 状态：D1-D5 / code_complete [待F5/实机验证]
+执行角色：架构 AI
+B7.1：blocked / control_plane_contract_failed
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+完成断点：
+
+- 生产方案链改为四次独立、无工具模型调用：`planning_artifact_reasoning -> program_artifact_reasoning -> art_artifact_reasoning -> collaboration_proposal_narration`；强类型或 hash 校验失败立即停止，不创建可确认 pending proposal。
+- `gm_proposal` 使用唯一 `proposal_id + proposal_version + proposal_hash`，并携带 `reply_to/origin_message_id/origin_correlation_id/reply_contract`；Runtime 外部执行键改为 `proposal_id@version:hash`，不再按稳定 legacy artifact ref 复用旧计划。
+- 无语义变化的修订不升版本；有效修订使用同一 proposal ID、递增版本、版本化 Artifact refs 和 supersedes 关系。
+- 讨论/问候改走直接聊天模型，只读取当前消息、目标 Agent 和累计项目目标；不注入 Runtime 报告、旧 plan ID 或失败诊断。
+- `generate_image` 的 `llm_content[].part[].content_url=fileid://...` 已接入 MediaRegistry resolver；图片 hash 只接受实际字节或 Provider 权威 hash，并输出明确失败码。
+- 模型和 Actor 导入前均校验 `generation_mode=image_to_3d` 及 source image ref/hash；缺图、超时、解析失败、缺 hash 或血缘不一致均 fail closed。
+- Finalizer 增加 `plan_id + scene_version + snapshot_fingerprint + terminal_status` 终态键；已持久化失败/完成终态不会因后续问候、讨论或查询再次生成 Finalizer 图。
+- 同一 proposal 的可见进度使用稳定 event ID 原位更新，策划、程序、美术和 GM 阶段使用不同文案；B7 probe 支持合法 `gm_proposal`、连续空白规范化、四类 purpose、提示词泄露、终态键重复和图片失败码检查。
+
+验证证据：
+
+```text
+D1-D5 + Runtime/Probe 聚焦组合：63 passed
+Track B 协作层：108 passed
+入口/上下文/媒体/Probe：35 passed
+关键确认事务与终态披露：8 passed
+受影响 Runtime Phase1 媒体用例：3 passed
+Python syntax compile：passed
+Skeleton v6 hash：保持 6144cabd...e1cd
+```
+
+未验证与边界：
+
+- `test_agent_runtime_phase1` 全模块在 180 秒预算内超时，仅运行到 31 个通过点，未完整结束；本轮只将受影响媒体用例单独闭环，不声明全量门禁通过。
+- 真实模型是否稳定返回四个 schema、Frontend 是否按稳定 event ID 原位更新、MediaRegistry 是否能在 F5 中解析真实 fileid、Hunyuan 是否接受解析后的图片输入，均为 `[待F5/实机验证]`。
+- 旧 22:18 日志仍是失败证据，不因代码修复改写为通过；B7.1/B7.2/Full R3 状态保持 blocked/red。
+
+下一动作：使用全新独立 Session 原样执行 B7.1 六条消息。只有 probe 输出 `B7_1_CONTROL_READY / WARN=0 / FAIL=0`，才进入 B7.2 最小真实媒体链 F5。
+
+## 100. 2026-07-21 E0-E4 三职能契约与控制面修复收口
+
+```text
+任务 ID / 状态：B7.1-E0..E4 / code_complete [待F5/实机验证]
+执行角色：架构 AI
+B7.1：blocked / collaboration_program_contract_failed
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+完成断点：
+
+- `CollaborationReasoningError` 现在携带 `stage/error_code/field_path/safe_summary/response_hash`；生产日志不再只记录异常类型，也不记录原始提示词或模型原文。
+- Gameplay primitive 参数、capability、必填参数和无环规则提取为 Validator/Prompt 共用 Manifest；Program Reasoner 使用通过真实 Validator 的 `key -> door -> goal` 示例。
+- 稳定错误码覆盖非法 JSON、缺字段、未知 slot、非白名单 primitive、capability 不匹配、非法参数、重复 ID 和循环引用。
+- 协作模型选择保持可插拔，默认 `deepseek/deepseek-v4-pro`；Planning/Program/Art 使用 `json_object`，讨论与 GM Narrator 使用文本模式，结构化模式不可用时 fail closed。
+- Walking Skeleton 增加内部 stage observer；策划/程序/美术完成后实时更新同一 ProgressEvent，失败阶段标 blocked，后续阶段标 not_started；公共 Protocol/hash 未改变。
+- Coordinator 保存 `CollaborationAttemptReport`；状态查询最多六行展示四阶段状态，不再倾倒 Runtime 内部诊断。
+- `@GM 让@小女孩 给我一个方案` 进入正式 Coordinator；完全相同的成功请求复用当前 Proposal，零额外模型调用、零版本增长。
+- Narrator 失败时标记 narration blocked，并撤销候选 Proposal；不会留下用户不可见但可被确认的 pending 方案。
+
+验证证据：
+
+```text
+E0-E4 生产 Reasoner/Coordinator/LANChat/模型策略聚焦：38 passed
+Track B 协作层：116 passed
+协作入口/只读入口/模型预算/意图组合：30 passed
+B7.1/B7.2 probe 单元测试：10 passed
+Python syntax compile：passed
+旧 2026-07-21 01:10 log/history：B7_1_CONTROL_BLOCKED / PASS=11 WARN=1 FAIL=4（历史证据保持不变）
+六轮只读回归 fixture：docs/probes/fixtures/2026-07-21_b7_1_three_role_conversation.json
+```
+
+未验证与边界：
+
+- `deepseek-v4-pro` 是否接受 `response_format=json_object`、是否连续返回四份可校验结果，仍为 `[待F5/实机验证]`。
+- Frontend 是否按稳定 event ID 原位更新四阶段进度、真实日志是否包含四类 purpose 和版本化 Proposal metadata，仍为 `[待F5/实机验证]`。
+- 本轮没有进入图片、模型、Actor、GameplayManifest 或 Engine 写链；B7.2 继续由 B7.1 阻断。
+
+下一动作：使用全新独立 Session 执行 B7.1 六消息验收；必须观察 `provider=deepseek model=deepseek-v4-pro`、四类 purpose、单 final reply、稳定 Proposal identity 和零 Runtime 诊断倾倒，探针达到 READY 后再进入 B7.2。
+
+## 101. 2026-07-21 E5.0 最新 F5 校准与修复入口
+
+```text
+任务 ID / 状态：B7.1-E5.0 / verified（失败证据已固化）
+执行角色：架构 AI
+B7.1：blocked / collaboration_art_contract_failed
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+实机证据：
+
+```text
+日志：build/examples/engine/RelWithDebInfo/logs/2026-07-21_02-54-38_corona.log
+discussion：deepseek/deepseek-v4-pro，1 次 agent_visible_reasoning，成功
+planning：completed
+program：completed
+art：blocked / gameplay_roles_missing / scene_composition_plan.entity_requirements
+narration：not_started
+proposal/runtime/media/actor：未进入
+```
+
+校准结论：
+
+- E0-E4 的自动契约验证结论保留；本轮 F5 证明程序契约已跨过，但美术模型没有稳定复述程序权威 semantic roles。
+- 单消息认领和单 final reply 在本轮三条消息中未观察到重复；DeepSeek 未回退 GPT，也没有连接错误。
+- Program 调用持续约 211 秒，暴露默认 SDK 重试使 90 秒配置没有形成单阶段硬预算；方案状态查询同时被 Coordinator 长锁阻塞。
+- Red 期间继续禁止 ActionProposal、EntityBindingPlan、ToolGraph、真实或 Mock Snapshot 输入和 Engine 写入。
+
+下一唯一任务：`E5.1 semantic_role 权威传递与美术 Artifact 组装`。
+
+## 102. 2026-07-21 E5.1 semantic_role 权威传递完成
+
+```text
+任务 ID / 状态：B7.1-E5.1 / code_complete
+B7.1：blocked / collaboration_art_contract_failed
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+- GameplayLogicPlan Validator 新增 semantic_role 唯一性检查。
+- Art Reasoner 从已验证 slot 构建有序角色 Manifest；最终 `entity_requirements` 和逐角色 `image_prompts` 由系统权威组装。
+- 美术模型只产出 ArtDirection、场景环境/布局、全局视觉提示和可选角色视觉覆盖；未知角色和缺失全局提示 fail closed。
+- 聚焦验证：Production Reasoners + LANChat Collaboration Proposal，20 passed。
+
+下一唯一任务：`E5.2 非阻塞 Coordinator 与实时 AttemptReport`。
+
+## 103. 2026-07-21 E5.2 非阻塞 Coordinator 完成
+
+```text
+任务 ID / 状态：B7.1-E5.2 / code_complete
+Collaboration schema version：1.2
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+- `create_proposal()` 只在状态预留和最终提交阶段持锁，三职能模型调用在锁外运行。
+- AttemptReport 从 Planning `in_progress` 开始，Stage Observer 实时推进 completed/in_progress/blocked/not_started。
+- 同项目已有 inflight 尝试时返回 `collaboration_in_progress`，不启动第二条模型链。
+- 状态查询可在模型任务阻塞期间立即读取；聚焦并发测试验证读取耗时低于 0.2 秒。
+- Coordinator/LANChat/schema 聚焦验证：15 passed。
+
+下一唯一任务：`E5.3 DeepSeek 零重试、90 秒预算与调用审计`。
+
+## 104. 2026-07-21 E5.3 DeepSeek 调用预算收口
+
+```text
+任务 ID / 状态：B7.1-E5.3 / code_complete
+协作阶段预算：90 秒 / max_retries=0
+```
+
+- `CollaborationModelSelection` 增加 `max_retries`，默认协作策略固定为 0。
+- Quasar chat model 构造支持调用方覆盖重试次数；非协作调用继续保留默认 2 次重试。
+- LANChat 模型调用日志增加 output_mode、timeout、max_retries、elapsed_ms、result 和 error_code。
+- Timeout 映射为 `collaboration_stage_timeout`，同一职能只产生一次 Provider 调用。
+- 模型策略/LANChat/Coordinator 聚焦验证：20 passed。
+
+下一唯一任务：`E5.4 GM 回复、ProgressEvent 与 B7.1 Probe 对齐`。
+
+## 105. 2026-07-21 E5.4-E5.5 控制面代码收口
+
+```text
+任务 ID / 状态：B7.1-E5.4..E5.5 / code_complete [待F5/实机验证]
+B7.1：blocked / repair_code_complete / pending_independent_f5
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Collaboration schema version：1.2
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+完成断点：
+
+- 讨论和问候继续由显式 persona 回复；正式方案、协作状态、协作失败与 Red Gate 确认阻断统一由 GM 回复。
+- Stage Observer 现在披露 planning/program/art/narration 的 in_progress、completed 和 blocked；not_started 只保留在 AttemptReport，避免覆盖用户可见根因。
+- Full R3 Red 时，结构化方案确认只核对 ID/version/hash/artifact refs，返回 `runtime_write_blocked` 并保留 pending proposal；旧非协作 Runtime 路由不受此开关影响。
+- B7.1 Probe 要求每个方案四类 purpose、四条 ModelCallResult、单阶段不超过 90 秒、方案累计不超过 180 秒；确认固定零模型调用。
+- F5 执行默认仍不启用 `AGENT_RUNTIME_ENABLE_COLLABORATION_WRITE`；B7.2 和 Single-player Gate Green 前不得打开。
+
+验证证据：
+
+```text
+E5 Track B 协作层：134 passed
+控制面/模型预算/意图/Probe：47 passed
+受影响 Runtime Guard：5 passed
+E5 重点组合：56 passed
+Python syntax compile：passed
+verify_ultimate_plan.py：运行一次，900 秒超时；134 个连续通过点，无断言失败，未完整结束
+```
+
+未验证与边界：
+
+- `deepseek-v4-pro` 是否在真实网络下连续完成四阶段且单阶段低于 90 秒，仍为 `[待F5/实机验证]`。
+- Frontend 是否对同一 event ID 原位更新四阶段进度、状态查询是否在实机线程中低于 1 秒，仍为 `[待F5/实机验证]`。
+- B7.1 未通过前不进入图片、模型、Actor、Finalizer、GameplayManifest 或 B7.2 修改。
+
+下一唯一任务：按 `docs/probes/B7.1控制面F5验收包.md` 使用全新 Session 原样执行六条消息；只有 `B7_1_CONTROL_READY / WARN=0 / FAIL=0` 才进入 B7.2。
+
+## 106. 2026-07-21 E6 程序契约、硬超时与协作状态收敛
+
+```text
+任务 ID / 状态：B7.1-E6.0..E6.5 / code_complete [待F5/实机验证]
+B7.1：blocked / collaboration_program_contract_failed / pending_independent_f5
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Skeleton contract version/hash：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+完成断点：
+
+- 已固化 `2026-07-21_04-20-32` log/history。更新后的 Probe 可稳定重现重复 semantic role、260770ms 阶段超时、旧 Runtime 诊断倾倒、固定六轮不完整和控制面对 Runtime 的上下文污染。
+- Program 生产 Reasoner 改用 `entity_roles` 映射作为模型输出；semantic role 经过规范化格式和唯一性校验，系统再组装公共 `GameplayLogicPlan.entity_slots`。重复 slot、role 和 primitive 分别产生稳定错误码。
+- 新增 `CollaborationModelInvoker`：协作调用具有应用级 deadline、attempt/stage token、迟到结果丢弃和同房间饱和保护。完整 Proposal 共享 180 秒预算；Provider 仍固定 `max_retries=0`。
+- 有 active/recent AttemptReport 时，通用 GM 状态查询优先返回最多六行的三职能状态；显式 Runtime/Engine 查询保持原有只读路径。
+- 首次方案失败固定为 `plan_drafting + collaboration_blocked`。讨论、协作状态和失败回复不再写 AgentRuntime reply context、模型摘要或内部 ToolGraph。
+- Probe 新增单阶段 90 秒、Proposal 180 秒、迟到模型结果和控制面 Runtime 零修改检查。
+
+验证证据：
+
+```text
+Python syntax compile：passed
+E6 Program/Invoker/ModelPolicy/LANChat/Probe 聚焦组合：59 passed
+Track B 显式协作模块：123 passed
+Collaboration ReadOnly/Context/Intent/Budget/Probe：26 passed
+受影响 Runtime Guard 状态查询与旧 Runtime fallback：13 passed
+受影响 Runtime Guard 直接场景兼容隔离：2 passed
+旧 04:20 log/history（E6 Probe）：B7_1_CONTROL_BLOCKED / PASS=13 WARN=1 FAIL=4
+```
+
+未验证与边界：
+
+- `deepseek-v4-pro` 是否在真实网络下连续完成 Planning/Program/Art/Narration，且每阶段低于 90 秒、总耗时低于 180 秒，仍为 `[待F5/实机验证]`。
+- 迟到 Provider 请求是否会在真实 SDK 连接中及时退出只能由新日志确认；即使底层连接继续存活，其结果已不能提交 Artifact 或 Proposal。
+- 全量 `test_lanchat_runtime_guard.py` 本轮运行到 300 秒上限时未完成；其中旧 Runtime fallback 测试会主动加载可选 Quasar 工具。与 E6 直接相关的 15 项已单独通过，不把全量超时记为通过。
+- 本轮没有进入图片、模型、Actor、Finalizer、GameplayManifest 或 Engine 写链；B7.2 继续由 B7.1 阻断。
+
+下一唯一任务：使用全新独立 Session 原样执行 B7.1 固定六条消息；另以辅助状态查询验证 AttemptReport 回复低于 1 秒。只有 `B7_1_CONTROL_READY / WARN=0 / FAIL=0` 才进入 B7.2。

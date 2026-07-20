@@ -26,7 +26,26 @@ class SchemaVersionTests(unittest.TestCase):
             for name, value in vars(schema_versions).items()
             if name.endswith("_VERSION") and isinstance(value, str)
         }
-        self.assertEqual(len(version_values), 6)
+        version_names = {
+            name
+            for name, value in vars(schema_versions).items()
+            if name.endswith("_VERSION") and isinstance(value, str)
+        }
+        self.assertEqual(
+            version_names,
+            {
+                "ACTION_PROPOSAL_SCHEMA_VERSION",
+                "COLLABORATION_SCHEMA_VERSION",
+                "ENGINE_ADAPTER_CONTRACT_VERSION",
+                "ENGINE_SNAPSHOT_INPUT_CONTRACT_VERSION",
+                "FRONTEND_INTERACTION_SCHEMA_VERSION",
+                "GAMEPLAY_MANIFEST_SCHEMA_VERSION",
+                "PLAN_PATCH_PAYLOAD_SCHEMA_VERSION",
+                "R3_GATE_SCHEMA_VERSION",
+                "SCENE_WORLD_SNAPSHOT_SCHEMA_VERSION",
+                "SKELETON_CONTRACT_VERSION",
+            },
+        )
 
         duplicates: list[str] = []
         for path in services_root.rglob("*.py"):

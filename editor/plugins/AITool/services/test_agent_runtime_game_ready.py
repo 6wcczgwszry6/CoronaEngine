@@ -728,6 +728,54 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         self.assertEqual(report["scene_world_snapshot"]["world_readiness"], "needs_review")
         self.assertEqual(report["completion_status"]["world_readiness"], "needs_review")
 
+    def test_terminal_report_waits_for_same_version_finalizer_evidence(self) -> None:
+        runtime = AgentRuntime()
+        applied, _ = runtime.state.apply_patch(
+            StatePatch(room_id="room-1", changes=_room_fact(game_ready=False))
+        )
+        self.assertTrue(applied)
+
+        pending_report = runtime.generate_report("room-1", plan_id="plan-1")
+        scene_version = int(pending_report["scene_world_snapshot"]["scene_version"])
+        pending_event = runtime.state.room("room-1")["runtime_events"][-1]
+
+        self.assertEqual(pending_event["event_type"], "report_pending")
+        self.assertTrue(pending_event["payload"]["terminal_report_candidate"])
+        self.assertFalse(pending_event["payload"]["terminal_prerequisites_ready"])
+        self.assertEqual(
+            pending_event["payload"]["missing_terminal_evidence"],
+            [
+                "scene_entity_registry_ready",
+                "runtime_scene_world_consistency_audited",
+                "scene_world_snapshot_ready",
+            ],
+        )
+
+        for event_type in pending_event["payload"]["missing_terminal_evidence"]:
+            runtime.operation_log.append(
+                event_type,
+                room_id="room-1",
+                plan_id="plan-1",
+                payload={"scene_version": scene_version},
+            )
+
+        ready_report = runtime.generate_report("room-1", plan_id="plan-1")
+        ready_event = runtime.state.room("room-1")["runtime_events"][-1]
+
+        self.assertEqual(ready_event["event_type"], "report_ready")
+        self.assertTrue(ready_event["payload"]["terminal_prerequisites_ready"])
+        self.assertEqual(ready_event["payload"]["missing_terminal_evidence"], [])
+        self.assertEqual(
+            ready_event["payload"]["scene_version"],
+            ready_report["scene_world_snapshot"]["scene_version"],
+        )
+        self.assertEqual(
+            ready_event["payload"]["world_fingerprint"],
+            ready_report["scene_world_snapshot"]["world_fingerprint"],
+        )
+        self.assertGreater(ready_event["payload"]["needs_review_entity_count"], 0)
+        self.assertTrue(ready_event["payload"]["readiness_missing_field_counts"])
+
     def test_world_consistency_audit_matches_runtime_and_engine_identity(self) -> None:
         room = _room_fact(game_ready=True)
         registry = AgentRuntime._scene_entity_registry_for_plan(room, "plan-1")
@@ -1459,6 +1507,149 @@ class AgentRuntimeGameReadyTests(unittest.TestCase):
         ]
         self.assertEqual(registry_versions, [1, 2])
         self.assertEqual(snapshot_versions, [1, 2])
+
+    def test_finalizer_same_world_short_circuits_before_snapshot_refresh(self) -> None:
+        runtime = AgentRuntime()
+        plan = ScenePlan(
+            plan_id="plan-finalizer-same-world",
+            room_id="room-finalizer-same-world",
+            title="same-world",
+            design_brief="same-world",
+            status=ScenePlanStatus.COMPLETED,
+            version=3,
+        )
+        batch = BatchPlan(
+            batch_id="batch-finalizer-same-world",
+            plan_id=plan.plan_id,
+            room_id=plan.room_id,
+            requested_items=["table"],
+            status=BatchPlanStatus.COMPLETED,
+        )
+        registry = {"entity_count": 1, "game_ready_entity_count": 1, "entities": [{}]}
+        snapshot = {
+            "plan_id": plan.plan_id,
+            "scene_version": plan.version,
+            "world_fingerprint": "sha256:same-world",
+            "world_readiness": "game_ready",
+            "environment_entities": [],
+            "actor_entities": [{}],
+            "operation_cursor": "op:1",
+        }
+        report = {
+            "plan_id": plan.plan_id,
+            "plan_summary": {"status": "completed"},
+            "scene_entity_registry": registry,
+            "scene_world_snapshot": snapshot,
+            "completion_status": {
+                "pipeline_status": "completed",
+                "engine_materialization_status": "complete",
+                "world_readiness": "game_ready",
+            },
+            "report_health_summary": {"status": "ok", "attention_required": False},
+        }
+
+        with (
+            patch.object(runtime, "_runtime_plan_by_id_from_state", return_value=plan),
+            patch.object(runtime, "_planned_batches_for_plan", return_value=[batch]),
+            patch.object(runtime, "_reconcile_partial_engine_readiness", return_value={}),
+            patch.object(
+                runtime,
+                "refresh_scene_snapshot",
+                return_value={"graph": {"status": "completed"}},
+            ) as refresh_snapshot,
+            patch.object(runtime, "_scene_entity_registry_for_plan", return_value=registry),
+            patch.object(runtime, "_scene_world_snapshot_for_plan", return_value=snapshot),
+            patch.object(runtime, "_latest_persisted_report_for_plan", return_value=report),
+            patch.object(runtime, "_report_covers_current_plan_state", return_value=True),
+            patch.object(runtime, "_persist_plan_identity_changes", return_value=True),
+        ):
+            first = runtime._finalize_plan_after_queue_drain(
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+            )
+            operation_count = len(runtime.operation_log.entries())
+            second = runtime._finalize_plan_after_queue_drain(
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+            )
+
+        self.assertTrue(first["report_ready"])
+        self.assertEqual(second["reason"], "already_finalized_same_world")
+        self.assertTrue(second["idempotent"])
+        self.assertEqual(len(runtime.operation_log.entries()), operation_count)
+        refresh_snapshot.assert_called_once()
+
+    def test_failed_terminal_key_survives_later_plan_version_changes(self) -> None:
+        runtime = AgentRuntime()
+        plan = ScenePlan(
+            plan_id="plan-terminal-key-failed",
+            room_id="room-terminal-key-failed",
+            title="failed",
+            design_brief="failed",
+            status=ScenePlanStatus.FAILED,
+            version=9,
+        )
+        batch = BatchPlan(
+            batch_id="batch-terminal-key-failed",
+            plan_id=plan.plan_id,
+            room_id=plan.room_id,
+            requested_items=["key"],
+            status=BatchPlanStatus.FAILED,
+        )
+        fingerprint = "sha256:" + "a" * 64
+        report = {
+            "plan_id": plan.plan_id,
+            "plan_summary": {"status": "failed", "version": 3},
+            "batch_summary": {
+                "batches": [{"batch_id": batch.batch_id, "status": "failed"}],
+            },
+        }
+        applied, reason = runtime.state.apply_patch(StatePatch(
+            room_id=plan.room_id,
+            changes={
+                "runtime_events": [{
+                    "event_id": "event-terminal-key-failed",
+                    "room_id": plan.room_id,
+                    "plan_id": plan.plan_id,
+                    "batch_id": "",
+                    "event_type": "report_ready",
+                    "phase": "report",
+                    "audience": "host",
+                    "level": "warning",
+                    "title": "failed report ready",
+                    "message": "failed report ready",
+                    "progress": 100,
+                    "timestamp": 1.0,
+                    "payload": {
+                        "status": "failed",
+                        "terminal_status": "failed",
+                        "scene_version": 3,
+                        "world_fingerprint": fingerprint,
+                        "terminal_key": f"{plan.plan_id}:3:{fingerprint}:failed",
+                    },
+                }],
+            },
+            expected_version=runtime.state.version,
+            source_tool_call_id="test-terminal-key",
+        ))
+        self.assertTrue(applied, reason)
+
+        with (
+            patch.object(runtime, "_runtime_plan_by_id_from_state", return_value=plan),
+            patch.object(runtime, "_planned_batches_for_plan", return_value=[batch]),
+            patch.object(runtime, "_latest_persisted_report_for_plan", return_value=report),
+            patch.object(runtime, "_reconcile_partial_engine_readiness") as reconcile,
+            patch.object(runtime, "refresh_scene_snapshot") as refresh,
+        ):
+            result = runtime._finalize_plan_after_queue_drain(
+                room_id=plan.room_id,
+                plan_id=plan.plan_id,
+            )
+
+        self.assertEqual(result["reason"], "already_finalized_terminal_key")
+        self.assertTrue(result["idempotent"])
+        reconcile.assert_not_called()
+        refresh.assert_not_called()
 
 
 if __name__ == "__main__":

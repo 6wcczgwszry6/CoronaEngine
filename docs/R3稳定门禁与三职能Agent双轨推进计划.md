@@ -1,6 +1,6 @@
 # R3 稳定门禁与三职能 Agent 双轨推进计划
 
-更新时间：2026-07-14
+更新时间：2026-07-21
 状态：当前权威推进计划
 适用范围：Game-ready Scene Runtime 收口，以及策划 / 美术 / 程序三职能 Agent 的第一阶段接入
 
@@ -30,11 +30,12 @@
 
 当前基线：
 
-- 轨道 A 的 W1.3-W1.8 已达到 `code_complete`；最近一轮扩展聚焦套件 49 项通过。
-- 最近一次 F5 使用较旧代码，结果为 14 个实体中 3 个 Game-ready。
-- 最新 Readiness、业务图分域、Finalizer 和 Peer Mirror 修复尚未重新 F5。
+- 轨道 A 的 Runtime、Readiness、Finalizer 和 Adapter 修复已积累自动证据，但完整 R3 仍未取得新的 Green 实机结论。
+- 最新控制面 F5 为 `2026-07-21_04-20-32_corona.log`：Discussion 与 Planning 完成，Program 模型返回后因重复 `semantic_role` 被强类型契约阻断；Art、Narrator、Proposal 和 Runtime 写入均未进入。
+- 本轮同时证明底层 `timeout_s=90` 不是应用级硬截止，Program 实际耗时 `260770ms`；通用 GM 状态查询仍错误披露旧 Runtime 长诊断。
+- 当前 B7.1 状态为 `blocked / collaboration_program_contract_failed`，B7.2 继续由 B7.1 阻断。
 - 当前门禁状态为 `red / pending_reevaluation`，不得据此冻结 Snapshot v1。
-- `services/agent_collaboration/` 的强类型契约、ProjectState、ArtifactRegistry、AgentTaskGraph 和三个非执行型职能 Agent 已达到 `code_complete`，但红灯期间没有生产入口，也不得接入真实或 Mock Snapshot。
+- `services/agent_collaboration/` 已有受限、非执行型生产控制入口；该入口只允许讨论、强类型 Artifact、Proposal Preflight 和阻断诊断，不得读取真实或 Mock Snapshot，也不得构造 Runtime 写入对象。
 
 ---
 
@@ -90,10 +91,10 @@ ScenePlan -> BatchPlan -> ToolCallGraph
 ### 3.3 红灯期间的硬隔离
 
 - 已完成的轨道 B 代码保留，不回滚。
-- 只允许继续数据契约、Registry、TaskGraph 和纯单元测试。
+- 只允许继续数据契约、Registry、TaskGraph、非执行型三职能控制面和对应聚焦测试。
 - 运行中的 Agent 不得读取真实或 Mock Snapshot。
 - Mock Snapshot 只能作为测试 fixture，不得成为 Agent 输入。
-- 不注册 LANChat 生产入口，不导入 AgentRuntime 写路径。
+- LANChat 只允许注册非执行型协作入口；该入口不得导入或触发 AgentRuntime 写路径。
 - 不创建 EntityBindingPlan、ActionProposal 或 ToolCallGraph。
 
 ---

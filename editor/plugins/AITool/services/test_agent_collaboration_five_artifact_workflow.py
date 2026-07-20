@@ -11,7 +11,9 @@ from editor.plugins.AITool.services.agent_collaboration import (
     ArtDirection,
     ArtifactRegistry,
     GameDesignBrief,
+    GameplayEntitySlot,
     GameplayLogicPlan,
+    GameplayPrimitiveSpec,
     LevelPlan,
     NonExecutableArtifactError,
     ProjectArtifactBundleIncompleteError,
@@ -93,6 +95,13 @@ class ProgramReasoner:
         return ProgramAgentDraft(
             gameplay_logic_plan=GameplayLogicPlan(
                 states=("exploring", "objective_active", f"complete_{self.label}"),
+                entity_slots=(
+                    GameplayEntitySlot("objective", "collectible_objective", ("collectible",)),
+                    GameplayEntitySlot("player", "player_spawn", ("player",)),
+                ),
+                primitives=(
+                    GameplayPrimitiveSpec("collect-objective", "on_collect", "objective", "player", {"state_key": "objective_active", "set_value": True}),
+                ),
                 triggers=("player_enters_objective_zone",),
                 rules=("all players share objective progress",),
                 win_conditions=("shared objective completed",),
