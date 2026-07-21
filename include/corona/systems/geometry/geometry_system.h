@@ -40,6 +40,10 @@ struct SceneVisibilityConfig {
     bool enable_distance_culling  = true;   // 是否启用距离剔除
     float unload_distance         = 80.0f;  // 超过此距离且不可见时触发淘汰
     float preload_distance        = 50.0f;  // 进入此距离时触发预加载
+
+    // 八叉树距离驱动 LOD 级空间淘汰
+    bool  enable_lod_spatial_eviction = false;  // 默认关闭（需足够大的 preload→unload gap）
+    float lod_evict_distance = 0.0f;             // 0 = 自动: (preload+effective_unload)/2
 };
 
 /**
@@ -602,6 +606,10 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 回写前做 ABA 重校验（model_id + residency_epoch + 级存在 + 未就绪），
     /// 失败则丢弃（结果 RAII 自动释放 GPU）。仅几何线程访问在途表，无需加锁。
     void process_pending_lod_builds();
+
+    /// 空间距离驱动的 LOD 级淘汰：释放指定 actor 所有 geometry 的 LOD1..N GPU 缓冲，
+    /// 仅保留 LOD0，并设 lod_spatially_evicted 标记。仅几何线程 update() 中调用。
+    void evict_lods_for_actor(std::uintptr_t actor);
 
     /// 维护 mesh/texture 的 CPU 资源账本（P0）：登记新出现 model_id 的 Scene
     /// (mesh CPU) 与其 Image 纹理 (texture CPU)，按 rid 去重；并对 ResourceManager
