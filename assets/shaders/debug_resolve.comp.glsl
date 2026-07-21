@@ -25,6 +25,9 @@ layout(push_constant) uniform PushConsts
     uint shadowInfoBufferIndex;
     uint shadowCascadeDebug;
     uint ssaoImageIndex;
+    uint ssaoRawImageIndex;
+    uint shadowMaskRawImageIndex;
+    uint shadowMaskImageIndex;
     uint disableAlbedoSample;
 } pushConsts;
 
@@ -286,6 +289,13 @@ vec3 pseudoColor(uint id)
 // Main
 // ============================================================================
 
+float sampleDebugScalar(uint imageIndex, ivec2 pixel, float fallback)
+{
+    return imageIndex == 0u
+        ? fallback
+        : texelFetch(textures[nonuniformEXT(imageIndex)], pixel, 0).r;
+}
+
 void main()
 {
     if (gl_GlobalInvocationID.x >= pushConsts.gbufferSize.x ||
@@ -298,10 +308,26 @@ void main()
 
     if (pushConsts.debugMode == 5u)
     {
-        float ao = pushConsts.ssaoImageIndex == 0u
-            ? 1.0
-            : texelFetch(textures[nonuniformEXT(pushConsts.ssaoImageIndex)], pixel, 0).r;
+        float ao = sampleDebugScalar(pushConsts.ssaoImageIndex, pixel, 1.0);
         imageStore(imagesRGBA16[pushConsts.outputImageIndex], pixel, vec4(vec3(ao), 1.0));
+        return;
+    }
+    if (pushConsts.debugMode == 6u)
+    {
+        float ao = sampleDebugScalar(pushConsts.ssaoRawImageIndex, pixel, 1.0);
+        imageStore(imagesRGBA16[pushConsts.outputImageIndex], pixel, vec4(vec3(ao), 1.0));
+        return;
+    }
+    if (pushConsts.debugMode == 7u)
+    {
+        float shadowMask = sampleDebugScalar(pushConsts.shadowMaskRawImageIndex, pixel, 1.0);
+        imageStore(imagesRGBA16[pushConsts.outputImageIndex], pixel, vec4(vec3(shadowMask), 1.0));
+        return;
+    }
+    if (pushConsts.debugMode == 8u)
+    {
+        float shadowMask = sampleDebugScalar(pushConsts.shadowMaskImageIndex, pixel, 1.0);
+        imageStore(imagesRGBA16[pushConsts.outputImageIndex], pixel, vec4(vec3(shadowMask), 1.0));
         return;
     }
 
