@@ -453,4 +453,61 @@ export const defineObjectBlocks = () => {
     this.setTooltip('\u8fd4\u56de\u6307\u5b9a\u6807\u7b7e\u4e0b\u5c1a\u672a\u88ab\u51fb\u8d25\u7684\u654c\u4eba\u6570\u91cf\u3002');
   } };
 
+
+
+  const applyStyleToBlocks = (types, styleName) => {
+    for (const type of types) {
+      const definition = Blockly.Blocks[type];
+      if (!definition?.init || definition.__coronaStyleOverride === styleName) continue;
+      const originalInit = definition.init;
+      definition.init = function (...args) {
+        originalInit.apply(this, args);
+        this.setStyle(styleName);
+      };
+      definition.__coronaStyleOverride = styleName;
+    }
+  };
+
+  applyStyleToBlocks([
+    'object_set_position',
+    'object_get_x',
+    'object_get_y',
+    'object_get_z',
+    'object_move_tag',
+    'object_clamp_axis',
+  ], 'motion_blocks');
+
+  applyStyleToBlocks([
+    'object_set_native_physics',
+    'object_set_logical_collision',
+    'object_logical_collision_enabled',
+  ], 'physics_blocks');
+
+  applyStyleToBlocks([
+    'object_move_to_lane',
+    'object_move_to_lane_smooth',
+    'object_lane_index',
+    'object_set_random_position',
+    'object_spawn_random_box',
+    'object_scatter_tag',
+    'object_recycle_tag_axis',
+    'object_reset_tag',
+    'object_count_active_tag',
+    'object_set_tag_velocity_axis',
+    'object_randomize_mouse_pick',
+    'object_delete_mouse_pick',
+    'object_third_person_move',
+    'object_arcade_jump',
+    'object_collect_touching_tag',
+    'object_breakout_reset_round',
+    'object_breakout_paddle_control',
+    'object_breakout_step',
+    'object_first_person_move',
+    'combat_set_tag_health',
+    'combat_melee_attack',
+    'combat_enemy_chase_tag',
+    'combat_enemy_contact_damage',
+    'combat_alive_count',
+  ], 'gameplay_blocks');
+
 };

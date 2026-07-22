@@ -1,0 +1,1529 @@
+<?xml version='1.0' encoding='utf-8'?>
+<CoronaBlocksDocument schemaVersion="1" documentPurpose="internal-ai-node-graph-contract" contractVersion="1" updatedAt="2026-07-18">
+  <InternalAiContract catalogLocked="true" visualGraphIsSourceOfTruth="true" pythonProducedByEngine="true">
+    <Purpose lang="zh-CN">这是 CoronaEngine 内部 AI 的只读节点积木能力合同。宿主提供用户的 3D Demo 描述、当前项目运行时上下文和 Catalog；模型返回内存中的 JSON 节点图，宿主将其应用到项目常驻节点图。</Purpose>
+    <Purpose lang="en-US">Read-only capability contract for the in-editor AI. The host supplies the user demo request, current project runtime context, and this Catalog. The model returns an in-memory JSON node graph that the host applies to the project-global graph.</Purpose>
+    <FixedTarget targetId="node_graph:project:global" targetType="project" scriptKind="node_graph" actorBinding="none" />
+    <SourceOfTruth>Nodes, edges, Blockly workspaces, Boolean edge conditions, global data blocks, and node x/y layout are the complete visible logic source. The model must not hide gameplay in text or code.</SourceOfTruth>
+    <NoPythonFromModel>The model must not produce Python. After validation and application, CoronaEngine calls nodeGraphToCode on the visible workspace and saves the compiled Python itself.</NoPythonFromModel>
+    <HostApplicationApi function="applyGeneratedNodeGraph" accepts="JSON object" atomic="true">The host validates the result before changing the editor. Invalid results leave the current project graph unchanged.</HostApplicationApi>
+  </InternalAiContract>
+  <HostInputContract>
+    <UserDemoDescription>Natural-language description of the requested 3D demo, controls, win/lose rules, camera style, and presentation.</UserDemoDescription>
+    <RuntimeContext>Current scenes, object names, object tags, available assets, audio names, checkpoints, and other project identifiers.</RuntimeContext>
+    <BlockCatalog>The Catalog in this document. Only listed block type, field, input, output, and dropdown values may be used.</BlockCatalog>
+    <ExistingGraph>Optional current project-global graph when the user asks to extend or revise existing logic.</ExistingGraph>
+    <ContextRule>Object names and tags used by blocks must come from RuntimeContext or be explicitly requested by the user. Do not invent scene bindings or actor targets.</ContextRule>
+  </HostInputContract>
+  <ModelOutputContract mediaType="application/json" transport="in-memory" schemaVersion="1">
+    <OutputRule>Return one JSON object matching ResultShape. Do not return XML, Python, a path, a file wrapper, Markdown, or explanation text in the result value consumed by the host.</OutputRule>
+    <ResultShape>{
+  "schemaVersion": 1,
+  "targetId": "node_graph:project:global",
+  "workspace": {
+    "version": 1,
+    "nodes": [],
+    "edges": [],
+    "globalVariablesWorkspace": {}
+  }
+}</ResultShape>
+    <ForbiddenKeys values="python sourceCode xml filePath actorTarget sceneTarget" />
+  </ModelOutputContract>
+  <GenerationRules>
+    <NodeGraphRule index="1">Generate exactly one node whose nodeType is start. Other nodeType values are custom or end.</NodeGraphRule>
+    <NodeGraphRule index="2">Every node, edge, and serialized block has a non-empty ID unique within its graph or workspace scope.</NodeGraphRule>
+    <NodeGraphRule index="3">Every edge endpoint references an existing node and uses side left, right, or bottom with a non-negative integer index.</NodeGraphRule>
+    <NodeGraphRule index="4">Every major gameplay state is reachable from start. Prefer explicit start, play, win, and lose states for complete demos.</NodeGraphRule>
+    <NodeGraphRule index="5">Node x and y are finite numbers. Lay the main flow left-to-right with about 340 to 460 pixels horizontal spacing and at least 220 pixels vertical spacing for branches.</NodeGraphRule>
+    <NodeGraphRule index="6">Node workspace contains visible lifecycle and action blocks. Do not describe a behavior only in node names.</NodeGraphRule>
+    <BlocklyRule index="1">Use official Blockly serialization JSON under workspace.blocks.blocks.</BlocklyRule>
+    <BlocklyRule index="2">Sequential statement blocks connect with next.block. Value and statement parameters connect with inputs.NAME.block or inputs.NAME.shadow.</BlocklyRule>
+    <BlocklyRule index="3">Use only block type values listed in Catalog. Use only Catalog field names, input names, dropdown option values, and compatible output types.</BlocklyRule>
+    <BlocklyRule index="4">Each serialized block must include type and id. Top-level blocks should include x and y for readable internal layout.</BlocklyRule>
+    <BlocklyRule index="5">Use lifecycle hat blocks such as node_when_enter and node_while_active inside state nodes so execution timing is visible.</BlocklyRule>
+    <BlocklyRule index="6">Use globalVariablesWorkspace only for Catalog GlobalWorkspaceRootTypes. Connect value blocks beneath their initialization or assignment inputs.</BlocklyRule>
+    <EdgeConditionRule index="1">Every edge has conditionWorkspace with exactly one visible top-level block whose output type is Boolean.</EdgeConditionRule>
+    <EdgeConditionRule index="2">An unconditional transition uses logic_boolean with field BOOL equal to TRUE. Never represent unconditional flow with an empty conditionWorkspace.</EdgeConditionRule>
+    <EdgeConditionRule index="3">Conditional flow uses logic_compare, logic_operation, logic_negate, input detection, collision, raycast, region, variable, score, lives, or countdown Boolean combinations.</EdgeConditionRule>
+    <EdgeConditionRule index="4">Number, text, coordinate, distance, score, and lives blocks are not valid outer conditions; connect them to a comparison block.</EdgeConditionRule>
+    <BlocklyRule index="7">Use only Catalog blocks whose projectUsage is project-safe. actor-context blocks require an actor-bound workspace and are invalid in the fixed project-global graph.</BlocklyRule>
+  </GenerationRules>
+  <ThreeDDemoCompositionPatterns>
+    <Pattern name="StateMachine">Use start for initialization, one or more custom nodes for active gameplay, and end nodes for win and lose. Give every transition a visible Boolean condition.</Pattern>
+    <Pattern name="Initialization">In node_when_enter, initialize score/lives/global data, configure camera, spawn or place objects, set physics, and start audio.</Pattern>
+    <Pattern name="GameplayLoop">In node_while_active, run player movement, enemy behavior, collision/raycast actions, cooldown checks, scoring, life changes, recycling, and area logic.</Pattern>
+    <Pattern name="ObjectAddressing">Use object-name blocks for unique objects and tag-based blocks for groups. Names and tags must match RuntimeContext.</Pattern>
+    <Pattern name="RandomMovement">Combine math_random_int or math_random_float with object_set_tag_velocity_axis, object_set_random_position, object_scatter_tag, or timed state changes.</Pattern>
+    <Pattern name="EnemyBehavior">Use combat_enemy_chase_tag for pursuit, combat_enemy_contact_damage for contact attacks, and combat_melee_attack or raycast blocks for player attacks.</Pattern>
+    <Pattern name="CameraAndControl">Choose first-person, third-person, orbit, or follow camera blocks and pair them with the corresponding movement template and input checks.</Pattern>
+    <Pattern name="PhysicsAndDetection">Combine velocity, gravity, impulse, collision, ground, raycast, region, and distance blocks. Use Boolean detection blocks on transition edges.</Pattern>
+    <Pattern name="ProgressAndRules">Use score, lives, countdown, cooldown, checkpoints, object counts, and variables to make explicit win, lose, wave, or objective conditions.</Pattern>
+  </ThreeDDemoCompositionPatterns>
+  <HostValidationPipeline>
+    <Step index="1">Validate schemaVersion, fixed targetId, workspace shape, IDs, finite positions, node types, and edge endpoints.</Step>
+    <Step index="2">Validate every serialized block against Catalog type, fields, inputs, dropdown options, connection shape, and output type.</Step>
+    <Step index="3">Validate exactly one start node, graph reachability, global workspace roots, and one Boolean condition block per edge.</Step>
+    <Step index="4">Deserialize candidate Blockly workspaces and run validateNodeGraph and nodeGraphToCode before changing the visible graph.</Step>
+    <Step index="5">Apply atomically to the mounted project-global editor and save only after successful compilation; otherwise restore the previous graph.</Step>
+  </HostValidationPipeline>
+  <ExampleResult mediaType="application/json" illustrative="true">{
+  "schemaVersion": 1,
+  "targetId": "node_graph:project:global",
+  "workspace": {
+    "version": 1,
+    "nodes": [
+      {
+        "id": "start",
+        "macroType": "state",
+        "nodeType": "start",
+        "name": "Start",
+        "customName": "Initialize",
+        "x": 80,
+        "y": 160,
+        "workspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "node_when_enter",
+                "id": "start_enter",
+                "x": 24,
+                "y": 24,
+                "inputs": {
+                  "DO": {
+                    "block": {
+                      "type": "ui_set_score",
+                      "id": "set_score",
+                      "fields": {
+                        "VALUE": 0
+                      },
+                      "next": {
+                        "block": {
+                          "type": "ui_set_lives",
+                          "id": "set_lives",
+                          "fields": {
+                            "VALUE": 3
+                          },
+                          "next": {
+                            "block": {
+                              "type": "camera_first_person_follow",
+                              "id": "setup_camera",
+                              "fields": {
+                                "NAME": "Player",
+                                "HEIGHT": 1.55,
+                                "SENSITIVITY": 0.16,
+                                "WEAPON": "Weapon"
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "play",
+        "macroType": "state",
+        "nodeType": "custom",
+        "name": "Combat",
+        "customName": "Combat",
+        "x": 500,
+        "y": 160,
+        "workspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "node_while_active",
+                "id": "play_active",
+                "x": 24,
+                "y": 24,
+                "inputs": {
+                  "DO": {
+                    "block": {
+                      "type": "object_first_person_move",
+                      "id": "player_move",
+                      "fields": {
+                        "NAME": "Player",
+                        "SPEED": 0.2,
+                        "OBSTACLE_TAG": "obstacle",
+                        "MIN_X": -50,
+                        "MAX_X": 50,
+                        "MIN_Z": -50,
+                        "MAX_Z": 50
+                      },
+                      "next": {
+                        "block": {
+                          "type": "combat_enemy_chase_tag",
+                          "id": "enemy_chase",
+                          "fields": {
+                            "TAG": "enemy",
+                            "PLAYER": "Player",
+                            "SPEED": 0.05,
+                            "STOP_DISTANCE": 2
+                          },
+                          "next": {
+                            "block": {
+                              "type": "combat_enemy_contact_damage",
+                              "id": "enemy_damage",
+                              "fields": {
+                                "TAG": "enemy",
+                                "PLAYER": "Player",
+                                "DAMAGE": 1,
+                                "COOLDOWN": 1
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "win",
+        "macroType": "state",
+        "nodeType": "end",
+        "name": "End",
+        "customName": "Win",
+        "x": 940,
+        "y": 60,
+        "workspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "node_when_enter",
+                "id": "win_enter",
+                "x": 24,
+                "y": 24,
+                "inputs": {
+                  "DO": {
+                    "block": {
+                      "type": "ui_game_win",
+                      "id": "game_win"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "lose",
+        "macroType": "state",
+        "nodeType": "end",
+        "name": "End",
+        "customName": "Lose",
+        "x": 940,
+        "y": 320,
+        "workspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "node_when_enter",
+                "id": "lose_enter",
+                "x": 24,
+                "y": 24,
+                "inputs": {
+                  "DO": {
+                    "block": {
+                      "type": "ui_game_over",
+                      "id": "game_over"
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "edges": [
+      {
+        "id": "start_to_play",
+        "source": {
+          "nodeId": "start",
+          "side": "right",
+          "index": 0
+        },
+        "target": {
+          "nodeId": "play",
+          "side": "left",
+          "index": 0
+        },
+        "name": "Start Combat",
+        "conditionWorkspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "logic_boolean",
+                "id": "always_start",
+                "fields": {
+                  "BOOL": "TRUE"
+                },
+                "x": 24,
+                "y": 24
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "play_to_win",
+        "source": {
+          "nodeId": "play",
+          "side": "right",
+          "index": 0
+        },
+        "target": {
+          "nodeId": "win",
+          "side": "left",
+          "index": 0
+        },
+        "name": "Reach Target Score",
+        "conditionWorkspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "logic_compare",
+                "id": "win_compare",
+                "fields": {
+                  "OP": "GTE"
+                },
+                "x": 24,
+                "y": 24,
+                "inputs": {
+                  "A": {
+                    "block": {
+                      "type": "ui_score",
+                      "id": "read_score"
+                    }
+                  },
+                  "B": {
+                    "block": {
+                      "type": "math_number",
+                      "id": "win_score",
+                      "fields": {
+                        "NUM": 5
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      {
+        "id": "play_to_lose",
+        "source": {
+          "nodeId": "play",
+          "side": "right",
+          "index": 1
+        },
+        "target": {
+          "nodeId": "lose",
+          "side": "left",
+          "index": 0
+        },
+        "name": "Lives Depleted",
+        "conditionWorkspace": {
+          "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+              {
+                "type": "logic_compare",
+                "id": "lose_compare",
+                "fields": {
+                  "OP": "LTE"
+                },
+                "x": 24,
+                "y": 24,
+                "inputs": {
+                  "A": {
+                    "block": {
+                      "type": "ui_lives",
+                      "id": "read_lives"
+                    }
+                  },
+                  "B": {
+                    "block": {
+                      "type": "math_number",
+                      "id": "zero_lives",
+                      "fields": {
+                        "NUM": 0
+                      }
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      }
+    ],
+    "globalVariablesWorkspace": {
+      "blocks": {
+        "languageVersion": 0,
+        "blocks": []
+      }
+    }
+  }
+}</ExampleResult>
+  <Catalog generatedFrom="editor/Frontend/src/blockly/configs/toolboxConfig.js and registered Blockly definitions" blockCount="261" locked="true">
+    <CatalogRules>
+      <Rule>AI must preserve this Catalog and may use only listed Block type, Field name, Input name, check type, and dropdown value combinations.</Rule>
+      <Rule>projectUsage=project-safe means suitable for the unbound project graph. projectUsage=actor-context means the block expects a current actor context and should normally be avoided here.</Rule>
+      <Rule>shape=output blocks connect into value inputs or condition workspaces; shape=statement/terminal blocks connect in statement chains; shape=hat/definition blocks are top-level.</Rule>
+      <Rule>Fields with inputOwner identify the visual input row that owns the field, but serialized field values still belong in the block fields object.</Rule>
+    </CatalogRules>
+    <RecommendedProjectSafeTypes>
+      <Group category="事件" types="event_gameStart node_when_enter node_while_active node_when_exit" />
+      <Group category="控制" types="control_wait control_if control_else control_cooldown_ready control_start_cooldown" />
+      <Group category="条件" types="logic_boolean logic_compare logic_operation logic_negate math_number math_arithmetic variable_get variable_exists detect_object_exists detect_object_not_exists detect_keyboard1 detect_keyboard0 detect_mouse1 detect_mouse0 detect_mouse_x_ratio detect_inside_axis detect_inside_box detect_position_near detect_raycast detect_raycast_hit_tag ui_countdown_finished ui_score ui_lives" />
+      <Group category="运动" types="object_set_position object_get_x object_get_y object_get_z object_move_tag" />
+      <Group category="摄像机" types="camera_follow_object camera_third_person_orbit camera_first_person_follow camera_raycast" />
+      <Group category="侦测" types="detect_crossed_x_once detect_crossed_z_once detect_mouse_pick_object detect_mouse_pick_hit_tag" />
+      <Group category="界面" types="ui_set_score ui_add_score ui_set_lives ui_game_win ui_game_over" />
+      <Group category="音效" types="audio_play" />
+      <Group category="全局变量" types="variable_define variable_set variable_add" />
+      <Group category="列表" types="list_define list_add_named list_item_named list_length_named list_contains_named" />
+      <Group category="运算" types="math_random_int" />
+      <Group category="文本" types="text text_join" />
+      <Group category="玩法模板" types="object_set_tag_velocity_axis object_third_person_move object_arcade_jump object_first_person_move" />
+    </RecommendedProjectSafeTypes>
+    <Blocks>
+      <Block type="event_gameStart" category="事件" shape="hat" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="当游戏开始时" />
+      <Block type="event_keyboard" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当按下 A 时 …">
+        <Input name="DO" kind="statement" check="" />
+        <Field name="x" kind="dropdown" defaultJson="&quot;KeyA&quot;" inputOwner="" dynamicOptionCount="45" />
+      </Block>
+      <Block type="event_keyboard_combo" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当按下组合键 Ctrl+Alt+K 时 …">
+        <Input name="DO" kind="statement" check="" />
+        <Field name="combo" kind="string" defaultJson="&quot;Ctrl+Alt+K&quot;" inputOwner="" />
+      </Block>
+      <Block type="event_mouse_click" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当鼠标点击 左键 时 …">
+        <Input name="DO" kind="statement" check="" />
+        <Field name="button" kind="dropdown" defaultJson="&quot;left&quot;" inputOwner="" optionValues="left|right|middle" optionLabels="左键|右键|中键" />
+      </Block>
+      <Block type="event_mouse_move" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当鼠标移动时 …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="event_mouse_wheel" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当鼠标滚轮滚动时 …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="event_mouse_contextmenu" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当鼠标右键菜单时 …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="event_RB" category="事件" shape="hat" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="当接收到广播 &lt;无广播&gt;">
+        <Field name="x" kind="dropdown" defaultJson="&quot;NO_BROADCAST&quot;" inputOwner="" optionValues="NO_BROADCAST|CREATE_NEW" optionLabels="&lt;无广播&gt;|新建广播..." />
+      </Block>
+      <Block type="event_broadcast" category="事件" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="发送广播 &lt;无广播&gt;">
+        <Field name="x" kind="dropdown" defaultJson="&quot;NO_BROADCAST&quot;" inputOwner="" optionValues="NO_BROADCAST|CREATE_NEW" optionLabels="&lt;无广播&gt;|新建广播..." />
+      </Block>
+      <Block type="event_broadcastWait" category="事件" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="发送广播 &lt;无广播&gt; 并等待">
+        <Field name="x" kind="dropdown" defaultJson="&quot;NO_BROADCAST&quot;" inputOwner="" optionValues="NO_BROADCAST|CREATE_NEW" optionLabels="&lt;无广播&gt;|新建广播..." />
+      </Block>
+      <Block type="node_when_enter" category="事件" shape="definition" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="当进入当前节点时 执行 …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="node_while_active" category="事件" shape="definition" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="当前节点持续时 执行 …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="node_when_exit" category="事件" shape="definition" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="当离开当前节点时 执行 …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="control_run_project_script" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="运行项目脚本 Scripts/shooting_game.py">
+        <Field name="PATH" kind="string" defaultJson="&quot;Scripts/shooting_game.py&quot;" inputOwner="" />
+      </Block>
+      <Block type="control_wait" category="控制" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="等待 1 秒">
+        <Field name="SECONDS" kind="number" defaultJson="1" inputOwner="" />
+      </Block>
+      <Block type="control_wait2" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="等待直到 …">
+        <Input name="CONDITION" kind="value" check="Boolean" />
+      </Block>
+      <Block type="control_for" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重复执行（永久） …">
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="control_forX" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重复执行 1 次 … 执行 …">
+        <Input name="TIMES" kind="value" check="Number" />
+        <Input name="DO" kind="statement" check="" />
+        <Field name="DEFAULT_TIMES" kind="number" defaultJson="1" inputOwner="TIMES" />
+      </Block>
+      <Block type="control_until" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重复执行直到 … 执行 …">
+        <Input name="CONDITION" kind="value" check="Boolean" />
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="control_if" category="控制" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="如果 … 那么 …">
+        <Input name="CONDITION" kind="value" check="Boolean" />
+        <Input name="DO" kind="statement" check="" />
+      </Block>
+      <Block type="control_else" category="控制" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="如果 … 那么 … 否则 …">
+        <Input name="CONDITION" kind="value" check="Boolean" />
+        <Input name="DO" kind="statement" check="" />
+        <Input name="ELSE" kind="statement" check="" />
+      </Block>
+      <Block type="control_stop" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="停止 当前脚本">
+        <Field name="STOP_OPTION" kind="dropdown" defaultJson="&quot;CURRENT_SCRIPT&quot;" inputOwner="" optionValues="CURRENT_SCRIPT|ALL_SCRIPTS|OTHER_SCRIPTS_OF_ACTOR" optionLabels="当前脚本|全部脚本|该角色的其他脚本" />
+      </Block>
+      <Block type="control_cloneStart" category="控制" shape="hat" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="当作为克隆体启动时" />
+      <Block type="control_clone" category="控制" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="克隆">
+        <Field name="x" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="control_cloneDEL" category="控制" shape="terminal" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="删除此克隆体" />
+      <Block type="control_senceSet" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="换成  场景">
+        <Field name="x" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="control_nextSence" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="下一个场景" />
+      <Block type="control_restart_level" category="控制" shape="terminal" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重新开始当前关卡" />
+      <Block type="control_cooldown_ready" category="控制" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="冷却 … 间隔秒数 0 … 就绪？ true 立即消耗">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="SECONDS" kind="value" check="Number" />
+        <Field name="SECONDS_NUMBER" kind="number" defaultJson="0" inputOwner="SECONDS" />
+        <Field name="CONSUME" kind="boolean" defaultJson="&quot;TRUE&quot;" inputOwner="" />
+      </Block>
+      <Block type="control_start_cooldown" category="控制" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="启动计时器 … 持续秒数 1 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="SECONDS" kind="value" check="Number" />
+        <Field name="SECONDS_NUMBER" kind="number" defaultJson="1" inputOwner="SECONDS" />
+      </Block>
+      <Block type="control_reset_cooldown" category="控制" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重置冷却 …">
+        <Input name="NAME" kind="value" check="String" />
+      </Block>
+      <Block type="logic_boolean" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="true">
+        <Field name="BOOL" kind="dropdown" defaultJson="&quot;TRUE&quot;" inputOwner="" optionValues="TRUE|FALSE" optionLabels="true|false" />
+      </Block>
+      <Block type="logic_compare" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="… = …">
+        <Input name="A" kind="value" check="" />
+        <Input name="B" kind="value" check="" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;EQ&quot;" inputOwner="B" optionValues="EQ|NEQ|LT|LTE|GT|GTE" optionLabels="=|≠|&lt;|≤|&gt;|≥" />
+      </Block>
+      <Block type="logic_operation" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="… 并且 …">
+        <Input name="A" kind="value" check="Boolean" />
+        <Input name="B" kind="value" check="Boolean" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;AND&quot;" inputOwner="B" optionValues="AND|OR" optionLabels="并且|或" />
+      </Block>
+      <Block type="logic_negate" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="非 …">
+        <Input name="BOOL" kind="value" check="Boolean" />
+      </Block>
+      <Block type="math_number" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="0">
+        <Field name="NUM" kind="number" defaultJson="0" inputOwner="" />
+      </Block>
+      <Block type="math_arithmetic" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="… + …">
+        <Input name="A" kind="value" check="Number" />
+        <Input name="B" kind="value" check="Number" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;ADD&quot;" inputOwner="B" optionValues="ADD|MINUS|MULTIPLY|DIVIDE|POWER" optionLabels="+|-|×|÷|^" />
+      </Block>
+      <Block type="variable_get" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="当前物体 变量 game_state">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;game_state&quot;" inputOwner="" optionValues="game_state|lives|score" optionLabels="game_state|lives|score" />
+      </Block>
+      <Block type="variable_exists" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="当前物体 变量 game_state 存在？">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;game_state&quot;" inputOwner="" optionValues="game_state|lives|score" optionLabels="game_state|lives|score" />
+      </Block>
+      <Block type="detect_touch" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="碰到  …">
+        <Input name="x" kind="value" check="String" />
+        <Field name="x" kind="string" defaultJson="&quot;&quot;" inputOwner="x" />
+      </Block>
+      <Block type="detect_not_touch" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="当前物体没有碰到对象  ？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="detect_touch_any" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="当前物体碰到任意物体？" />
+      <Block type="detect_touch_tag" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="碰到标签 tag ？ …">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="detect_touch_started" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="刚刚碰到对象 …">
+        <Input name="NAME" kind="value" check="String" />
+      </Block>
+      <Block type="detect_touch_tag_started" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="刚刚碰到标签 …">
+        <Input name="TAG" kind="value" check="String" />
+      </Block>
+      <Block type="detect_object_exists" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象  存在？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="detect_object_not_exists" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象  不存在？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="detect_keyboard1" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="按下  ？">
+        <Field name="x" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="detect_keyboard0" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="松开  ？">
+        <Field name="x" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="detect_mouse1" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="按下鼠标？" />
+      <Block type="detect_mouse0" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="松开鼠标？" />
+      <Block type="detect_mouse_left_half" category="条件" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="鼠标在主视口左半边？" />
+      <Block type="detect_mouse_right_half" category="条件" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="鼠标在主视口右半边？" />
+      <Block type="detect_mouse_x_ratio" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="鼠标主视口 X 比例" />
+      <Block type="detect_ground_below" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="脚下有地面？距离 1">
+        <Field name="DISTANCE" kind="number" defaultJson="1" inputOwner="" />
+      </Block>
+      <Block type="detect_no_ground_below" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="脚下没有地面？距离 1">
+        <Field name="DISTANCE" kind="number" defaultJson="1" inputOwner="" />
+      </Block>
+      <Block type="detect_inside_axis" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象  在 X 范围 0 到 10 内？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="NAME" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="MIN" kind="number" defaultJson="0" inputOwner="NAME" />
+        <Field name="MAX" kind="number" defaultJson="10" inputOwner="NAME" />
+      </Block>
+      <Block type="detect_outside_axis" category="条件" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="对象 … 在 X 范围外 最小 0 … 最大 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="MIN" kind="value" check="Number" />
+        <Input name="MAX" kind="value" check="Number" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="MIN_NUMBER" kind="number" defaultJson="0" inputOwner="MIN" />
+        <Field name="MAX_NUMBER" kind="number" defaultJson="0" inputOwner="MAX" />
+      </Block>
+      <Block type="detect_inside_box" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象在 3D 区域内 … 中心X 0 … Y 0 … Z 0 … 尺寸X 0 … Y 0 … Z 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="CX" kind="value" check="Number" />
+        <Input name="CY" kind="value" check="Number" />
+        <Input name="CZ" kind="value" check="Number" />
+        <Input name="SX" kind="value" check="Number" />
+        <Input name="SY" kind="value" check="Number" />
+        <Input name="SZ" kind="value" check="Number" />
+        <Field name="CX_NUMBER" kind="number" defaultJson="0" inputOwner="CX" />
+        <Field name="CY_NUMBER" kind="number" defaultJson="0" inputOwner="CY" />
+        <Field name="CZ_NUMBER" kind="number" defaultJson="0" inputOwner="CZ" />
+        <Field name="SX_NUMBER" kind="number" defaultJson="0" inputOwner="SX" />
+        <Field name="SY_NUMBER" kind="number" defaultJson="0" inputOwner="SY" />
+        <Field name="SZ_NUMBER" kind="number" defaultJson="0" inputOwner="SZ" />
+      </Block>
+      <Block type="detect_position_near" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象  … 接近位置 X 0 … Y 0 … Z 0 … 误差 0.1 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="X" kind="value" check="Number" />
+        <Input name="Y" kind="value" check="Number" />
+        <Input name="Z" kind="value" check="Number" />
+        <Input name="TOLERANCE" kind="value" check="Number" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="X_NUMBER" kind="number" defaultJson="0" inputOwner="X" />
+        <Field name="Y_NUMBER" kind="number" defaultJson="0" inputOwner="Y" />
+        <Field name="Z_NUMBER" kind="number" defaultJson="0" inputOwner="Z" />
+        <Field name="TOLERANCE_NUMBER" kind="number" defaultJson="0.1" inputOwner="TOLERANCE" />
+      </Block>
+      <Block type="detect_raycast" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="射线命中? 起点X 0 Y 0 Z 0 方向X 0 Y 0 Z 1 距离 100">
+        <Field name="OX" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="OY" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="OZ" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="DX" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="DY" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="DZ" kind="number" defaultJson="1" inputOwner="" />
+        <Field name="MAX_DIST" kind="number" defaultJson="100" inputOwner="" />
+      </Block>
+      <Block type="detect_raycast_hit_tag" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="射线命中标签 tag ？ …">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="detect_last_collision_axis" category="条件" shape="output" projectUsage="actor-context" recommended="false" outputCheck="String" dynamic="false" label="最近碰撞轴" />
+      <Block type="ui_countdown_finished" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="倒计时结束？" />
+      <Block type="ui_game_state" category="条件" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="当前游戏状态" />
+      <Block type="ui_score" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="当前分数" />
+      <Block type="ui_lives" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="生命" />
+      <Block type="ui_countdown_left" category="条件" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="倒计时剩余" />
+      <Block type="engine_move" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="移动 10 步">
+        <Field name="STEPS" kind="number" defaultJson="10" inputOwner="" />
+      </Block>
+      <Block type="engine_rotateX" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="水平旋转 15 度">
+        <Field name="ANGLE" kind="number" defaultJson="15" inputOwner="" />
+      </Block>
+      <Block type="engine_rotateY" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="竖直旋转 15 度">
+        <Field name="ANGLE" kind="number" defaultJson="15" inputOwner="" />
+      </Block>
+      <Block type="engine_rotateZ" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="旋转 15 度">
+        <Field name="ANGLE" kind="number" defaultJson="15" inputOwner="" />
+      </Block>
+      <Block type="engine_face" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="面向 0 度方向">
+        <Field name="DIRECTION" kind="number" defaultJson="0" inputOwner="" />
+      </Block>
+      <Block type="engine_moveto" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="移动到 随机位置">
+        <Field name="POSITION" kind="dropdown" defaultJson="&quot;random_position&quot;" inputOwner="" optionValues="random_position|sight_position" optionLabels="随机位置|准星位置" />
+      </Block>
+      <Block type="engine_movetoXYZ" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="移到 X: 0 Y: 0 Z: 0">
+        <Field name="X" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="Y" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="" />
+      </Block>
+      <Block type="engine_movetoXYZtime" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="在 1 秒内移到 0 0 0">
+        <Field name="TIME" kind="number" defaultJson="1" inputOwner="" />
+        <Field name="X" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="Y" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="" />
+      </Block>
+      <Block type="engine_Xset" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 X 为 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="X" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_Yset" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 Y 为 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="Y" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_Zset" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 Z 为 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_Xadd" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="X 增加 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="DX" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_Yadd" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="Y 增加 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="DY" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_Zadd" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="Z 增加 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="DZ" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_X" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="X" />
+      <Block type="engine_Y" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="Y" />
+      <Block type="engine_Z" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="Z" />
+      <Block type="engine_rotationX" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="旋转 X" />
+      <Block type="engine_rotationY" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="旋转 Y" />
+      <Block type="engine_rotationZ" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="旋转 Z" />
+      <Block type="object_set_position" category="运动" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="设置对象  … 位置 X 0 … Y 0 … Z 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="X" kind="value" check="Number" />
+        <Input name="Y" kind="value" check="Number" />
+        <Input name="Z" kind="value" check="Number" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="X" kind="number" defaultJson="0" inputOwner="X" />
+        <Field name="Y" kind="number" defaultJson="0" inputOwner="Y" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="Z" />
+      </Block>
+      <Block type="object_get_x" category="运动" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="对象  的 X …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_get_y" category="运动" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="对象  的 Y …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_get_z" category="运动" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="对象  的 Z …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_move_tag" category="运动" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="移动标签 tag 对象 … 偏移 X 0 … Y 0 … Z 0 …">
+        <Input name="TAG" kind="value" check="String" />
+        <Input name="DX" kind="value" check="Number" />
+        <Input name="DY" kind="value" check="Number" />
+        <Input name="DZ" kind="value" check="Number" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+        <Field name="DX_NUMBER" kind="number" defaultJson="0" inputOwner="DX" />
+        <Field name="DY_NUMBER" kind="number" defaultJson="0" inputOwner="DY" />
+        <Field name="DZ_NUMBER" kind="number" defaultJson="0" inputOwner="DZ" />
+      </Block>
+      <Block type="object_clamp_axis" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="限制对象  … 轴 X 最小 0 … 最大 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="MIN" kind="value" check="Number" />
+        <Input name="MAX" kind="value" check="Number" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="MIN_NUMBER" kind="number" defaultJson="0" inputOwner="MIN" />
+        <Field name="MAX_NUMBER" kind="number" defaultJson="0" inputOwner="MAX" />
+      </Block>
+      <Block type="engine_set_velocity" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置速度 X 0 或接入变量/运算 … Y 0 或接入变量/运算 … Z 0 或接入变量/运算 …">
+        <Input name="VX" kind="value" check="Number" />
+        <Input name="VY" kind="value" check="Number" />
+        <Input name="VZ" kind="value" check="Number" />
+        <Field name="VX" kind="number" defaultJson="0" inputOwner="VX" />
+        <Field name="VY" kind="number" defaultJson="0" inputOwner="VY" />
+        <Field name="VZ" kind="number" defaultJson="0" inputOwner="VZ" />
+      </Block>
+      <Block type="engine_set_velocity_axis" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 X 速度为 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="VALUE" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="VALUE_DEFAULT" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_get_velocity" category="物理" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="当前速度 X">
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+      </Block>
+      <Block type="engine_apply_impulse" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="施加冲量 X 0 或接入变量/运算 … Y 0 或接入变量/运算 … Z 0 或接入变量/运算 …">
+        <Input name="IX" kind="value" check="Number" />
+        <Input name="IY" kind="value" check="Number" />
+        <Input name="IZ" kind="value" check="Number" />
+        <Field name="IX" kind="number" defaultJson="0" inputOwner="IX" />
+        <Field name="IY" kind="number" defaultJson="0" inputOwner="IY" />
+        <Field name="IZ" kind="number" defaultJson="0" inputOwner="IZ" />
+      </Block>
+      <Block type="engine_stop_motion" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="停止当前物体运动" />
+      <Block type="engine_set_gravity" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置重力 启用 强度 9.8">
+        <Field name="ENABLED" kind="dropdown" defaultJson="&quot;TRUE&quot;" inputOwner="" optionValues="TRUE|FALSE" optionLabels="启用|关闭" />
+        <Field name="STRENGTH" kind="number" defaultJson="9.8" inputOwner="" />
+      </Block>
+      <Block type="engine_jump" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="跳跃力度 8 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="POWER" kind="number" defaultJson="8" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_bounce_axis" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="反弹 X 方向 系数 1">
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="FACTOR" kind="number" defaultJson="1" inputOwner="" />
+      </Block>
+      <Block type="engine_bounce_last_collision" category="物理" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="根据最近碰撞方向反弹 系数 1 或接入变量/运算 …">
+        <Input name="FACTOR" kind="value" check="Number" />
+        <Field name="FACTOR_DEFAULT" kind="number" defaultJson="1" inputOwner="FACTOR" />
+      </Block>
+      <Block type="object_set_native_physics" category="物理" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="对象  … 的原生物理 开启">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="ENABLED" kind="dropdown" defaultJson="&quot;TRUE&quot;" inputOwner="" optionValues="TRUE|FALSE" optionLabels="开启|关闭" />
+      </Block>
+      <Block type="object_set_logical_collision" category="物理" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="对象  … 的逻辑碰撞 开启">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="ENABLED" kind="dropdown" defaultJson="&quot;TRUE&quot;" inputOwner="" optionValues="TRUE|FALSE" optionLabels="开启|关闭" />
+      </Block>
+      <Block type="object_logical_collision_enabled" category="物理" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="对象  … 的逻辑碰撞已开启？">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="camera_lock_mouse" category="摄像机" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="锁定鼠标" />
+      <Block type="camera_unlock_mouse" category="摄像机" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="解锁鼠标" />
+      <Block type="camera_mouse_dx" category="摄像机" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="鼠标移动 X" />
+      <Block type="camera_mouse_dy" category="摄像机" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="鼠标移动 Y" />
+      <Block type="camera_set_fov" category="摄像机" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="视野设为 75 度">
+        <Field name="FOV" kind="number" defaultJson="75" inputOwner="" />
+      </Block>
+      <Block type="camera_follow_object" category="摄像机" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="摄像机跟随对象  偏移 X 0 Y 5 Z -10">
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+        <Field name="OX" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="OY" kind="number" defaultJson="5" inputOwner="" />
+        <Field name="OZ" kind="number" defaultJson="-10" inputOwner="" />
+      </Block>
+      <Block type="camera_third_person_orbit" category="摄像机" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="第三人称摄像机跟随 CoinHero 距离 7 高度 2.4 鼠标灵敏度 0.18">
+        <Field name="NAME" kind="string" defaultJson="&quot;CoinHero&quot;" inputOwner="" />
+        <Field name="DISTANCE" kind="number" defaultJson="7" inputOwner="" />
+        <Field name="HEIGHT" kind="number" defaultJson="2.4" inputOwner="" />
+        <Field name="SENSITIVITY" kind="number" defaultJson="0.18" inputOwner="" />
+      </Block>
+      <Block type="camera_first_person_follow" category="摄像机" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="第一人称摄像机跟随 FighterPlayer 高度 1.55 灵敏度 0.16 武器 Sword">
+        <Field name="NAME" kind="string" defaultJson="&quot;FighterPlayer&quot;" inputOwner="" />
+        <Field name="HEIGHT" kind="number" defaultJson="1.55" inputOwner="" />
+        <Field name="SENSITIVITY" kind="number" defaultJson="0.16" inputOwner="" />
+        <Field name="WEAPON" kind="string" defaultJson="&quot;Sword&quot;" inputOwner="" />
+      </Block>
+      <Block type="camera_raycast" category="摄像机" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="从摄像机发射射线 距离 100 命中？">
+        <Field name="MAX_DIST" kind="number" defaultJson="100" inputOwner="" />
+      </Block>
+      <Block type="camera_raycast_object" category="摄像机" shape="output" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="摄像机射线命中的对象" />
+      <Block type="appearance_cartoonSet" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="换成 0 动画">
+        <Field name="INDEX" kind="number" defaultJson="0" inputOwner="" />
+      </Block>
+      <Block type="appearance_nextCartoon" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="下一个动画" />
+      <Block type="appearance_playCartoon" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="播放动画" />
+      <Block type="appearance_stopCartoon" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="停止动画" />
+      <Block type="appearance_resetCartoon" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="重置动画" />
+      <Block type="appearance_sizeAdd" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="大小增加 10">
+        <Field name="DS" kind="number" defaultJson="10" inputOwner="" />
+      </Block>
+      <Block type="appearance_sizeSet" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="大小设为 100">
+        <Field name="SIZE" kind="number" defaultJson="100" inputOwner="" />
+      </Block>
+      <Block type="appearance_show" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="显示" />
+      <Block type="appearance_hide" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="隐藏" />
+      <Block type="appearance_cartoon" category="外观" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="动画" />
+      <Block type="appearance_size" category="外观" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="大小" />
+      <Block type="appearance_set_color" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置颜色 R 1 G 0 B 0">
+        <Field name="R" kind="number" defaultJson="1" inputOwner="" />
+        <Field name="G" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="B" kind="number" defaultJson="0" inputOwner="" />
+      </Block>
+      <Block type="appearance_set_alpha" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="透明度设为 1">
+        <Field name="ALPHA" kind="number" defaultJson="1" inputOwner="" />
+      </Block>
+      <Block type="object_reference" category="对象" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="场景对象 当前物体 或输入">
+        <Field name="OBJECT" kind="dropdown" defaultJson="&quot;&quot;" inputOwner="" optionValues="|__manual__" optionLabels="当前物体|手动输入" />
+        <Field name="MANUAL" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="object_hide" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="隐藏对象  …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_show" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="显示对象  …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_delete" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="删除对象  …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_delete_last_touched" category="对象" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="删除最近碰到的对象" />
+      <Block type="object_exists" category="对象" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="对象  存在？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+      </Block>
+      <Block type="object_set_tag" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置对象  … 标签 tag …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="TAG" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="object_tag_numbered_range" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="批量设置编号对象 前缀 Coin 从 1 到 12 位数 2 标签 coin">
+        <Field name="PREFIX" kind="string" defaultJson="&quot;Coin&quot;" inputOwner="" />
+        <Field name="FIRST" kind="number" defaultJson="1" inputOwner="" />
+        <Field name="LAST" kind="number" defaultJson="12" inputOwner="" />
+        <Field name="DIGITS" kind="number" defaultJson="2" inputOwner="" />
+        <Field name="TAG" kind="string" defaultJson="&quot;coin&quot;" inputOwner="" />
+      </Block>
+      <Block type="object_count_tag" category="对象" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="标签 tag 的对象数量 …">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="object_spawn" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="生成对象 模板 template … 命名 object_01 … 到 X 0 … Y 0 … Z 0 …">
+        <Input name="TEMPLATE" kind="value" check="String" />
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="X" kind="value" check="Number" />
+        <Input name="Y" kind="value" check="Number" />
+        <Input name="Z" kind="value" check="Number" />
+        <Field name="TEMPLATE" kind="string" defaultJson="&quot;template&quot;" inputOwner="TEMPLATE" />
+        <Field name="NAME" kind="string" defaultJson="&quot;object_01&quot;" inputOwner="NAME" />
+        <Field name="X" kind="number" defaultJson="0" inputOwner="X" />
+        <Field name="Y" kind="number" defaultJson="0" inputOwner="Y" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="Z" />
+      </Block>
+      <Block type="object_spawn_tag" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="批量生成标签 coin … 数量 5 … 模板 template … 起点 X 0 … Y 0 … Z 0 … 间距 X 1 … Y 0 … Z 0 …">
+        <Input name="TAG" kind="value" check="String" />
+        <Input name="COUNT" kind="value" check="Number" />
+        <Input name="TEMPLATE" kind="value" check="String" />
+        <Input name="X" kind="value" check="Number" />
+        <Input name="Y" kind="value" check="Number" />
+        <Input name="Z" kind="value" check="Number" />
+        <Input name="DX" kind="value" check="Number" />
+        <Input name="DY" kind="value" check="Number" />
+        <Input name="DZ" kind="value" check="Number" />
+        <Field name="TAG" kind="string" defaultJson="&quot;coin&quot;" inputOwner="TAG" />
+        <Field name="COUNT" kind="number" defaultJson="5" inputOwner="COUNT" />
+        <Field name="TEMPLATE" kind="string" defaultJson="&quot;template&quot;" inputOwner="TEMPLATE" />
+        <Field name="X" kind="number" defaultJson="0" inputOwner="X" />
+        <Field name="Y" kind="number" defaultJson="0" inputOwner="Y" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="Z" />
+        <Field name="DX" kind="number" defaultJson="1" inputOwner="DX" />
+        <Field name="DY" kind="number" defaultJson="0" inputOwner="DY" />
+        <Field name="DZ" kind="number" defaultJson="0" inputOwner="DZ" />
+      </Block>
+      <Block type="object_delete_raycast_hit" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="删除射线命中的对象" />
+      <Block type="object_save_checkpoint" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="保存对象  … 检查点  … 保存速度 true">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="CHECKPOINT" kind="value" check="String" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="CHECKPOINT_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="CHECKPOINT" />
+        <Field name="SAVE_VELOCITY" kind="boolean" defaultJson="&quot;TRUE&quot;" inputOwner="" />
+      </Block>
+      <Block type="object_restore_checkpoint" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="恢复对象  … 检查点  … 清除速度 true">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="CHECKPOINT" kind="value" check="String" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="CHECKPOINT_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="CHECKPOINT" />
+        <Field name="CLEAR_VELOCITY" kind="boolean" defaultJson="&quot;TRUE&quot;" inputOwner="" />
+      </Block>
+      <Block type="object_reset_crossed_once" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重置对象  … 通过一次标识 留空为全部  …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="TRIGGER" kind="value" check="String" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="TRIGGER_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TRIGGER" />
+      </Block>
+      <Block type="detect_not_touch_any" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="当前物体没有碰到任意物体？" />
+      <Block type="detect_not_touch_tag" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Boolean" dynamic="false" label="当前物体没有碰到标签 tag ？ …">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="detect_last_touch_object" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="最近碰到的对象" />
+      <Block type="detect_distance" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="到  的距离 …">
+        <Input name="x" kind="value" check="String" />
+        <Field name="x" kind="string" defaultJson="&quot;&quot;" inputOwner="x" />
+      </Block>
+      <Block type="detect_passed_x" category="侦测" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="对象  通过 X 0 ？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="X" kind="number" defaultJson="0" inputOwner="NAME" />
+      </Block>
+      <Block type="detect_passed_z" category="侦测" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="对象  通过 Z 0 ？ …">
+        <Input name="NAME" kind="value" check="String" />
+        <Field name="NAME" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="Z" kind="number" defaultJson="0" inputOwner="NAME" />
+      </Block>
+      <Block type="detect_crossed_x_once" category="侦测" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象 … 通过 X 增大方向 坐标 0 … 一次？">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="THRESHOLD" kind="value" check="Number" />
+        <Field name="DIRECTION" kind="dropdown" defaultJson="&quot;POSITIVE&quot;" inputOwner="" optionValues="POSITIVE|NEGATIVE|ANY" optionLabels="增大方向|减小方向|任意方向" />
+        <Field name="THRESHOLD_NUMBER" kind="number" defaultJson="0" inputOwner="THRESHOLD" />
+      </Block>
+      <Block type="detect_crossed_z_once" category="侦测" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="对象 … 通过 Z 增大方向 坐标 0 … 一次？">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="THRESHOLD" kind="value" check="Number" />
+        <Field name="DIRECTION" kind="dropdown" defaultJson="&quot;POSITIVE&quot;" inputOwner="" optionValues="POSITIVE|NEGATIVE|ANY" optionLabels="增大方向|减小方向|任意方向" />
+        <Field name="THRESHOLD_NUMBER" kind="number" defaultJson="0" inputOwner="THRESHOLD" />
+      </Block>
+      <Block type="detect_ask_answer" category="侦测" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="询问 你叫什么？ 的回答 …">
+        <Input name="QUESTION" kind="value" check="String" />
+        <Field name="QUESTION_TEXT" kind="string" defaultJson="&quot;你叫什么？&quot;" inputOwner="QUESTION" />
+      </Block>
+      <Block type="detect_attribute" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="动画名称">
+        <Field name="x" kind="dropdown" defaultJson="&quot;NAME&quot;" inputOwner="" optionValues="NAME|ID|X|Y|Z|DIRECTION|SIZE" optionLabels="动画名称|动画编号|X坐标|Y坐标|Z坐标|方向|大小" />
+      </Block>
+      <Block type="detect_raycast_distance" category="侦测" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="射线命中距离" />
+      <Block type="detect_raycast_object" category="侦测" shape="output" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="射线命中物体" />
+      <Block type="detect_raycast_point" category="侦测" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="射线命中点 X">
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+      </Block>
+      <Block type="detect_last_collision_normal_x" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="最近碰撞法线 X" />
+      <Block type="detect_last_collision_normal_y" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="最近碰撞法线 Y" />
+      <Block type="detect_last_collision_normal_z" category="侦测" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="最近碰撞法线 Z" />
+      <Block type="detect_mouse_pick_object" category="侦测" shape="output" projectUsage="project-safe" recommended="true" outputCheck="String" dynamic="false" label="最近鼠标命中的对象" />
+      <Block type="detect_mouse_pick_hit_tag" category="侦测" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="最近鼠标命中的对象有标签 target … ?">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;target&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="ui_set_score" category="界面" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="设置分数为 0 或接入变量/运算 …">
+        <Input name="VALUE_INPUT" kind="value" check="Number" />
+        <Field name="VALUE" kind="number" defaultJson="0" inputOwner="VALUE_INPUT" />
+      </Block>
+      <Block type="ui_add_score" category="界面" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="分数增加 1 或接入变量/运算 …">
+        <Input name="VALUE_INPUT" kind="value" check="Number" />
+        <Field name="DELTA" kind="number" defaultJson="1" inputOwner="VALUE_INPUT" />
+      </Block>
+      <Block type="ui_set_lives" category="界面" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="设置生命为 3 或接入变量/运算 …">
+        <Input name="VALUE_INPUT" kind="value" check="Number" />
+        <Field name="VALUE" kind="number" defaultJson="3" inputOwner="VALUE_INPUT" />
+      </Block>
+      <Block type="ui_add_lives" category="界面" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="生命增加 1 或接入变量/运算 …">
+        <Input name="VALUE_INPUT" kind="value" check="Number" />
+        <Field name="DELTA" kind="number" defaultJson="1" inputOwner="VALUE_INPUT" />
+      </Block>
+      <Block type="ui_set_countdown" category="界面" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置倒计时秒数 30 或接入变量/运算 …">
+        <Input name="VALUE_INPUT" kind="value" check="Number" />
+        <Field name="SECONDS" kind="number" defaultJson="30" inputOwner="VALUE_INPUT" />
+      </Block>
+      <Block type="ui_countdown_elapsed" category="界面" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="倒计时已经过秒数" />
+      <Block type="ui_game_win" category="界面" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="游戏胜利" />
+      <Block type="ui_game_over" category="界面" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="游戏失败" />
+      <Block type="audio_play" category="音效" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="播放音效 射击">
+        <Field name="SOUND" kind="dropdown" defaultJson="&quot;shoot&quot;" inputOwner="" optionValues="shoot|hit|hit_head|reload|empty_clip|target_up|target_down|combo|tick|game_start|game_end|bgm_menu|bgm_game" optionLabels="射击|命中|命中靶心|换弹|空膛|靶子升起|靶子落下|连击|倒计时|游戏开始|游戏结束|菜单BGM|游戏BGM" />
+      </Block>
+      <Block type="audio_loop" category="音效" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="循环播放 射击">
+        <Field name="SOUND" kind="dropdown" defaultJson="&quot;shoot&quot;" inputOwner="" optionValues="shoot|hit|hit_head|reload|empty_clip|target_up|target_down|combo|tick|game_start|game_end|bgm_menu|bgm_game" optionLabels="射击|命中|命中靶心|换弹|空膛|靶子升起|靶子落下|连击|倒计时|游戏开始|游戏结束|菜单BGM|游戏BGM" />
+      </Block>
+      <Block type="audio_stop" category="音效" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="停止音效 射击">
+        <Field name="SOUND" kind="dropdown" defaultJson="&quot;shoot&quot;" inputOwner="" optionValues="shoot|hit|hit_head|reload|empty_clip|target_up|target_down|combo|tick|game_start|game_end|bgm_menu|bgm_game" optionLabels="射击|命中|命中靶心|换弹|空膛|靶子升起|靶子落下|连击|倒计时|游戏开始|游戏结束|菜单BGM|游戏BGM" />
+      </Block>
+      <Block type="audio_stop_all" category="音效" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="停止全部音效" />
+      <Block type="variable_define" category="全局变量" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="初始化 当前物体 变量 score 为 0 或接入其他值 …">
+        <Input name="VALUE" kind="value" check="" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="string" defaultJson="&quot;score&quot;" inputOwner="" />
+        <Field name="x" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="variable_set" category="全局变量" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="将 当前物体 变量 game_state 设为 0 或接入其他值 …">
+        <Input name="VALUE" kind="value" check="" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="v" kind="dropdown" defaultJson="&quot;game_state&quot;" inputOwner="" optionValues="game_state|lives|score" optionLabels="game_state|lives|score" />
+        <Field name="x" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="variable_add" category="全局变量" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="将 当前物体 变量 game_state 增加 0 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="v" kind="dropdown" defaultJson="&quot;game_state&quot;" inputOwner="" optionValues="game_state|lives|score" optionLabels="game_state|lives|score" />
+        <Field name="x" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="variable_show" category="全局变量" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="显示 当前物体 变量 game_state">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="v" kind="dropdown" defaultJson="&quot;game_state&quot;" inputOwner="" optionValues="game_state|lives|score" optionLabels="game_state|lives|score" />
+      </Block>
+      <Block type="variable_hide" category="全局变量" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="隐藏 当前物体 变量 game_state">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="v" kind="dropdown" defaultJson="&quot;game_state&quot;" inputOwner="" optionValues="game_state|lives|score" optionLabels="game_state|lives|score" />
+      </Block>
+      <Block type="list_define" category="列表" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="初始化 当前物体 列表 items  为 …">
+        <Input name="VALUE" kind="value" check="Array" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="string" defaultJson="&quot;items&quot;" inputOwner="" />
+        <Field name="v" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="list_add_named" category="列表" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="向 当前物体 列表 items 加入 0 或接入其他值 …">
+        <Input name="VALUE" kind="value" check="" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="VALUE_NUMBER" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="list_insert_named" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="向 当前物体 列表 items 第 1 … 项插入 0 或接入其他值 …">
+        <Input name="INDEX" kind="value" check="Number" />
+        <Input name="VALUE" kind="value" check="" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="INDEX_NUMBER" kind="number" defaultJson="1" inputOwner="INDEX" />
+        <Field name="VALUE_NUMBER" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="list_remove_index_named" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="删除 当前物体 列表 items 第 1 … 项">
+        <Input name="INDEX" kind="value" check="Number" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="INDEX_NUMBER" kind="number" defaultJson="1" inputOwner="INDEX" />
+      </Block>
+      <Block type="list_remove_value_named" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="从 当前物体 列表 items 删除内容 0 或接入其他值 …">
+        <Input name="VALUE" kind="value" check="" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="VALUE_NUMBER" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="list_clear_named" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="清空 当前物体 列表 items">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+      </Block>
+      <Block type="list_item_named" category="列表" shape="output" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="读取 当前物体 列表 items 第 1 … 项">
+        <Input name="INDEX" kind="value" check="Number" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="INDEX_NUMBER" kind="number" defaultJson="1" inputOwner="INDEX" />
+      </Block>
+      <Block type="list_length_named" category="列表" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="读取 当前物体 列表 items 长度">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+      </Block>
+      <Block type="list_contains_named" category="列表" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Boolean" dynamic="false" label="判断 当前物体 列表 items 包含 0 或接入其他值 … ？">
+        <Input name="VALUE" kind="value" check="" />
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="VALUE_NUMBER" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="list_show" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="显示 当前物体 列表 items">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="v" kind="string" defaultJson="&quot;&quot;" inputOwner="LEGACY" />
+      </Block>
+      <Block type="list_hide" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="隐藏 当前物体 列表 items">
+        <Field name="SCOPE" kind="dropdown" defaultJson="&quot;OBJECT&quot;" inputOwner="" optionValues="OBJECT|SCENE" optionLabels="当前物体|当前场景" />
+        <Field name="NAME" kind="dropdown" defaultJson="&quot;items&quot;" inputOwner="" optionValues="items" optionLabels="items" />
+        <Field name="v" kind="string" defaultJson="&quot;&quot;" inputOwner="LEGACY" />
+      </Block>
+      <Block type="lists_create_empty" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="false" label="创建空列表" />
+      <Block type="lists_create_with" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="true" label="创建列表，内容： … … …">
+        <Input name="ADD0" kind="value" check="" />
+        <Input name="ADD1" kind="value" check="" />
+        <Input name="ADD2" kind="value" check="" />
+      </Block>
+      <Block type="lists_repeat" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="false" label="建立列表使用项 … 重复 … 次">
+        <Input name="ITEM" kind="value" check="" />
+        <Input name="NUM" kind="value" check="Number" />
+      </Block>
+      <Block type="lists_length" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="… 的长度">
+        <Input name="VALUE" kind="value" check="String|Array" />
+      </Block>
+      <Block type="lists_isEmpty" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="… 是空的">
+        <Input name="VALUE" kind="value" check="String|Array" />
+      </Block>
+      <Block type="lists_indexOf" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="在列表中 … 寻找第一次出现的项 …">
+        <Input name="VALUE" kind="value" check="Array" />
+        <Input name="FIND" kind="value" check="" />
+        <Field name="END" kind="dropdown" defaultJson="&quot;FIRST&quot;" inputOwner="FIND" optionValues="FIRST|LAST" optionLabels="寻找第一次出现的项|寻找最后一次出现的项" />
+      </Block>
+      <Block type="lists_getIndex" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="在列表中 … 取得  # …">
+        <Input name="VALUE" kind="value" check="Array" />
+        <Input name="AT" kind="value" check="Number" />
+        <Field name="MODE" kind="dropdown" defaultJson="&quot;GET&quot;" inputOwner="" optionValues="GET|GET_REMOVE|REMOVE" optionLabels="取得|取得并移除|移除" />
+        <Field name="SPACE" kind="field" defaultJson="&quot;&quot;" inputOwner="" />
+        <Field name="WHERE" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="" optionValues="FROM_START|FROM_END|FIRST|LAST|RANDOM" optionLabels="#|倒数第#项|第一项|最后一项|随机的一项" />
+      </Block>
+      <Block type="lists_setIndex" category="列表" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="在列表中 … 设置  # … 值为 …">
+        <Input name="LIST" kind="value" check="Array" />
+        <Input name="AT" kind="value" check="Number" />
+        <Input name="TO" kind="value" check="" />
+        <Field name="MODE" kind="dropdown" defaultJson="&quot;SET&quot;" inputOwner="" optionValues="SET|INSERT" optionLabels="设置|插入在" />
+        <Field name="SPACE" kind="field" defaultJson="&quot;&quot;" inputOwner="" />
+        <Field name="WHERE" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="" optionValues="FROM_START|FROM_END|FIRST|LAST|RANDOM" optionLabels="#|倒数第#项|第一项|最后一项|随机的一项" />
+      </Block>
+      <Block type="lists_getSublist" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="false" label="在列表中 … 获取子列表，从第#项 … 到第#项 …">
+        <Input name="LIST" kind="value" check="Array" />
+        <Input name="AT1" kind="value" check="Number" />
+        <Input name="AT2" kind="value" check="Number" />
+        <Field name="WHERE1" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="WHERE1_INPUT" optionValues="FROM_START|FROM_END|FIRST" optionLabels="获取子列表，从第#项|获取子列表，从倒数第#项|获取子列表，从第一项" />
+        <Field name="WHERE2" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="WHERE2_INPUT" optionValues="FROM_START|FROM_END|LAST" optionLabels="到第#项|到倒数第#项|到最后一项" />
+      </Block>
+      <Block type="lists_reverse" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="false" label="倒转 …">
+        <Input name="LIST" kind="value" check="Array" />
+      </Block>
+      <Block type="lists_sort" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="false" label="排序 按数字 升序 …">
+        <Input name="LIST" kind="value" check="Array" />
+        <Field name="TYPE" kind="dropdown" defaultJson="&quot;NUMERIC&quot;" inputOwner="LIST" optionValues="NUMERIC|TEXT|IGNORE_CASE" optionLabels="按数字|按字母|按字母（忽略大小写）" />
+        <Field name="DIRECTION" kind="dropdown" defaultJson="&quot;1&quot;" inputOwner="LIST" optionValues="1|-1" optionLabels="升序|降序" />
+      </Block>
+      <Block type="lists_split" category="列表" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Array" dynamic="false" label="从文本制作列表 … delimiter …">
+        <Input name="INPUT" kind="value" check="String" />
+        <Input name="DELIM" kind="value" check="String" />
+        <Field name="MODE" kind="dropdown" defaultJson="&quot;SPLIT&quot;" inputOwner="INPUT" optionValues="SPLIT|JOIN" optionLabels="从文本制作列表|将列表合并为文本" />
+      </Block>
+      <Block type="logic_null" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="空" />
+      <Block type="logic_ternary" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="断言 … 如果为 true … 如果为 false …">
+        <Input name="IF" kind="value" check="Boolean" />
+        <Input name="THEN" kind="value" check="" />
+        <Input name="ELSE" kind="value" check="" />
+      </Block>
+      <Block type="math_single" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="平方根 …">
+        <Input name="NUM" kind="value" check="Number" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;ROOT&quot;" inputOwner="NUM" optionValues="ROOT|ABS|NEG|LN|LOG10|EXP|POW10" optionLabels="平方根|绝对值|-|ln|log10|e^|10^" />
+      </Block>
+      <Block type="math_trig" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="正弦 …">
+        <Input name="NUM" kind="value" check="Number" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;SIN&quot;" inputOwner="NUM" optionValues="SIN|COS|TAN|ASIN|ACOS|ATAN" optionLabels="正弦|余弦|正切|反正弦|反余弦|反正切" />
+      </Block>
+      <Block type="math_constant" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="π">
+        <Field name="CONSTANT" kind="dropdown" defaultJson="&quot;PI&quot;" inputOwner="" optionValues="PI|E|GOLDEN_RATIO|SQRT2|SQRT1_2|INFINITY" optionLabels="π|e|φ|sqrt(2)|sqrt(½)|∞" />
+      </Block>
+      <Block type="math_number_property" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="… 是偶数">
+        <Input name="NUMBER_TO_CHECK" kind="value" check="Number" />
+        <Field name="PROPERTY" kind="dropdown" defaultJson="&quot;EVEN&quot;" inputOwner="" optionValues="EVEN|ODD|PRIME|WHOLE|POSITIVE|NEGATIVE|DIVISIBLE_BY" optionLabels="是偶数|是奇数|是质数|是整数|是正数|是负数|可整除被" />
+      </Block>
+      <Block type="math_round" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="四舍五入 …">
+        <Input name="NUM" kind="value" check="Number" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;ROUND&quot;" inputOwner="NUM" optionValues="ROUND|ROUNDUP|ROUNDDOWN" optionLabels="四舍五入|向上舍入|向下舍入" />
+      </Block>
+      <Block type="math_on_list" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="列表的和 …">
+        <Input name="LIST" kind="value" check="Array" />
+        <Field name="OP" kind="dropdown" defaultJson="&quot;SUM&quot;" inputOwner="LIST" optionValues="SUM|MIN|MAX|AVERAGE|MEDIAN|MODE|STD_DEV|RANDOM" optionLabels="列表的和|列表的最小数|列表的最大数|列表的平均|列表的中位数|列表的众数|列表的标准差|列表的随机项" />
+      </Block>
+      <Block type="math_modulo" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="… ÷ … 的余数">
+        <Input name="DIVIDEND" kind="value" check="Number" />
+        <Input name="DIVISOR" kind="value" check="Number" />
+      </Block>
+      <Block type="math_constrain" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="将 … 限制在 最低 … 到最高 … 之间">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Input name="LOW" kind="value" check="Number" />
+        <Input name="HIGH" kind="value" check="Number" />
+      </Block>
+      <Block type="math_random_int" category="运算" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="从 … 到 … 范围内的随机整数">
+        <Input name="FROM" kind="value" check="Number" />
+        <Input name="TO" kind="value" check="Number" />
+      </Block>
+      <Block type="math_random_float" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="随机小数" />
+      <Block type="math_atan2" category="运算" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="点(x: … ,y: … )的方位角">
+        <Input name="X" kind="value" check="Number" />
+        <Input name="Y" kind="value" check="Number" />
+      </Block>
+      <Block type="text" category="文本" shape="output" projectUsage="project-safe" recommended="true" outputCheck="String" dynamic="false" label="“  ”">
+        <Field name="TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="text_join" category="文本" shape="output" projectUsage="project-safe" recommended="true" outputCheck="String" dynamic="true" label="创建文本，内容： … …">
+        <Input name="ADD0" kind="value" check="" />
+        <Input name="ADD1" kind="value" check="" />
+      </Block>
+      <Block type="text_append" category="文本" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="在 项目 之后加上文本 …">
+        <Input name="TEXT" kind="value" check="" />
+        <Field name="VAR" kind="dropdown" defaultJson="&quot;_3S7hLUew9b~X#%=d]r7&quot;" inputOwner="TEXT" optionValues="_3S7hLUew9b~X#%=d]r7|RENAME_VARIABLE_ID|DELETE_VARIABLE_ID" optionLabels="项目|重命名变量“项目”...|删除变量“项目”" />
+      </Block>
+      <Block type="text_length" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="… 的长度">
+        <Input name="VALUE" kind="value" check="String|Array" />
+      </Block>
+      <Block type="text_isEmpty" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Boolean" dynamic="false" label="… 是空的">
+        <Input name="VALUE" kind="value" check="String|Array" />
+      </Block>
+      <Block type="text_indexOf" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="在文本 … 里 寻找第一次出现的文本 …">
+        <Input name="VALUE" kind="value" check="String" />
+        <Input name="FIND" kind="value" check="String" />
+        <Field name="END" kind="dropdown" defaultJson="&quot;FIRST&quot;" inputOwner="FIND" optionValues="FIRST|LAST" optionLabels="寻找第一次出现的文本|寻找最后一次出现的文本" />
+      </Block>
+      <Block type="text_charAt" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="在文本 … 里 获取第#个字符 …">
+        <Input name="VALUE" kind="value" check="String" />
+        <Input name="AT" kind="value" check="Number" />
+        <Field name="WHERE" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="" optionValues="FROM_START|FROM_END|FIRST|LAST|RANDOM" optionLabels="获取第#个字符|获取倒数第#个字符|获取第一个字符|获取最后一个字符|获取随机一个字符" />
+      </Block>
+      <Block type="text_getSubstring" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="从文本 … 获取子串，从第#个字符 … 到第#个字符 …">
+        <Input name="STRING" kind="value" check="String" />
+        <Input name="AT1" kind="value" check="Number" />
+        <Input name="AT2" kind="value" check="Number" />
+        <Field name="WHERE1" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="WHERE1_INPUT" optionValues="FROM_START|FROM_END|FIRST" optionLabels="获取子串，从第#个字符|获取子串，从倒数第#个字符|获取子串，从第一个字符" />
+        <Field name="WHERE2" kind="dropdown" defaultJson="&quot;FROM_START&quot;" inputOwner="WHERE2_INPUT" optionValues="FROM_START|FROM_END|LAST" optionLabels="到第#个字符|到倒数第#个字符|到最后一个字符" />
+      </Block>
+      <Block type="text_changeCase" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="转为大写 …">
+        <Input name="TEXT" kind="value" check="String" />
+        <Field name="CASE" kind="dropdown" defaultJson="&quot;UPPERCASE&quot;" inputOwner="TEXT" optionValues="UPPERCASE|LOWERCASE|TITLECASE" optionLabels="转为大写|转为小写|转为首字母大写" />
+      </Block>
+      <Block type="text_trim" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="消除其两侧的空格 …">
+        <Input name="TEXT" kind="value" check="String" />
+        <Field name="MODE" kind="dropdown" defaultJson="&quot;BOTH&quot;" inputOwner="TEXT" optionValues="BOTH|LEFT|RIGHT" optionLabels="消除其两侧的空格|消除其左侧的空格|消除其右侧的空格" />
+      </Block>
+      <Block type="text_count" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="计算 … 在 … 里出现的次数">
+        <Input name="SUB" kind="value" check="String" />
+        <Input name="TEXT" kind="value" check="String" />
+      </Block>
+      <Block type="text_replace" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="把 … 中的 … 替换为 …">
+        <Input name="TEXT" kind="value" check="String" />
+        <Input name="FROM" kind="value" check="String" />
+        <Input name="TO" kind="value" check="String" />
+      </Block>
+      <Block type="text_reverse" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="倒转文本 …">
+        <Input name="TEXT" kind="value" check="String" />
+      </Block>
+      <Block type="text_print" category="文本" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="输出 …">
+        <Input name="TEXT" kind="value" check="" />
+      </Block>
+      <Block type="text_prompt_ext" category="文本" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="要求输入文本，并显示提示消息 …">
+        <Input name="TEXT" kind="value" check="" />
+        <Field name="TYPE" kind="dropdown" defaultJson="&quot;TEXT&quot;" inputOwner="TEXT" optionValues="TEXT|NUMBER" optionLabels="要求输入文本，并显示提示消息|提示输入数并显示消息" />
+      </Block>
+      <Block type="procedures_defnoreturn" category="函数" shape="definition" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="true" label="至 未命名  …">
+        <Input name="STACK" kind="statement" check="" />
+        <Field name="NAME" kind="string" defaultJson="&quot;未命名&quot;" inputOwner="" />
+        <Field name="PARAMS" kind="field" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="procedures_defreturn" category="函数" shape="definition" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="true" label="至 未命名  … 返回 …">
+        <Input name="STACK" kind="statement" check="" />
+        <Input name="RETURN" kind="value" check="" />
+        <Field name="NAME" kind="string" defaultJson="&quot;未命名&quot;" inputOwner="" />
+        <Field name="PARAMS" kind="field" defaultJson="&quot;&quot;" inputOwner="" />
+      </Block>
+      <Block type="procedures_callnoreturn" category="函数" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="true" label="调用过程">
+        <Field name="NAME" kind="field" defaultJson="&quot;&quot;" inputOwner="TOPROW" />
+      </Block>
+      <Block type="procedures_callreturn" category="函数" shape="output" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="true" label="调用有返回值过程">
+        <Field name="NAME" kind="field" defaultJson="&quot;&quot;" inputOwner="TOPROW" />
+      </Block>
+      <Block type="procedures_ifreturn" category="函数" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="如果 … 返回 …">
+        <Input name="CONDITION" kind="value" check="Boolean" />
+        <Input name="VALUE" kind="value" check="" />
+      </Block>
+      <Block type="engine_set_game_speed" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置游戏速度 1 或接入变量/运算 …">
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="VALUE" kind="number" defaultJson="1" inputOwner="VALUE" />
+      </Block>
+      <Block type="engine_get_game_speed" category="玩法模板" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="游戏速度" />
+      <Block type="object_move_to_lane" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="对象  … 移动到 X 跑道 编号 0 … 起点 0 … 间距 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="LANE" kind="value" check="Number" />
+        <Input name="ORIGIN" kind="value" check="Number" />
+        <Input name="SPACING" kind="value" check="Number" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Z" optionLabels="X|Z" />
+        <Field name="LANE_NUMBER" kind="number" defaultJson="0" inputOwner="LANE" />
+        <Field name="ORIGIN_NUMBER" kind="number" defaultJson="0" inputOwner="ORIGIN" />
+        <Field name="SPACING_NUMBER" kind="number" defaultJson="0" inputOwner="SPACING" />
+      </Block>
+      <Block type="object_move_to_lane_smooth" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="对象  … 平滑移动到 X 轴跑道 编号 0 … 起点 0 … 间距 2 … 速度 8 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="LANE" kind="value" check="Number" />
+        <Input name="ORIGIN" kind="value" check="Number" />
+        <Input name="SPACING" kind="value" check="Number" />
+        <Input name="SPEED" kind="value" check="Number" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Z" optionLabels="X|Z" />
+        <Field name="LANE_NUMBER" kind="number" defaultJson="0" inputOwner="LANE" />
+        <Field name="ORIGIN_NUMBER" kind="number" defaultJson="0" inputOwner="ORIGIN" />
+        <Field name="SPACING_NUMBER" kind="number" defaultJson="2" inputOwner="SPACING" />
+        <Field name="SPEED_NUMBER" kind="number" defaultJson="8" inputOwner="SPEED" />
+      </Block>
+      <Block type="object_lane_index" category="玩法模板" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象  … 当前 X 跑道 起点 0 … 间距 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="ORIGIN" kind="value" check="Number" />
+        <Input name="SPACING" kind="value" check="Number" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Z" optionLabels="X|Z" />
+        <Field name="ORIGIN_NUMBER" kind="number" defaultJson="0" inputOwner="ORIGIN" />
+        <Field name="SPACING_NUMBER" kind="number" defaultJson="0" inputOwner="SPACING" />
+      </Block>
+      <Block type="object_set_random_position" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="随机放置对象  … 中心X 0 … Y 0 … Z 0 … 尺寸X 0 … Y 0 … Z 0 …">
+        <Input name="NAME" kind="value" check="String" />
+        <Input name="CX" kind="value" check="Number" />
+        <Input name="CY" kind="value" check="Number" />
+        <Input name="CZ" kind="value" check="Number" />
+        <Input name="SX" kind="value" check="Number" />
+        <Input name="SY" kind="value" check="Number" />
+        <Input name="SZ" kind="value" check="Number" />
+        <Field name="NAME_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="NAME" />
+        <Field name="CX_NUMBER" kind="number" defaultJson="0" inputOwner="CX" />
+        <Field name="CY_NUMBER" kind="number" defaultJson="0" inputOwner="CY" />
+        <Field name="CZ_NUMBER" kind="number" defaultJson="0" inputOwner="CZ" />
+        <Field name="SX_NUMBER" kind="number" defaultJson="0" inputOwner="SX" />
+        <Field name="SY_NUMBER" kind="number" defaultJson="0" inputOwner="SY" />
+        <Field name="SZ_NUMBER" kind="number" defaultJson="0" inputOwner="SZ" />
+      </Block>
+      <Block type="object_spawn_random_box" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="在 3D 区域随机生成模板  … 标签  … 数量 0 … 中心X 0 … Y 0 … Z 0 … 尺寸X 0 … Y 0 … Z 0 …">
+        <Input name="TEMPLATE" kind="value" check="String" />
+        <Input name="TAG" kind="value" check="String" />
+        <Input name="COUNT" kind="value" check="Number" />
+        <Input name="CX" kind="value" check="Number" />
+        <Input name="CY" kind="value" check="Number" />
+        <Input name="CZ" kind="value" check="Number" />
+        <Input name="SX" kind="value" check="Number" />
+        <Input name="SY" kind="value" check="Number" />
+        <Input name="SZ" kind="value" check="Number" />
+        <Field name="TEMPLATE_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TEMPLATE" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TAG" />
+        <Field name="COUNT_NUMBER" kind="number" defaultJson="0" inputOwner="COUNT" />
+        <Field name="CX_NUMBER" kind="number" defaultJson="0" inputOwner="CX" />
+        <Field name="CY_NUMBER" kind="number" defaultJson="0" inputOwner="CY" />
+        <Field name="CZ_NUMBER" kind="number" defaultJson="0" inputOwner="CZ" />
+        <Field name="SX_NUMBER" kind="number" defaultJson="0" inputOwner="SX" />
+        <Field name="SY_NUMBER" kind="number" defaultJson="0" inputOwner="SY" />
+        <Field name="SZ_NUMBER" kind="number" defaultJson="0" inputOwner="SZ" />
+      </Block>
+      <Block type="object_scatter_tag" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="随机散布标签  … 中心X 0 … Y 0 … Z 0 … 尺寸X 0 … Y 0 … Z 0 …">
+        <Input name="TAG" kind="value" check="String" />
+        <Input name="CX" kind="value" check="Number" />
+        <Input name="CY" kind="value" check="Number" />
+        <Input name="CZ" kind="value" check="Number" />
+        <Input name="SX" kind="value" check="Number" />
+        <Input name="SY" kind="value" check="Number" />
+        <Input name="SZ" kind="value" check="Number" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TAG" />
+        <Field name="CX_NUMBER" kind="number" defaultJson="0" inputOwner="CX" />
+        <Field name="CY_NUMBER" kind="number" defaultJson="0" inputOwner="CY" />
+        <Field name="CZ_NUMBER" kind="number" defaultJson="0" inputOwner="CZ" />
+        <Field name="SX_NUMBER" kind="number" defaultJson="0" inputOwner="SX" />
+        <Field name="SY_NUMBER" kind="number" defaultJson="0" inputOwner="SY" />
+        <Field name="SZ_NUMBER" kind="number" defaultJson="0" inputOwner="SZ" />
+      </Block>
+      <Block type="object_recycle_tag_axis" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="回收标签  … 前进轴 X 方向 小于 边界 0 … 重置坐标 0 … 随机轴 不随机 随机最小 0 … 随机最大 0 …">
+        <Input name="TAG" kind="value" check="String" />
+        <Input name="BOUNDARY" kind="value" check="Number" />
+        <Input name="RESET" kind="value" check="Number" />
+        <Input name="RANDOM_MIN" kind="value" check="Number" />
+        <Input name="RANDOM_MAX" kind="value" check="Number" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TAG" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="DIRECTION" kind="dropdown" defaultJson="&quot;LESS&quot;" inputOwner="" optionValues="LESS|GREATER" optionLabels="小于|大于" />
+        <Field name="BOUNDARY_NUMBER" kind="number" defaultJson="0" inputOwner="BOUNDARY" />
+        <Field name="RESET_NUMBER" kind="number" defaultJson="0" inputOwner="RESET" />
+        <Field name="RANDOM_AXIS" kind="dropdown" defaultJson="&quot;&quot;" inputOwner="" optionValues="|X|Y|Z" optionLabels="不随机|X|Y|Z" />
+        <Field name="RANDOM_MIN_NUMBER" kind="number" defaultJson="0" inputOwner="RANDOM_MIN" />
+        <Field name="RANDOM_MAX_NUMBER" kind="number" defaultJson="0" inputOwner="RANDOM_MAX" />
+      </Block>
+      <Block type="object_reset_tag" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="恢复标签对象  …">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="object_count_active_tag" category="玩法模板" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="标签  … 当前有效数量">
+        <Input name="TAG" kind="value" check="String" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;&quot;" inputOwner="TAG" />
+      </Block>
+      <Block type="object_set_tag_velocity_axis" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="设置标签 tag … 对象的 X 速度 为 0 …">
+        <Input name="TAG" kind="value" check="String" />
+        <Input name="VALUE" kind="value" check="Number" />
+        <Field name="TAG_TEXT" kind="string" defaultJson="&quot;tag&quot;" inputOwner="TAG" />
+        <Field name="AXIS" kind="dropdown" defaultJson="&quot;X&quot;" inputOwner="" optionValues="X|Y|Z" optionLabels="X|Y|Z" />
+        <Field name="VALUE_NUMBER" kind="number" defaultJson="0" inputOwner="VALUE" />
+      </Block>
+      <Block type="object_randomize_mouse_pick" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="将最近鼠标命中的对象随机放到 3D 区域 中心X 0 … Y 0 … Z 0 … 尺寸X 10 … Y 10 … Z 10 …">
+        <Input name="CX" kind="value" check="Number" />
+        <Input name="CY" kind="value" check="Number" />
+        <Input name="CZ" kind="value" check="Number" />
+        <Input name="SX" kind="value" check="Number" />
+        <Input name="SY" kind="value" check="Number" />
+        <Input name="SZ" kind="value" check="Number" />
+        <Field name="CX_NUMBER" kind="number" defaultJson="0" inputOwner="CX" />
+        <Field name="CY_NUMBER" kind="number" defaultJson="0" inputOwner="CY" />
+        <Field name="CZ_NUMBER" kind="number" defaultJson="0" inputOwner="CZ" />
+        <Field name="SX_NUMBER" kind="number" defaultJson="10" inputOwner="SX" />
+        <Field name="SY_NUMBER" kind="number" defaultJson="10" inputOwner="SY" />
+        <Field name="SZ_NUMBER" kind="number" defaultJson="10" inputOwner="SZ" />
+      </Block>
+      <Block type="object_delete_mouse_pick" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="删除最近鼠标命中的对象" />
+      <Block type="object_third_person_move" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="让对象 CoinHero 按 WASD 相对摄像机移动 速度 0.18 障碍标签 obstacle 范围 X -12 到 12 Z -12 到 12">
+        <Field name="NAME" kind="string" defaultJson="&quot;CoinHero&quot;" inputOwner="" />
+        <Field name="SPEED" kind="number" defaultJson="0.18" inputOwner="" />
+        <Field name="OBSTACLE_TAG" kind="string" defaultJson="&quot;obstacle&quot;" inputOwner="" />
+        <Field name="MIN_X" kind="number" defaultJson="-12" inputOwner="" />
+        <Field name="MAX_X" kind="number" defaultJson="12" inputOwner="" />
+        <Field name="MIN_Z" kind="number" defaultJson="-12" inputOwner="" />
+        <Field name="MAX_Z" kind="number" defaultJson="12" inputOwner="" />
+      </Block>
+      <Block type="object_arcade_jump" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="让对象 CoinHero 空格跳跃 力度 0.28 重力 0.025 地面 Y 0.8">
+        <Field name="NAME" kind="string" defaultJson="&quot;CoinHero&quot;" inputOwner="" />
+        <Field name="POWER" kind="number" defaultJson="0.28" inputOwner="" />
+        <Field name="GRAVITY" kind="number" defaultJson="0.025" inputOwner="" />
+        <Field name="GROUND_Y" kind="number" defaultJson="0.8" inputOwner="" />
+      </Block>
+      <Block type="object_collect_touching_tag" category="玩法模板" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="收集碰到的标签 coin 每个加分 1">
+        <Field name="TAG" kind="string" defaultJson="&quot;coin&quot;" inputOwner="" />
+        <Field name="POINTS" kind="number" defaultJson="1" inputOwner="" />
+      </Block>
+      <Block type="object_breakout_reset_round" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="重置打砖块 球 Ball 挡板 Paddle 砖块标签 brick 球位置 X 0 Y -3 Z 2.5 挡板位置 X 0 Y -4.2 Z 2.5 初速度 X 0.16 Y 0.18 重置砖块 false">
+        <Field name="BALL" kind="string" defaultJson="&quot;Ball&quot;" inputOwner="" />
+        <Field name="PADDLE" kind="string" defaultJson="&quot;Paddle&quot;" inputOwner="" />
+        <Field name="BRICK_TAG" kind="string" defaultJson="&quot;brick&quot;" inputOwner="" />
+        <Field name="BALL_X" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="BALL_Y" kind="number" defaultJson="-3" inputOwner="" />
+        <Field name="BALL_Z" kind="number" defaultJson="2.5" inputOwner="" />
+        <Field name="PADDLE_X" kind="number" defaultJson="0" inputOwner="" />
+        <Field name="PADDLE_Y" kind="number" defaultJson="-4.2" inputOwner="" />
+        <Field name="PADDLE_Z" kind="number" defaultJson="2.5" inputOwner="" />
+        <Field name="SPEED_X" kind="number" defaultJson="0.16" inputOwner="" />
+        <Field name="SPEED_Y" kind="number" defaultJson="0.18" inputOwner="" />
+        <Field name="RESET_BRICKS" kind="boolean" defaultJson="&quot;FALSE&quot;" inputOwner="" />
+      </Block>
+      <Block type="object_breakout_paddle_control" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="控制挡板 Paddle A/D 或方向键 速度 0.28 X 范围 -5.2 到 5.2">
+        <Field name="PADDLE" kind="string" defaultJson="&quot;Paddle&quot;" inputOwner="" />
+        <Field name="SPEED" kind="number" defaultJson="0.28" inputOwner="" />
+        <Field name="MIN_X" kind="number" defaultJson="-5.2" inputOwner="" />
+        <Field name="MAX_X" kind="number" defaultJson="5.2" inputOwner="" />
+      </Block>
+      <Block type="object_breakout_step" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="更新打砖块 球 Ball 挡板 Paddle 砖块标签 brick 边界 X -5.8 到 5.8 顶部 Y 5.8">
+        <Field name="BALL" kind="string" defaultJson="&quot;Ball&quot;" inputOwner="" />
+        <Field name="PADDLE" kind="string" defaultJson="&quot;Paddle&quot;" inputOwner="" />
+        <Field name="BRICK_TAG" kind="string" defaultJson="&quot;brick&quot;" inputOwner="" />
+        <Field name="MIN_X" kind="number" defaultJson="-5.8" inputOwner="" />
+        <Field name="MAX_X" kind="number" defaultJson="5.8" inputOwner="" />
+        <Field name="MAX_Y" kind="number" defaultJson="5.8" inputOwner="" />
+      </Block>
+      <Block type="object_first_person_move" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="第一人称移动 FighterPlayer 速度 0.2 障碍标签 obstacle 范围 X -5 到 5 Z -1 到 48">
+        <Field name="NAME" kind="string" defaultJson="&quot;FighterPlayer&quot;" inputOwner="" />
+        <Field name="SPEED" kind="number" defaultJson="0.2" inputOwner="" />
+        <Field name="OBSTACLE_TAG" kind="string" defaultJson="&quot;obstacle&quot;" inputOwner="" />
+        <Field name="MIN_X" kind="number" defaultJson="-5" inputOwner="" />
+        <Field name="MAX_X" kind="number" defaultJson="5" inputOwner="" />
+        <Field name="MIN_Z" kind="number" defaultJson="-1" inputOwner="" />
+        <Field name="MAX_Z" kind="number" defaultJson="48" inputOwner="" />
+      </Block>
+      <Block type="combat_set_tag_health" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置标签敌人 room1 生命值 2">
+        <Field name="TAG" kind="string" defaultJson="&quot;room1&quot;" inputOwner="" />
+        <Field name="HEALTH" kind="number" defaultJson="2" inputOwner="" />
+      </Block>
+      <Block type="combat_melee_attack" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="近战攻击 玩家 FighterPlayer 敌人标签 room1 请求变量 attack_requested 范围 2.2 伤害 1 冷却 0.25">
+        <Field name="PLAYER" kind="string" defaultJson="&quot;FighterPlayer&quot;" inputOwner="" />
+        <Field name="TAG" kind="string" defaultJson="&quot;room1&quot;" inputOwner="" />
+        <Field name="REQUEST" kind="string" defaultJson="&quot;attack_requested&quot;" inputOwner="" />
+        <Field name="RANGE" kind="number" defaultJson="2.2" inputOwner="" />
+        <Field name="DAMAGE" kind="number" defaultJson="1" inputOwner="" />
+        <Field name="COOLDOWN" kind="number" defaultJson="0.25" inputOwner="" />
+      </Block>
+      <Block type="combat_enemy_chase_tag" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="标签敌人 room1 追逐玩家 FighterPlayer 速度 0.06 停止距离 1.15">
+        <Field name="TAG" kind="string" defaultJson="&quot;room1&quot;" inputOwner="" />
+        <Field name="PLAYER" kind="string" defaultJson="&quot;FighterPlayer&quot;" inputOwner="" />
+        <Field name="SPEED" kind="number" defaultJson="0.06" inputOwner="" />
+        <Field name="STOP_DISTANCE" kind="number" defaultJson="1.15" inputOwner="" />
+      </Block>
+      <Block type="combat_enemy_contact_damage" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="标签敌人 room1 碰到玩家 FighterPlayer 伤害 1 冷却 0.8">
+        <Field name="TAG" kind="string" defaultJson="&quot;room1&quot;" inputOwner="" />
+        <Field name="PLAYER" kind="string" defaultJson="&quot;FighterPlayer&quot;" inputOwner="" />
+        <Field name="DAMAGE" kind="number" defaultJson="1" inputOwner="" />
+        <Field name="COOLDOWN" kind="number" defaultJson="0.8" inputOwner="" />
+      </Block>
+      <Block type="combat_alive_count" category="玩法模板" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="标签 room1 存活数量">
+        <Field name="TAG" kind="string" defaultJson="&quot;room1&quot;" inputOwner="" />
+      </Block>
+    </Blocks>
+    <NodeTypes>
+      <NodeType type="start" countRule="exactly-one" execution="graph entry; enter lifecycle runs before transitions" />
+      <NodeType type="custom" countRule="zero-or-more" execution="state node; enter/active/exit lifecycle blocks are supported" />
+      <NodeType type="end" countRule="zero-or-more" execution="enter lifecycle runs once, then graph terminates" />
+    </NodeTypes>
+    <ConnectionSides values="left right bottom" index="non-negative-integer" />
+    <GlobalWorkspaceRootTypes values="variable_define variable_set variable_add variable_show variable_hide list_define list_show list_hide" />
+  </Catalog>
+</CoronaBlocksDocument>
