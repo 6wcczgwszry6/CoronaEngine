@@ -970,7 +970,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     // =====================================================
                 }
             }
-        }  // 内层：collision_pairs
+    
 
         // 收敛早退：本轮所有碰撞对的速度修正都极小，说明已稳定，无需继续迭代
         if (max_delta_v_sq_this_iter < k_early_exit_vel_eps * k_early_exit_vel_eps) {
