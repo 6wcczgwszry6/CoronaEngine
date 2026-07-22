@@ -301,20 +301,12 @@ void GeometrySystem::update() {
     // 轮询回写已完成的异步 LOD 构建（方案 C）：放在 reconcile 之前，让本帧完成的级
     // 即刻参与本帧的驻留决策（计入 ready，避免对同级重复发起任务）。
     process_pending_lod_builds();
-    // reconcile（Step 3a 按需驻留）：每帧把每个 mesh 的 GPU 驻留集收敛到 {LOD0, 需求级 D}，
-    // 只构建当前需要的那一级、释放其余已构建的简化级，消除"上传所有 LOD ≈2×显存"的浪费。
+    // reconcile（Step 3a 按需驻留）和 reconcile_cpu_residency 已移到场景循环之后。
+    // 这样 evict_lods_for_actor（场景循环内，按距离淘汰 LOD1..N）先于 reconcile 执行：
+    // 避免 reconcile 刚恢复的 mesh 在同帧被 evict_lods_for_actor 重新淘汰，
+    // 造成"恢复→淘汰→恢复"的每帧 ping-pong（GPU 缓冲反复创建/释放）。
+    //
     // 必须在 upload 之后（缓存条目已建）、skin 之前（蒙皮需写本帧新建级）。
-    reconcile_lod_residency();
-
-    // ---- CPU LOD 驻留协调（RAM 3层窗口管理）----
-    // 每 kCpuWindowEvalInterval 帧运行一次：确定各 model_id 的 CPU 驻留窗口
-    // {lod_levels[0], lod_levels[demand_median-1], lod_levels[N-1]}，
-    // 窗口外的 LODLevel 数据移交异步队列写入磁盘缓存以节省 RAM，
-    // 窗口内数据缺失的级从磁盘缓存回读，供 GPU 侧按需重建该级缓冲。
-    if (++impl_->cpu_window_eval_counter >= Impl::kCpuWindowEvalInterval) {
-        impl_->cpu_window_eval_counter = 0;
-        reconcile_cpu_residency();
-    }
 
     // ---- 骨骼动画 CPU 蒙皮 ----
     // 已迁移到 MechanicsSystem::update_skinned_geometry()（物理线程帧尾执行）。
@@ -770,6 +762,24 @@ void GeometrySystem::update() {
         }
     }
 
+    // ---- 动态减面驻留协调（Step 3a：按需驻留）----
+    // 必须在场景循环之后调用：场景循环中的 evict_lods_for_actor 先按距离淘汰
+    // LOD1..N GPU 缓冲并置 lod_spatially_evicted，然后 reconcile 统一处理驻留——
+    // 包括对已淘汰 mesh 保持 LOD0、对回到恢复区的 mesh 清除标记并重建需求级。
+    // 若在场景循环之前调用，reconcile 先恢复 mesh，随后 evict_lods_for_actor
+    // 同帧重新淘汰，造成"恢复→淘汰→恢复"的每帧 ping-pong。
+    reconcile_lod_residency();
+
+    // ---- CPU LOD 驻留协调（RAM 3层窗口管理）----
+    // 每 kCpuWindowEvalInterval 帧运行一次：确定各 model_id 的 CPU 驻留窗口
+    // {lod_levels[0], lod_levels[demand_median-1], lod_levels[N-1]}，
+    // 窗口外的 LODLevel 数据移交异步队列写入磁盘缓存以节省 RAM，
+    // 窗口内数据缺失的级从磁盘缓存回读，供 GPU 侧按需重建该级缓冲。
+    if (++impl_->cpu_window_eval_counter >= Impl::kCpuWindowEvalInterval) {
+        impl_->cpu_window_eval_counter = 0;
+        reconcile_cpu_residency();
+    }
+
     // ========================================
     // 每帧资源预算检查：超过预算时主动淘汰最久未访问的冷资源
     // ========================================
@@ -1105,6 +1115,19 @@ void GeometrySystem::shutdown() {
 void GeometrySystem::set_visibility_config(std::uintptr_t scene, SceneVisibilityConfig cfg) {
     std::unique_lock lock(impl_->mtx);
     impl_->get_or_create(scene).cfg = cfg;
+
+    // 关闭 LOD 空间淘汰时，立即清除所有已存在的 lod_spatially_evicted 标记。
+    // 否则已被标记的 mesh 永久卡在 LOD0，直到碰巧走进 lod_evict_distance 内。
+    if (!cfg.enable_lod_spatial_eviction) {
+        std::unique_lock lod_lock(impl_->lod_cache_mutex);
+        for (auto& [key, entry] : impl_->lod_cache) {
+            if (entry.lod_spatially_evicted) {
+                entry.lod_spatially_evicted = false;
+                // 不清除 committed_demand：reconcile 下帧会正常重算。
+            }
+        }
+    }
+
     // 同步全局值（reconcile 使用）。若显式设置则用设置值，
     // 否则自动计算。注意：多 scene 时以最后一次调用为准（v1 限制）。
     if (cfg.lod_evict_distance > 0)
