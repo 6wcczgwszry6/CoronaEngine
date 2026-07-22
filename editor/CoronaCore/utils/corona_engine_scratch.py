@@ -1377,7 +1377,14 @@ def _apply_rotation():
 
 
 # Engine / motion
-def move(steps):
+def move(steps, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        pos = _actor_position(actor)
+        if actor is None or pos is None:
+            return False
+        pos[0] += float(steps)
+        return _set_actor_position(actor, pos)
     if _actor_only("move"):
         return
     _init_engine()
@@ -1386,7 +1393,12 @@ def move(steps):
     _sync_position()
 
 
-def rotateX(angle):
+def rotateX(angle, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[0] += float(angle)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("rotateX"):
         return
     _init_engine()
@@ -1400,7 +1412,12 @@ def rotateX(angle):
     _apply_rotation()
 
 
-def rotateY(angle):
+def rotateY(angle, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[1] += float(angle)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("rotateY"):
         return
     _init_engine()
@@ -1414,7 +1431,12 @@ def rotateY(angle):
     _apply_rotation()
 
 
-def rotateZ(angle):
+def rotateZ(angle, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[2] += float(angle)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("rotateZ"):
         return
     _init_engine()
@@ -1428,7 +1450,12 @@ def rotateZ(angle):
     _apply_rotation()
 
 
-def face(direction):
+def face(direction, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[1] = float(direction)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("face"):
         return
     _init_engine()
@@ -1436,22 +1463,45 @@ def face(direction):
     _apply_rotation()
 
 
-def rotationX():
+def rotationX(actor_name=""):
+    if str(actor_name or "").strip():
+        return _actor_vector(_resolve_actor(actor_name), "get_rotation", [0.0, 0.0, 0.0])[0]
     _init_engine()
     return _current_context().rot_x
 
 
-def rotationY():
+def rotationY(actor_name=""):
+    if str(actor_name or "").strip():
+        return _actor_vector(_resolve_actor(actor_name), "get_rotation", [0.0, 0.0, 0.0])[1]
     _init_engine()
     return _current_context().rot_y
 
 
-def rotationZ():
+def rotationZ(actor_name=""):
+    if str(actor_name or "").strip():
+        return _actor_vector(_resolve_actor(actor_name), "get_rotation", [0.0, 0.0, 0.0])[2]
     _init_engine()
     return _current_context().rot_z
 
 
-def moveto(position):
+def moveto(position, actor_name=""):
+    explicit_target = str(actor_name or "").strip()
+    if explicit_target:
+        actor = _resolve_actor(explicit_target)
+        if actor is None:
+            return False
+        if position == "random_position":
+            target = [
+                _random.uniform(-10, 10),
+                _random.uniform(-5, 5),
+                _random.uniform(-10, 10),
+            ]
+        elif position == "sight_position":
+            target = [0.0, 0.0, 0.0]
+        else:
+            _logger.warning("[ScratchWrapper] unknown moveto position: %s", position)
+            return False
+        return _set_actor_position(actor, target)
     if _actor_only("moveto"):
         return
     _init_engine()
@@ -1468,18 +1518,21 @@ def moveto(position):
     _sync_position()
 
 
-def movetoXYZ(position):
-    if _actor_only("movetoXYZ"):
-        return False
-    _init_engine()
+def movetoXYZ(position, actor_name=""):
     try:
         values = position
         if isinstance(position, str):
             values = [item.strip() for item in position.split(',')]
         if len(values) < 3:
             return False
+        target = [float(values[0]), float(values[1]), float(values[2])]
+        if str(actor_name or "").strip():
+            return _set_actor_position(_resolve_actor(actor_name), target)
+        if _actor_only("movetoXYZ"):
+            return False
+        _init_engine()
         ctx = _current_context()
-        ctx.x, ctx.y, ctx.z = (float(values[0]), float(values[1]), float(values[2]))
+        ctx.x, ctx.y, ctx.z = target
         _sync_position()
         return True
     except (TypeError, ValueError):
@@ -1487,16 +1540,30 @@ def movetoXYZ(position):
         return False
 
 
-def movetoXYZtime(t, x1, x2, x3):
+def movetoXYZtime(t, x1, x2, x3, actor_name=""):
+    target = [float(x1), float(x2), float(x3)]
+    if str(actor_name or "").strip():
+        return _set_actor_position(_resolve_actor(actor_name), target)
     if _actor_only("movetoXYZtime"):
         return
     _init_engine()
     ctx = _current_context()
-    ctx.x, ctx.y, ctx.z = float(x1), float(x2), float(x3)
+    ctx.x, ctx.y, ctx.z = target
     _sync_position()
 
 
-def Xset(x):
+def _set_or_add_actor_axis(actor_name, axis, value, add=False):
+    actor = _resolve_actor(actor_name)
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    pos[axis] = pos[axis] + float(value) if add else float(value)
+    return _set_actor_position(actor, pos)
+
+
+def Xset(x, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 0, x)
     if _actor_only("Xset"):
         return
     _init_engine()
@@ -1504,7 +1571,9 @@ def Xset(x):
     _sync_position()
 
 
-def Yset(y):
+def Yset(y, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 1, y)
     if _actor_only("Yset"):
         return
     _init_engine()
@@ -1512,7 +1581,9 @@ def Yset(y):
     _sync_position()
 
 
-def Zset(z):
+def Zset(z, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 2, z)
     if _actor_only("Zset"):
         return
     _init_engine()
@@ -1520,7 +1591,9 @@ def Zset(z):
     _sync_position()
 
 
-def Xadd(dx):
+def Xadd(dx, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 0, dx, True)
     if _actor_only("Xadd"):
         return
     _init_engine()
@@ -1528,7 +1601,9 @@ def Xadd(dx):
     _sync_position()
 
 
-def Yadd(dy):
+def Yadd(dy, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 1, dy, True)
     if _actor_only("Yadd"):
         return
     _init_engine()
@@ -1536,7 +1611,9 @@ def Yadd(dy):
     _sync_position()
 
 
-def Zadd(dz):
+def Zadd(dz, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 2, dz, True)
     if _actor_only("Zadd"):
         return
     _init_engine()
@@ -1544,17 +1621,26 @@ def Zadd(dz):
     _sync_position()
 
 
-def X():
+def X(actor_name=""):
+    if str(actor_name or "").strip():
+        pos = _actor_position(_resolve_actor(actor_name))
+        return pos[0] if pos is not None else 0.0
     _init_engine()
     return _current_context().x
 
 
-def Y():
+def Y(actor_name=""):
+    if str(actor_name or "").strip():
+        pos = _actor_position(_resolve_actor(actor_name))
+        return pos[1] if pos is not None else 0.0
     _init_engine()
     return _current_context().y
 
 
-def Z():
+def Z(actor_name=""):
+    if str(actor_name or "").strip():
+        pos = _actor_position(_resolve_actor(actor_name))
+        return pos[2] if pos is not None else 0.0
     _init_engine()
     return _current_context().z
 

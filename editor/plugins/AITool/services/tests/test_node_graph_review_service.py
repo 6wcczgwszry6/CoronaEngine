@@ -324,6 +324,76 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
 
         self.assertFalse({"missing_actor_target", "actor_target_not_found"} & {item["code"] for item in facts})
 
+    def test_engine_motion_block_requires_connected_object(self):
+        workspace = graph(nodes=[{
+            "id": "start",
+            "nodeType": "start",
+            "workspace": {"blocks": {"blocks": [
+                block("engine_moveto", "move")
+            ]}},
+        }])
+        catalog = {"engine_moveto": {"outputCheck": "", "projectUsage": "project-safe"}}
+        with mock.patch.object(NodeGraphReviewService, "_catalog_index", return_value=catalog):
+            facts = NodeGraphReviewService._collect_local_facts(
+                workspace, {"actors": [{"name": "Ball"}]}
+            )
+
+        issue = next(item for item in facts if item["code"] == "missing_actor_target")
+        self.assertEqual("start", issue["nodeId"])
+        self.assertEqual("move", issue["blockId"])
+
+    def test_engine_motion_block_accepts_connected_object_reference(self):
+        reference = block(
+            "object_reference",
+            "reference",
+            {"OBJECT": "Ball", "MANUAL": ""},
+        )
+        workspace = graph(nodes=[{
+            "id": "start",
+            "nodeType": "start",
+            "workspace": {"blocks": {"blocks": [
+                block("engine_moveto", "move", inputs={"OBJECT": {"block": reference}})
+            ]}},
+        }])
+        catalog = {
+            "engine_moveto": {"outputCheck": "", "projectUsage": "project-safe"},
+            "object_reference": {"outputCheck": "String", "projectUsage": "project-safe"},
+        }
+        with mock.patch.object(NodeGraphReviewService, "_catalog_index", return_value=catalog):
+            facts = NodeGraphReviewService._collect_local_facts(
+                workspace, {"actors": [{"name": "Ball"}]}
+            )
+
+        self.assertFalse(
+            {"missing_actor_target", "actor_target_not_found"}
+            & {item["code"] for item in facts}
+        )
+
+    def test_engine_motion_block_reports_missing_connected_scene_object(self):
+        reference = block(
+            "object_reference",
+            "reference",
+            {"OBJECT": "MissingBall", "MANUAL": ""},
+        )
+        workspace = graph(nodes=[{
+            "id": "start",
+            "nodeType": "start",
+            "workspace": {"blocks": {"blocks": [
+                block("engine_moveto", "move", inputs={"OBJECT": {"block": reference}})
+            ]}},
+        }])
+        catalog = {
+            "engine_moveto": {"outputCheck": "", "projectUsage": "project-safe"},
+            "object_reference": {"outputCheck": "String", "projectUsage": "project-safe"},
+        }
+        with mock.patch.object(NodeGraphReviewService, "_catalog_index", return_value=catalog):
+            facts = NodeGraphReviewService._collect_local_facts(
+                workspace, {"actors": [{"name": "Ball"}]}
+            )
+
+        issue = next(item for item in facts if item["code"] == "actor_target_not_found")
+        self.assertEqual("MissingBall", issue["actorName"])
+
     def test_tag_target_is_not_treated_as_actor_name(self):
         workspace = graph(nodes=[{
             "id": "start",

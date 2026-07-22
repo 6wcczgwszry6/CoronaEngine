@@ -1,8 +1,14 @@
-import * as Blockly from 'blockly/core';
+﻿import * as Blockly from 'blockly/core';
 
 export const defineEngineBlocks = () => {
+  const appendObjectTarget = (block, label = '让对象') => block
+    .appendValueInput('OBJECT')
+    .setCheck('String')
+    .appendField(label);
+
   Blockly.Blocks['engine_move'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('移动')
         .appendField(new Blockly.FieldNumber(10, 0), 'STEPS')
@@ -18,6 +24,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_rotateX'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('水平旋转')
         .appendField(new Blockly.FieldNumber(15, -Infinity), 'ANGLE')
@@ -33,6 +40,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_rotateY'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('竖直旋转')
         .appendField(new Blockly.FieldNumber(15, -Infinity), 'ANGLE')
@@ -48,6 +56,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_rotateZ'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('旋转')
         .appendField(new Blockly.FieldNumber(15, -Infinity), 'ANGLE')
@@ -63,6 +72,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_face'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('面向')
         .appendField(new Blockly.FieldNumber(0, 0, 360), 'DIRECTION')
@@ -78,6 +88,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_moveto'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('移动到')
         .appendField(
@@ -98,6 +109,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_movetoXYZ'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('移到 X:')
         .appendField(new Blockly.FieldNumber(0), 'X')
@@ -116,6 +128,7 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_movetoXYZtime'] = {
     init: function () {
+      appendObjectTarget(this);
       this.appendDummyInput()
         .appendField('在')
         .appendField(new Blockly.FieldNumber(1, 0), 'TIME')
@@ -134,7 +147,8 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_X'] = {
     init: function () {
-      this.appendDummyInput().appendField('X');
+      appendObjectTarget(this, '对象');
+      this.appendDummyInput().appendField('的 X 坐标');
       this.setOutput(true, 'Number');
       this.setStyle('motion_blocks');
       this.setTooltip('该角色的 X 坐标');
@@ -143,7 +157,8 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_Y'] = {
     init: function () {
-      this.appendDummyInput().appendField('Y');
+      appendObjectTarget(this, '对象');
+      this.appendDummyInput().appendField('的 Y 坐标');
       this.setOutput(true, 'Number');
       this.setStyle('motion_blocks');
       this.setTooltip('该角色的 Y 坐标');
@@ -152,7 +167,8 @@ export const defineEngineBlocks = () => {
 
   Blockly.Blocks['engine_Z'] = {
     init: function () {
-      this.appendDummyInput().appendField('Z');
+      appendObjectTarget(this, '对象');
+      this.appendDummyInput().appendField('的 Z 坐标');
       this.setOutput(true, 'Number');
       this.setStyle('motion_blocks');
       this.setTooltip('该角色的 Z 坐标');
@@ -161,7 +177,8 @@ export const defineEngineBlocks = () => {
 
   const rotationReporter = (type, axis) => {
     Blockly.Blocks[type] = { init() {
-      this.appendDummyInput().appendField(`\u65cb\u8f6c ${axis}`);
+      appendObjectTarget(this, '\u5bf9\u8c61');
+      this.appendDummyInput().appendField(`\u7684\u65cb\u8f6c ${axis}`);
       this.setOutput(true, 'Number');
       this.setStyle('motion_blocks');
       this.setTooltip(`\u8bfb\u53d6\u5f53\u524d\u5bf9\u8c61 ${axis} \u8f74\u65cb\u8f6c\u89d2\u5ea6`);
@@ -225,8 +242,9 @@ export const defineEngineBlocks = () => {
   };
 
 
-  const numberValueStatement = (type, label, input, legacy, defaultValue = 0, style = 'motion_blocks') => {
+  const numberValueStatement = (type, label, input, legacy, defaultValue = 0, style = 'motion_blocks', acceptsObject = false) => {
     Blockly.Blocks[type] = { init() {
+      if (acceptsObject) appendObjectTarget(this);
       this.appendValueInput(input)
         .setCheck('Number')
         .appendField(label)
@@ -235,12 +253,12 @@ export const defineEngineBlocks = () => {
       this.setInputsInline(true); this.setPreviousStatement(true); this.setNextStatement(true); this.setStyle(style);
     } };
   };
-  numberValueStatement('engine_Xset', '\u8bbe\u7f6e X \u4e3a', 'VALUE', 'X');
-  numberValueStatement('engine_Yset', '\u8bbe\u7f6e Y \u4e3a', 'VALUE', 'Y');
-  numberValueStatement('engine_Zset', '\u8bbe\u7f6e Z \u4e3a', 'VALUE', 'Z');
-  numberValueStatement('engine_Xadd', 'X \u589e\u52a0', 'VALUE', 'DX');
-  numberValueStatement('engine_Yadd', 'Y \u589e\u52a0', 'VALUE', 'DY');
-  numberValueStatement('engine_Zadd', 'Z \u589e\u52a0', 'VALUE', 'DZ');
+  numberValueStatement('engine_Xset', '\u8bbe\u7f6e X \u4e3a', 'VALUE', 'X', 0, 'motion_blocks', true);
+  numberValueStatement('engine_Yset', '\u8bbe\u7f6e Y \u4e3a', 'VALUE', 'Y', 0, 'motion_blocks', true);
+  numberValueStatement('engine_Zset', '\u8bbe\u7f6e Z \u4e3a', 'VALUE', 'Z', 0, 'motion_blocks', true);
+  numberValueStatement('engine_Xadd', 'X \u589e\u52a0', 'VALUE', 'DX', 0, 'motion_blocks', true);
+  numberValueStatement('engine_Yadd', 'Y \u589e\u52a0', 'VALUE', 'DY', 0, 'motion_blocks', true);
+  numberValueStatement('engine_Zadd', 'Z \u589e\u52a0', 'VALUE', 'DZ', 0, 'motion_blocks', true);
   numberValueStatement('engine_jump', '\u8df3\u8dc3\u529b\u5ea6', 'VALUE', 'POWER', 8, 'physics_blocks');
   numberValueStatement('engine_set_game_speed', '\u8bbe\u7f6e\u6e38\u620f\u901f\u5ea6', 'VALUE', 'VALUE', 1, 'gameplay_blocks');
 
