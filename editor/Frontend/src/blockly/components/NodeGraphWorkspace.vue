@@ -302,15 +302,18 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { appService, scriptingService, sceneService } from '@/utils/bridge.js';
+import { appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 import { registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
+import { startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
   sceneName: { type: String, default: '' },
   targetType: { type: String, default: 'actor' },
+  reviewActive: { type: Boolean, default: true },
 });
 const { error: logError } = useErrorHandler('NodeGraphWorkspace');
 const NODE_WIDTH = 170,
@@ -468,17 +471,62 @@ let isLoading = false,
   gamePreviewGuardTimer = null,
   startedRunForTarget = false,
   unregisterAiNodeGraphConsumer = null,
+  stopNodeGraphReview = null,
+  unregisterProjectNodeGraphSaveHandler = null,
+  loadedProjectPath = '',
   componentMounted = false;
 const targetEnabledByKey = new Map();
+function readActiveProjectPath() {
+  return String(window.localStorage?.getItem('corona.activeProjectPath') || '').trim();
+}
+function extractProjectPath(response) {
+  const candidates = [
+    response,
+    response?.data,
+    response?.result,
+    response?.data?.data,
+    response?.result?.data,
+  ];
+  for (const item of candidates) {
+    const value = String(item?.project_path || item?.projectPath || '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+async function refreshActiveProjectPath() {
+  try {
+    const response = await projectSettingsService.getActiveProjectInfo();
+    const projectPath = extractProjectPath(response);
+    if (projectPath) {
+      activeProjectPath.value = projectPath;
+      window.localStorage?.setItem('corona.activeProjectPath', projectPath);
+      return projectPath;
+    }
+  } catch (error) {
+    console.warn('\u8bfb\u53d6\u5f53\u524d\u9879\u76ee\u8def\u5f84\u5931\u8d25\uff0c\u5c06\u4f7f\u7528\u5df2\u6709\u9879\u76ee\u4e0a\u4e0b\u6587:', error);
+  }
+  return activeProjectPath.value || readActiveProjectPath();
+}
+function normalizeProjectPath(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLocaleLowerCase('en-US');
+}
+const activeProjectPath = ref(readActiveProjectPath());
+const projectStorageScope = computed(() =>
+  encodeURIComponent(normalizeProjectPath(activeProjectPath.value) || 'unknown-project')
+);
 const normalizedTargetType = computed(() => (props.targetType === 'model' ? 'actor' : props.targetType || 'actor'));
 const isProjectTarget = computed(() => normalizedTargetType.value === 'project');
 const targetReady = computed(() => isProjectTarget.value || Boolean(props.actorName));
 const targetKey = computed(
-  () => `${normalizedTargetType.value}:${isProjectTarget.value ? '' : props.sceneName || ''}:${isProjectTarget.value ? '' : props.actorName || ''}`
+  () => `${projectStorageScope.value}:${normalizedTargetType.value}:${isProjectTarget.value ? '' : props.sceneName || ''}:${isProjectTarget.value ? '' : props.actorName || ''}`
 );
 const targetLabel = computed(() =>
   isProjectTarget.value
-    ? '项目常驻节点图'
+    ? '节点'
     : props.actorName
       ? `${props.actorName} [${props.sceneName || '未命名场景'}]`
       : '未选择目标'
@@ -1394,18 +1442,28 @@ function scheduleSave() {
   }, SAVE_DELAY);
 }
 function storageKeyForTarget(target) {
-  return `corona-nodegraph-ui:${target.targetType || 'actor'}:${target.sceneName || ''}:${target.actorName || ''}`;
+  const projectScope = encodeURIComponent(
+    normalizeProjectPath(target?.projectPath || activeProjectPath.value || readActiveProjectPath()) || 'unknown-project'
+  );
+  return `corona-nodegraph-ui:v2:${projectScope}:${target.targetType || 'actor'}:${target.sceneName || ''}:${target.actorName || ''}`;
 }
-function currentTarget() {
+function currentTarget(projectPathOverride = '') {
   return {
     targetType: normalizedTargetType.value,
     sceneName: isProjectTarget.value ? '' : props.sceneName || '',
     actorName: isProjectTarget.value ? '' : props.actorName || '',
+    projectPath: projectPathOverride || loadedProjectPath || activeProjectPath.value || readActiveProjectPath(),
   };
 }
 async function saveNow(targetOverride = null) {
   if (isLoading) return false;
-  const target = targetOverride || currentTarget();
+  const target = { ...currentTarget(), ...(targetOverride || {}) };
+  const expectedProjectPath = normalizeProjectPath(target.projectPath);
+  const currentProjectPath = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+  if (expectedProjectPath && currentProjectPath && expectedProjectPath !== currentProjectPath) {
+    saveLabel.value = '项目已切换，已跳过旧节点图保存';
+    return false;
+  }
   const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
   if (!isProject && !target.actorName) return false;
   if (saveTimer) {
@@ -1434,6 +1492,7 @@ async function saveNow(targetOverride = null) {
       scene_name: isProject ? '' : target.sceneName || '',
       actor_name: isProject ? '' : target.actorName || '',
       script_kind: 'node_graph',
+      project_path: target.projectPath || '',
       workspace: snapshot,
       code,
       enabled: targetEnabledByKey.get(storageKeyForTarget(target)) ?? true,
@@ -1458,39 +1517,69 @@ async function loadGraphForCurrentTarget() {
     return;
   }
   isLoading = true;
-  saveLabel.value = '项目加载中...';
+  saveLabel.value = '\u9879\u76ee\u52a0\u8f7d\u4e2d...';
   let shouldMigrateLocal = false;
   try {
-    const target = currentTarget();
-    const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
-    const response = bridgeResult(await scriptingService.loadBlocklyTarget({
-      target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
-      scene_name: isProject ? '' : target.sceneName || '',
-      actor_name: isProject ? '' : target.actorName || '',
-      script_kind: 'node_graph',
-    }));
-    if (response?.status === 'error') throw new Error(response.message || '节点图加载失败');
+    await refreshActiveProjectPath();
+    let requestProjectPath = activeProjectPath.value || readActiveProjectPath();
+    let target = null;
+    let response = null;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      target = currentTarget(requestProjectPath);
+      const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
+      response = bridgeResult(await scriptingService.loadBlocklyTarget({
+        target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
+        scene_name: isProject ? '' : target.sceneName || '',
+        actor_name: isProject ? '' : target.actorName || '',
+        script_kind: 'node_graph',
+        project_path: requestProjectPath,
+      }));
+
+      if (response?.status === 'error' && response?.code === 'PROJECT_CONTEXT_CHANGED' && attempt === 0) {
+        const backendProjectPath = String(response.project_path || '').trim();
+        if (backendProjectPath) {
+          requestProjectPath = backendProjectPath;
+          activeProjectPath.value = backendProjectPath;
+          window.localStorage?.setItem('corona.activeProjectPath', backendProjectPath);
+          continue;
+        }
+      }
+      break;
+    }
+
+    const responseProjectPath = String(response?.project_path || requestProjectPath || '').trim();
+    const currentProjectPath = activeProjectPath.value || readActiveProjectPath();
+    if (normalizeProjectPath(responseProjectPath) !== normalizeProjectPath(currentProjectPath)) return;
+
+    activeProjectPath.value = responseProjectPath;
+    loadedProjectPath = responseProjectPath;
+    window.localStorage?.setItem('corona.activeProjectPath', responseProjectPath);
+    target.projectPath = responseProjectPath;
+
+    if (response?.status === 'error') throw new Error(response.message || '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25');
     if (response?.status === 'loaded') {
       targetEnabledByKey.set(storageKeyForTarget(target), response.target?.enabled !== false);
       shouldMigrateLocal = applyGraph(normalizeGraph(response.workspace || {}));
-      saveLabel.value = '项目节点图已加载';
+      saveLabel.value = '\u9879\u76ee\u8282\u70b9\u56fe\u5df2\u52a0\u8f7d';
     } else {
       targetEnabledByKey.set(storageKeyForTarget(target), true);
       const raw = window.localStorage?.getItem(storageKeyForTarget(target));
       const portsRedistributed = applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
       shouldMigrateLocal = Boolean(raw) || portsRedistributed;
-      saveLabel.value = raw ? '已加载本地节点图，正在迁移...' : '新节点图';
+      saveLabel.value = raw ? '\u5df2\u52a0\u8f7d\u5f53\u524d\u9879\u76ee\u7684\u672c\u5730\u8282\u70b9\u56fe\uff0c\u6b63\u5728\u8fc1\u79fb...' : '\u65b0\u8282\u70b9\u56fe';
     }
   } catch (error) {
-    logError('加载项目节点图失败', error);
+    logError('\u52a0\u8f7d\u9879\u76ee\u8282\u70b9\u56fe\u5931\u8d25', error);
     try {
-      const raw = window.localStorage?.getItem(storageKeyForTarget(currentTarget()));
+      const target = currentTarget(activeProjectPath.value || readActiveProjectPath());
+      const raw = window.localStorage?.getItem(storageKeyForTarget(target));
       const portsRedistributed = applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
       shouldMigrateLocal = Boolean(raw) || portsRedistributed;
-      saveLabel.value = raw ? '项目加载失败，已使用本地副本' : '节点图加载失败';
+      saveLabel.value = raw ? '\u9879\u76ee\u52a0\u8f7d\u5931\u8d25\uff0c\u5df2\u4f7f\u7528\u5f53\u524d\u9879\u76ee\u672c\u5730\u526f\u672c' : '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25';
     } catch (_) {
       applyGraph(normalizeGraph({}));
-      saveLabel.value = '节点图加载失败';
+      saveLabel.value = '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25';
     }
   } finally {
     isLoading = false;
@@ -1501,6 +1590,7 @@ async function loadGraphForCurrentTarget() {
   }
   if (shouldMigrateLocal) await saveNow();
 }
+
 function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
 }
@@ -1841,6 +1931,30 @@ function updateCanvasSize() {
   canvasSize.height = Math.max(CANVAS_WORLD_HEIGHT, Math.ceil(r.height / 0.4));
   clampViewport();
 }
+async function onActiveProjectChanged(event) {
+  const nextProjectPath = String(event?.detail?.projectPath || readActiveProjectPath()).trim();
+  if (!nextProjectPath || normalizeProjectPath(nextProjectPath) === normalizeProjectPath(activeProjectPath.value)) return;
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  activeProjectPath.value = nextProjectPath;
+  loadedProjectPath = '';
+  targetEnabledByKey.clear();
+  applyGraph(normalizeGraph({}));
+  runStatus.value = '';
+  currentRunNodeId.value = '';
+  runWarnings.value = [];
+  if (!componentMounted) return;
+  await loadGraphForCurrentTarget();
+  await refreshSceneActorOptions();
+}
+function onProjectStorageChanged(event) {
+  if (event?.key !== 'corona.activeProjectPath') return;
+  onActiveProjectChanged({ detail: { projectPath: event.newValue || '' } });
+}
+
+
 watch(
   () => [props.sceneName, props.actorName, props.targetType],
   async (_n, old) => {
@@ -1868,9 +1982,15 @@ function registerNodeGraphFlusher() {
     : new Set();
   window.__coronaNodeGraphFlushers = flushers;
   flushers.add(saveNow);
-  window.__coronaNodeGraphFlushSave = () => Promise.all(
-    Array.from(window.__coronaNodeGraphFlushers || []).map((flush) => Promise.resolve().then(() => flush()))
-  );
+  window.__coronaNodeGraphFlushSave = async () => {
+    const results = await Promise.all(
+      Array.from(window.__coronaNodeGraphFlushers || []).map((flush) => Promise.resolve().then(() => flush()))
+    );
+    if (results.some((result) => result === false)) {
+      throw new Error('\u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u53d6\u6d88\u5168\u5c40\u8fd0\u884c');
+    }
+    return true;
+  };
 }
 function unregisterNodeGraphFlusher() {
   window.__coronaNodeGraphFlushers?.delete?.(saveNow);
@@ -1881,7 +2001,31 @@ function unregisterNodeGraphFlusher() {
 }
 onMounted(() => {
   componentMounted = true;
+  activeProjectPath.value = readActiveProjectPath() || activeProjectPath.value;
+  window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.addEventListener('storage', onProjectStorageChanged);
   syncGeneratedNodeGraphConsumer();
+  if (isProjectTarget.value) {
+    stopNodeGraphReview = startNodeGraphReview({
+      getWorkspace: () => ({
+        version: graph.version,
+        nodes: graph.nodes,
+        edges: graph.edges,
+        globalVariablesWorkspace: graph.globalVariablesWorkspace,
+      }),
+      getRevisionScope: () => normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+      getProjectContext: () => ({
+        sceneName: props.sceneName || 'default',
+        actors: (window.__coronaBlocklyActorOptions || []).map(([name]) => ({
+          name: String(name || ''),
+          type: 'actor',
+          tags: [],
+        })).filter((actor) => actor.name),
+      }),
+      enabled: () => componentMounted && props.reviewActive && isProjectTarget.value && !isLoading,
+      intervalMs: 10000,
+    });
+  }
   window.addEventListener('corona-game-preview-status', onGamePreviewStatus);
   window.addEventListener('keydown', handleFullscreenKey);
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
@@ -1891,6 +2035,9 @@ onMounted(() => {
   refreshGamePreviewGuard();
   startGamePreviewGuardPoll();
   registerNodeGraphFlusher();
+  if (isProjectTarget.value) {
+    unregisterProjectNodeGraphSaveHandler = registerProjectNodeGraphSaveHandler(saveNow);
+  }
   loadLayout();
   resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
   if (canvasRef.value) resizeObserver.observe(canvasRef.value);
@@ -1898,6 +2045,12 @@ onMounted(() => {
 });
 onBeforeUnmount(() => {
   componentMounted = false;
+  window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.removeEventListener('storage', onProjectStorageChanged);
+  stopNodeGraphReview?.();
+  stopNodeGraphReview = null;
+  unregisterProjectNodeGraphSaveHandler?.();
+  unregisterProjectNodeGraphSaveHandler = null;
   unregisterAiNodeGraphConsumer?.();
   unregisterAiNodeGraphConsumer = null;
   window.removeEventListener('corona-game-preview-status', onGamePreviewStatus);
