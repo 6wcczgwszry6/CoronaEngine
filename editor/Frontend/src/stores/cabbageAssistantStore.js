@@ -101,6 +101,25 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.activeRequestId = '';
     },
 
+    hydrateContext(snapshot = {}) {
+      const scope = String(snapshot.projectScopeId || '');
+      if (this.projectScopeId && scope && scope !== this.projectScopeId) {
+        this.clearForProjectChange(scope);
+      }
+      if (scope) this.projectScopeId = scope;
+      this.graphRevision = String(snapshot.graphRevision || '');
+      this.graphExcerpt = snapshot.graphExcerpt && typeof snapshot.graphExcerpt === 'object'
+        ? JSON.parse(JSON.stringify(snapshot.graphExcerpt))
+        : {};
+      this.tasks = (Array.isArray(snapshot.tasks) ? snapshot.tasks : [])
+        .map((task) => normalizeTask(task, this.graphRevision, Number(task?.updatedAt) || Date.now()))
+        .filter(Boolean);
+      const selectedTaskKey = String(snapshot.selectedTaskKey || '');
+      this.selectedTaskKey = this.tasks.some((task) => task.issueKey === selectedTaskKey)
+        ? selectedTaskKey
+        : '';
+    },
+
     selectTask(issueKey = '') {
       this.selectedTaskKey = String(issueKey || '');
     },

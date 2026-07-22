@@ -488,6 +488,7 @@ import {
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
+import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 
@@ -851,6 +852,7 @@ function currentProjectReviewScopeId() {
 
 function clearNodeReviewForProjectChange() {
   cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
+  publishCabbageAssistantContext(cabbageAssistant);
 }
 
 function refreshCameraAfterProjectChange() {
@@ -894,6 +896,7 @@ function handleNodeGraphReview(result) {
     return;
   }
   cabbageAssistant.applyReview(result);
+  publishCabbageAssistantContext(cabbageAssistant);
 }
 
 // 加载菜单状态

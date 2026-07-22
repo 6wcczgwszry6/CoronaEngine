@@ -64,11 +64,16 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { aiService } from '@/utils/bridge.js';
+import { reviewScopeId } from '@/services/nodeGraphReviewService.js';
+import {
+  publishCabbageAssistantContext,
+  subscribeCabbageAssistantContext,
+} from '@/services/cabbageAssistantContextService.js';
 
 const assistant = useCabbageAssistantStore();
 const { closePanel, isDocked } = useDockPanel();
@@ -78,10 +83,14 @@ const streamingContent = ref('');
 const activeTaskId = ref('');
 let requestSequence = 0;
 let pollTimer = null;
+let unsubscribeAssistantContext = null;
 
 const selectedKey = computed({
   get: () => assistant.selectedTaskKey,
-  set: (value) => assistant.selectTask(value),
+  set: (value) => {
+    assistant.selectTask(value);
+    publishCabbageAssistantContext(assistant);
+  },
 });
 
 function scrollToBottom() {
@@ -211,7 +220,19 @@ function closeFloat() {
 watch(() => assistant.messages.length, scrollToBottom);
 watch(streamingContent, scrollToBottom);
 
+onMounted(() => {
+  const currentProjectScopeId = () => reviewScopeId(
+    String(window.localStorage?.getItem('corona.activeProjectPath') || '')
+  );
+  unsubscribeAssistantContext = subscribeCabbageAssistantContext(
+    (snapshot) => assistant.hydrateContext(snapshot),
+    { projectScopeId: currentProjectScopeId, emitCurrent: true }
+  );
+});
+
 onBeforeUnmount(() => {
+  unsubscribeAssistantContext?.();
+  unsubscribeAssistantContext = null;
   clearPollTimer();
   const taskId = activeTaskId.value;
   assistant.activeRequestId = '';

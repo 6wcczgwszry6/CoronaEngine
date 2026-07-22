@@ -58,6 +58,7 @@ import { computed, reactive, watch } from 'vue';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { openFloatingPanel, toggleFloatingPanel } from '@/utils/panelWindows.js';
+import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
 
 const props = defineProps({
   tasks: { type: Array, default: () => [] },
@@ -71,16 +72,19 @@ const chatOpen = computed(() => Boolean(dockStore.panels.CabbageChatPanel?.open)
 
 function toggleTask(task) {
   assistant.selectTask(task.issueKey);
+  publishCabbageAssistantContext(assistant);
   if (expandedKeys.has(task.issueKey)) expandedKeys.delete(task.issueKey);
   else expandedKeys.add(task.issueKey);
 }
 
 async function toggleChat() {
+  publishCabbageAssistantContext(assistant);
   await toggleFloatingPanel(dockStore, 'CabbageChatPanel');
 }
 
 async function openChat(task) {
   assistant.selectTask(task.issueKey);
+  publishCabbageAssistantContext(assistant);
   await openFloatingPanel(dockStore, 'CabbageChatPanel');
 }
 
