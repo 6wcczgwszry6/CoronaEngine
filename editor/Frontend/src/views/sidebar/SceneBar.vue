@@ -725,6 +725,7 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
+import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
@@ -842,26 +843,14 @@ const onViewportControlsState = (state) => {
 };
 
 const scenePreviewActionBusy = ref(false);
-const sceneIdTokens = (value) => {
-  const text = String(value || '').trim().replace(/\\/g, '/').toLowerCase();
-  if (!text) return new Set();
-  const name = text.split('/').pop() || text;
-  const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
-  return new Set([text, name, stem]);
-};
-const isSameSceneId = (left, right) => {
-  const leftTokens = sceneIdTokens(left);
-  const rightTokens = sceneIdTokens(right);
-  return Array.from(leftTokens).some((token) => rightTokens.has(token));
-};
 const activePreview = computed(() => viewportControlState.value.preview || {});
 const anyPreviewActive = computed(() =>
   Boolean(viewportControlState.value.previewRunning || activePreview.value.hasSnapshot || activePreview.value.has_snapshot)
 );
-// 场景运行启动后，即使用户切换了场景，或后端返回的是 route 而前端保存的是
-// scene id，也必须保留停止入口。否则按钮会因标识不完全一致而永久禁用。
+// 顶部按钮标记为“全局运行”，因此必须启动并停止项目级预览。
+// 项目常驻节点图是 project target；scene scope 会按设计跳过它。
 const scenePreviewStopAvailable = computed(() =>
-  anyPreviewActive.value && activePreview.value.scope === 'scene'
+  anyPreviewActive.value && activePreview.value.scope === 'project'
 );
 const scenePreviewHasError = computed(() =>
   Number(activePreview.value.errorCount ?? activePreview.value.error_count ?? 0) > 0
@@ -877,10 +866,10 @@ const scenePreviewButtonLabel = computed(() =>
   scenePreviewStopAvailable.value ? '停止并恢复' : '全局运行'
 );
 const scenePreviewButtonTitle = computed(() => {
-  if (scenePreviewStopAvailable.value) return '停止正在运行的场景脚本并恢复运行前状态';
+  if (scenePreviewStopAvailable.value) return '停止正在运行的项目节点并恢复运行前状态';
   if (!currentSceneName.value) return '请先打开场景';
   if (anyPreviewActive.value) return '项目预览正在运行';
-  return '运行当前场景全部物体的积木和节点图脚本';
+  return '运行场景“节点”中的项目全局逻辑';
 });
 const scenePreviewSummary = computed(() => {
   const preview = activePreview.value;
@@ -897,8 +886,7 @@ const scenePreviewSummary = computed(() => {
   if (scenePreviewStopAvailable.value) {
     return `运行 ${running || started}（积木 ${blockly} / 节点 ${nodeGraph}）`;
   }
-  const previewScene = preview.sceneName || preview.scene_name || '';
-  if (preview.scope !== 'scene' || !isSameSceneId(previewScene, currentSceneName.value)) return '';
+  if (preview.scope !== 'project') return '';
   if (state === 'completed') return errors ? `已完成，${errors} 个错误` : '已完成';
   if (state === 'stopped') return '已停止并恢复';
   if (state === 'error') return (preview.restoreError || preview.restore_error) ? '场景恢复失败' : (errors ? `${errors} 个脚本错误` : '运行失败');
@@ -978,7 +966,7 @@ const toggleSceneScripts = async (event = null) => {
   const controls = getEditorControls();
   window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
   window.__coronaPreviewActionPending = true;
-  window.__coronaPreviewPendingScope = 'scene';
+  window.__coronaPreviewPendingScope = 'project';
   scenePreviewActionBusy.value = true;
   let stopping = false;
   try {
@@ -990,7 +978,7 @@ const toggleSceneScripts = async (event = null) => {
     const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
       || live.runningCount > 0
       || live.hasSnapshot;
-    stopping = liveActive && live.scope === 'scene';
+    stopping = liveActive && live.scope === 'project';
 
     if (stopping) {
       if (controls && typeof controls.stopPreview === 'function') {
@@ -1000,20 +988,25 @@ const toggleSceneScripts = async (event = null) => {
         pollDirectPreviewStatus();
       }
     } else if (liveActive) {
-      throw new Error('项目预览正在运行，请先在主视口停止');
+      throw new Error('当前场景预览正在运行，请先停止后再启动全局运行');
     } else {
-      const request = { scope: 'scene', scene_name: currentSceneName.value };
+      const request = { scope: 'project' };
       let started;
       if (controls && typeof controls.startPreview === 'function') {
+        // MainPage owns the save-before-run sequence when its controls are available.
         started = await controls.startPreview(request);
       } else {
+        // Detached/fallback SceneBar must flush the project node graph itself.
+        await flushProjectNodeGraphBeforeRun();
         started = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.startGamePreview(request)));
         pollDirectPreviewStatus();
       }
-      if (started === false) {
-        const refreshed = applyDirectPreviewStatus(
-          unwrapBridgeData(await scriptingService.getGamePreviewStatus())
-        );
+      if (started === false || started?.status === 'error') {
+        const refreshed = started?.status === 'error'
+          ? started
+          : applyDirectPreviewStatus(
+              unwrapBridgeData(await scriptingService.getGamePreviewStatus())
+            );
         const message = refreshed.message || refreshed.errors?.[0] || '全局运行启动失败';
         throw new Error(message);
       }

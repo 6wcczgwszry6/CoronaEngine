@@ -46,36 +46,6 @@ export const defineEngineGenerators = () => {
     return `CoronaEngine.movetoXYZtime(${t}, ${x}, ${y}, ${z})\n`;
   };
 
-  pythonGenerator.forBlock['engine_Xset'] = function (block) {
-    const x = block.getFieldValue('X');
-    return `CoronaEngine.Xset(${x})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_Yset'] = function (block) {
-    const y = block.getFieldValue('Y');
-    return `CoronaEngine.Yset(${y})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_Zset'] = function (block) {
-    const z = block.getFieldValue('Z');
-    return `CoronaEngine.Zset(${z})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_Xadd'] = function (block) {
-    const dx = block.getFieldValue('DX');
-    return `CoronaEngine.Xadd(${dx})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_Yadd'] = function (block) {
-    const dy = block.getFieldValue('DY');
-    return `CoronaEngine.Yadd(${dy})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_Zadd'] = function (block) {
-    const dz = block.getFieldValue('DZ');
-    return `CoronaEngine.Zadd(${dz})\n`;
-  };
-
   pythonGenerator.forBlock['engine_X'] = function () {
     return ['CoronaEngine.X()', pythonGenerator.ORDER_ATOMIC];
   };
@@ -88,21 +58,12 @@ export const defineEngineGenerators = () => {
     return ['CoronaEngine.Z()', pythonGenerator.ORDER_ATOMIC];
   };
 
+  pythonGenerator.forBlock.engine_rotationX = () => ['CoronaEngine.rotationX()', pythonGenerator.ORDER_FUNCTION_CALL];
+  pythonGenerator.forBlock.engine_rotationY = () => ['CoronaEngine.rotationY()', pythonGenerator.ORDER_FUNCTION_CALL];
+  pythonGenerator.forBlock.engine_rotationZ = () => ['CoronaEngine.rotationZ()', pythonGenerator.ORDER_FUNCTION_CALL];
+
+
   // ── 物理扩展生成器 ──
-
-  pythonGenerator.forBlock['engine_set_velocity'] = function (block) {
-    const vx = block.getFieldValue('VX');
-    const vy = block.getFieldValue('VY');
-    const vz = block.getFieldValue('VZ');
-    return `CoronaEngine.set_velocity(${vx}, ${vy}, ${vz})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_apply_impulse'] = function (block) {
-    const ix = block.getFieldValue('IX');
-    const iy = block.getFieldValue('IY');
-    const iz = block.getFieldValue('IZ');
-    return `CoronaEngine.apply_impulse(${ix}, ${iy}, ${iz})\n`;
-  };
 
   pythonGenerator.forBlock['engine_get_velocity'] = function (block) {
     const axis = block.getFieldValue('AXIS');
@@ -115,18 +76,10 @@ export const defineEngineGenerators = () => {
     return `CoronaEngine.set_gravity(${enabled}, ${strength})\n`;
   };
 
-  pythonGenerator.forBlock['engine_jump'] = function (block) {
-    return `CoronaEngine.jump(${block.getFieldValue('POWER')})\n`;
-  };
-
   pythonGenerator.forBlock['engine_bounce_axis'] = function (block) {
     const axis = block.getFieldValue('AXIS');
     const factor = block.getFieldValue('FACTOR');
     return `CoronaEngine.bounce_axis('${axis}', ${factor})\n`;
-  };
-
-  pythonGenerator.forBlock['engine_set_game_speed'] = function (block) {
-    return `CoronaEngine.set_game_speed(${block.getFieldValue('VALUE')})\n`;
   };
 
   pythonGenerator.forBlock['engine_get_game_speed'] = function () {

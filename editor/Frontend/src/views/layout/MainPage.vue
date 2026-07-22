@@ -440,13 +440,10 @@
       </svg>
     </div>
 
-    <!-- 包菜自动提示气泡：每隔一段时间弹出，时长由 cabbage_hint_time 控制 -->
-    <AIHintBubble
-      :show="cabbageBubbleShow"
-      :hintText="cabbageBubbleText"
-      :loading="cabbageBubbleLoading"
-      :autoHideMs="cabbageHintTime * 1000"
-      @close="onCabbageBubbleClose"
+    <CabbageReviewAssistant
+      v-model:open="cabbageAssistantOpen"
+      :tasks="nodeReviewTasks"
+      :attention-token="nodeReviewAttentionToken"
     />
   </div>
 </template>
@@ -468,8 +465,9 @@ import {
   createViewportUiPointerController,
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
-import AIHintBubble from '@/components/ui/AIHintBubble.vue';
-import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
+import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
+import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
+import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
@@ -783,27 +781,80 @@ let pendingMainRenderSelection = null;
 const currentMainCameraId = () =>
   cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
 
-// ── 包菜提示气泡状态 ──
-const STORAGE_KEY = 'corona_editor_settings';
-const cabbageBubbleShow = ref(false);
-const cabbageBubbleText = ref('');
-const cabbageBubbleLoading = ref(false);
-const cabbageHintTime = ref(3.0); // 默认 3 秒，从设置中读取
+// Cabbage assistant: current unresolved node-logic tasks.
+const LEGACY_NODE_REVIEW_HISTORY_KEY = 'corona_node_graph_review_history_v1';
+const cabbageAssistantOpen = ref(false);
+const nodeReviewTasks = ref([]);
+const nodeReviewAttentionToken = ref(0);
+let unsubscribeNodeGraphReview = null;
 
-function readCabbageHintTime() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed.cabbage_hint_time === 'number' && parsed.cabbage_hint_time > 0) {
-        cabbageHintTime.value = parsed.cabbage_hint_time;
-      }
-    }
-  } catch (_) { /* keep default */ }
+function normalizeReviewTask(summary, graphRevision, previous = null) {
+  const message = String(summary || '').trim().slice(0, 160);
+  if (!message) return null;
+  const now = Date.now();
+  return {
+    issueKey: 'current_node_graph_logic',
+    code: 'node_graph_logic_issue',
+    severity: 'warning',
+    confidence: 1,
+    nodeId: '',
+    blockId: '',
+    title: '当前逻辑有问题',
+    message,
+    suggestion: '',
+    graphRevision: String(graphRevision || ''),
+    createdAt: Number(previous?.createdAt) || now,
+    updatedAt: now,
+  };
 }
 
-function onCabbageBubbleClose() {
-  cabbageBubbleShow.value = false;
+function removeLegacyReviewHistory() {
+  try {
+    localStorage.removeItem(LEGACY_NODE_REVIEW_HISTORY_KEY);
+  } catch (_) { /* storage may be unavailable */ }
+}
+
+function currentProjectReviewScopeId() {
+  return reviewScopeId(window.localStorage?.getItem('corona.activeProjectPath') || '');
+}
+
+function clearNodeReviewForProjectChange() {
+  nodeReviewTasks.value = [];
+  cabbageAssistantOpen.value = false;
+}
+
+function onActiveProjectChanged() {
+  clearNodeReviewForProjectChange();
+}
+
+function onActiveProjectStorageChanged(event) {
+  if (event?.key === 'corona.activeProjectPath') clearNodeReviewForProjectChange();
+}
+
+function handleNodeGraphReview(result) {
+  if (result?.projectScopeId && result.projectScopeId !== currentProjectReviewScopeId()) return;
+  if (result?.success !== true || result?.status !== 'ok') {
+    if (result?.error) console.warn('[NodeGraphReview]', result.error);
+    return;
+  }
+
+  if (result.hasProblems !== true) {
+    nodeReviewTasks.value = [];
+    return;
+  }
+
+  const previous = nodeReviewTasks.value[0] || null;
+  const task = normalizeReviewTask(result.summary, result.graphRevision, previous);
+  if (!task) {
+    nodeReviewTasks.value = [];
+    return;
+  }
+
+  const changed = !previous
+    || previous.message !== task.message
+    || previous.graphRevision !== task.graphRevision;
+  nodeReviewTasks.value = [task];
+  if (changed) nodeReviewAttentionToken.value += 1;
 }
 
 // 新增：加载状态
@@ -1849,11 +1900,16 @@ const handleStartGamePreview = async (request = { scope: 'project' }) => {
       scope: previewRequest.scope,
       sceneName: previewRequest.scene_name || '',
     }));
-    if (typeof window.__coronaBlocklyFlushSave === 'function') {
-      await window.__coronaBlocklyFlushSave();
-    }
-    if (typeof window.__coronaNodeGraphFlushSave === 'function') {
-      await window.__coronaNodeGraphFlushSave();
+    if (previewRequest.scope === 'project') {
+      // Global run executes only node_graph:project:global.
+      await flushProjectNodeGraphBeforeRun();
+    } else {
+      if (typeof window.__coronaBlocklyFlushSave === 'function') {
+        await window.__coronaBlocklyFlushSave();
+      }
+      if (typeof window.__coronaNodeGraphFlushSave === 'function') {
+        await window.__coronaNodeGraphFlushSave();
+      }
     }
     const result = await scriptingService.startGamePreview(previewRequest);
     const payload = unwrapBridgeData(result);
@@ -2215,15 +2271,9 @@ const handlePanelClosed = (payload) => {
   dockStore.popIn(panelId);
 };
 
-// 监听其他窗口（如设置页面）修改了 cabbage_hint_time
-function onStorageChange(e) {
-  if (e.key === STORAGE_KEY) {
-    readCabbageHintTime();
-    setHintShowMs(cabbageHintTime.value * 1000);
-  }
-}
 
 onMounted(async () => {
+  removeLegacyReviewHistory();
   const result = await projectService.OnInit();
   const initData = result?.data ?? result;
   const scenes = initData?.scenes ?? [];
@@ -2290,26 +2340,20 @@ onMounted(async () => {
   await openDefaultFloatingToolPanels();
   broadcastViewportControlsState();
 
-  // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
-  startStageHints(
-    (text) => {
-      cabbageBubbleText.value = text;
-      cabbageBubbleLoading.value = false;
-      cabbageBubbleShow.value = true;
-    },
-    () => {
-      cabbageBubbleShow.value = false;
-      cabbageBubbleLoading.value = true;
-    },
-    cabbageHintTime.value * 1000
-  );
+  // Subscribe only to proactive DeepSeek node-graph review results.
+  unsubscribeNodeGraphReview = subscribeNodeGraphReviews(handleNodeGraphReview);
+  window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.addEventListener('storage', onActiveProjectStorageChanged);
 });
 
 onUnmounted(() => {
   clearPreviewPoll();
   setGamePreviewInputLocked(false);
   unregisterEditorControls();
-  stopStageHints();
+  unsubscribeNodeGraphReview?.();
+  unsubscribeNodeGraphReview = null;
+  window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.removeEventListener('storage', onActiveProjectStorageChanged);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   coronaEventBus.off('loading-show', showLoading);
   coronaEventBus.off('loading-update', updateLoading);
@@ -2334,7 +2378,6 @@ onUnmounted(() => {
     });
     sceneRenamedCallbackToken = null;
   }
-  window.removeEventListener('storage', onStorageChange);
   window.removeEventListener('resize', handleViewportLayoutChange);
   stopMoveLoop();
   if (cameraViewportSyncRafId != null) {
