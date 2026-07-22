@@ -574,9 +574,13 @@ class ScratchTool:
             state_snapshot, snapshot_error = cls._capture_exec_snapshot(resolved)
             if state_snapshot is None:
                 message = f"\u65e0\u6cd5\u521b\u5efa\u8fd0\u884c\u524d\u573a\u666f\u5feb\u7167: {snapshot_error or '\u672a\u77e5\u9519\u8bef'}"
+                with cls._exec_lock:
+                    cls._exec_state_snapshot = None
+                cls._set_exec_input_locked(False)
                 cls._replace_exec_state(
                     status="error", outcome="snapshot_error", error=message,
-                    snapshotCaptured=False, restoreStatus="error", restoreError=message,
+                    inputLocked=False, snapshotCaptured=False,
+                    restoreStatus="idle", restoreError="",
                     finishedAt=time.time(),
                 )
                 return {"status": "error", "message": message, "outcome": "snapshot_error"}
@@ -654,6 +658,7 @@ class ScratchTool:
                         "target_type": target_type,
                         "scene_name": scene_name,
                         "actor_name": actor_name,
+                        "_resolved": resolved,
                     },
                     single_exec=True,
                 )
@@ -1723,6 +1728,14 @@ class ScratchTool:
             scene_name=target.get("scene_name", ""),
             actor_name=target.get("actor_name", ""),
         )
+        resolved = target.get("_resolved") if isinstance(target.get("_resolved"), dict) else {}
+        if ctx.target_type == "project" and resolved.get("scene") is not None:
+            # Keep project-global semantics while attaching the active scene so
+            # explicit object blocks can resolve native editor actors by name.
+            ctx.scene = resolved.get("scene")
+            ctx.target_scene = ctx.scene
+            ctx.scene_name = str(resolved.get("scene_name") or ctx.scene_name or "")
+            ctx.target_scene_name = ctx.scene_name
         corona_engine_scratch.bind_context(ctx)
 
         module_name = f"blockly_runtime_{cls._target_digest(context_id)}_{int(time.time() * 1000)}"
