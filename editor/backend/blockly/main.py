@@ -789,6 +789,9 @@ class ScratchTool:
             state["snapshotCaptured"] = cls._exec_state_snapshot is not None
             context_id = cls._exec_context_id or state.get("contextId")
             thread_alive = bool(cls._exec_thread and cls._exec_thread.is_alive())
+            if cls._exec_thread is not None and not thread_alive:
+                cls._exec_thread = None
+        state["threadAlive"] = thread_alive
         snapshot = corona_engine_scratch.runtime_context_snapshot(context_id) if context_id else None
         if snapshot:
             state.update(
@@ -800,8 +803,35 @@ class ScratchTool:
             binding_error = snapshot.get("binding_error", "")
             if binding_error and not state.get("error"):
                 state["error"] = binding_error
-        if thread_alive and state.get("status") not in ("starting", "running"):
+        status_name = str(state.get("status") or "idle")
+        started_at = float(state.get("startedAt") or 0.0)
+        starting_recently = (
+            status_name == "starting"
+            and started_at > 0.0
+            and (time.time() - started_at) < 1.0
+        )
+        if thread_alive and status_name not in ("starting", "running"):
             state["status"] = "running"
+        elif not thread_alive and not starting_recently:
+            # A status string can survive a project switch or an interrupted worker.
+            # Only a live worker may own the node-graph camera input lock.
+            cls._set_exec_input_locked(False)
+            state["inputLocked"] = False
+            if status_name in ("starting", "running", "stopping"):
+                terminal_status = "stopped" if status_name == "stopping" else "completed"
+                terminal_outcome = str(state.get("outcome") or terminal_status)
+                with cls._exec_lock:
+                    cls._exec_state.update(
+                        status=terminal_status,
+                        outcome=terminal_outcome,
+                        finishedAt=float(state.get("finishedAt") or time.time()),
+                        inputLocked=False,
+                    )
+                state.update(
+                    status=terminal_status,
+                    outcome=terminal_outcome,
+                    finishedAt=float(state.get("finishedAt") or time.time()),
+                )
         return state
 
     # ------------------------------------------------------------------
@@ -1183,7 +1213,27 @@ class ScratchTool:
         if should_restore:
             cls._complete_preview_restore()
         with cls._preview_lock:
+            live_threads = any(
+                info.get("thread") and info["thread"].is_alive()
+                for info in cls._preview_threads
+            )
+            stop_thread_alive = bool(
+                cls._preview_stop_thread and cls._preview_stop_thread.is_alive()
+            )
+            preview_work_active = bool(
+                live_threads
+                or stop_thread_alive
+                or cls._preview_restore_pending
+                or cls._preview_restore_in_progress
+            )
+        if not preview_work_active:
+            # Terminal/idle previews must never keep the editor camera disabled.
+            # Call even when the Python flag is already false to re-sync native state.
+            cls._set_preview_input_locked(False)
+        with cls._preview_lock:
             status = cls._preview_payload_locked()
+        status["worker_active"] = preview_work_active
+        status["workerActive"] = preview_work_active
         status["runtime_states"] = corona_engine_scratch.runtime_state_snapshots()
         return status
 

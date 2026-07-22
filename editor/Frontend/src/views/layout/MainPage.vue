@@ -823,12 +823,28 @@ function clearNodeReviewForProjectChange() {
   cabbageAssistantOpen.value = false;
 }
 
+function refreshCameraAfterProjectChange() {
+  window.setTimeout(() => {
+    void refreshSceneCameraBinding({
+      force: true,
+      preservePose: false,
+    });
+  }, 0);
+}
+
 function onActiveProjectChanged() {
   clearNodeReviewForProjectChange();
+  clearKnownEditorCameraInputLocks();
+  void reconcileEditorCameraInputLocks();
+  refreshCameraAfterProjectChange();
 }
 
 function onActiveProjectStorageChanged(event) {
-  if (event?.key === 'corona.activeProjectPath') clearNodeReviewForProjectChange();
+  if (event?.key !== 'corona.activeProjectPath') return;
+  clearNodeReviewForProjectChange();
+  clearKnownEditorCameraInputLocks();
+  void reconcileEditorCameraInputLocks();
+  refreshCameraAfterProjectChange();
 }
 
 function handleNodeGraphReview(result) {
@@ -962,7 +978,12 @@ const cancelAddTab = () => {
 
 const isVector3 = (value) => Array.isArray(value) && value.length === 3;
 
-const applySceneSnapshot = (sceneId, payload) => {
+let sceneCameraBindingRequestRevision = 0;
+let sceneCameraBindingRefreshPromise = null;
+let sceneCameraBindingLastRefreshAt = 0;
+const SCENE_CAMERA_BINDING_REFRESH_INTERVAL_MS = 1000;
+
+const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => {
   const snapshot = payload?.scene ?? payload?.data?.scene ?? payload?.data ?? payload;
   if (!snapshot || typeof snapshot !== 'object') {
     cameraBindingState.value = {
@@ -1005,6 +1026,8 @@ const applySceneSnapshot = (sceneId, payload) => {
 
   if (
     activeCamera &&
+    !preservePose &&
+    !isRealtimeCameraInputActive() &&
     (isVector3(activeCamera.position) ||
       isVector3(activeCamera.forward) ||
       isVector3(activeCamera.world_up))
@@ -1026,17 +1049,42 @@ const applySceneSnapshot = (sceneId, payload) => {
   }
 };
 
-const syncSceneCameraBinding = async (sceneId) => {
+const syncSceneCameraBinding = async (sceneId, { preservePose = false } = {}) => {
   if (!sceneId) {
-    return;
+    return false;
   }
 
+  const requestRevision = ++sceneCameraBindingRequestRevision;
   try {
     const result = await sceneService.getScene(sceneId);
-    applySceneSnapshot(sceneId, result);
+    if (requestRevision !== sceneCameraBindingRequestRevision) return false;
+    applySceneSnapshot(sceneId, result, { preservePose });
+    return true;
   } catch (e) {
-    logError('Failed to sync scene camera binding', e);
+    if (requestRevision === sceneCameraBindingRequestRevision) {
+      logError('Failed to sync scene camera binding', e);
+    }
+    return false;
   }
+};
+
+const refreshSceneCameraBinding = ({ force = false, preservePose = true } = {}) => {
+  const sceneId = tabs.value[activeTab.value]?.id || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME;
+  const now = Date.now();
+  if (!force && sceneCameraBindingRefreshPromise) return sceneCameraBindingRefreshPromise;
+  if (!force && now - sceneCameraBindingLastRefreshAt < SCENE_CAMERA_BINDING_REFRESH_INTERVAL_MS) {
+    return Promise.resolve(true);
+  }
+
+  sceneCameraBindingLastRefreshAt = now;
+  const refreshPromise = syncSceneCameraBinding(sceneId, { preservePose });
+  const trackedPromise = refreshPromise.finally(() => {
+    if (sceneCameraBindingRefreshPromise === trackedPromise) {
+      sceneCameraBindingRefreshPromise = null;
+    }
+  });
+  sceneCameraBindingRefreshPromise = trackedPromise;
+  return trackedPromise;
 };
 
 const restoreCameraViews = async (sceneId) => {
@@ -1091,6 +1139,10 @@ const focusViewportInput = () => {
   viewportPickSurfaceRef.value?.focus?.({ preventScroll: true });
 };
 
+const handleMainWindowFocus = () => {
+  void refreshSceneCameraBinding({ preservePose: true });
+};
+
 const handleKeyDown = (event) => {
   // 检查输入框是否聚焦
   const inputElement = document.getElementById('new-tab-name');
@@ -1122,6 +1174,12 @@ const handleKeyDown = (event) => {
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
     event.preventDefault();
+    if (!movementKeys[key]) {
+      // A project/scene reload recreates native cameras and invalidates their old
+      // handles. Refresh once when a new movement gesture starts instead of
+      // continuing to publish WASD/QE updates to a released camera.
+      void refreshSceneCameraBinding({ preservePose: true });
+    }
     movementKeys[key] = true;
     startMoveLoop();
   }
@@ -1197,18 +1255,54 @@ const resetRealtimeCameraInput = () => {
   mouseRotate.active = false;
 };
 
-const setGamePreviewInputLocked = (locked) => {
+const setEditorCameraInputLock = (reason, locked) => {
   const locks = window.__coronaEditorInputLocks instanceof Set
     ? window.__coronaEditorInputLocks
     : new Set();
   window.__coronaEditorInputLocks = locks;
-  if (locked) locks.add('game_preview');
-  else locks.delete('game_preview');
+  if (locked) locks.add(reason);
+  else locks.delete(reason);
   window.__coronaGamePreviewInputLocked = locks.size > 0;
   if (window.__coronaGamePreviewInputLocked) {
     resetRealtimeCameraInput();
   }
 };
+
+const setGamePreviewInputLocked = (locked) => {
+  setEditorCameraInputLock('game_preview', Boolean(locked));
+};
+
+function clearKnownEditorCameraInputLocks() {
+  setEditorCameraInputLock('node_graph', false);
+  setEditorCameraInputLock('game_preview', false);
+}
+
+let cameraInputLockReconcileToken = 0;
+async function reconcileEditorCameraInputLocks() {
+  const token = ++cameraInputLockReconcileToken;
+  const [scriptResult, previewResult] = await Promise.allSettled([
+    scriptingService.getScriptStatus(),
+    scriptingService.getGamePreviewStatus(),
+  ]);
+  if (token !== cameraInputLockReconcileToken) return;
+
+  if (scriptResult.status === 'fulfilled') {
+    const scriptStatus = unwrapBridgeData(scriptResult.value) || {};
+    const scriptWorkerActive = Boolean(scriptStatus.threadAlive)
+      && ['starting', 'running', 'stopping'].includes(String(scriptStatus.status || ''));
+    setEditorCameraInputLock(
+      'node_graph',
+      scriptWorkerActive && Boolean(scriptStatus.inputLocked)
+    );
+  }
+  if (previewResult.status === 'fulfilled') {
+    const previewStatus = normalizePreviewDetails(unwrapBridgeData(previewResult.value) || {});
+    const previewWorkerActive = Boolean(previewStatus.workerActive || previewStatus.stopPending);
+    setGamePreviewInputLocked(
+      previewWorkerActive && Boolean(previewStatus.inputLocked)
+    );
+  }
+}
 
 const moveLoop = (now) => {
   if (isGamePreviewInputLocked()) {
@@ -1439,6 +1533,9 @@ const handleViewportPointer = (event) => {
 
 const handleViewportPointerDown = (event) => {
   focusViewportInput();
+  // Detached docks and project initialization may reload the native scene after
+  // MainPage's first snapshot. Rebind before the user starts interacting.
+  void refreshSceneCameraBinding({ preservePose: true });
   sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
@@ -1811,6 +1908,7 @@ const normalizePreviewDetails = (payload = {}) => ({
   restoreError: payload.restoreError ?? payload.restore_error ?? '',
   restored: Boolean(payload.restored),
   stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
+  workerActive: Boolean(payload.workerActive ?? payload.worker_active),
   errors: Array.isArray(payload.errors) ? payload.errors : [],
   warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
   targets: Array.isArray(payload.targets) ? payload.targets : [],
@@ -2274,6 +2372,9 @@ const handlePanelClosed = (payload) => {
 
 onMounted(async () => {
   removeLegacyReviewHistory();
+  // A reused CEF page must not inherit camera locks from a previous world.
+  // Real active workers are added back by reconcileEditorCameraInputLocks().
+  clearKnownEditorCameraInputLocks();
   const result = await projectService.OnInit();
   const initData = result?.data ?? result;
   const scenes = initData?.scenes ?? [];
@@ -2314,6 +2415,13 @@ onMounted(async () => {
     cameraViewportResizeObserver.observe(viewportPickSurfaceRef.value);
   }
   await restoreCameraViews(initialSceneId);
+  // Restoring detached camera windows can overlap native scene initialization.
+  // Always take a second snapshot after that phase so the main viewport owns the
+  // current camera handle rather than the camera object that was just destroyed.
+  await syncSceneCameraBinding(initialSceneId);
+  // The CEF window can survive project creation/switching, so discard stale
+  // frontend lock reasons using the backend's self-healed runtime truth.
+  await reconcileEditorCameraInputLocks();
 
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);
@@ -2323,6 +2431,7 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
+  window.addEventListener('focus', handleMainWindowFocus);
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
@@ -2338,6 +2447,9 @@ onMounted(async () => {
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   await openDefaultFloatingToolPanels();
+  // A floating tool can finish loading after the first recovery snapshot. Make
+  // the final settled binding authoritative before normal editor interaction.
+  await syncSceneCameraBinding(initialSceneId);
   broadcastViewportControlsState();
 
   // Subscribe only to proactive DeepSeek node-graph review results.
@@ -2348,7 +2460,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   clearPreviewPoll();
-  setGamePreviewInputLocked(false);
+  clearKnownEditorCameraInputLocks();
   unregisterEditorControls();
   unsubscribeNodeGraphReview?.();
   unsubscribeNodeGraphReview = null;
@@ -2379,6 +2491,9 @@ onUnmounted(() => {
     sceneRenamedCallbackToken = null;
   }
   window.removeEventListener('resize', handleViewportLayoutChange);
+  window.removeEventListener('focus', handleMainWindowFocus);
+  sceneCameraBindingRequestRevision += 1;
+  sceneCameraBindingRefreshPromise = null;
   stopMoveLoop();
   if (cameraViewportSyncRafId != null) {
     cancelAnimationFrame(cameraViewportSyncRafId);
