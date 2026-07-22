@@ -33,19 +33,27 @@ function hashText(text) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+export function normalizeReviewScope(scope) {
+  return String(scope || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLocaleLowerCase('en-US');
+}
+
 export function reviewScopeId(scope) {
-  return hashText(String(scope || '').trim().toLocaleLowerCase('en-US'));
+  return hashText(normalizeReviewScope(scope));
 }
 
 export function graphRevision(workspace, scope = '') {
   const snapshot = createReviewSnapshot(workspace);
-  return hashText(`${String(scope || '').trim()}\n${JSON.stringify(snapshot)}`);
+  return hashText(`${normalizeReviewScope(scope)}\n${JSON.stringify(snapshot)}`);
 }
 
 function snapshotWithRevision(workspace, scope = '') {
   const snapshot = createReviewSnapshot(workspace);
   if (!Array.isArray(snapshot?.nodes) || !Array.isArray(snapshot?.edges)) return null;
-  const normalizedScope = String(scope || '').trim().toLocaleLowerCase('en-US');
+  const normalizedScope = normalizeReviewScope(scope);
   return {
     workspace: snapshot,
     revision: hashText(`${normalizedScope}\n${JSON.stringify(snapshot)}`),
