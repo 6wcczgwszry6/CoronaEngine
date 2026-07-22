@@ -33,6 +33,7 @@ from .services.request_service import AIRequestService
 from .services.stream_dispatcher import StreamDispatcher
 from .services.ai_hint_service import get_hint_service
 from .services.node_graph_review_service import get_node_graph_review_service
+from .services.node_graph_review_chat_service import get_node_graph_review_chat_service
 from .services.lanchat_agent_worker import LANChatAgentWorker
 
 try:
@@ -74,6 +75,7 @@ class AITool(PluginBase):
     _request_states = _request_service.states
     _hint_service = get_hint_service()
     _node_graph_review_service = get_node_graph_review_service()
+    _node_graph_review_chat_service = get_node_graph_review_chat_service()
 
     @classmethod
     def _init_hint_service(cls) -> None:
@@ -126,6 +128,14 @@ class AITool(PluginBase):
                 return cls._node_graph_review_service.start(parsed.get("payload") or {})
             if operation == "node_graph.review.status":
                 return cls._node_graph_review_service.status(parsed.get("taskId") or parsed.get("task_id") or "")
+            if operation == "node_graph.review.chat":
+                return cls._node_graph_review_chat_service.chat(parsed.get("payload") or {})
+            if operation == "node_graph.review.chat.start":
+                return cls._node_graph_review_chat_service.start(parsed.get("payload") or {})
+            if operation == "node_graph.review.chat.status":
+                return cls._node_graph_review_chat_service.status(parsed.get("taskId") or parsed.get("task_id") or "")
+            if operation == "node_graph.review.chat.cancel":
+                return cls._node_graph_review_chat_service.cancel(parsed.get("taskId") or parsed.get("task_id") or "")
         return cls._controller.submit_request(request)
 
     @classmethod
@@ -133,6 +143,7 @@ class AITool(PluginBase):
         """清理资源"""
         cls._lanchat_agent_worker.stop()
         cls._node_graph_review_service.shutdown()
+        cls._node_graph_review_chat_service.shutdown()
         cls._controller.cleanup(cls._executor)
 
     @staticmethod

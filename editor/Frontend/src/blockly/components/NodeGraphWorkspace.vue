@@ -476,6 +476,9 @@ let isLoading = false,
   loadedProjectPath = '',
   componentMounted = false;
 const targetEnabledByKey = new Map();
+function requestNodeGraphReview(delay = 250) {
+  stopNodeGraphReview?.scanNow?.(delay);
+}
 function readActiveProjectPath() {
   return String(window.localStorage?.getItem('corona.activeProjectPath') || '').trim();
 }
@@ -1587,6 +1590,7 @@ async function loadGraphForCurrentTarget() {
     variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
     activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
     updateCanvasSize();
+    requestNodeGraphReview();
   }
   if (shouldMigrateLocal) await saveNow();
 }
@@ -2025,6 +2029,7 @@ onMounted(() => {
       enabled: () => componentMounted && props.reviewActive && isProjectTarget.value && !isLoading,
       intervalMs: 10000,
     });
+    requestNodeGraphReview(500);
   }
   window.addEventListener('corona-game-preview-status', onGamePreviewStatus);
   window.addEventListener('keydown', handleFullscreenKey);

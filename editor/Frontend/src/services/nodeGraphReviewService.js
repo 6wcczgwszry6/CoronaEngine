@@ -1,4 +1,4 @@
-﻿import { aiService } from '@/utils/bridge.js';
+import { aiService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 
 const CHANNEL_NAME = 'corona-node-graph-review-v1';
@@ -89,11 +89,10 @@ export function startNodeGraphReview({
   let lastSuccessfulRevision = '';
   let lastErrorKey = '';
 
-  const canReview = () => (
-    !stopped
-    && enabled()
-    && (typeof document === 'undefined' || document.visibilityState !== 'hidden')
-  );
+  // Floating CEF panels may report document.visibilityState === 'hidden' even while
+  // they are open in the main editor. Review availability must follow the panel lifecycle,
+  // not browser visibility, otherwise background node checks silently stop.
+  const canReview = () => !stopped && enabled();
 
   const currentCandidate = () => snapshotWithRevision(
     getWorkspace?.(),
@@ -201,6 +200,7 @@ export function startNodeGraphReview({
           requestId: task.requestId,
           graphRevision: task.revision,
           projectScopeId: task.projectScopeId,
+          graphExcerpt: task.workspace,
         });
       } else {
         publishErrorOnce(result, task.requestId, task.revision, task.projectScopeId);
@@ -239,9 +239,9 @@ export function startNodeGraphReview({
 
   const period = Math.max(1000, Number(intervalMs) || REVIEW_INTERVAL_MS);
   scanTimer = window.setInterval(scan, period);
-  firstScanTimer = window.setTimeout(scan, period);
+  firstScanTimer = window.setTimeout(scan, Math.min(750, period));
 
-  return () => {
+  const stop = () => {
     stopped = true;
     if (firstScanTimer) window.clearTimeout(firstScanTimer);
     if (scanTimer) window.clearInterval(scanTimer);
@@ -252,4 +252,13 @@ export function startNodeGraphReview({
     activeTask = null;
     pendingReview = null;
   };
+  stop.scanNow = (delay = 0) => {
+    if (stopped) return;
+    if (firstScanTimer) window.clearTimeout(firstScanTimer);
+    firstScanTimer = window.setTimeout(() => {
+      firstScanTimer = null;
+      scan();
+    }, Math.max(0, Number(delay) || 0));
+  };
+  return stop;
 }

@@ -82,6 +82,26 @@
         </div>
       </div>
 
+      <!-- 场景基础设置 -->
+      <section class="scene-settings" data-assistant-title="场景基础设置" data-assistant-description="调整当前场景的主光照方向与编辑网格显示。">
+        <div class="scene-settings-title">场景设置</div>
+        <div class="scene-setting-row">
+          <label class="scene-setting-label" for="scene-light-enabled">光照</label>
+          <input id="scene-light-enabled" v-model="sceneSettings.light.enabled" type="checkbox" data-assistant-title="场景光照" data-assistant-description="启用后可通过方向参数改变当前场景主光照的照射方向。" @change="updateSceneLight" />
+          <div class="scene-direction-inputs" :class="{ disabled: !sceneSettings.light.enabled }">
+            <label v-for="axis in ['x', 'y', 'z']" :key="axis">
+              <span>{{ axis.toUpperCase() }}</span>
+              <input v-model.number="sceneSettings.light.direction[axis]" type="number" step="0.1" :disabled="!sceneSettings.light.enabled" :data-assistant-title="`光照方向 ${axis.toUpperCase()}`" data-assistant-description="修改后会改变场景主光照从该轴方向照射的强度和方向。" @change="updateSceneLight" />
+            </label>
+          </div>
+        </div>
+        <div class="scene-setting-row">
+          <label class="scene-setting-label" for="scene-grid-enabled">编辑网格</label>
+          <input id="scene-grid-enabled" v-model="sceneSettings.gridEnabled" type="checkbox" data-assistant-title="编辑网格" data-assistant-description="控制当前场景地面参考网格的显示，方便判断位置、距离和方向。" @change="updateSceneGrid" />
+          <span class="scene-setting-help">用于摆放和对齐场景对象</span>
+        </div>
+      </section>
+
       <!-- 资源搜索栏(B-2 竞态保护 + 防抖 + 错误兜底) -->
       <div
         v-if="RESOURCE_SEARCH_ENABLED"
@@ -337,111 +357,6 @@
           </svg>
         </button>
         <!-- GBuffer 输出模式切换 -->
-        <div class="relative">
-          <button
-            class="p-1.5 hover:bg-[#545454] rounded flex items-center gap-0.5"
-            :class="activeOutputMode === 'final_color' ? 'text-[#e0e0e0]' : 'text-[#c084fc]'"
-            title="输出通道"
-            @click.stop="ShowGBufferDropdown = !ShowGBufferDropdown"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M4 6h16M4 10h16M4 14h10M4 18h6"
-              />
-            </svg>
-            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M19 9l-7 7-7-7"
-              />
-            </svg>
-          </button>
-          <div
-            v-if="ShowGBufferDropdown"
-            v-click-outside="() => (ShowGBufferDropdown = false)"
-            class="absolute z-20 right-0 mt-1 w-36 bg-[#3c3c3c] rounded shadow-lg border border-[#1a1a1a]"
-          >
-            <div class="px-2 py-1 text-[10px] text-gray-500 border-b border-[#1a1a1a]">
-              输出通道
-            </div>
-            <button
-              v-for="buf in outputModes"
-              :key="buf.type"
-              class="w-full px-3 py-1.5 text-xs hover:bg-[#545454] text-left flex items-center gap-2"
-              :class="activeOutputMode === buf.type ? 'text-white bg-[#4a4a4a]' : 'text-[#e0e0e0]'"
-              @click.stop="SetOutputMode(buf.type)"
-            >
-              <span :style="{ color: buf.color }">■</span>
-              {{ buf.label }}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 输出模式快捷切换 & 截图测试 -->
-      <div
-        class="flex flex-wrap items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
-      >
-        <button
-          v-for="buf in outputModes"
-          :key="'quick-' + buf.type"
-          class="px-1.5 py-0.5 text-[10px] rounded border"
-          :class="
-            activeOutputMode === buf.type
-              ? 'border-current font-bold'
-              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
-          "
-          :style="activeOutputMode === buf.type ? { color: buf.color, borderColor: buf.color } : {}"
-          :title="'切换到 ' + buf.label"
-          @click="SetOutputMode(buf.type)"
-        >
-          {{ buf.label }}
-        </button>
-        <div class="w-px h-4 bg-[#444] mx-0.5"></div>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border"
-          :class="
-            shadowCascadeDebug
-              ? 'border-[#f59e0b] text-[#fff7c2] bg-[#4a3512]'
-              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
-          "
-          title="显示 CSM cascade 分级颜色"
-          @click="ToggleShadowCascadeDebug"
-        >
-          CSM
-        </button>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border"
-          :class="
-            ssaoEnabled
-              ? 'border-[#22c55e] text-[#dcfce7] bg-[#12351f]'
-              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
-          "
-          title="Toggle Native SSAO"
-          @click="ToggleSsaoEnabled"
-        >
-          SSAO
-        </button>
-        <div class="w-px h-4 bg-[#444] mx-0.5"></div>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border border-[#555] text-[#4ec9b0] hover:bg-[#3a3a3a]"
-          title="快速截图（保存当前输出模式到桌面）"
-          @click="QuickScreenshot"
-        >
-          📷 快速截图
-        </button>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border border-[#555] text-[#dcdcaa] hover:bg-[#3a3a3a]"
-          title="依次切换所有通道并逐一截图保存"
-          @click="SaveAllBuffers"
-        >
-          📦 全部保存
-        </button>
       </div>
 
       <!-- 场景树 -->
@@ -746,6 +661,48 @@ const defaultViewportControls = {
   cameraSpeed: 0.2,
 };
 const currentSceneName = ref('');
+const sceneSettings = reactive({
+  light: { enabled: true, direction: { x: 1, y: 1, z: 1 } },
+  gridEnabled: true,
+});
+
+const unwrapSceneData = (result) => result?.data ?? result ?? {};
+
+const loadSceneSettings = async () => {
+  if (!currentSceneName.value) return;
+  try {
+    const data = unwrapSceneData(await sceneService.getScene(currentSceneName.value));
+    const sun = data?.sun || {};
+    const direction = Array.isArray(sun.direction) ? sun.direction : [1, 1, 1];
+    sceneSettings.light.enabled = sun.enabled !== false;
+    sceneSettings.light.direction.x = Number(direction[0] ?? 1);
+    sceneSettings.light.direction.y = Number(direction[1] ?? 1);
+    sceneSettings.light.direction.z = Number(direction[2] ?? 1);
+    if (typeof data?.grid?.enabled === 'boolean') sceneSettings.gridEnabled = data.grid.enabled;
+    else if (typeof data?.floor_grid_enabled === 'boolean') sceneSettings.gridEnabled = data.floor_grid_enabled;
+  } catch (error) {
+    logWarn('读取场景基础设置失败', error);
+  }
+};
+
+const updateSceneLight = async () => {
+  if (!currentSceneName.value) return;
+  const direction = sceneSettings.light.direction;
+  try {
+    await sceneService.sunDirection(currentSceneName.value, sceneSettings.light.enabled, [Number(direction.x) || 0, Number(direction.y) || 0, Number(direction.z) || 0]);
+  } catch (error) {
+    logError('更新场景光照失败', error);
+  }
+};
+
+const updateSceneGrid = async () => {
+  if (!currentSceneName.value) return;
+  try {
+    await sceneService.floorGrid(currentSceneName.value, sceneSettings.gridEnabled);
+  } catch (error) {
+    logError('更新场景网格失败', error);
+  }
+};
 const viewportControlState = ref({ ...defaultViewportControls });
 const cameraSpeedLabel = computed(() =>
   Number(viewportControlState.value.cameraSpeed || 0).toFixed(2)
@@ -1466,9 +1423,6 @@ const SelectActor = (scene) => {
 const SelectCamera = (cam) => {
   selectedItem.value = 'cam:' + cam.name;
   selectedCameraName.value = cam.name;
-  activeOutputMode.value = cam.output_mode || 'final_color';
-  shadowCascadeDebug.value = !!cam.shadow_cascade_debug;
-  ssaoEnabled.value = cam.ssao_enabled !== false;
   RefreshRenderBackendState();
 };
 
@@ -1780,23 +1734,6 @@ const TakeScreenshot = async () => {
   }
 };
 
-const outputModes = [
-  { type: 'final_color', label: 'Final Color', color: '#e0e0e0' },
-  { type: 'base_color', label: 'Base Color', color: '#60a5fa' },
-  { type: 'normal', label: 'Normal', color: '#34d399' },
-  { type: 'position', label: 'Position', color: '#fbbf24' },
-  { type: 'object_id', label: 'Object ID', color: '#c084fc' },
-  { type: 'visibility_buffer', label: 'Visibility', color: '#f472b6' },
-  { type: 'ssao_raw', label: 'SSAO Raw', color: '#84cc16' },
-  { type: 'ssao', label: 'SSAO', color: '#22c55e' },
-  { type: 'shadow_mask_raw', label: 'Shadow Raw', color: '#f97316' },
-  { type: 'shadow_mask', label: 'Shadow Mask', color: '#fb7185' },
-];
-const ShowGBufferDropdown = ref(false);
-const activeOutputMode = ref('final_color');
-const shadowCascadeDebug = ref(false);
-const ssaoEnabled = ref(true);
-
 // Vision / Native 渲染后端切换状态
 const visionAvailable = ref(false);
 const activeRenderBackend = ref('native');
@@ -1840,152 +1777,6 @@ const ToggleRenderBackend = async () => {
     }
   } catch (e) {
     logError('Failed to switch render backend', e);
-  }
-};
-
-const SetOutputMode = async (mode) => {
-  ShowGBufferDropdown.value = false;
-  try {
-    const cameraName = getTargetCameraName();
-    const result = await sceneService.setOutputMode(currentSceneName.value, cameraName, mode);
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      logError(`Set output mode failed`, payload?.message || result?.error || 'unknown error');
-    } else {
-      activeOutputMode.value = mode;
-      const target = getTargetCamera();
-      if (target) {
-        target.output_mode = mode;
-      }
-    }
-  } catch (e) {
-    logError('Failed to set output mode', e);
-  }
-};
-
-const ToggleShadowCascadeDebug = async () => {
-  const next = !shadowCascadeDebug.value;
-  shadowCascadeDebug.value = next;
-  try {
-    const cameraName = getTargetCameraName();
-    const result = await sceneService.setShadowCascadeDebug(currentSceneName.value, cameraName, next);
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      shadowCascadeDebug.value = !next;
-      logError('Set CSM cascade debug failed', payload?.message || result?.error || 'unknown error');
-    } else {
-      shadowCascadeDebug.value = !!payload?.enabled;
-      const target = getTargetCamera();
-      if (target) {
-        target.shadow_cascade_debug = shadowCascadeDebug.value;
-      }
-    }
-  } catch (e) {
-    shadowCascadeDebug.value = !next;
-    logError('Failed to set CSM cascade debug', e);
-  }
-};
-
-const ToggleSsaoEnabled = async () => {
-  const next = !ssaoEnabled.value;
-  ssaoEnabled.value = next;
-  try {
-    const cameraName = getTargetCameraName();
-    const result = await sceneService.setSsaoEnabled(currentSceneName.value, cameraName, next);
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      ssaoEnabled.value = !next;
-      logError('Set SSAO failed', payload?.message || result?.error || 'unknown error');
-    } else {
-      ssaoEnabled.value = payload?.enabled !== false;
-      const target = getTargetCamera();
-      if (target) {
-        target.ssao_enabled = ssaoEnabled.value;
-      }
-    }
-  } catch (e) {
-    ssaoEnabled.value = !next;
-    logError('Failed to set SSAO', e);
-  }
-};
-
-const QuickScreenshot = async () => {
-  try {
-    const cameraName = getTargetCameraName();
-    const selectResult = await sceneService.selectScreenshotPath(
-      currentSceneName.value,
-      cameraName
-    );
-    const selectPayload = selectResult?.data ?? selectResult;
-    if (!selectPayload || selectPayload.status === 'canceled' || !selectPayload.path) {
-      return;
-    }
-    // Insert current mode name before file extension
-    const path = selectPayload.path;
-    const dotIdx = path.lastIndexOf('.');
-    const taggedPath =
-      dotIdx > 0
-        ? path.slice(0, dotIdx) + '_' + activeOutputMode.value + path.slice(dotIdx)
-        : path + '_' + activeOutputMode.value + '.png';
-
-    const result = await sceneService.saveScreenshot(
-      currentSceneName.value,
-      taggedPath,
-      cameraName
-    );
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      logError('Quick screenshot failed', payload?.message || result?.error || 'unknown error');
-    }
-  } catch (e) {
-    logError('Failed to take quick screenshot', e);
-  }
-};
-
-const SaveAllBuffers = async () => {
-  try {
-    const cameraName = getTargetCameraName();
-    const selectResult = await sceneService.selectScreenshotPath(
-      currentSceneName.value,
-      cameraName
-    );
-    const selectPayload = selectResult?.data ?? selectResult;
-    if (!selectPayload || selectPayload.status === 'canceled' || !selectPayload.path) {
-      return;
-    }
-    const basePath = selectPayload.path;
-    const dotIdx = basePath.lastIndexOf('.');
-    const stem = dotIdx > 0 ? basePath.slice(0, dotIdx) : basePath;
-    const ext = dotIdx > 0 ? basePath.slice(dotIdx) : '.png';
-
-    const previousMode = activeOutputMode.value;
-
-    for (const buf of outputModes) {
-      // Switch mode
-      await sceneService.setOutputMode(currentSceneName.value, cameraName, buf.type);
-      activeOutputMode.value = buf.type;
-
-      // Wait one frame for GPU to render with new mode
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Save screenshot
-      const filePath = stem + '_' + buf.type + ext;
-      const result = await sceneService.saveScreenshot(
-        currentSceneName.value,
-        filePath,
-        cameraName
-      );
-      const payload = result?.data ?? result;
-      if (result?.success === false || payload?.status === 'error') {
-        logError(`Save ${buf.label} failed`, payload?.message || result?.error || 'unknown error');
-      }
-    }
-
-    // Restore previous mode
-    await sceneService.setOutputMode(currentSceneName.value, cameraName, previousMode);
-    activeOutputMode.value = previousMode;
-  } catch (e) {
-    logError('Failed to save all buffers', e);
   }
 };
 
@@ -2294,6 +2085,7 @@ onMounted(async () => {
   const activeScene = initData?.scenes?.[initData?.active_index ?? 0];
   currentSceneName.value = urlSceneName || activeScene?.path || DEFAULT_SCENE_NAME;
 
+  await loadSceneSettings();
   await OnInitObjTree();
   await RefreshRenderBackendState();
   requestViewportControlsState();
@@ -2312,6 +2104,7 @@ const onActorChangeEvent = (payload, maybeSceneId /*, actorId, oldPath */) => {
   const sceneId = payload?.scene ?? maybeSceneId;
   if (type !== 'scene' || !sceneId) return;
   currentSceneName.value = sceneId;
+  loadSceneSettings();
   OnInitObjTree();
 };
 
@@ -2348,10 +2141,6 @@ const applyCameraList = (cameras) => {
   if (!sceneCameras.value.some((cam) => cam.name === selectedCameraName.value)) {
     selectedCameraName.value = sceneCameras.value[0]?.name || null;
   }
-  const target = getTargetCamera();
-  activeOutputMode.value = target?.output_mode || 'final_color';
-  shadowCascadeDebug.value = !!target?.shadow_cascade_debug;
-  ssaoEnabled.value = target?.ssao_enabled !== false;
 };
 
 const RefreshCameraListOnly = async () => {
@@ -2436,6 +2225,78 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+
+.scene-settings {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 9px 10px;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.34);
+  background: rgba(37, 41, 37, 0.58);
+}
+
+.scene-settings-title {
+  color: #c9d8c2;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.scene-setting-row {
+  display: grid;
+  grid-template-columns: 62px auto minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.scene-setting-label,
+.scene-setting-help {
+  color: #aeb7aa;
+  font-size: 11px;
+}
+
+.scene-setting-help {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.scene-direction-inputs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 5px;
+  min-width: 0;
+}
+
+.scene-direction-inputs.disabled {
+  opacity: 0.5;
+}
+
+.scene-direction-inputs label {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: center;
+  gap: 3px;
+  color: #929d8f;
+  font-size: 9px;
+}
+
+.scene-direction-inputs input {
+  width: 100%;
+  min-width: 0;
+  border: 1px solid #485049;
+  border-radius: 4px;
+  background: #191c1a;
+  color: #e5e7eb;
+  padding: 4px 5px;
+  font-size: 10px;
+  outline: none;
+}
+
+.scene-direction-inputs input:focus {
+  border-color: #83a36b;
+}
+
 .scene-preview-button {
   flex: 0 0 auto;
   min-width: 72px;

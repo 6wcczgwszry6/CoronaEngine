@@ -821,8 +821,8 @@ export const projectService = {
 };
 
 export const appService = {
-  createPanelTab: (panelId, routePath, width, height, dockingPos) =>
-    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
+  createPanelTab: (panelId, routePath, width, height, dockingPos, zPriority = 0) =>
+    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos, zPriority }),
   // Create a panel that is born directly as its own borderless OS window (skips the
   // main-window docked-rectangle stage, so no 1-frame flash). x/y/width/height are the
   // desired initial geometry in logical px. Returns { tab_id, panel_id }.
@@ -885,6 +885,34 @@ export const aiService = {
   getNodeGraphReviewStatus: async (taskId) => {
     const response = await editorApi.ai.submitRequest({
       operation: 'node_graph.review.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  chatAboutNodeGraph: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startNodeGraphReviewChat: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphReviewChatStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  cancelNodeGraphReviewChat: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.cancel',
       taskId: String(taskId || ''),
     });
     return response?.data ?? response;
