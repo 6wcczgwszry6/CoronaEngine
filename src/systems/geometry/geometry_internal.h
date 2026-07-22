@@ -193,6 +193,8 @@ struct GeometrySystem::Impl {
         //   (3) 距离基于几何 AABB 而非轴心，相机环绕几何中心时距离恒定 → 不再无谓跳级。
         ktm::fvec3 local_aabb_min{0.0f, 0.0f, 0.0f};
         ktm::fvec3 local_aabb_max{0.0f, 0.0f, 0.0f};
+
+        bool lod_spatially_evicted = false;  // 被空间淘汰强制 LOD0
     };
 
     mutable std::shared_mutex          lod_cache_mutex;
@@ -320,6 +322,16 @@ struct GeometrySystem::Impl {
 
     /// 两级 LRU 磁盘缓存（内存 128MB + 磁盘 512MB），直接使用 CacheManager
     std::unique_ptr<Corona::Cache::CacheManager> lod_disk_cache;
+
+    // 全局默认 lod_evict_distance（reconcile 中读取，无 scene context）。
+    // 初始化为与 SceneVisibilityConfig 默认值一致的计算结果：
+    // (preload=50 + effective_unload=max(80, 50*1.2)=80) * 0.5 = 65.0
+    // set_visibility_config / set_distance_config 调用时会同步更新。
+    float lod_evict_distance = 65.0f;
+
+    // 淘汰/恢复每帧限制
+    static constexpr size_t kMaxLodSpatialEvictPerFrame  = 16;
+    static constexpr size_t kMaxLodSpatialRestorePerFrame = 16;
 
     /// 保证 ensure_lod_disk_cache() 只初始化一次（线程安全）
     std::once_flag                                lod_disk_cache_once;

@@ -598,9 +598,25 @@ void GeometrySystem::update() {
                     const float effective_unload_radius = std::max(
                         scene_state.cfg.unload_distance,
                         scene_state.cfg.preload_distance * 1.2f);
+
+                    // LOD 空间淘汰距离（自动或手动）
+                    const float lod_evict_dist = (scene_state.cfg.lod_evict_distance > 0)
+                        ? scene_state.cfg.lod_evict_distance
+                        : (scene_state.cfg.preload_distance + effective_unload_radius) * 0.5f;
+
+                    // 空间淘汰启用时缩小遍历半径：collect_outside_spheres 收集半径外的节点，
+                    // 更小半径 = 收集更多候选 = LOD 淘汰 + actor 卸载全覆盖
+                    const float traversal_radius = scene_state.cfg.enable_lod_spatial_eviction
+                        ? std::min(lod_evict_dist, effective_unload_radius)
+                        : effective_unload_radius;
+
                     std::vector<Impl::Payload> outside_results;
                     scene_state.tree.collect_outside_spheres(
-                        cam_positions, effective_unload_radius, outside_results);
+                        cam_positions, traversal_radius, outside_results);
+
+                    // ---- 分级：LOD 空间淘汰 / actor 卸载 ----
+                    struct LodEvictCandidate { Impl::Payload actor; float distance; };
+                    std::vector<LodEvictCandidate> lod_evict_candidates;
 
                     auto& actor_storage = SharedDataHub::instance().actor_storage();
                     for (auto actor : outside_results) {
@@ -620,7 +636,27 @@ void GeometrySystem::update() {
                             min_dist = std::min(min_dist,
                                 ktm::distance(entry_it->second.center(), cam_pos));
                         }
-                        pending_unloads.push_back({{scene_handle, actor}, min_dist});
+
+                        if (min_dist > effective_unload_radius) {
+                            pending_unloads.push_back({{scene_handle, actor}, min_dist});
+                        } else if (scene_state.cfg.enable_lod_spatial_eviction
+                                   && min_dist > lod_evict_dist * 1.15f) {
+                            // 15% 滞回外扩：淘汰阈值略大于回读阈值，防止边界 ping-pong
+                            lod_evict_candidates.push_back({actor, min_dist});
+                        }
+                    }
+
+                    // ---- LOD 空间淘汰执行（远者优先，限速）----
+                    if (!lod_evict_candidates.empty()) {
+                        std::sort(lod_evict_candidates.begin(), lod_evict_candidates.end(),
+                            [](const LodEvictCandidate& a, const LodEvictCandidate& b) {
+                                return a.distance > b.distance;
+                            });
+                        if (lod_evict_candidates.size() > Impl::kMaxLodSpatialEvictPerFrame)
+                            lod_evict_candidates.resize(Impl::kMaxLodSpatialEvictPerFrame);
+
+                        for (const auto& c : lod_evict_candidates)
+                            evict_lods_for_actor(c.actor);
                     }
                 }
             }
@@ -863,6 +899,87 @@ void GeometrySystem::update() {
     }
 }
 
+void GeometrySystem::evict_lods_for_actor(std::uintptr_t actor) {
+    auto& hub = SharedDataHub::instance();
+    auto actor_read = hub.actor_storage().try_acquire_read(actor);
+    if (!actor_read.valid()) return;
+
+    std::unordered_set<std::uintptr_t> visited_geom;
+
+    for (auto profile_handle : actor_read->profile_handles) {
+        auto profile = hub.profile_storage().try_acquire_read(profile_handle);
+        if (!profile) continue;
+
+        std::vector<std::uintptr_t> geom_handles;
+        if (profile->geometry_handle) geom_handles.push_back(profile->geometry_handle);
+        if (profile->mechanics_handle)
+            if (auto m = hub.mechanics_storage().try_acquire_read(profile->mechanics_handle))
+                if (m->geometry_handle) geom_handles.push_back(m->geometry_handle);
+        if (profile->optics_handle)
+            if (auto o = hub.optics_storage().try_acquire_read(profile->optics_handle))
+                if (o->geometry_handle) geom_handles.push_back(o->geometry_handle);
+        if (profile->acoustics_handle)
+            if (auto a = hub.acoustics_storage().try_acquire_read(profile->acoustics_handle))
+                if (a->geometry_handle) geom_handles.push_back(a->geometry_handle);
+
+        for (auto geom_handle : geom_handles) {
+            if (!visited_geom.insert(geom_handle).second) continue;
+
+            auto geom_read = hub.geometry_storage().try_acquire_read(geom_handle);
+            if (!geom_read) continue;
+
+            for (uint32_t mesh_idx = 0;
+                 mesh_idx < static_cast<uint32_t>(geom_read->mesh_handles.size());
+                 ++mesh_idx) {
+
+                uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
+
+                {
+                    std::unique_lock lock(impl_->lod_cache_mutex);
+                    auto cit = impl_->lod_cache.find(lod_key);
+                    if (cit == impl_->lod_cache.end()) continue;
+                    if (cit->second.levels.size() <= 1) continue;
+                    if (cit->second.lod_spatially_evicted) continue;  // 已淘汰，幂等跳过
+
+                    // 释放 LOD1..N 的 GPU 缓冲，LOD0 保留
+                    for (size_t lvl = 1; lvl < cit->second.levels.size(); ++lvl) {
+                        auto& buf = cit->second.levels[lvl];
+                        if (!buf.ready) continue;
+                        buf.vertex_buffer  = Horizon::HardwareBuffer{};
+                        buf.index_buffer   = Horizon::HardwareBuffer{};
+                        buf.vertex_storage = Horizon::HardwareBuffer{};
+                        buf.index_storage  = Horizon::HardwareBuffer{};
+                        buf.mesh_mem       = Corona::Memory::GpuMemToken{};
+                        buf.ready          = false;
+                    }
+
+                    cit->second.lod_spatially_evicted = true;
+                    cit->second.committed_demand = 0;
+                    // 空间淘汰 LOD1..N 后，shadow 必须回退 LOD0，否则会引用已释放的缓冲
+                    cit->second.shadow_committed_demand = -1;
+                    cit->second.shadow_prev_committed   = -1;
+                    cit->second.shadow_swap_in_progress = false;
+                    // 主视图 swap 状态也必须重置：prev_committed 可能指向已被释放的级，
+                    // 残留的 swap_in_progress=true 会在恢复时阻止 prev_committed 正确更新
+                    cit->second.swap_in_progress = false;
+                    cit->second.prev_committed   = -1;
+                }  // unique_lock 释放
+
+                // 取消该 lod_key 的在途异步构建：LOD1..N 已被释放，
+                // 若 TBB worker 稍后完成构建，process_pending_lod_builds 回写
+                // 会重新设 ready=true，撤销本次淘汰。
+                //
+                // 线程安全：evict_lods_for_actor 仅在几何线程 update() 中调用，
+                // pending_lod_builds/pending_shadow_lod_builds 的所有其他访问
+                // （reconcile 插入、process_pending_lod_builds 轮询/移除）也在
+                // 同一几何线程，无竞态，无需额外加锁。
+                impl_->pending_lod_builds.erase(lod_key);
+                impl_->pending_shadow_lod_builds.erase(lod_key);
+                 }
+        }
+    }
+}
+
 void GeometrySystem::shutdown() {
     CFW_LOG_NOTICE("GeometrySystem: Shutting down...");
 
@@ -988,6 +1105,14 @@ void GeometrySystem::shutdown() {
 void GeometrySystem::set_visibility_config(std::uintptr_t scene, SceneVisibilityConfig cfg) {
     std::unique_lock lock(impl_->mtx);
     impl_->get_or_create(scene).cfg = cfg;
+    // 同步全局值（reconcile 使用）。若显式设置则用设置值，
+    // 否则自动计算。注意：多 scene 时以最后一次调用为准（v1 限制）。
+    if (cfg.lod_evict_distance > 0)
+        impl_->lod_evict_distance = cfg.lod_evict_distance;
+    else if (cfg.preload_distance > 0) {
+        const float eff = std::max(cfg.unload_distance, cfg.preload_distance * 1.2f);
+        impl_->lod_evict_distance = (cfg.preload_distance + eff) * 0.5f;
+    }
 }
 
 void GeometrySystem::set_distance_config(std::uintptr_t scene, float unload_dist,
@@ -997,6 +1122,11 @@ void GeometrySystem::set_distance_config(std::uintptr_t scene, float unload_dist
     scene_state.cfg.enable_distance_culling = enable;
     scene_state.cfg.unload_distance = unload_dist;
     scene_state.cfg.preload_distance = preload_dist;
+    // 同步全局值：preload/unload 改变时自动重算
+    // 注：即使 enable=false（关闭距离剔除），仍更新 lod_evict_distance，
+    // 因为由 enable_lod_spatial_eviction 独立控制，与 distance culling 开关正交。
+    const float eff_unload = std::max(unload_dist, preload_dist * 1.2f);
+    impl_->lod_evict_distance = (preload_dist + eff_unload) * 0.5f;
 }
 
 void GeometrySystem::set_cache_directory(std::filesystem::path dir) {
@@ -2890,6 +3020,9 @@ void GeometrySystem::reconcile_lod_residency() {
     };
     std::vector<Lod0DeviceEviction> pending_lod0_evictions;
 
+    // 空间淘汰恢复限速：防止相机快速移动时大量 actor 同时恢复 LOD 导致 GPU 构建洪峰
+    size_t spatial_restored_this_frame = 0;
+
     // ---- 收集观察者 (世界位置, 角误差预算 epsilon)；无则不改动驻留 ----
     // 每个相机把「像素预算 + 自身 fov/分辨率」塌缩成单个角阈值 epsilon。选级判据
     // world_error/d ≤ epsilon 是纯球形量（与方向无关）→ 相机背后物体同样有定义，
@@ -2992,11 +3125,13 @@ void GeometrySystem::reconcile_lod_residency() {
             ktm::fvec3 local_max{0.0f, 0.0f, 0.0f};
             size_t level_count = 0;
             bool   have_error_data = false;
+            bool   lod_spatially_evicted = false;
             {
                 std::shared_lock lock(impl_->lod_cache_mutex);
                 auto cit = impl_->lod_cache.find(lod_key);
                 if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) continue;
                 level_count = cit->second.levels.size();
+                lod_spatially_evicted = cit->second.lod_spatially_evicted;
                 local_min = make_fvec3(cit->second.local_aabb_min[0],
                                        cit->second.local_aabb_min[1],
                                        cit->second.local_aabb_min[2]);
@@ -3059,50 +3194,77 @@ void GeometrySystem::reconcile_lod_residency() {
             }
 
             int demand = prev_committed;
-            if (!have_error_data) {
-                // 回退：无 geometric_error 的旧资源仍按距离选级（误差全 0 → 恒 LOD0），
-                // 实际通常 level_count<=1 已被上面拦截；此处只防御性保持 prev。
-                demand = prev_committed;
-            } else {
-                const float h = Impl::kLodHysteresis;
-                const int demand_finer  = aggregate_demand(1.0f + h);  // 偏粗估计；仍 < prev 才允许变精细
-                const int demand_coarser = aggregate_demand(1.0f - h); // 偏细估计；仍 > prev 才允许变粗
-                if (demand_finer < prev_committed) {
-                    demand = demand_finer;
-                } else if (demand_coarser > prev_committed) {
-                    demand = demand_coarser;
+
+            // ---- 空间淘汰保持 / 回读恢复（在滞回之前短路）----
+            bool skip_lod_demand = false;  // true = 强制 LOD0，跳过滞回+cap+阴影
+            if (lod_spatially_evicted) {
+                // 用本帧已算好的 world_center 判定距离
+                float min_d = std::numeric_limits<float>::max();
+                for (const auto& cp : camera_positions)
+                    min_d = std::min(min_d, ktm::distance(world_center, cp));
+
+                const float lod_evict_d = impl_->lod_evict_distance;
+
+                if (min_d <= lod_evict_d) {
+                    // 回到恢复区：清除标记（限速），让下方滞回正常重算 demand
+                    if (spatial_restored_this_frame < Impl::kMaxLodSpatialRestorePerFrame) {
+                        std::unique_lock ulock(impl_->lod_cache_mutex);
+                        auto cit2 = impl_->lod_cache.find(lod_key);
+                        if (cit2 != impl_->lod_cache.end() && cit2->second.model_id == model_id
+                            && cit2->second.lod_spatially_evicted) {
+                            cit2->second.lod_spatially_evicted = false;
+                            ++spatial_restored_this_frame;
+                        }
+                    }
+                    // 超限或已清除 → skip_lod_demand 保持 false → 滞回正常执行
                 } else {
-                    demand = prev_committed;  // 死区内：维持
+                    // 仍在淘汰区：强制 demand=0，跳过滞回+P2 cap+阴影
+                    demand = 0;
+                    skip_lod_demand = true;
                 }
             }
-            if (demand < 0) demand = 0;
-            if (static_cast<size_t>(demand) >= level_count) demand = static_cast<int>(level_count) - 1;
-
-            // ============================================================
-            // LOD 级 LRU — 应用上一帧的 budget cap + 收集本帧 entry
-            // ============================================================
-            // Cap 是上一帧 enforce_lod_budget 写入的"最小允许 demand"（下限），
-            // 含义：demand 只能 >= cap（只能比 cap 更粗）。用 max 施加。
-            //
-            // 关键：必须附带 model_id 校验。若 lod_cache 条目已因 actor evict 而
-            // 被 erase（slot 复用场景），同步清除陈旧 cap，防止新 actor 被旧 cap
-            // 错误降级。
-            {
-                auto cap_it = impl_->lod_budget_caps.find(lod_key);
-                if (cap_it != impl_->lod_budget_caps.end()) {
-                    std::shared_lock cap_lock(impl_->lod_cache_mutex);
-                    auto cache_it = impl_->lod_cache.find(lod_key);
-                    if (cache_it == impl_->lod_cache.end()
-                        || cache_it->second.model_id != model_id) {
-                        // 条目已被 evict 或 model_id 不匹配（slot 复用）→ 清理陈旧 cap
-                        impl_->lod_budget_caps.erase(cap_it);
+            if (!skip_lod_demand) {
+                if (!have_error_data) {
+                    // 回退：无 geometric_error 的旧资源仍按距离选级（误差全 0 → 恒 LOD0），
+                    // 实际通常 level_count<=1 已被上面拦截；此处只防御性保持 prev。
+                    demand = prev_committed;
+                } else {
+                    const float h = Impl::kLodHysteresis;
+                    const int demand_finer  = aggregate_demand(1.0f + h);
+                    const int demand_coarser = aggregate_demand(1.0f - h);
+                    if (demand_finer < prev_committed) {
+                        demand = demand_finer;
+                    } else if (demand_coarser > prev_committed) {
+                        demand = demand_coarser;
                     } else {
-                        // 有效 cap：施加下限。max(demand, cap) = 强制 demand 不细于 cap
-                        demand = std::max(demand, cap_it->second);
-                        // 防御：cap 写入时的 level_count 可能与本帧不同（模型重导入后
-                        // LOD 级数变化），确保 demand 不越界
-                        if (static_cast<size_t>(demand) >= level_count)
-                            demand = static_cast<int>(level_count) - 1;
+                        demand = prev_committed;
+                    }
+                }
+                if (demand < 0) demand = 0;
+                if (static_cast<size_t>(demand) >= level_count) demand = static_cast<int>(level_count) - 1;
+
+                // ============================================================
+                // LOD 级 LRU — 应用上一帧的 budget cap + 收集本帧 entry
+                // ============================================================
+                // Cap 是上一帧 enforce_lod_budget 写入的"最小允许 demand"（下限），
+                // 含义：demand 只能 >= cap（只能比 cap 更粗）。用 max 施加。
+                //
+                // 关键：必须附带 model_id 校验。若 lod_cache 条目已因 actor evict 而
+                // 被 erase（slot 复用场景），同步清除陈旧 cap，防止新 actor 被旧 cap
+                // 错误降级。
+                {
+                    auto cap_it = impl_->lod_budget_caps.find(lod_key);
+                    if (cap_it != impl_->lod_budget_caps.end()) {
+                        std::shared_lock cap_lock(impl_->lod_cache_mutex);
+                        auto cache_it = impl_->lod_cache.find(lod_key);
+                        if (cache_it == impl_->lod_cache.end()
+                            || cache_it->second.model_id != model_id) {
+                            impl_->lod_budget_caps.erase(cap_it);
+                        } else {
+                            demand = std::max(demand, cap_it->second);
+                            if (static_cast<size_t>(demand) >= level_count)
+                                demand = static_cast<int>(level_count) - 1;
+                        }
                     }
                 }
             }
@@ -3115,7 +3277,7 @@ void GeometrySystem::reconcile_lod_residency() {
 
             int shadow_demand = -1;
             int shadow_previous = -1;
-            {
+            if (!skip_lod_demand) {
                 std::unique_lock lock(impl_->lod_cache_mutex);
                 auto cit = impl_->lod_cache.find(lod_key);
                 if (cit != impl_->lod_cache.end() && cit->second.model_id == model_id) {
