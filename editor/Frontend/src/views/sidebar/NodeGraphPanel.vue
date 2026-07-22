@@ -1,9 +1,8 @@
-﻿<template>
+<template>
   <div class="node-graph-panel flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden">
     <DockTitleBar
       v-if="!isDocked"
       title="节点"
-      extraClass="bg-[#84A65B] rounded-t-md"
       routePath="/NodeGraph"
       @close="closeFloat"
     />
@@ -18,26 +17,48 @@
 </template>
 
 <script setup>
-import { onMounted, ref } from 'vue';
+import { onBeforeUnmount, onMounted, ref } from 'vue';
 import NodeGraphWorkspace from '@/blockly/components/NodeGraphWorkspace.vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { useDockPanel } from '@/composables/useDockPanel.js';
-import { projectService } from '@/utils/bridge.js';
-import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
+import { appService } from '@/utils/bridge.js';
+import { coronaEventBus } from '@/utils/eventBus.js';
 
 const { closePanel, isDocked } = useDockPanel();
-const sceneName = ref(DEFAULT_SCENE_NAME);
+// Keep the route empty until MainPage reports the active scene. Passing the generic
+// DEFAULT_SCENE_NAME into listActorTree can make the native scene router reload a
+// different scene, which resets the main viewport camera when this panel opens.
+const sceneName = ref('');
 
-onMounted(async () => {
-  try {
-    const response = await projectService.OnInit();
-    const data = response?.data ?? response;
-    const scenes = Array.isArray(data?.scenes) ? data.scenes : [];
-    const index = Math.max(0, Number(data?.active_index) || 0);
-    sceneName.value = scenes[index]?.path || scenes[index]?.name || data?.path || data?.name || DEFAULT_SCENE_NAME;
-  } catch {
-    sceneName.value = DEFAULT_SCENE_NAME;
+function applyViewportState(state = {}) {
+  const nextSceneName = String(state?.sceneId || '').trim();
+  if (nextSceneName && nextSceneName !== sceneName.value) {
+    sceneName.value = nextSceneName;
   }
+}
+
+function requestViewportState() {
+  const controls = window.__coronaEditorControls;
+  if (controls && typeof controls.getState === 'function') {
+    try {
+      applyViewportState(controls.getState());
+      return;
+    } catch {
+      // A detached panel does not share the main page window; use the cross-tab path below.
+    }
+  }
+  appService.crossTabBroadcast('viewport-controls-request', { action: 'getState' }).catch(() => {});
+}
+
+onMounted(() => {
+  // Read the scene initialized by MainPage. Calling MainView.on_init here would reset
+  // the scene and camera every time the node panel is opened.
+  coronaEventBus.on('viewport-controls-state', applyViewportState);
+  requestViewportState();
+});
+
+onBeforeUnmount(() => {
+  coronaEventBus.off('viewport-controls-state', applyViewportState);
 });
 
 function closeFloat() {
@@ -49,11 +70,9 @@ function closeFloat() {
 .node-graph-panel {
   position: relative;
   z-index: 2147483100;
-  background: rgba(40, 40, 40, 0.42);
-  border: 1px solid rgba(58, 58, 58, 0.72);
+  background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
+  border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
 }
 </style>
-
-
-

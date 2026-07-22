@@ -134,8 +134,11 @@ export const PLUGIN_MANIFEST = [
     displayName: '节点',
     pageType: 'view',
     defaultDock: 'bottom',
-    defaultWidth: 1120,
-    defaultHeight: 640,
+    // Open wide enough for the toolbox, node canvas and inspector to use the
+    // normal three-column layout immediately. Narrower user-resized windows still
+    // fall back to NodeGraphWorkspace's compact responsive layout.
+    defaultWidth: 1440,
+    defaultHeight: 720,
     autoInit: false,
     defaultOpenMode: 'external',
     defaultFloatPosition: 'center',

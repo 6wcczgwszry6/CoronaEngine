@@ -475,6 +475,7 @@ import {
   closeFloatingPanel,
   consumeExpectedPanelClosed,
   isFloatingPanel,
+  openFloatingPanel,
   toggleFloatingPanel,
 } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
@@ -488,6 +489,7 @@ import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
+import { setActorContext } from '@/blockly/composables/useActorContext.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
@@ -531,6 +533,7 @@ const cameraBindingState = ref({
 });
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
+let actorSelectionCallbackToken = null;
 let sceneAddedCallbackToken = null;
 let sceneRenamedCallbackToken = null;
 const viewportPickSurfaceRef = ref(null);
@@ -619,6 +622,18 @@ const emitActorChangeFast = (type, sceneId, actorName) => {
   editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
     logError('Failed to publish actor selection', error);
   });
+};
+
+const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = '', maybeActorName = '') => {
+  const actorType = String(payload?.actor_type || payload?.type || '').trim().toLowerCase();
+  const sceneId = String(payload?.scene || payload?.scene_id || maybeSceneId || '').trim();
+  const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
+  if (!actorName || actorType === 'scene') return;
+
+  setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
+  if (!dockStore.panels.SceneDatas?.open) {
+    await openFloatingPanel(dockStore, 'SceneDatas');
+  }
 };
 
 const viewportPickController = createViewportPickController({
@@ -2442,6 +2457,7 @@ onMounted(async () => {
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
   sceneAddedCallbackToken = await editorApi.events.onSceneAdded(onSceneAddedEvent);
   sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
+  actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
   actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
@@ -2483,6 +2499,12 @@ onUnmounted(() => {
       logError('Failed to unregister actor pick result callback', error);
     });
     actorPickResultCallbackToken = null;
+  }
+  if (actorSelectionCallbackToken) {
+    editorApi.off(actorSelectionCallbackToken).catch((error) => {
+      logError('Failed to unregister actor selection callback', error);
+    });
+    actorSelectionCallbackToken = null;
   }
   if (sceneAddedCallbackToken) {
     editorApi.off(sceneAddedCallbackToken).catch((error) => {

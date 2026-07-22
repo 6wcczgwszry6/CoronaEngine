@@ -850,8 +850,8 @@
       <Block type="appearance_set_alpha" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="透明度设为 1">
         <Field name="ALPHA" kind="number" defaultJson="1" inputOwner="" />
       </Block>
-      <Block type="object_reference" category="对象" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="场景对象 当前物体 或输入">
-        <Field name="OBJECT" kind="dropdown" defaultJson="&quot;&quot;" inputOwner="" optionValues="|__manual__" optionLabels="当前物体|手动输入" />
+      <Block type="object_reference" category="对象" shape="output" projectUsage="project-safe" recommended="true" outputCheck="String" dynamic="true" label="对象 [指定物体]">
+        <Field name="OBJECT" kind="dropdown" defaultJson="&quot;__none__&quot;" inputOwner="" />
         <Field name="MANUAL" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
       </Block>
       <Block type="object_hide" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="隐藏对象  …">

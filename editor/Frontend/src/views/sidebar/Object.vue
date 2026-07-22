@@ -121,7 +121,7 @@ import { computed, onMounted, onUnmounted, reactive, ref } from 'vue';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { editorApi, projectService, sceneService } from '@/utils/bridge.js';
+import { editorApi, sceneService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { getActorContext } from '@/blockly/composables/useActorContext.js';
 
@@ -397,17 +397,12 @@ function closeFloat() {
 }
 
 onMounted(async () => {
-  try {
-    const init = unwrap(await projectService.OnInit());
-    const scenes = Array.isArray(init.scenes) ? init.scenes : [];
-    const index = Math.max(0, Number(init.active_index) || 0);
-    selectedSceneName.value = scenes[index]?.path || scenes[index]?.name || DEFAULT_SCENE_NAME;
-  } catch (error) {
-    logError('读取当前场景失败', error);
-  }
+  // Actor selection is stored before this panel opens. Read it without invoking
+  // MainView.on_init, which would reinitialize the scene and main camera.
   const actorContext = getActorContext();
+  selectedSceneName.value = actorContext.scene || DEFAULT_SCENE_NAME;
   if (actorContext.actor) {
-    await loadActor(actorContext.scene || selectedSceneName.value, actorContext.actor);
+    await loadActor(selectedSceneName.value, actorContext.actor);
   }
   selectionToken = await editorApi.events.onActorSelectionChanged(handleSelection);
   transformToken = await editorApi.events.onActorTransformUpdated(handleTransform);

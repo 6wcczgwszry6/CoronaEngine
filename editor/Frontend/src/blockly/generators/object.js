@@ -119,7 +119,9 @@ export const defineObjectGenerators = () => {
 
   pythonGenerator.forBlock.object_reference = (block) => {
     const selected = block.getFieldValue('OBJECT') || '';
-    const value = selected === '__manual__' ? block.getFieldValue('MANUAL') : selected;
+    const value = selected === '__manual__'
+      ? block.getFieldValue('MANUAL')
+      : (selected === '__none__' ? '' : selected);
     return [pyString(value || ''), pythonGenerator.ORDER_ATOMIC];
   };
   pythonGenerator.forBlock.object_set_logical_collision = (block) => `CoronaEngine.set_object_logical_collision(${input(block,'NAME',"''")}, ${block.getFieldValue('ENABLED') === 'FALSE' ? 'False' : 'True'})\n`;

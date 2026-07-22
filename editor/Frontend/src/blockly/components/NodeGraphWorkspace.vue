@@ -3,7 +3,7 @@
   <div
     ref="workspaceRootRef"
     class="node-graph-workspace"
-    :class="{ fullscreen: isFullscreen }"
+    :class="{ fullscreen: isFullscreen, compact: isCompactLayout, narrow: isNarrowLayout }"
     :style="layoutStyle"
   >
     <div class="ng-toolbar">
@@ -70,6 +70,7 @@
           <small>{{ paletteWorkspaceRole === 'condition' ? '用于组合跳转条件' : 'Blockly 原生形状' }}</small>
         </div>
         <BlocklyToolboxPalette
+          ref="paletteRef"
           class="ng-native-palette"
           :workspace-role="paletteWorkspaceRole"
           @pick="handlePalettePick"
@@ -78,7 +79,7 @@
           @external-drag-end="handlePaletteDragEnd"
         />
       </aside>
-      <div class="ng-splitter vertical" title="拖动调整工具箱宽度" @pointerdown="beginLayoutResize($event, 'toolbox')"></div>
+      <div class="ng-splitter ng-toolbox-splitter vertical" title="拖动调整工具箱宽度" @pointerdown="beginLayoutResize($event, 'toolbox')"></div>
       <main
         ref="canvasRef"
         class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive, panning: isCanvasPanning }"
@@ -197,7 +198,7 @@
         </div>
         </div>
       </main>
-      <div class="ng-splitter vertical" title="拖动调整内部编辑区宽度" @pointerdown="beginLayoutResize($event, 'inspector')"></div>
+      <div class="ng-splitter ng-inspector-splitter vertical" title="拖动调整内部编辑区宽度" @pointerdown="beginLayoutResize($event, 'inspector')"></div>
       <aside ref="inspectorRef" class="ng-panel ng-inspector">
         <section class="ng-vars">
           <div class="ng-section-title">
@@ -332,11 +333,15 @@ const mode = ref('select'),
   saveLabel = ref('');
 const workspaceRootRef = ref(null),
   canvasRef = ref(null),
+  paletteRef = ref(null),
   inspectorRef = ref(null),
   variablesBlocklyRef = ref(null),
   activeBlocklyRef = ref(null),
   edgeNameInputRef = ref(null);
 const canvasSize = reactive({ width: CANVAS_WORLD_WIDTH, height: CANVAS_WORLD_HEIGHT });
+const workspaceSize = reactive({ width: 0, height: 0 });
+const isCompactLayout = computed(() => workspaceSize.width > 0 && workspaceSize.width < 1180);
+const isNarrowLayout = computed(() => workspaceSize.width > 0 && workspaceSize.width < 680);
 const viewport = reactive({ scale: 1, offsetX: 0, offsetY: 0 });
 const isCanvasPanning = ref(false);
 const connectionPointer = reactive({ active: false, x: 0, y: 0 });
@@ -381,21 +386,26 @@ const externalDrag = reactive({
 });
 const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v5';
 const LAYOUT_LIMITS = Object.freeze({
-  toolboxMin: 460,
-  toolboxMax: 980,
-  toolboxEmergencyMin: 320,
-  inspectorMin: 520,
-  inspectorMax: 960,
-  inspectorEmergencyMin: 340,
-  canvasMin: 420,
+  toolboxMin: 260,
+  toolboxMax: 520,
+  toolboxEmergencyMin: 220,
+  inspectorMin: 360,
+  inspectorMax: 620,
+  inspectorEmergencyMin: 300,
+  canvasMin: 360,
   gridChrome: 60,
 });
-const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 640, inspectorWidth: 720, variablesHeight: 240 });
+const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 360, inspectorWidth: 460, variablesHeight: 180 });
 const layout = reactive({ ...DEFAULT_LAYOUT });
+const effectiveVariablesHeight = computed(() => {
+  if (!workspaceSize.height) return layout.variablesHeight;
+  const ratio = isCompactLayout.value ? 0.2 : 0.4;
+  return Math.max(110, Math.min(layout.variablesHeight, Math.floor(workspaceSize.height * ratio)));
+});
 const layoutStyle = computed(() => ({
   '--toolbox-width': `${layout.toolboxWidth}px`,
   '--inspector-width': `${layout.inspectorWidth}px`,
-  '--variables-height': `${layout.variablesHeight}px`,
+  '--variables-height': `${effectiveVariablesHeight.value}px`,
 }));
 async function toggleFullscreen() {
   if (fullscreenTransitionBusy.value) return;
@@ -462,6 +472,7 @@ const worldStyle = computed(() => ({
 let isLoading = false,
   saveTimer = null,
   resizeObserver = null,
+  resizeFrame = 0,
   dragState = null,
   panState = null,
   suppressCanvasClick = false,
@@ -846,14 +857,29 @@ function loadLayout() {
     Object.assign(layout, DEFAULT_LAYOUT);
   }
 }
-function resizeEmbeddedWorkspaces() {
+function readWorkspaceSize() {
+  const rect = workspaceRootRef.value?.getBoundingClientRect?.();
+  if (!rect) return;
+  workspaceSize.width = Math.max(0, Math.round(rect.width));
+  workspaceSize.height = Math.max(0, Math.round(rect.height));
+}
+function performEmbeddedWorkspaceResize() {
+  readWorkspaceSize();
   const clamped = clampLayoutWidths(layout.toolboxWidth, layout.inspectorWidth);
   if (clamped.toolbox !== layout.toolboxWidth) layout.toolboxWidth = clamped.toolbox;
   if (clamped.inspector !== layout.inspectorWidth) layout.inspectorWidth = clamped.inspector;
   nextTick(() => {
     updateCanvasSize();
+    paletteRef.value?.resizeBlockly?.();
     variablesBlocklyRef.value?.resizeBlockly?.();
     activeBlocklyRef.value?.resizeBlockly?.();
+  });
+}
+function resizeEmbeddedWorkspaces() {
+  if (resizeFrame) return;
+  resizeFrame = window.requestAnimationFrame(() => {
+    resizeFrame = 0;
+    performEmbeddedWorkspaceResize();
   });
 }
 function clampLayoutWidths(toolboxWidth, inspectorWidth) {
@@ -861,6 +887,18 @@ function clampLayoutWidths(toolboxWidth, inspectorWidth) {
   const available = Math.max(0, total - LAYOUT_LIMITS.gridChrome);
   let toolbox = Math.min(LAYOUT_LIMITS.toolboxMax, Math.max(LAYOUT_LIMITS.toolboxMin, toolboxWidth));
   let inspector = Math.min(LAYOUT_LIMITS.inspectorMax, Math.max(LAYOUT_LIMITS.inspectorMin, inspectorWidth));
+
+  // In compact mode the inspector moves below the canvas, so only the toolbox
+  // competes with the canvas for horizontal space.
+  if (total < 1180) {
+    const maxToolbox = Math.max(
+      LAYOUT_LIMITS.toolboxEmergencyMin,
+      Math.min(LAYOUT_LIMITS.toolboxMax, available - Math.min(320, LAYOUT_LIMITS.canvasMin))
+    );
+    toolbox = Math.min(maxToolbox, Math.max(LAYOUT_LIMITS.toolboxEmergencyMin, toolbox));
+    return { toolbox: Math.round(toolbox), inspector: Math.round(inspector) };
+  }
+
   const maxSides = Math.max(
     LAYOUT_LIMITS.toolboxEmergencyMin + LAYOUT_LIMITS.inspectorEmergencyMin,
     available - LAYOUT_LIMITS.canvasMin
@@ -2045,8 +2083,8 @@ onMounted(() => {
   }
   loadLayout();
   resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
-  if (canvasRef.value) resizeObserver.observe(canvasRef.value);
-  updateCanvasSize();
+  if (workspaceRootRef.value) resizeObserver.observe(workspaceRootRef.value);
+  resizeEmbeddedWorkspaces();
 });
 onBeforeUnmount(() => {
   componentMounted = false;
@@ -2073,6 +2111,8 @@ onBeforeUnmount(() => {
   if (saveTimer) clearTimeout(saveTimer);
   saveNow();
   resizeObserver?.disconnect?.();
+  if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
+  resizeFrame = 0;
   clearRunPoll();
   clearExternalDrag();
   cancelMacroPointerDrag();
@@ -2087,8 +2127,10 @@ onBeforeUnmount(() => {
 <style scoped>
 .node-graph-workspace {
   position: relative;
+  width: 100%;
   height: 100%;
-  min-height: 1160px;
+  min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -2116,7 +2158,7 @@ onBeforeUnmount(() => {
 }
 .ng-toolbar {
   position: relative;
-  height: 42px;
+  min-height: 42px;
   flex: 0 0 auto;
   display: flex;
   align-items: center;
@@ -2231,6 +2273,67 @@ onBeforeUnmount(() => {
   grid-template-columns: var(--toolbox-width) 6px minmax(420px, 1fr) 6px var(--inspector-width);
   gap: 8px;
   padding: 8px;
+}
+.node-graph-workspace.compact .ng-toolbar {
+  flex-wrap: wrap;
+  padding-top: 6px;
+  padding-bottom: 6px;
+}
+.node-graph-workspace.compact .ng-title {
+  flex: 1 1 220px;
+}
+.node-graph-workspace.compact .ng-modes {
+  flex: 0 1 auto;
+  flex-wrap: wrap;
+}
+.node-graph-workspace.compact .ng-body {
+  grid-template-columns: minmax(220px, var(--toolbox-width)) 6px minmax(0, 1fr);
+  grid-template-rows: minmax(250px, 1fr) minmax(280px, 0.92fr);
+  overflow-y: auto;
+}
+.node-graph-workspace.compact .ng-toolbox {
+  grid-column: 1;
+  grid-row: 1;
+}
+.node-graph-workspace.compact .ng-toolbox-splitter {
+  grid-column: 2;
+  grid-row: 1;
+}
+.node-graph-workspace.compact .ng-canvas {
+  grid-column: 3;
+  grid-row: 1;
+  min-width: 0;
+}
+.node-graph-workspace.compact .ng-inspector-splitter {
+  display: none;
+}
+.node-graph-workspace.compact .ng-inspector {
+  grid-column: 1 / -1;
+  grid-row: 2;
+  min-width: 0;
+  grid-template-rows: minmax(110px, var(--variables-height)) 6px minmax(160px, 1fr);
+}
+.node-graph-workspace.narrow .ng-body {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: 230px minmax(280px, 1fr) minmax(300px, 1fr);
+}
+.node-graph-workspace.narrow .ng-toolbox,
+.node-graph-workspace.narrow .ng-canvas,
+.node-graph-workspace.narrow .ng-inspector {
+  grid-column: 1;
+}
+.node-graph-workspace.narrow .ng-toolbox {
+  grid-row: 1;
+}
+.node-graph-workspace.narrow .ng-canvas {
+  grid-row: 2;
+}
+.node-graph-workspace.narrow .ng-inspector {
+  grid-row: 3;
+}
+.node-graph-workspace.narrow .ng-toolbox-splitter,
+.node-graph-workspace.narrow .ng-inspector-splitter {
+  display: none;
 }
 .ng-panel {
   min-height: 0;
