@@ -259,6 +259,25 @@
 
           <!-- ===== 单位内容 ===== -->
           <template v-else-if="mainActiveTab === 'actor'">
+            <div
+              v-if="actorData.load_status !== 'loaded'"
+              data-testid="actor-placeholder-warning"
+              class="mb-2 rounded border border-amber-600/70 bg-amber-950/40 p-2 text-[10px] text-amber-100"
+            >
+              <div class="font-medium">资源未加载，当前显示为占位项</div>
+              <div class="mt-1 break-all text-amber-200/80">
+                {{ actorData.load_error?.message || actorData.load_error || '模型资源不可用' }}
+              </div>
+              <button
+                type="button"
+                class="mt-2 rounded bg-amber-600 px-2 py-1 text-[#17120a] hover:bg-amber-500 disabled:cursor-not-allowed disabled:opacity-50"
+                :disabled="placeholderRebinding"
+                @click="rebindPlaceholderResource"
+              >
+                {{ placeholderRebinding ? '重新绑定中' : '重新绑定资源' }}
+              </button>
+            </div>
+
             <!-- 单位 - 基础信息 -->
             <div v-show="ActiveSubTab === 'Basic'" class="space-y-2 text-xs">
               <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-[#84a65b]">
@@ -545,7 +564,7 @@
 
                 <!-- 碰撞选项 -->
                 <div
-                  v-if="actorData.hasGeometry"
+                  v-if="actorData.hasGeometry && actorData.load_status === 'loaded'"
                   class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-orange-600"
                 >
                   <div class="flex items-center justify-between">
@@ -590,7 +609,7 @@
 
                 <!-- 物理属性 -->
                 <div
-                  v-if="actorData.hasMechanics"
+                  v-if="actorData.hasMechanics && actorData.load_status === 'loaded'"
                   class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-purple-600"
                 >
                   <label class="text-[#e0e0e0] font-medium block mb-1 text-[10px]">物理</label>
@@ -1710,6 +1729,9 @@ const sceneData = ref({
 const actorData = ref({
   name: '',
   handle: 0,
+  actor_guid: '',
+  load_status: 'loaded',
+  load_error: '',
   type: '',
   parentScene: '',
   file: '',
@@ -1747,6 +1769,7 @@ const actorData = ref({
     rotation_offset: { x: 0.0, y: 0.0, z: 0.0 },
   },
 });
+const placeholderRebinding = ref(false);
 
 // ========== 模型数据 ==========
 const modelData = ref({
@@ -1971,6 +1994,9 @@ const loadActorData = async (sceneId, actorId) => {
       actorAliasDraft.value = displayName;
       actorAliasError.value = '';
       actorData.value.handle = Number(data.handle || 0);
+      actorData.value.actor_guid = data.actor_guid || '';
+      actorData.value.load_status = data.load_status || 'loaded';
+      actorData.value.load_error = data.load_error || '';
       actorData.value.parentScene = sceneId || '';
       actorData.value.type = data.actor_type || data.type || '';
       const modelPath = readActorModelPath(data);
@@ -2676,6 +2702,33 @@ const selectModelFile = async () => {
     }
   } catch (e) {
     logError('选择模型文件失败', e);
+  }
+};
+
+const rebindPlaceholderResource = async () => {
+  if (!actorData.value.actor_guid || placeholderRebinding.value) return;
+  placeholderRebinding.value = true;
+  try {
+    const selected = await sceneService.selectModelFileDialog(
+      actorData.value.parentScene,
+      actorData.value.name,
+      'model'
+    );
+    if (!selected?.success || !selected.data) return;
+    const result = await sceneService.rebindActorResource(
+      actorData.value.parentScene,
+      actorData.value.actor_guid,
+      selected.data
+    );
+    const data = unwrapBridgeResult(result);
+    if (!data || data.status === 'error' || data.ok === false) {
+      throw new Error(data?.message || '重新绑定资源失败');
+    }
+    await loadActorData(actorData.value.parentScene, currentActorFile.value || actorData.value.name);
+  } catch (e) {
+    logError('重新绑定占位资源失败', e);
+  } finally {
+    placeholderRebinding.value = false;
   }
 };
 

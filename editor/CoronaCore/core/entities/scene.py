@@ -12,6 +12,7 @@ from .environment import Environment
 
 from ..corona_editor import CoronaEditor
 from ...utils.proejct_utils import auto_save
+from ...archive.parser import parse_archive
 
 CoronaEngine = CoronaEditor.CoronaEngine
 logger = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ class Scene:
         self.route = route
         self.name = Path(route).stem
         self.file_data = configparser.ConfigParser()
+        self.archive_snapshot: Dict[str, Any] = {}
 
         if CoronaEngine is None:
             raise RuntimeError("CoronaEngine 未初始化")
@@ -357,6 +359,7 @@ class Scene:
             data_path = os.path.join(_active_project_path() or '', self.route)
 
         if os.path.exists(data_path):
+            self.archive_snapshot = parse_archive(data_path)
             self.file_data.read(data_path, encoding='utf-8')
             if self._is_portable_scene_folder():
                 self.name = self.file_data.get('scene', 'name', fallback=self.name)

@@ -533,7 +533,8 @@ const editorApiStatic = {
     getRecentProjects: () => call_manifest_editor_api('project.getRecentProjects', []),
     migrateLegacyScene: (payload) =>
       call_manifest_editor_api('project.migrateLegacyScene', [payload || {}]),
-    openProject: (projectPath) => call_manifest_editor_api('project.openProject', [projectPath]),
+    openProject: (projectPath, options = {}) =>
+      call_manifest_editor_api('project.openProject', [projectPath, options]),
     openProjectFile: () => call_manifest_editor_api('project.openProjectFile', []),
     setProjectMode: (mode, settings) =>
       call_manifest_editor_api('project.setProjectMode', [{ mode, settings }]),
@@ -574,6 +575,8 @@ const editorApiStatic = {
     listSceneTree: (sceneName) => call_manifest_editor_api('sceneTools.listSceneTree', [sceneName]),
     reloadScene: (sceneName, projectPath = '') =>
       call_manifest_editor_api('sceneTools.reloadScene', projectPath ? [sceneName, projectPath] : [sceneName]),
+    rebindActorResource: (sceneName, actorGuid, path) =>
+      call_manifest_editor_api('sceneTools.rebindActorResource', [sceneName, actorGuid, path]),
     createActor: (sceneName, objPath, actorType = 'model', actorData = null) =>
       call_manifest_editor_api('sceneTools.createActor',
         actorData ? [sceneName, objPath, actorType, actorData] : [sceneName, objPath, actorType],
@@ -762,6 +765,8 @@ export const sceneService = {
   loadVisionScene: (path) => editorApi.sceneTools.loadVisionScene(path),
   reloadScene: (sceneName, projectPath = '') =>
     editorApi.sceneTools.reloadScene(sceneName, projectPath),
+  rebindActorResource: (sceneName, actorGuid, path) =>
+    editorApi.sceneTools.rebindActorResource(sceneName, actorGuid, path),
   listActorTree: (sceneName) => editorApi.scene.listActorTree(sceneName),
   listSceneTree: (sceneName) => editorApi.sceneTools.listSceneTree(sceneName),
   openSceneActor: (sceneName, actorName) =>
@@ -1038,27 +1043,14 @@ export const projectLauncherService = {
   createMultiplayerProject: (projectData) =>
     editorApi.project.createMultiplayerProject(projectData),
   // 打开项目并让原生场景同步到该项目。
-  openProject: async (projectPath) => {
-    const result = await editorApi.project.openProject(projectPath);
+  openProject: async (projectPath, options = {}) => {
+    const loadPolicy = options.loadPolicy || options.load_policy || 'prompt';
+    const result = await editorApi.project.openProject(projectPath, { load_policy: loadPolicy });
     const success = result?.data ?? result;
     const activeProjectPath = success?.path || projectPath;
-    if (success && activeProjectPath) {
+    if (success?.ok && activeProjectPath) {
       window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
       window.localStorage?.setItem('corona.activeProjectLegacy', success?.legacy ? 'true' : 'false');
-      try {
-        // Different projects commonly reuse Scene/default.scene. Reload the
-        // native scene so actors from the previous project cannot leak across.
-        const initResult = await editorApi.main.onInit(activeProjectPath);
-        const initData = initResult?.data ?? initResult;
-        const scenes = Array.isArray(initData?.scenes) ? initData.scenes : [];
-        const activeIndex = Number(initData?.active_index ?? 0);
-        const activeScene = scenes[activeIndex] || scenes[0];
-        if (activeScene?.path) {
-          await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath);
-        }
-      } catch (error) {
-        console.warn('Project opened, but the active scene could not be reloaded:', error);
-      }
     }
     return result;
   },

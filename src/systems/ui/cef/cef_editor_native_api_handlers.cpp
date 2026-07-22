@@ -496,6 +496,23 @@ struct NativeEditorActorOpticsState {
     std::string texture;
 };
 
+enum class ActorLoadStatus {
+    Loaded,
+    MissingResource,
+    DecodeFailed,
+    UnsupportedResource,
+};
+
+const char* actor_load_status_name(ActorLoadStatus status) {
+    switch (status) {
+        case ActorLoadStatus::Loaded: return "loaded";
+        case ActorLoadStatus::MissingResource: return "missing_resource";
+        case ActorLoadStatus::DecodeFailed: return "decode_failed";
+        case ActorLoadStatus::UnsupportedResource: return "unsupported_resource";
+    }
+    return "decode_failed";
+}
+
 struct NativeEditorActor {
     std::string name;
     std::string actor_guid;
@@ -506,6 +523,14 @@ struct NativeEditorActor {
     std::array<float, 3> position{0.0f, 0.0f, 0.0f};
     std::array<float, 3> rotation{0.0f, 0.0f, 0.0f};
     std::array<float, 3> scale{1.0f, 1.0f, 1.0f};
+    ActorLoadStatus load_status{ActorLoadStatus::Loaded};
+    std::string load_error_code;
+    std::string load_error_message;
+    std::string resolved_asset_path;
+    bool persisted_visible{true};
+    bool persisted_physics_enabled{true};
+    std::string persisted_collision_type{"box"};
+    nlohmann::json persisted_snapshot = nlohmann::json::object();
     NativeEditorActorOpticsState persisted_optics;
     std::unique_ptr<Corona::API::Geometry> geometry;
     std::unique_ptr<Corona::API::Optics> optics;
@@ -545,6 +570,7 @@ struct NativeEditorScene {
     bool floor_grid_enabled{true};
     std::vector<NativeEditorActor> actors;
     std::vector<NativeEditorCamera> cameras;
+    nlohmann::json load_diagnostics = nlohmann::json::array();
     size_t active_camera_index{0};
     std::unique_ptr<Corona::API::Environment> environment;
     std::unique_ptr<Corona::API::Scene> engine_scene;
@@ -761,7 +787,11 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
             lines.push_back(key + ".actor_guid = " + actor.actor_guid);
         }
         lines.push_back(key + ".follow_camera = " + std::string(actor.follow_camera ? "true" : "false"));
-        if (actor.mechanics) {
+        if (actor.load_status != ActorLoadStatus::Loaded) {
+            lines.push_back(key + ".mechanics.physics_enabled = " +
+                            std::string(actor.persisted_physics_enabled ? "true" : "false"));
+            lines.push_back(key + ".mechanics.collision_type = " + actor.persisted_collision_type);
+        } else if (actor.mechanics) {
             lines.push_back(key + ".mechanics.physics_enabled = " +
                             std::string(actor.mechanics->get_physics_enabled() ? "true" : "false"));
             lines.push_back(key + ".mechanics.collision_type = " +
@@ -770,7 +800,17 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         lines.push_back(key + ".geometry.position = " + format_float3(actor.geometry ? actor.geometry->get_position() : actor.position));
         lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
         lines.push_back(key + ".geometry.scale = " + format_float3(actor.geometry ? actor.geometry->get_scale() : actor.scale));
-        if (actor.optics) {
+        if (actor.load_status != ActorLoadStatus::Loaded) {
+            lines.push_back(key + ".optics.visible = " +
+                            std::string(actor.persisted_visible ? "true" : "false"));
+            if (actor.persisted_optics.diffuse) {
+                lines.push_back(key + ".optics.diffuse = " + format_float3(*actor.persisted_optics.diffuse));
+            }
+            if (actor.persisted_optics.metallic) lines.push_back(key + ".optics.metallic = " + std::to_string(*actor.persisted_optics.metallic));
+            if (actor.persisted_optics.roughness) lines.push_back(key + ".optics.roughness = " + std::to_string(*actor.persisted_optics.roughness));
+            if (actor.persisted_optics.specular) lines.push_back(key + ".optics.specular = " + std::to_string(*actor.persisted_optics.specular));
+            if (actor.persisted_optics.shininess) lines.push_back(key + ".optics.shininess = " + std::to_string(*actor.persisted_optics.shininess));
+        } else if (actor.optics) {
             lines.push_back(key + ".optics.visible = " +
                             std::string(actor.optics->get_visible() ? "true" : "false"));
             lines.push_back(key + ".optics.diffuse = " + format_float3(actor.optics->get_diffuse()));
@@ -784,6 +824,26 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         }
         if (!actor.persisted_optics.texture.empty()) {
             lines.push_back(key + ".material.texture = " + actor.persisted_optics.texture);
+        }
+        if (actor.actor_type == "audio" && actor.audio_resource_id != 0) {
+            lines.push_back(key + ".audio_resource_id = " + std::to_string(actor.audio_resource_id));
+        }
+        const auto persisted_fields = actor.persisted_snapshot.value(
+            "persisted_fields", nlohmann::json::object());
+        static const std::set<std::string> normalized_fields{
+            "actor_guid", "actor_type", "audio_resource_id", "follow_camera", "name", "route",
+            "geometry.position", "geometry.rotation", "geometry.scale",
+            "material.texture", "mechanics.collision_enabled", "mechanics.collision_type",
+            "mechanics.physics_enabled", "optics.diffuse", "optics.emission", "optics.metallic",
+            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible"};
+        if (persisted_fields.is_object()) {
+            for (const auto& field : persisted_fields.items()) {
+                const auto dot = field.key().find('.');
+                if (dot == std::string::npos || dot + 1 >= field.key().size()) continue;
+                const auto suffix = field.key().substr(dot + 1);
+                if (normalized_fields.contains(suffix) || !field.value().is_string()) continue;
+                lines.push_back(key + "." + suffix + " = " + field.value().get<std::string>());
+            }
         }
     }
     return lines;
@@ -1085,17 +1145,21 @@ void persist_native_scene_common(const NativeEditorScene& scene) {
         auto diagnostics = store.validate_manifest();
         const auto validate_route = [&](const std::string& route,
                                         const std::string& field,
-                                        const std::string& actor = {}) {
+                                        const std::string& actor = {},
+                                        bool allow_missing = false) {
             if (route.empty()) return;
-            if (!SceneFolders::is_valid_asset_route(route) || !store.contains_route(route)) {
+            if (!SceneFolders::is_valid_asset_route(route) ||
+                (!allow_missing && !store.contains_route(route))) {
                 diagnostics.push_back({"untrusted_asset_route",
                                        "Portable scene resource is outside Assets or absent from the manifest",
                                        path_from_utf8(route), actor, field});
             }
         };
         for (const auto& actor : scene.actors) {
-            validate_route(actor.route, "actors.route", actor.name);
-            validate_route(actor.persisted_optics.texture, "actors.material.texture", actor.name);
+            validate_route(actor.route, "actors.route", actor.name,
+                           actor.load_status != ActorLoadStatus::Loaded);
+            validate_route(actor.persisted_optics.texture, "actors.material.texture", actor.name,
+                           true);
         }
         validate_route(scene.script_path, "scripts.path");
         validate_route(scene.terrain_path, "terrain.path");
@@ -1587,8 +1651,9 @@ NativeEditorCamera make_native_camera(NativeEditorScene& scene,
     return item;
 }
 
-std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path& project_root,
-                                                     const std::string& scene_route) {
+std::unique_ptr<NativeEditorScene> load_native_scene_from_ini_legacy(
+    const std::filesystem::path& project_root,
+    const std::string& scene_route) {
     const auto scene_file = resolve_project_path(project_root, scene_route);
     auto scene_ini = read_ini_file(scene_file);
 
@@ -1688,26 +1753,471 @@ std::unique_ptr<NativeEditorScene> load_native_scene(const std::filesystem::path
     return scene;
 }
 
-NativeEditorScene* ensure_native_editor_scene(const std::string& project_path_arg = {}) {
-    auto& state = native_editor_state();
-    const auto project_path = normalize_route(project_path_arg.empty()
-                                                  ? resolve_active_project_path(nlohmann::json::array())
-                                                  : project_path_arg);
-    if (project_path.empty()) {
-        throw std::runtime_error("No active project path for native editor initialization");
+std::array<float, 3> snapshot_float3(const nlohmann::json& value,
+                                     std::array<float, 3> fallback) {
+    if (!value.is_array() || value.size() != 3) return fallback;
+    std::array<float, 3> result = fallback;
+    for (std::size_t index = 0; index < 3; ++index) {
+        if (!value[index].is_number()) return fallback;
+        const auto number = value[index].get<double>();
+        if (!std::isfinite(number)) return fallback;
+        result[index] = static_cast<float>(number);
     }
-    const auto project_root = path_from_utf8(project_path);
-    const auto portable = detect_scene_folder(project_root);
-    const auto project_ini = portable ? IniFile{} : read_ini_file(project_root / "project.ini");
-    const auto scene_route = portable ? std::string{"scene.ini"}
-                                      : choose_single_scene_route(project_root, project_ini);
-    if (scene_route.empty()) {
-        throw std::runtime_error("No entrance scene found in project.ini");
+    return result;
+}
+
+void validate_snapshot_float3(const nlohmann::json& value, const char* field) {
+    if (!value.is_array() || value.size() != 3) {
+        throw std::runtime_error(std::string{"ArchiveSnapshot "} + field +
+                                 " must be a three-number array");
+    }
+    for (const auto& component : value) {
+        if (!component.is_number() || !std::isfinite(component.get<double>())) {
+            throw std::runtime_error(std::string{"ArchiveSnapshot "} + field +
+                                     " contains a non-finite number");
+        }
+    }
+}
+
+void validate_snapshot_finite_number(const nlohmann::json& object,
+                                     const char* key,
+                                     const char* field) {
+    if (!object.contains(key)) return;
+    const auto& value = object.at(key);
+    if (!value.is_number() || !std::isfinite(value.get<double>())) {
+        throw std::runtime_error(std::string{"ArchiveSnapshot "} + field +
+                                 " must be a finite number");
+    }
+}
+
+void validate_archive_snapshot(const nlohmann::json& snapshot) {
+    if (!snapshot.is_object() || snapshot.value("schema_version", 0) != 1) {
+        throw std::runtime_error("Unsupported or malformed ArchiveSnapshot schema_version");
+    }
+    if (!snapshot.contains("project_root") || !snapshot["project_root"].is_string() ||
+        !snapshot.contains("scene") || !snapshot["scene"].is_object()) {
+        throw std::runtime_error("ArchiveSnapshot requires project_root and scene");
+    }
+    if (!path_from_utf8(snapshot["project_root"].get<std::string>()).is_absolute()) {
+        throw std::runtime_error("ArchiveSnapshot project_root must be absolute");
+    }
+    const auto& scene = snapshot["scene"];
+    if (!scene.contains("route") || !scene["route"].is_string() ||
+        !scene.contains("actors") || !scene["actors"].is_array() ||
+        !scene.contains("cameras") || !scene["cameras"].is_array()) {
+        throw std::runtime_error("ArchiveSnapshot scene contract is incomplete");
+    }
+    constexpr std::size_t kMaxSnapshotItems = 100000;
+    if (scene["actors"].size() > kMaxSnapshotItems ||
+        scene["cameras"].size() > kMaxSnapshotItems) {
+        throw std::runtime_error("ArchiveSnapshot exceeds the item safety limit");
     }
 
-    if (!state.scene || state.project_path != project_path || state.scene->route != scene_route) {
-        state.scene = load_native_scene(project_root, scene_route);
-        state.project_path = project_path;
+    std::unordered_set<std::string> actor_guids;
+    for (const auto& actor : scene["actors"]) {
+        if (!actor.is_object() || !actor.contains("actor_guid") ||
+            !actor["actor_guid"].is_string() || actor["actor_guid"].get<std::string>().empty()) {
+            throw std::runtime_error("ArchiveSnapshot actor requires a non-empty actor_guid");
+        }
+        if (!actor_guids.insert(actor["actor_guid"].get<std::string>()).second) {
+            throw std::runtime_error("Duplicate actor_guid in ArchiveSnapshot");
+        }
+        if (!actor.contains("route") || !actor["route"].is_string() ||
+            !actor.contains("asset_path") || !actor["asset_path"].is_string() ||
+            !actor.contains("transform") || !actor["transform"].is_object()) {
+            throw std::runtime_error("ArchiveSnapshot actor contract is incomplete");
+        }
+        const auto asset_path = actor["asset_path"].get<std::string>();
+        if (!asset_path.empty() && !path_from_utf8(asset_path).is_absolute()) {
+            throw std::runtime_error("ArchiveSnapshot actor asset_path must be absolute");
+        }
+        const auto& transform = actor["transform"];
+        validate_snapshot_float3(transform.value("position", nlohmann::json()),
+                                 "actor.transform.position");
+        validate_snapshot_float3(transform.value("rotation", nlohmann::json()),
+                                 "actor.transform.rotation");
+        validate_snapshot_float3(transform.value("scale", nlohmann::json()),
+                                 "actor.transform.scale");
+        if (actor.contains("mechanics") && actor["mechanics"].is_object()) {
+            const auto collision = actor["mechanics"].value("collision_type", std::string{"box"});
+            if (collision != "box" && collision != "mesh" && collision != "none") {
+                throw std::runtime_error("ArchiveSnapshot actor collision_type is invalid");
+            }
+        }
+        if (actor.contains("optics")) {
+            if (!actor["optics"].is_object()) {
+                throw std::runtime_error("ArchiveSnapshot actor optics must be an object");
+            }
+            const auto& optics = actor["optics"];
+            if (optics.contains("diffuse")) {
+                validate_snapshot_float3(optics["diffuse"], "actor.optics.diffuse");
+            }
+            if (optics.contains("emission")) {
+                validate_snapshot_float3(optics["emission"], "actor.optics.emission");
+            }
+            for (const auto* field : {"metallic", "roughness", "specular", "shininess"}) {
+                validate_snapshot_finite_number(optics, field, field);
+            }
+        }
+    }
+
+    std::unordered_set<std::string> camera_ids;
+    for (const auto& camera : scene["cameras"]) {
+        if (!camera.is_object() || !camera.contains("id") || !camera["id"].is_string() ||
+            camera["id"].get<std::string>().empty()) {
+            throw std::runtime_error("ArchiveSnapshot camera requires a non-empty id");
+        }
+        if (!camera_ids.insert(camera["id"].get<std::string>()).second) {
+            throw std::runtime_error("Duplicate camera id in ArchiveSnapshot");
+        }
+        validate_snapshot_float3(camera.value("position", nlohmann::json()), "camera.position");
+        validate_snapshot_float3(camera.value("forward", nlohmann::json()), "camera.forward");
+        validate_snapshot_float3(camera.value("world_up", nlohmann::json()), "camera.world_up");
+        validate_snapshot_finite_number(camera, "fov", "camera.fov");
+        validate_snapshot_finite_number(camera, "move_speed", "camera.move_speed");
+        for (const auto* dimension : {"width", "height", "view_width", "view_height"}) {
+            if (!camera.contains(dimension) || !camera[dimension].is_number_integer() ||
+                camera[dimension].get<std::int64_t>() <= 0 ||
+                camera[dimension].get<std::int64_t>() > 32768) {
+                throw std::runtime_error(std::string{"ArchiveSnapshot camera."} + dimension +
+                                         " is outside the safety range");
+            }
+        }
+    }
+
+    if (scene.contains("active_camera_id") && !scene["active_camera_id"].is_null()) {
+        if (!scene["active_camera_id"].is_string() ||
+            (!scene["active_camera_id"].get<std::string>().empty() &&
+             !camera_ids.contains(scene["active_camera_id"].get<std::string>()))) {
+            throw std::runtime_error("ArchiveSnapshot active_camera_id is invalid");
+        }
+    }
+    if (scene.contains("environment")) {
+        if (!scene["environment"].is_object()) {
+            throw std::runtime_error("ArchiveSnapshot environment must be an object");
+        }
+        if (scene["environment"].contains("sun_direction")) {
+            validate_snapshot_float3(scene["environment"]["sun_direction"],
+                                     "environment.sun_direction");
+        }
+    }
+}
+
+NativeEditorActor native_actor_from_snapshot(const nlohmann::json& actor_data) {
+    NativeEditorActor item;
+    item.persisted_snapshot = actor_data;
+    item.name = actor_data.value("name", std::string{"Actor"});
+    item.actor_guid = actor_data.value("actor_guid", std::string{});
+    item.route = normalize_route(actor_data.value("route", std::string{}));
+    item.actor_type = actor_data.value("actor_type", std::string{"actor"});
+    item.follow_camera = actor_data.value("follow_camera", false);
+    item.resolved_asset_path = actor_data.value("asset_path", std::string{});
+    const auto transform = actor_data.value("transform", nlohmann::json::object());
+    item.position = snapshot_float3(transform.value("position", nlohmann::json::array()),
+                                    {0.0f, 0.0f, 0.0f});
+    item.rotation = snapshot_float3(transform.value("rotation", nlohmann::json::array()),
+                                    {0.0f, 0.0f, 0.0f});
+    item.scale = snapshot_float3(transform.value("scale", nlohmann::json::array()),
+                                 {1.0f, 1.0f, 1.0f});
+    item.persisted_visible = actor_data.value("visible", true);
+    const auto mechanics = actor_data.value("mechanics", nlohmann::json::object());
+    item.persisted_physics_enabled = mechanics.value("physics_enabled", true);
+    item.persisted_collision_type = normalize_collision_type(
+        mechanics.value("collision_type", std::string{"box"}));
+    const auto optics = actor_data.value("optics", nlohmann::json::object());
+    if (optics.contains("diffuse")) {
+        item.persisted_optics.diffuse = snapshot_float3(optics["diffuse"], {0.8f, 0.8f, 0.8f});
+    }
+    const auto optional_float = [&](const char* key, std::optional<float>& target) {
+        if (optics.contains(key) && optics[key].is_number()) {
+            const auto value = optics[key].get<double>();
+            if (std::isfinite(value)) target = static_cast<float>(value);
+        }
+    };
+    optional_float("metallic", item.persisted_optics.metallic);
+    optional_float("roughness", item.persisted_optics.roughness);
+    optional_float("specular", item.persisted_optics.specular);
+    optional_float("shininess", item.persisted_optics.shininess);
+    if (optics.contains("emission")) {
+        item.persisted_optics.emission = snapshot_float3(optics["emission"], {0.0f, 0.0f, 0.0f});
+    }
+    item.persisted_optics.texture = optics.value("texture", std::string{});
+    const auto audio_id = actor_data.value("audio_resource_id", std::string{});
+    if (!audio_id.empty()) {
+        try { item.audio_resource_id = std::stoull(audio_id); } catch (...) { item.audio_resource_id = 0; }
+    }
+    return item;
+}
+
+void append_actor_materialization_diagnostic(nlohmann::json& diagnostics,
+                                             const NativeEditorActor& actor,
+                                             const std::string& code,
+                                             const std::string& message) {
+    diagnostics.push_back({
+        {"severity", "error"},
+        {"recoverable", true},
+        {"stage", "actor_materialization"},
+        {"code", code},
+        {"message", message},
+        {"actor_guid", actor.actor_guid},
+        {"actor_name", actor.name},
+        {"resource_path", actor.route},
+        {"path", actor.resolved_asset_path},
+    });
+}
+
+bool snapshot_actor_resource_supported(const NativeEditorActor& actor,
+                                       const std::filesystem::path& asset_path) {
+    if (actor.actor_type == "audio") return true;
+    const auto extension = to_lower_ascii(asset_path.extension().string());
+    if (actor.actor_type == "ui_image") {
+        static const std::set<std::string> image_extensions{
+            ".bmp", ".hdr", ".jpeg", ".jpg", ".png", ".tga"};
+        return image_extensions.contains(extension);
+    }
+    static const std::set<std::string> model_extensions{
+        ".actor", ".dae", ".fbx", ".glb", ".gltf", ".obj", ".usd", ".usda", ".usdc"};
+    return model_extensions.contains(extension);
+}
+
+void materialize_actor_snapshot(NativeEditorScene& scene,
+                                const nlohmann::json& actor_data,
+                                bool allow_degraded,
+    nlohmann::json& diagnostics) {
+    auto item = native_actor_from_snapshot(actor_data);
+    const auto asset_path = path_from_utf8(item.resolved_asset_path);
+    const bool missing = item.actor_type != "audio" &&
+                         (item.resolved_asset_path.empty() ||
+                          !std::filesystem::is_regular_file(asset_path));
+    const bool unsupported = !missing && !snapshot_actor_resource_supported(item, asset_path);
+    if (unsupported) {
+        item.load_status = ActorLoadStatus::UnsupportedResource;
+        item.load_error_code = "UNSUPPORTED_RESOURCE_TYPE";
+        item.load_error_message = "Actor resource type is unsupported: " + item.route;
+        append_actor_materialization_diagnostic(
+            diagnostics, item, item.load_error_code, item.load_error_message);
+    } else if (!missing) {
+        try {
+            auto& actor = add_native_actor_to_scene(
+                scene, std::move(item), asset_path);
+            if (actor.optics) actor.optics->set_visible(actor.persisted_visible);
+            if (actor.mechanics && actor.actor_type != "ui_image") {
+                actor.mechanics->set_physics_enabled(actor.persisted_physics_enabled);
+                actor.mechanics->set_collision_shape(actor.persisted_collision_type);
+            }
+            return;
+        } catch (const std::exception& error) {
+            item = native_actor_from_snapshot(actor_data);
+            item.load_status = ActorLoadStatus::DecodeFailed;
+            item.load_error_code = "MODEL_DECODE_FAILED";
+            item.load_error_message = error.what();
+            append_actor_materialization_diagnostic(
+                diagnostics, item, item.load_error_code, item.load_error_message);
+        }
+    } else {
+        item.load_status = ActorLoadStatus::MissingResource;
+        item.load_error_code = "RESOURCE_NOT_FOUND";
+        item.load_error_message = "Actor resource does not exist: " + item.route;
+        const bool already_reported = std::any_of(
+            diagnostics.begin(), diagnostics.end(), [&](const nlohmann::json& diagnostic) {
+                return diagnostic.value("actor_guid", std::string{}) == item.actor_guid &&
+                       diagnostic.value("code", std::string{}) == item.load_error_code;
+            });
+        if (!already_reported) {
+            append_actor_materialization_diagnostic(
+                diagnostics, item, item.load_error_code, item.load_error_message);
+        }
+    }
+
+    if (!allow_degraded) return;
+    const auto original_type = item.actor_type;
+    item.actor_type = "actor";
+    auto& placeholder = add_native_actor_to_scene(scene, std::move(item), std::filesystem::path{});
+    placeholder.actor_type = original_type;
+    if (placeholder.optics) placeholder.optics->set_visible(false);
+    if (placeholder.mechanics) {
+        placeholder.mechanics->set_physics_enabled(false);
+        placeholder.mechanics->set_collision_shape("none");
+    }
+}
+
+NativeEditorCamera materialize_camera_snapshot(NativeEditorScene& scene,
+                                                const nlohmann::json& camera_data,
+                                                std::size_t index) {
+    NativeEditorCamera item;
+    item.camera_id = camera_data.value("id", scene.route + "#camera" + std::to_string(index));
+    item.name = camera_data.value("name", index == 0 ? scene.name + "_MainCamera"
+                                                     : scene.name + "_Camera" + std::to_string(index));
+    item.deletable = camera_data.value("deletable", index != 0);
+    item.width = camera_data.value("width", 1920);
+    item.height = camera_data.value("height", 1080);
+    item.view_open = camera_data.value("view_open", false);
+    item.view_x = camera_data.value("view_x", 120);
+    item.view_y = camera_data.value("view_y", 120);
+    item.view_width = camera_data.value("view_width", 960);
+    item.view_height = camera_data.value("view_height", 540);
+    item.move_speed = camera_data.value("move_speed", 1.0f);
+    item.vision_spp = camera_data.value("vision_spp", std::string{});
+    item.vision_max_depth = camera_data.value("vision_max_depth", std::string{});
+    item.vision_denoise = camera_data.value("vision_denoise", std::string{});
+    const auto position = snapshot_float3(camera_data.value("position", nlohmann::json::array()),
+                                          {0.0f, 0.0f, -5.0f});
+    const auto forward = snapshot_float3(camera_data.value("forward", nlohmann::json::array()),
+                                         {0.0f, 0.0f, 1.0f});
+    const auto world_up = snapshot_float3(camera_data.value("world_up", nlohmann::json::array()),
+                                          {0.0f, 1.0f, 0.0f});
+    item.engine_camera = std::make_unique<Corona::API::Camera>(
+        position, forward, world_up, camera_data.value("fov", 45.0f));
+    item.engine_camera->set_size(item.width, item.height);
+    item.engine_camera->set_output_mode(camera_data.value("output_mode", std::string{"final_color"}));
+    item.engine_camera->set_render_backend(camera_data.value("render_backend", std::string{"native"}));
+    item.engine_camera->set_vision_render_mode(
+        camera_data.value("vision_render_mode", std::string{"path_tracing"}));
+    item.engine_camera->set_ssao_enabled(camera_data.value("ssao_enabled", true));
+    item.engine_camera->set_view_state(item.view_open, item.view_x, item.view_y,
+                                       item.view_width, item.view_height, item.move_speed);
+    if (index > 0) item.engine_camera->set_offscreen_capture_mode(true);
+    return item;
+}
+
+std::unique_ptr<NativeEditorScene> materialize_scene_snapshot(
+    const nlohmann::json& snapshot,
+    bool allow_degraded,
+    nlohmann::json& diagnostics) {
+    validate_archive_snapshot(snapshot);
+    const auto& data = snapshot.at("scene");
+    auto scene = std::make_unique<NativeEditorScene>();
+    scene->project_root = path_from_utf8(snapshot.at("project_root").get<std::string>());
+    scene->route = data.value("route", std::string{});
+    scene->name = data.value("name", stem_utf8(scene->route));
+    scene->core_version = data.value("core_version", std::string{});
+    const auto scripts = data.value("scripts", nlohmann::json::object());
+    const auto terrain = data.value("terrain", nlohmann::json::object());
+    const auto environment = data.value("environment", nlohmann::json::object());
+    const auto vision = data.value("vision", nlohmann::json::object());
+    scene->script_path = scripts.value("path", std::string{});
+    scene->terrain_type = terrain.value("type", std::string{});
+    scene->terrain_path = terrain.value("path", std::string{});
+    scene->sun_enabled = environment.value("sun_enabled", true);
+    scene->sun_direction = snapshot_float3(
+        environment.value("sun_direction", nlohmann::json::array()), {1.0f, 1.0f, 1.0f});
+    scene->floor_grid_enabled = environment.value("floor_grid_enabled", true);
+    scene->vision_storage = vision.value("storage", std::string{});
+    scene->vision_source_id = vision.value("source_id", std::string{});
+    scene->vision_source_path = vision.value("source_path", std::string{});
+    scene->vision_import_mode = vision.value("import_mode", std::string{});
+    scene->vision_document_version = vision.value("document_version", std::string{});
+    scene->vision_document_encoding = vision.value("document_encoding", std::string{});
+    scene->vision_document_data = vision.value("document_data", std::string{});
+    scene->vision_document_asset_root = vision.value("document_asset_root", std::string{});
+    scene->engine_scene = std::make_unique<Corona::API::Scene>();
+    scene->environment = std::make_unique<Corona::API::Environment>();
+    apply_native_scene_environment(*scene);
+    scene->engine_scene->set_environment(scene->environment.get());
+    for (const auto& actor_data : data.at("actors")) {
+        materialize_actor_snapshot(*scene, actor_data, allow_degraded, diagnostics);
+    }
+    std::size_t camera_index = 0;
+    for (const auto& camera_data : data.at("cameras")) {
+        scene->cameras.push_back(materialize_camera_snapshot(*scene, camera_data, camera_index++));
+        scene->engine_scene->add_camera(scene->cameras.back().engine_camera.get());
+    }
+    if (scene->cameras.empty()) {
+        scene->cameras.push_back(materialize_camera_snapshot(*scene, nlohmann::json::object(), 0));
+        scene->engine_scene->add_camera(scene->cameras.back().engine_camera.get());
+    }
+    const auto active_id = data.value("active_camera_id", scene->cameras.front().camera_id);
+    scene->active_camera_index = 0;
+    for (std::size_t index = 0; index < scene->cameras.size(); ++index) {
+        if (scene->cameras[index].camera_id == active_id) scene->active_camera_index = index;
+    }
+    scene->engine_scene->set_active_camera(
+        scene->cameras[scene->active_camera_index].engine_camera.get());
+    apply_native_scene_vision_camera_defaults(*scene);
+    scene->engine_scene->set_simulation_enabled(true);
+    scene->engine_scene->set_enabled(true);
+    apply_native_scene_vision_source(*scene);
+    scene->load_diagnostics = diagnostics;
+    return scene;
+}
+
+NativeResult invoke_project_archive_parser(const std::string& path,
+                                           const std::string& load_policy) {
+    NativeRequest parser_request;
+    parser_request.module = "ProjectArchive";
+    parser_request.function = "parse";
+    parser_request.args = nlohmann::json::array({{
+        {"path", path},
+        {"load_policy", load_policy},
+    }});
+    return invoke_python_script_service(parser_request, "python-archive");
+}
+
+struct PreparedArchiveLoad {
+    bool service_ok{false};
+    std::string status{"invalid_archive"};
+    std::string error;
+    nlohmann::json snapshot = nlohmann::json::object();
+    nlohmann::json diagnostics = nlohmann::json::array();
+    std::unique_ptr<NativeEditorScene> scene;
+};
+
+PreparedArchiveLoad prepare_archive_load(const std::string& path,
+                                         const std::string& load_policy) {
+    PreparedArchiveLoad prepared;
+    auto parser_result = invoke_project_archive_parser(path, load_policy);
+    if (!parser_result.success) {
+        prepared.error = parser_result.error;
+        return prepared;
+    }
+    prepared.service_ok = true;
+    const auto& data = parser_result.data;
+    prepared.status = data.value("status", std::string{"invalid_archive"});
+    prepared.diagnostics = data.value("diagnostics", nlohmann::json::array());
+    if (!data.value("ok", false) || prepared.status == "invalid_archive") {
+        return prepared;
+    }
+    if (!data.contains("snapshot") || !data["snapshot"].is_object()) {
+        prepared.status = "invalid_archive";
+        prepared.diagnostics.push_back({
+            {"severity", "error"}, {"recoverable", false},
+            {"stage", "snapshot_validation"}, {"code", "SNAPSHOT_CONTRACT_INVALID"},
+            {"message", "Python archive parser returned no ArchiveSnapshot"},
+            {"path", path},
+        });
+        return prepared;
+    }
+    prepared.snapshot = data["snapshot"];
+    if (prepared.status == "decision_required" && load_policy != "degraded") {
+        return prepared;
+    }
+    try {
+        prepared.scene = materialize_scene_snapshot(
+            prepared.snapshot, load_policy == "degraded", prepared.diagnostics);
+    } catch (const std::exception& error) {
+        prepared.status = "invalid_archive";
+        prepared.diagnostics.push_back({
+            {"severity", "error"}, {"recoverable", false},
+            {"stage", "snapshot_validation"}, {"code", "SNAPSHOT_CONTRACT_INVALID"},
+            {"message", error.what()}, {"path", path},
+        });
+        prepared.scene.reset();
+        return prepared;
+    }
+    if (!prepared.diagnostics.empty() && load_policy != "degraded") {
+        prepared.status = "decision_required";
+        prepared.scene.reset();
+    } else {
+        prepared.status = prepared.diagnostics.empty() ? "opened" : "opened_degraded";
+    }
+    return prepared;
+}
+
+NativeEditorScene* ensure_native_editor_scene(const std::string& project_path_arg = {}) {
+    auto& state = native_editor_state();
+    (void)project_path_arg;
+    if (!state.scene) {
+        throw std::runtime_error("No committed native editor scene; open a project first");
     }
     return state.scene.get();
 }
@@ -1722,21 +2232,16 @@ NativeEditorScene* reload_native_editor_scene(const std::string& project_path_ar
         throw std::runtime_error("No active project path for native editor reload");
     }
 
-    const auto project_root = path_from_utf8(project_path);
-    const auto portable = detect_scene_folder(project_root);
-    const auto project_ini = portable ? IniFile{} : read_ini_file(project_root / "project.ini");
-    auto scene_route = normalize_route(scene_route_arg);
-    if (scene_route.empty()) {
-        scene_route = state.scene ? state.scene->route
-                                  : (portable ? std::string{"scene.ini"}
-                                              : choose_single_scene_route(project_root, project_ini));
+    (void)scene_route_arg;
+    auto prepared = prepare_archive_load(project_path, "prompt");
+    if (!prepared.service_ok) {
+        throw std::runtime_error(prepared.error.empty() ? "Archive reload failed" : prepared.error);
     }
-    if (scene_route.empty()) {
-        throw std::runtime_error("No scene route for native editor reload");
+    if (!prepared.scene) {
+        throw std::runtime_error("Archive reload requires user decision");
     }
-
-    state.scene = load_native_scene(project_root, scene_route);
-    state.project_path = project_path;
+    state.scene = std::move(prepared.scene);
+    state.project_path = path_to_utf8(state.scene->project_root);
     return state.scene.get();
 }
 
@@ -1808,11 +2313,26 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["model"] = actor.route;
     item["model_dependencies"] = nlohmann::json::array();
     item["actor_type"] = actor.actor_type;
+    item["load_status"] = actor_load_status_name(actor.load_status);
+    if (actor.load_status != ActorLoadStatus::Loaded) {
+        item["load_error"] = {
+            {"code", actor.load_error_code},
+            {"message", actor.load_error_message},
+            {"resource_path", actor.route},
+            {"path", actor.resolved_asset_path},
+        };
+    } else {
+        item["load_error"] = nullptr;
+    }
     if (actor.actor_type == "audio") {
         item["audio_resource_id"] = std::to_string(actor.audio_resource_id);
     }
-    item["collision"] = actor.mechanics ? collision_shape_name(*actor.mechanics) : "box";
-    item["visible"] = actor.optics ? actor.optics->get_visible() : true;
+    item["collision"] = actor.load_status == ActorLoadStatus::Loaded && actor.mechanics
+                            ? collision_shape_name(*actor.mechanics)
+                            : actor.persisted_collision_type;
+    item["visible"] = actor.load_status == ActorLoadStatus::Loaded && actor.optics
+                          ? actor.optics->get_visible()
+                          : actor.persisted_visible;
     item["script"] = "";
     item["follow_camera"] = actor.follow_camera;
     item["render_space"] = actor.follow_camera ? "ui" : "scene";
@@ -1841,7 +2361,9 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
             {"mass", actor.mechanics->get_mass()},
             {"restitution", actor.mechanics->get_restitution()},
             {"damping", actor.mechanics->get_damping()},
-            {"physics_enabled", actor.mechanics->get_physics_enabled()},
+            {"physics_enabled", actor.load_status == ActorLoadStatus::Loaded
+                                    ? actor.mechanics->get_physics_enabled()
+                                    : actor.persisted_physics_enabled},
             {"linear_lock", {linear_x, linear_y, linear_z}},
             {"angular_lock", {angular_x, angular_y, angular_z}},
         };
@@ -5454,15 +5976,63 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
         }},
         {"open_project", [](const NativeRequest& request, const NativeContext&) {
             const auto path = normalize_route(arg_string(request.args, 0));
+            const auto options = arg_object(request.args, 1);
+            const auto load_policy = options.value("load_policy", std::string{"prompt"});
             CFW_LOG_INFO("[ProjectLauncher] open_project request path='{}'", path);
             if (path.empty()) {
                 return native_success({{"ok", false}, {"path", std::string{}}, {"status", "cancelled"}});
             }
-            const auto opened = open_project_native(path_from_utf8(path));
-            CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}'", path_to_utf8(opened));
-            emit_editor_api_event("ProjectLauncher.projectOpened", {{"path", path_to_utf8(opened)}});
-            return native_success({{"ok", true}, {"path", path_to_utf8(opened)},
-                                   {"legacy", !detect_scene_folder(opened).has_value()}});
+            auto prepared = prepare_archive_load(path, load_policy);
+            if (prepared.service_ok && prepared.snapshot.value("archive_type", std::string{}) == "vision_json") {
+                try {
+                    const auto imported = create_vision_project_native(path_from_utf8(path));
+                    prepared = prepare_archive_load(path_to_utf8(imported), load_policy);
+                } catch (const std::exception& error) {
+                    return native_success({
+                        {"ok", false}, {"status", "invalid_archive"}, {"path", path},
+                        {"diagnostics", nlohmann::json::array({{
+                            {"severity", "error"}, {"recoverable", false},
+                            {"stage", "vision_import"}, {"code", "VISION_IMPORT_FAILED"},
+                            {"message", error.what()}, {"path", path},
+                        }})},
+                    });
+                }
+            }
+            if (!prepared.service_ok) {
+                return native_failure(prepared.error.empty() ? "Python archive parser failed"
+                                                             : prepared.error,
+                                      503, "python-archive");
+            }
+            if (!prepared.scene) {
+                return native_success({
+                    {"ok", false}, {"status", prepared.status}, {"path", path},
+                    {"diagnostics", prepared.diagnostics},
+                });
+            }
+
+            auto& state = native_editor_state();
+            state.scene = std::move(prepared.scene);
+            state.project_path = path_to_utf8(state.scene->project_root);
+            update_editor_settings_section("General", {{"last_project", state.project_path}});
+            add_recent_project_native(state.scene->project_root);
+            std::size_t unresolved_count = 0;
+            for (const auto& actor : state.scene->actors) {
+                if (actor.load_status != ActorLoadStatus::Loaded) ++unresolved_count;
+            }
+            CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}' status='{}'",
+                         state.project_path, prepared.status);
+            emit_editor_api_event("ProjectLauncher.projectOpened", {
+                {"path", state.project_path}, {"status", prepared.status},
+            });
+            return native_success({
+                {"ok", true}, {"status", prepared.status}, {"path", state.project_path},
+                {"legacy", prepared.snapshot.value("project", nlohmann::json::object())
+                               .value("legacy", false)},
+                {"degraded", prepared.status == "opened_degraded" || unresolved_count > 0},
+                {"unresolved_actor_count", unresolved_count},
+                {"diagnostics", prepared.diagnostics},
+                {"scene", {{"path", state.scene->route}, {"name", state.scene->name}}},
+            });
         }},
         {"open_project_file", script_method},
         {"choose_portable_scene_target", script_method},
@@ -5600,9 +6170,7 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
                 return native_success({{"ok", false}, {"path", std::string{}},
                                        {"diagnostics", std::move(diagnostics)}});
             }
-            const auto opened = open_project_native(migrated.root);
-            emit_editor_api_event("ProjectLauncher.projectOpened", {{"path", path_to_utf8(opened)}});
-            return native_success({{"ok", true}, {"path", path_to_utf8(opened)},
+            return native_success({{"ok", true}, {"path", path_to_utf8(migrated.root)},
                                    {"diagnostics", std::move(diagnostics)}});
         }},
         {"set_project_mode", [](const NativeRequest&, const NativeContext&) {
@@ -5636,10 +6204,12 @@ void register_main_view_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"get_menu_data", script_method},
         {"import_resource_file", script_method},
-        {"on_init", [](const NativeRequest& request, const NativeContext&) {
-            const auto project_path = resolve_active_project_path(request.args);
-            auto* scene = ensure_native_editor_scene(project_path);
-            return native_success(make_on_init_payload(*scene));
+        {"on_init", [](const NativeRequest&, const NativeContext&) {
+            auto& state = native_editor_state();
+            if (!state.scene) {
+                return native_failure("No committed native editor scene; open a project first", 404);
+            }
+            return native_success(make_on_init_payload(*state.scene));
         }},
         {"run_project", script_method},
         {"scene_save", [](const NativeRequest& request, const NativeContext&) {
@@ -5688,11 +6258,33 @@ void register_main_view_api_handlers(NativeApiRegistry& registry) {
                                        {"message", error.what()},
                                        {"diagnostics", error.diagnostics()}});
             }
+            nlohmann::json save_diagnostics = scene->load_diagnostics;
+            std::size_t unresolved_count = 0;
+            for (const auto& actor : scene->actors) {
+                if (actor.load_status == ActorLoadStatus::Loaded) continue;
+                ++unresolved_count;
+                const bool already_reported = std::any_of(
+                    save_diagnostics.begin(), save_diagnostics.end(),
+                    [&](const nlohmann::json& diagnostic) {
+                        return diagnostic.value("actor_guid", std::string{}) == actor.actor_guid &&
+                               diagnostic.value("code", std::string{}) == actor.load_error_code;
+                    });
+                if (!already_reported) {
+                    save_diagnostics.push_back({
+                        {"code", actor.load_error_code}, {"message", actor.load_error_message},
+                        {"actor_guid", actor.actor_guid}, {"actor_name", actor.name},
+                        {"resource_path", actor.route},
+                    });
+                }
+            }
             return native_success({
                 {"ok", true},
                 {"status", "success"},
                 {"filepath", path_to_utf8(resolve_project_path(scene->project_root, scene->route))},
                 {"format", "corona_scene"},
+                {"degraded", !save_diagnostics.empty()},
+                {"unresolved_actor_count", unresolved_count},
+                {"diagnostics", std::move(save_diagnostics)},
             });
         }},
         {"update_view_tool_state", script_method},
@@ -5928,6 +6520,112 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                 {"actor_count", scene->actors.size()},
                 {"camera_count", scene->cameras.size()},
             });
+        }},
+        {"rebind_actor_resource", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto actor_guid = arg_string(request.args, 1);
+            auto source_path = path_from_utf8(arg_string(request.args, 2));
+            if (source_path.is_relative()) source_path = scene->project_root / source_path;
+            if (!std::filesystem::is_regular_file(source_path)) {
+                return native_success({
+                    {"ok", false}, {"status", "resource_error"},
+                    {"diagnostics", nlohmann::json::array({{
+                        {"code", "RESOURCE_NOT_FOUND"}, {"recoverable", true},
+                        {"actor_guid", actor_guid}, {"path", path_to_utf8(source_path)},
+                        {"message", "Replacement resource does not exist"},
+                    }})},
+                });
+            }
+            auto* actor = find_native_actor_by_guid(*scene, actor_guid);
+            if (!actor) return native_failure("Actor GUID not found: " + actor_guid, 404);
+            if (!snapshot_actor_resource_supported(*actor, source_path)) {
+                return native_success({
+                    {"ok", false}, {"status", "resource_error"},
+                    {"diagnostics", nlohmann::json::array({{
+                        {"code", "UNSUPPORTED_RESOURCE_TYPE"}, {"recoverable", true},
+                        {"actor_guid", actor_guid}, {"path", path_to_utf8(source_path)},
+                        {"message", "Replacement resource type is unsupported"},
+                    }})},
+                });
+            }
+
+            std::string route;
+            auto resolved_path = std::filesystem::weakly_canonical(source_path);
+            if (detect_scene_folder(scene->project_root)) {
+                std::error_code ec;
+                auto relative = std::filesystem::relative(resolved_path, scene->project_root, ec);
+                if (ec || relative.empty() || relative.generic_string().rfind("..", 0) == 0) {
+                    SceneAssetStore store(scene->project_root);
+                    auto imported = store.import_model(resolved_path);
+                    if (!imported.ok() || !store.write_manifest()) {
+                        return native_success({
+                            {"ok", false}, {"status", "resource_error"},
+                            {"diagnostics", nlohmann::json::array({{
+                                {"code", "RESOURCE_IMPORT_FAILED"}, {"recoverable", true},
+                                {"actor_guid", actor_guid}, {"path", path_to_utf8(resolved_path)},
+                                {"message", "Replacement resource could not be imported"},
+                            }})},
+                        });
+                    }
+                    route = imported.main_route;
+                    resolved_path = resolve_project_path(scene->project_root, route);
+                } else {
+                    route = path_to_utf8(relative);
+                }
+            } else {
+                std::error_code ec;
+                const auto relative = std::filesystem::relative(resolved_path, scene->project_root, ec);
+                route = ec ? path_to_utf8(resolved_path) : path_to_utf8(relative);
+            }
+
+            const auto actor_index = static_cast<std::size_t>(actor - scene->actors.data());
+            auto replacement_data = actor->persisted_snapshot;
+            replacement_data["route"] = route;
+            replacement_data["asset_path"] = path_to_utf8(resolved_path);
+            replacement_data["transform"] = {
+                {"position", actor->geometry ? actor->geometry->get_position() : actor->position},
+                {"rotation", actor->geometry ? actor->geometry->get_rotation() : actor->rotation},
+                {"scale", actor->geometry ? actor->geometry->get_scale() : actor->scale},
+            };
+            try {
+                auto replacement = native_actor_from_snapshot(replacement_data);
+                auto& loaded = add_native_actor_to_scene(*scene, std::move(replacement), resolved_path);
+                loaded.load_status = ActorLoadStatus::Loaded;
+                loaded.load_error_code.clear();
+                loaded.load_error_message.clear();
+                if (loaded.optics) loaded.optics->set_visible(loaded.persisted_visible);
+                if (loaded.mechanics && loaded.actor_type != "ui_image") {
+                    loaded.mechanics->set_physics_enabled(loaded.persisted_physics_enabled);
+                    loaded.mechanics->set_collision_shape(loaded.persisted_collision_type);
+                }
+                if (scene->actors[actor_index].engine_actor) {
+                    scene->engine_scene->remove_actor(scene->actors[actor_index].engine_actor.get());
+                }
+                scene->actors.erase(scene->actors.begin() + static_cast<std::ptrdiff_t>(actor_index));
+                nlohmann::json retained_diagnostics = nlohmann::json::array();
+                for (const auto& diagnostic : scene->load_diagnostics) {
+                    const bool resolved_main_resource =
+                        diagnostic.value("actor_guid", std::string{}) == actor_guid &&
+                        diagnostic.value("code", std::string{}) != "ATTACHMENT_RESOURCE_NOT_FOUND";
+                    if (!resolved_main_resource) retained_diagnostics.push_back(diagnostic);
+                }
+                scene->load_diagnostics = std::move(retained_diagnostics);
+                persist_native_scene_actors(*scene);
+                auto* rebound = find_native_actor_by_guid(*scene, actor_guid);
+                return native_success({
+                    {"ok", true}, {"status", "loaded"},
+                    {"actor", rebound ? actor_to_json(*scene, *rebound) : nlohmann::json::object()},
+                });
+            } catch (const std::exception& error) {
+                return native_success({
+                    {"ok", false}, {"status", "resource_error"},
+                    {"diagnostics", nlohmann::json::array({{
+                        {"code", "MODEL_DECODE_FAILED"}, {"recoverable", true},
+                        {"actor_guid", actor_guid}, {"path", path_to_utf8(resolved_path)},
+                        {"message", error.what()},
+                    }})},
+                });
+            }
         }},
         {"sun_direction", [](const NativeRequest& request, const NativeContext&) {
             const auto scene_route = normalize_route(arg_string(request.args, 0));

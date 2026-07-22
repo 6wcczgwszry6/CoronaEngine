@@ -133,6 +133,14 @@ const migrationDiagnostics = (result) => (result?.diagnostics || [])
   .map((item) => `${item.actor || 'scene'}: ${item.path || ''} — ${item.message || ''}`)
   .join('\n');
 
+const archiveDiagnostics = (result) => (result?.diagnostics || [])
+  .map((item) => {
+    const actor = item.actor_name || item.actor_guid || '场景';
+    const path = item.resource_path || item.path || '';
+    return `${actor}: ${path}${path ? ' — ' : ''}${item.message || item.code || '加载失败'}`;
+  })
+  .join('\n');
+
 const openSelectedProject = () => {
   const project = recentProjects.value.find((item) => item.path === selectedProject.value);
   if (project) handleOpenProject(project.path, project);
@@ -172,8 +180,21 @@ const migrateLegacyProject = async (project) => {
 
 const handleOpenProject = async (path, project = null) => {
   try {
-    const result = await projectLauncherService.openProject(path);
-    const opened = unwrapResponse(result);
+    let result = await projectLauncherService.openProject(path);
+    let opened = unwrapResponse(result);
+    if (opened?.status === 'decision_required') {
+      const details = archiveDiagnostics(opened);
+      const proceed = window.confirm(
+        `存档中有部分资源无法加载：\n\n${details}\n\n是否保留占位对象并降级打开？`,
+      );
+      if (!proceed) return;
+      result = await projectLauncherService.openProject(path, { loadPolicy: 'degraded' });
+      opened = unwrapResponse(result);
+    }
+    if (opened?.status === 'invalid_archive') {
+      window.alert(`无法打开存档：\n${archiveDiagnostics(opened)}`);
+      return;
+    }
     if (opened?.legacy) {
       const promptKey = `corona.legacyMigrationPrompted:${opened.path}`;
       if (!window.localStorage?.getItem(promptKey)) {

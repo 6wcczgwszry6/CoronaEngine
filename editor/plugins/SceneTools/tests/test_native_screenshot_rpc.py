@@ -1679,10 +1679,10 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         body = handler_source[start:end]
 
         self.assertIn('emit_editor_api_event("ProjectLauncher.projectOpened"', body)
-        self.assertIn('{"path", path_to_utf8(opened)}', body)
+        self.assertIn('{"path", state.project_path}', body)
         self.assertLess(
             body.find('emit_editor_api_event("ProjectLauncher.projectOpened"'),
-            body.find('return native_success({{"ok", true}'),
+            body.rfind('return native_success({'),
         )
 
     def test_lanchat_event_is_defined_and_emitted_by_cpp_callback_registry(self):
@@ -2300,7 +2300,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "ProjectLauncher.create_world_project": ("kObjectPayloadParam", "EditorApiValueType::Object"),
             "ProjectLauncher.get_default_project_path": ("kNoParams", "EditorApiValueType::String"),
             "ProjectLauncher.get_recent_projects": ("kNoParams", "EditorApiValueType::Array"),
-            "ProjectLauncher.open_project": ("kPathParam", "EditorApiValueType::Object"),
+            "ProjectLauncher.open_project": ("kOpenProjectParams", "EditorApiValueType::Object"),
             "ProjectLauncher.open_project_file": ("kNoParams", "EditorApiValueType::Object"),
             "ProjectLauncher.set_project_mode": ("kObjectPayloadParam", "EditorApiValueType::Boolean"),
         }
@@ -2324,9 +2324,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "createProject: (projectData) =>\n    editorApi.project.createProject",
             "createWorldProject: (worldData) =>\n    editorApi.project.createWorldProject",
             "createMultiplayerProject: (projectData) =>\n    editorApi.project.createMultiplayerProject",
-            "openProject: async (projectPath) => {",
-            "const result = await editorApi.project.openProject(projectPath)",
-            "await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath)",
+            "openProject: async (projectPath, options = {}) => {",
+            "const result = await editorApi.project.openProject(projectPath, { load_policy: loadPolicy })",
             "setProjectMode: (mode, settings) =>\n    editorApi.project.setProjectMode",
             "getRecentProjects: () => editorApi.project.getRecentProjects()",
         ):
@@ -3430,7 +3429,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             '"open_project"',
             "create_vision_project_native",
             "create_embedded_vision_document",
-            "open_project_native",
+            "prepare_archive_load",
+            "materialize_scene_snapshot",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
@@ -3450,7 +3450,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             api_source,
         )
         self.assertIn(
-            "EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kPathParam, EditorApiValueType::Object)",
+            "EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kOpenProjectParams, EditorApiValueType::Object)",
             api_source,
         )
         self.assertIn(
@@ -3514,16 +3514,16 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
     def test_project_launcher_open_project_returns_resolved_project_path(self):
         source = self._handler_source()
-        self.assertIn("std::filesystem::path open_project_native", source)
-        self.assertIn("return project_dir;", source)
 
         start = source.find('{"open_project", [](const NativeRequest& request, const NativeContext&)')
         end = source.find('{"set_project_mode"', start)
         self.assertGreaterEqual(start, 0)
         self.assertGreater(end, start)
         handler = source[start:end]
-        self.assertIn("const auto opened = open_project_native", handler)
-        self.assertIn('{"path", path_to_utf8(opened)}', handler)
+        self.assertIn("auto prepared = prepare_archive_load(path, load_policy)", handler)
+        self.assertIn("state.project_path = path_to_utf8(state.scene->project_root)", handler)
+        self.assertIn('{"path", state.project_path}', handler)
+        self.assertNotIn("open_project_native", handler)
 
     def test_project_launcher_frontend_caches_resolved_project_path(self):
         repo_root = pathlib.Path(__file__).resolve().parents[4]
@@ -3724,7 +3724,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("enum class CollisionShape", hub_source)
         self.assertIn("CollisionShape collision_shape{CollisionShape::Box}", hub_source)
         self.assertIn(".mechanics.collision_type", api_source)
-        self.assertIn('item["collision"] = actor.mechanics ? collision_shape_name(', api_source)
+        self.assertIn('? collision_shape_name(*actor.mechanics)', api_source)
+        self.assertIn(': actor.persisted_collision_type', api_source)
         self.assertIn("set_collision_shape", api_source)
         self.assertIn("normalizeCollisionType(data.collision)", object_source)
         mechanics_source = (
@@ -3823,6 +3824,69 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("[scripts]\npath =\n", template_source)
         self.assertNotIn("Scripts/scene_script.py", template_source)
 
+    def test_archive_open_is_python_parsed_and_cpp_materialized(self):
+        source = self._handler_source()
+        self.assertIn("invoke_project_archive_parser", source)
+        self.assertIn('parser_request.module = "ProjectArchive"', source)
+        self.assertIn('parser_request.function = "parse"', source)
+        self.assertIn("validate_archive_snapshot", source)
+        self.assertIn("validate_snapshot_float3", source)
+        self.assertIn("Duplicate actor_guid in ArchiveSnapshot", source)
+        self.assertIn("asset_path must be absolute", source)
+        self.assertIn("materialize_scene_snapshot", source)
+        self.assertIn("ActorLoadStatus", source)
+        self.assertIn("UNSUPPORTED_RESOURCE_TYPE", source)
+        self.assertIn('item.actor_type != "audio"', source)
+        self.assertIn("actor.persisted_snapshot.value(", source)
+        self.assertIn('"persisted_fields", nlohmann::json::object()', source)
+        self.assertIn("actor.load_status != ActorLoadStatus::Loaded", source)
+        self.assertIn("allow_missing", source)
+        self.assertIn('{"rebind_actor_resource"', source)
+        self.assertIn("load_status = ActorLoadStatus::Loaded", source)
+        self.assertIn('"decision_required"', source)
+        self.assertNotIn("std::unique_ptr<NativeEditorScene> load_native_scene(", source)
+
+    def test_main_on_init_only_reads_committed_native_scene(self):
+        source = self._handler_source()
+        start = source.index('static const NativeMethodTable methods = {', source.index("void register_main_view_api_handlers"))
+        end = source.index('};', start)
+        methods = source[start:end]
+        on_init_start = methods.index('{"on_init"')
+        on_init_end = methods.index('{"run_project"', on_init_start)
+        on_init = methods[on_init_start:on_init_end]
+        self.assertIn("auto& state = native_editor_state()", on_init)
+        self.assertIn("state.scene", on_init)
+        self.assertNotIn("ensure_native_editor_scene", on_init)
+
+    def test_frontend_handles_degraded_archive_without_duplicate_reload(self):
+        repo_root = self._repo_root()
+        bridge = self._frontend_bridge_source()
+        recent = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
+        ).read_text(encoding="utf-8")
+        scene_bar = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "SceneBar.vue"
+        ).read_text(encoding="utf-8")
+        object_panel = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "Object.vue"
+        ).read_text(encoding="utf-8")
+        open_start = bridge.index("openProject: async")
+        open_end = bridge.index("// 设置项目模式", open_start)
+        open_body = bridge[open_start:open_end]
+        self.assertIn("options = {}", open_body)
+        self.assertIn("load_policy", open_body)
+        self.assertIn("openProject: (projectPath, options = {})", bridge)
+        self.assertIn("[projectPath, options]", bridge)
+        self.assertNotIn("editorApi.main.onInit", open_body)
+        self.assertNotIn("reloadScene", open_body)
+        self.assertIn("decision_required", recent)
+        self.assertIn("loadPolicy: 'degraded'", recent)
+        self.assertIn('data-testid="actor-load-warning"', scene_bar)
+        self.assertIn("rebindActorResource", scene_bar)
+        self.assertIn("unresolved_actor_count", scene_bar)
+        self.assertIn('data-testid="actor-placeholder-warning"', object_panel)
+        self.assertIn("rebindPlaceholderResource", object_panel)
+
     def test_legacy_scene_migration_has_prompt_and_permanent_file_manager_action(self):
         repo_root = self._repo_root()
         handler_source = (
@@ -3835,7 +3899,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "FileManager.vue"
         ).read_text(encoding="utf-8")
 
-        self.assertIn('{"legacy", !detect_scene_folder(opened).has_value()}', handler_source)
+        self.assertIn('prepared.snapshot.value("project", nlohmann::json::object())', handler_source)
+        self.assertIn('.value("legacy", false)', handler_source)
         self.assertIn("corona.legacyMigrationPrompted", recent_games_source)
         self.assertIn("另存为便携场景", recent_games_source)
         self.assertIn("migrateLegacyScene", recent_games_source)

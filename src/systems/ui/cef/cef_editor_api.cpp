@@ -48,6 +48,11 @@ constexpr std::array<EditorApiParamSpec, 1> kPathParam = {{
     param("path", EditorApiValueType::String),
 }};
 
+constexpr std::array<EditorApiParamSpec, 2> kOpenProjectParams = {{
+    param("path", EditorApiValueType::String),
+    param("options", EditorApiValueType::Object, true),
+}};
+
 constexpr std::array<EditorApiParamSpec, 1> kPathOptionalParam = {{
     param("path", EditorApiValueType::String, true),
 }};
@@ -267,6 +272,12 @@ constexpr std::array<EditorApiParamSpec, 2> kSceneToolsReloadSceneParams = {{
     param("project_path", EditorApiValueType::String, true),
 }};
 
+constexpr std::array<EditorApiParamSpec, 3> kSceneToolsRebindActorResourceParams = {{
+    param("scene_name", EditorApiValueType::String),
+    param("actor_guid", EditorApiValueType::String),
+    param("path", EditorApiValueType::String),
+}};
+
 constexpr std::array<EditorApiParamSpec, 2> kSceneToolsCreateCameraViewParams = {{
     param("scene_name", EditorApiValueType::String),
     param("name", EditorApiValueType::String, true),
@@ -392,7 +403,7 @@ constexpr std::array<EditorApiParamSpec, 9> kScratchMouseEventParams = {{
 #define EDITOR_API_METHOD_SCHEMA(module, function, params_array, return_type) \
     EDITOR_API_METHOD_SCHEMA_WRAPPED(module, function, params_array, "", "", return_type)
 
-constexpr std::array<EditorApiMethodSpec, 140> kEditorApiMethods = {{
+constexpr std::array<EditorApiMethodSpec, 141> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, submit_request, kObjectPayloadParam, "ai.submitRequest", "ai.submit_request", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, generate_hint, kAiToolGenerateHintParams, "ai.generateHint", "ai.generate_hint", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, read_local_file_as_base64, kPathParam, "ai.readLocalFileAsBase64", "ai.read_local_file_as_base64", EditorApiValueType::Any),
@@ -462,7 +473,7 @@ constexpr std::array<EditorApiMethodSpec, 140> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_recent_projects, kNoParams, EditorApiValueType::Array),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ProjectLauncher, migrate_legacy_scene, kObjectPayloadParam, "project.migrateLegacyScene", "project.migrate_legacy_scene", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ProjectLauncher, import_portable_asset, kObjectPayloadParam, "project.importPortableAsset", "project.import_portable_asset", EditorApiValueType::Object),
-    EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kPathParam, EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kOpenProjectParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project_file, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ProjectLauncher, validate_portable_scene, kObjectPayloadParam, "project.validatePortableScene", "project.validate_portable_scene", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, set_project_mode, kObjectPayloadParam, EditorApiValueType::Boolean),
@@ -507,6 +518,7 @@ constexpr std::array<EditorApiMethodSpec, 140> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, pick_actor_at_pixel, kSceneToolsPickActorParams, "sceneTools.pickActor", "scene_tools.pick_actor", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, play_audio, kSceneToolsPlayAudioParams, "sceneTools.playAudio", "scene_tools.play_audio", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, reload_scene, kSceneToolsReloadSceneParams, "sceneTools.reloadScene", "scene_tools.reload_scene", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, rebind_actor_resource, kSceneToolsRebindActorResourceParams, "sceneTools.rebindActorResource", "scene_tools.rebind_actor_resource", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, remove_actor, kSceneActorParams, "sceneTools.removeActor", "scene_tools.remove_actor", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, rename_actor, kSceneToolsRenameActorParams, "sceneTools.renameActor", "scene_tools.rename_actor", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, rename_camera_view, kSceneToolsRenameCameraViewParams, "sceneTools.renameCameraView", "scene_tools.rename_camera_view", EditorApiValueType::Object),
