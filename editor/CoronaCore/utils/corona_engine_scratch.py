@@ -495,6 +495,23 @@ def _native_scene_snapshot(scene_name):
     return None, errors
 
 
+def _normalize_native_collision_type(value):
+    if isinstance(value, dict):
+        value = value.get("type", value.get("shape"))
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in ("none", "box", "mesh"):
+            return candidate
+        if candidate in ("off", "disabled", "false", "0"):
+            return "none"
+        return "box"
+    if value in (False, 0, None):
+        return "none"
+    if value == 2:
+        return "mesh"
+    return "box"
+
+
 class _NativeEditorActorProxy:
     def __init__(self, scene, data):
         self.scene = scene
@@ -520,6 +537,9 @@ class _NativeEditorActorProxy:
         self._restitution = float(mechanics.get("restitution", 0.8) or 0.0)
         self._damping = float(mechanics.get("damping", 0.99) or 0.0)
         self._physics_enabled = bool(mechanics.get("physics_enabled", False))
+        self._collision_type = _normalize_native_collision_type(
+            self._data.get("collision", mechanics.get("collision_type", "box"))
+        )
         self._geometry = self
         self._kinematics = self
         self._optics = self
@@ -601,7 +621,10 @@ class _NativeEditorActorProxy:
     def get_damping(self): return self._damping
     def set_physics_enabled(self, value): self._physics_enabled = bool(value); return self._operation("SetPhysicsEnabled", [self._physics_enabled])
     def get_physics_enabled(self): return self._physics_enabled
-    def set_collision_enabled(self, value): return self._operation("SetCollision", [bool(value)])
+    def set_collision_enabled(self, value):
+        self._collision_type = _normalize_native_collision_type(value)
+        return self._operation("SetCollision", [self._collision_type])
+    def get_collision_enabled(self): return self._collision_type
     def set_linear_lock(self, x, y, z): return self._operation("SetLinearLock", [bool(x), bool(y), bool(z)])
     def set_angular_lock(self, x, y, z): return self._operation("SetAngularLock", [bool(x), bool(y), bool(z)])
 
@@ -1042,7 +1065,12 @@ def _restore_native_actor_state(scene_route, actor_data):
         scene_route, actor_name, "SetVisible", [bool(actor_data.get("visible", True))]
     )
     _native_restore_operation(
-        scene_route, actor_name, "SetCollision", [bool(actor_data.get("collision", True))]
+        scene_route,
+        actor_name,
+        "SetCollision",
+        [_normalize_native_collision_type(
+            actor_data.get("collision", mechanics.get("collision_type", "box"))
+        )],
     )
     if "mass" in mechanics:
         _native_restore_operation(scene_route, actor_name, "SetMass", [mechanics.get("mass")])

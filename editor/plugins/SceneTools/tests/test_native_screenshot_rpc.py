@@ -3724,7 +3724,14 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn(".mechanics.collision_type", api_source)
         self.assertIn('item["collision"] = actor.mechanics ? collision_shape_name(', api_source)
         self.assertIn("set_collision_shape", api_source)
-        self.assertIn("normalizeCollisionType(data.collision)", object_source)
+        self.assertIn("const normalizeCollisionType", object_source)
+        self.assertIn("actor.collision = normalizeCollisionType(", object_source)
+        scratch_source = (
+            repo_root / "editor" / "CoronaCore" / "utils" / "corona_engine_scratch.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def _normalize_native_collision_type", scratch_source)
+        self.assertIn("[self._collision_type]", scratch_source)
+        self.assertNotIn('[bool(actor_data.get("collision", True))]', scratch_source)
         mechanics_source = (
             repo_root / "src" / "systems" / "mechanics" / "mechanics_system.cpp"
         ).read_text(encoding="utf-8")

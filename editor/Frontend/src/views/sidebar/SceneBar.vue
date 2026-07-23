@@ -641,6 +641,7 @@ import { setActorContext } from '@/blockly/composables/useActorContext.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
+import { cabbageContextService } from '@/services/cabbageAssistantContextService.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
@@ -690,6 +691,12 @@ const updateSceneLight = async () => {
   const direction = sceneSettings.light.direction;
   try {
     await sceneService.sunDirection(currentSceneName.value, sceneSettings.light.enabled, [Number(direction.x) || 0, Number(direction.y) || 0, Number(direction.z) || 0]);
+    void cabbageContextService.recordEvent({
+      type: 'lighting_changed',
+      category: 'lighting',
+      success: true,
+      details: { sceneName: currentSceneName.value },
+    });
   } catch (error) {
     logError('更新场景光照失败', error);
   }
@@ -1840,6 +1847,18 @@ const createActorFromSelectedFile = async (payload, actorType, logLabel) => {
     selectedItem.value = actor.name;
   }
   updateLoading('导入完成', 100);
+  if (actorType === 'model') {
+    void cabbageContextService.recordEvent({
+      type: 'model_imported',
+      category: 'scene',
+      success: true,
+      details: {
+        sceneName: currentSceneName.value,
+        actorName: String(actor?.name || ''),
+        actorType: 'model',
+      },
+    });
+  }
   return actor || null;
 };
 

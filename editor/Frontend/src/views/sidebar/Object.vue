@@ -85,11 +85,22 @@
         <div class="section-title">碰撞</div>
         <div class="property-row">
           <label for="actor-collision">碰撞形状</label>
-          <select id="actor-collision" v-model="actor.collision" @change="updateCollision">
-            <option value="none">无</option>
-            <option value="box">包围盒</option>
-            <option value="mesh">模型网格</option>
-          </select>
+          <div id="actor-collision" class="collision-options" role="radiogroup" aria-label="碰撞形状">
+            <label
+              v-for="option in collisionOptions"
+              :key="option.value"
+              :class="{ active: actor.collision === option.value }"
+            >
+              <input
+                v-model="actor.collision"
+                type="radio"
+                name="actor-collision-shape"
+                :value="option.value"
+                @change="updateCollision"
+              />
+              <span>{{ option.label }}</span>
+            </label>
+          </div>
         </div>
       </section>
 
@@ -124,10 +135,16 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { editorApi, sceneService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { getActorContext } from '@/blockly/composables/useActorContext.js';
+import { cabbageContextService } from '@/services/cabbageAssistantContextService.js';
 
 const { closePanel, isDocked } = useDockPanel();
 const { error: logError } = useErrorHandler('Object');
 const axes = ['x', 'y', 'z'];
+const collisionOptions = [
+  { value: 'none', label: '无' },
+  { value: 'box', label: '包围盒' },
+  { value: 'mesh', label: '模型网格' },
+];
 const transformGroups = [
   { key: 'position', label: '位置', operation: 'SetPosition', operationCode: 0, step: 0.1 },
   { key: 'rotation', label: '旋转', operation: 'SetRotation', operationCode: 1, step: 1 },
@@ -151,6 +168,7 @@ const updateTimers = new Map();
 const pendingTransformUpdates = new Map();
 let transformFrameId = null;
 let transformBridgeWarningShown = false;
+let lastSavedCollision = 'none';
 
 const actor = reactive({
   name: '',
@@ -181,9 +199,16 @@ const actor = reactive({
 const unwrap = (value) => value?.data ?? value ?? {};
 const aliasDirty = computed(() => aliasDraft.value.trim() !== actor.name);
 const numberAt = (value, index, fallback) => Number(value?.[index] ?? fallback);
-const normalizeCollision = (value) => {
-  const candidate = value?.type ?? value;
-  return ['none', 'box', 'mesh'].includes(candidate) ? candidate : (candidate === false ? 'none' : 'box');
+const normalizeCollisionType = (value) => {
+  const raw = value?.type ?? value?.shape ?? value;
+  if (raw === false || raw === 0) return 'none';
+  if (raw === true || raw === 1) return 'box';
+  if (raw === 2) return 'mesh';
+  const candidate = String(raw ?? '').trim().toLowerCase();
+  if (['none', 'disabled', 'off'].includes(candidate)) return 'none';
+  if (['mesh', 'model_mesh', 'model-mesh'].includes(candidate)) return 'mesh';
+  if (['box', 'aabb', 'bounding_box', 'bounding-box'].includes(candidate)) return 'box';
+  return 'box';
 };
 const readFollowCamera = (data) => data?.render_space === 'ui' || data?.follow_camera === true || data?.follow_camera === 1 || data?.follow_camera === 'true' || data?.follow_camera === '1';
 
@@ -212,8 +237,14 @@ async function loadActor(sceneName, actorName) {
     assignVector(actor.transform.position, geometry.position, { x: 0, y: 0, z: 0 });
     assignVector(actor.transform.rotation, geometry.rotation, { x: 0, y: 0, z: 0 });
     assignVector(actor.transform.scale, geometry.scale, { x: 1, y: 1, z: 1 });
-    actor.collision = normalizeCollision(data.collision);
     const mechanics = data.mechanics || {};
+    actor.collision = normalizeCollisionType(
+      data.collision
+      ?? data.collision_type
+      ?? mechanics.collision_type
+      ?? mechanics.collision_shape
+    );
+    lastSavedCollision = actor.collision;
     actor.mechanics.physicsEnabled = mechanics.physics_enabled !== false;
     actor.mechanics.mass = Number(mechanics.mass ?? 1);
     actor.mechanics.restitution = Number(mechanics.restitution ?? 0.8);
@@ -320,6 +351,21 @@ async function applyTransform(operation) {
   schedule(`save:${operation}`, async () => {
     try {
       await sceneService.saveActor(selectedSceneName.value, selectedActorName.value);
+      const eventType = operation === 'SetPosition'
+        ? 'transform_position'
+        : operation === 'SetRotation'
+          ? 'transform_rotation'
+          : 'transform_scale';
+      void cabbageContextService.recordEvent({
+        type: eventType,
+        category: 'scene',
+        success: true,
+        details: {
+          sceneName: selectedSceneName.value,
+          actorName: selectedActorName.value,
+          actorType: actor.type || 'model',
+        },
+      });
     } catch (error) {
       logError('保存对象变换失败', error);
     }
@@ -351,10 +397,40 @@ async function selectModelFile() {
   }
 }
 
-async function updateCollision() {
+function applyCollisionFast(collisionType) {
+  const bridge = window.coronaBridge;
+  if (!bridge || typeof bridge.setProperty !== 'function' || !actor.handle) return;
+  const value = { none: 0, box: 1, mesh: 2 }[normalizeCollisionType(collisionType)] ?? 1;
   try {
-    await sceneService.actorOperation(selectedSceneName.value, selectedActorName.value, 'SetCollision', [actor.collision]);
+    bridge.setProperty(actor.handle, 8, value);
+  } catch (_) {
+    // 慢速 Actor API 仍会负责更新和保存。
+  }
+}
+
+async function updateCollision() {
+  if (!selectedActorName.value) return;
+  const previous = lastSavedCollision;
+  const selected = normalizeCollisionType(actor.collision);
+  actor.collision = selected;
+  applyCollisionFast(selected);
+  try {
+    await sceneService.actorOperation(selectedSceneName.value, selectedActorName.value, 'SetCollision', [selected]);
+    lastSavedCollision = selected;
+    void cabbageContextService.recordEvent({
+      type: 'physics_changed',
+      category: 'physics',
+      success: true,
+      details: {
+        sceneName: selectedSceneName.value,
+        actorName: selectedActorName.value,
+        operation: 'SetCollision',
+        collisionType: selected,
+      },
+    });
   } catch (error) {
+    actor.collision = previous;
+    applyCollisionFast(previous);
     logError('更新对象碰撞失败', error);
   }
 }
@@ -363,6 +439,16 @@ async function updateMechanic(operation, value) {
   if (!selectedActorName.value) return;
   try {
     await sceneService.actorOperation(selectedSceneName.value, selectedActorName.value, operation, [value]);
+    void cabbageContextService.recordEvent({
+      type: 'physics_changed',
+      category: 'physics',
+      success: true,
+      details: {
+        sceneName: selectedSceneName.value,
+        actorName: selectedActorName.value,
+        operation,
+      },
+    });
   } catch (error) {
     logError('更新对象物理属性失败', error);
   }
@@ -377,6 +463,16 @@ async function updateLocks(operation, values) {
       operation,
       values.map((value) => value ? 1 : 0)
     );
+    void cabbageContextService.recordEvent({
+      type: 'physics_changed',
+      category: 'physics',
+      success: true,
+      details: {
+        sceneName: selectedSceneName.value,
+        actorName: selectedActorName.value,
+        operation,
+      },
+    });
   } catch (error) {
     logError('更新对象轴锁失败', error);
   }
@@ -499,6 +595,11 @@ onUnmounted(() => {
 .property-row { display:grid; grid-template-columns:72px minmax(0,1fr) auto; align-items:center; gap:7px; margin-top:7px; }
 .property-row-wide { grid-template-columns:72px minmax(0,1fr) auto; }
 .property-row>label { color:#aeb4ad; font-size:11px; }
+.collision-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; }
+.collision-options label { display:flex; align-items:center; justify-content:center; min-width:0; padding:5px 4px; border:1px solid #444; border-radius:4px; background:#1f1f1f; color:#aeb4ad; font-size:10px; cursor:pointer; transition:border-color .15s,background .15s,color .15s; }
+.collision-options label:hover { border-color:#666; color:#f3f4f6; }
+.collision-options label.active { border-color:#84A65B; background:#526846; color:#fff; }
+.collision-options input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
 input[type='text'],input[type='number'],select { min-width:0; width:100%; border:1px solid #444; border-radius:4px; background:#1f1f1f; color:#e5e7eb; padding:5px 6px; font-size:11px; outline:none; }
 input:focus,select:focus { border-color:#84A65B; box-shadow:0 0 0 1px rgba(132,166,91,.18); }
 .property-error { margin:5px 0 0 79px; color:#ff9e91; font-size:10px; }
