@@ -2299,6 +2299,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "ProjectLauncher.create_project": ("kObjectPayloadParam", "EditorApiValueType::String"),
             "ProjectLauncher.create_world_project": ("kObjectPayloadParam", "EditorApiValueType::Object"),
             "ProjectLauncher.get_default_project_path": ("kNoParams", "EditorApiValueType::String"),
+            "ProjectLauncher.get_project_load_status": ("kNoParams", "EditorApiValueType::Object"),
             "ProjectLauncher.get_recent_projects": ("kNoParams", "EditorApiValueType::Array"),
             "ProjectLauncher.open_project": ("kOpenProjectParams", "EditorApiValueType::Object"),
             "ProjectLauncher.open_project_file": ("kNoParams", "EditorApiValueType::Object"),
@@ -2324,6 +2325,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "createProject: (projectData) =>\n    editorApi.project.createProject",
             "createWorldProject: (worldData) =>\n    editorApi.project.createWorldProject",
             "createMultiplayerProject: (projectData) =>\n    editorApi.project.createMultiplayerProject",
+            "getProjectLoadStatus: () => editorApi.project.getProjectLoadStatus()",
             "openProject: async (projectPath, options = {}) => {",
             "const result = await editorApi.project.openProject(projectPath, { load_policy: loadPolicy })",
             "setProjectMode: (mode, settings) =>\n    editorApi.project.setProjectMode",
@@ -3521,7 +3523,13 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertGreater(end, start)
         handler = source[start:end]
         self.assertIn("auto prepared = prepare_archive_load(path, load_policy)", handler)
-        self.assertIn("state.project_path = path_to_utf8(state.scene->project_root)", handler)
+        self.assertIn("materialize_scene_snapshot_into_state(", handler)
+        materialize_start = source.index("NativeEditorScene& materialize_scene_snapshot_into_state")
+        materialize_end = source.index("NativeResult invoke_project_archive_parser", materialize_start)
+        self.assertIn(
+            "state.project_path = path_to_utf8(scene.project_root)",
+            source[materialize_start:materialize_end],
+        )
         self.assertIn('{"path", state.project_path}', handler)
         self.assertNotIn("open_project_native", handler)
 
@@ -3845,6 +3853,55 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("load_status = ActorLoadStatus::Loaded", source)
         self.assertIn('"decision_required"', source)
         self.assertNotIn("std::unique_ptr<NativeEditorScene> load_native_scene(", source)
+
+    def test_archive_load_materializes_only_after_target_scene_is_committed(self):
+        source = self._handler_source()
+        prepare_start = source.index("PreparedArchiveLoad prepare_archive_load")
+        prepare_end = source.index("NativeEditorScene* ensure_native_editor_scene", prepare_start)
+        prepare_body = source[prepare_start:prepare_end]
+        struct_start = source.index("struct PreparedArchiveLoad")
+        struct_end = source.index("};", struct_start)
+        prepared_struct = source[struct_start:struct_end]
+
+        self.assertNotIn("materialize_scene_snapshot(", prepare_body)
+        self.assertNotIn("std::unique_ptr<NativeEditorScene> scene", prepared_struct)
+        self.assertIn("materialize_scene_snapshot_into_state", source)
+        self.assertIn("state.scene = std::make_unique<NativeEditorScene>()", source)
+        self.assertNotIn("state.scene = std::move(prepared.scene)", source)
+
+    def test_project_resource_loading_is_non_blocking_and_reported_to_frontend(self):
+        source = self._handler_source()
+        api_source = self._editor_api_source()
+        bridge_source = self._frontend_bridge_source()
+        main_page = (
+            self._repo_root()
+            / "editor"
+            / "Frontend"
+            / "src"
+            / "views"
+            / "layout"
+            / "MainPage.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('{"get_project_load_status"', source)
+        self.assertIn(
+            "EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_project_load_status, "
+            "kNoParams, EditorApiValueType::Object)",
+            api_source,
+        )
+        self.assertIn("getProjectLoadStatus: () =>", bridge_source)
+        self.assertIn("projectResourceLoadStatus", main_page)
+        self.assertIn("pollProjectResourceLoadStatus", main_page)
+
+    def test_project_resource_load_status_counts_audio_without_geometry_as_ready(self):
+        source = self._handler_source()
+        start = source.index("nlohmann::json project_resource_load_status()")
+        end = source.index("nlohmann::json camera_to_json", start)
+        handler = source[start:end]
+
+        audio_check = handler.index('actor.actor_type == "audio"')
+        geometry_failure_check = handler.index("!actor.geometry")
+        self.assertLess(audio_check, geometry_failure_check)
 
     def test_main_on_init_only_reads_committed_native_scene(self):
         source = self._handler_source()

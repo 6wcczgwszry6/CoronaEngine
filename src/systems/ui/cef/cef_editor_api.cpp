@@ -403,7 +403,7 @@ constexpr std::array<EditorApiParamSpec, 9> kScratchMouseEventParams = {{
 #define EDITOR_API_METHOD_SCHEMA(module, function, params_array, return_type) \
     EDITOR_API_METHOD_SCHEMA_WRAPPED(module, function, params_array, "", "", return_type)
 
-constexpr std::array<EditorApiMethodSpec, 141> kEditorApiMethods = {{
+constexpr std::array<EditorApiMethodSpec, 142> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, submit_request, kObjectPayloadParam, "ai.submitRequest", "ai.submit_request", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, generate_hint, kAiToolGenerateHintParams, "ai.generateHint", "ai.generate_hint", EditorApiValueType::Any),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(AITool, read_local_file_as_base64, kPathParam, "ai.readLocalFileAsBase64", "ai.read_local_file_as_base64", EditorApiValueType::Any),
@@ -470,6 +470,7 @@ constexpr std::array<EditorApiMethodSpec, 141> kEditorApiMethods = {{
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, create_world_project, kObjectPayloadParam, EditorApiValueType::Object),
     EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version, "project.getAppVersion", "project.get_app_version", EditorApiValueType::String),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_default_project_path, kNoParams, EditorApiValueType::String),
+    EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_project_load_status, kNoParams, EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_recent_projects, kNoParams, EditorApiValueType::Array),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ProjectLauncher, migrate_legacy_scene, kObjectPayloadParam, "project.migrateLegacyScene", "project.migrate_legacy_scene", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(ProjectLauncher, import_portable_asset, kObjectPayloadParam, "project.importPortableAsset", "project.import_portable_asset", EditorApiValueType::Object),

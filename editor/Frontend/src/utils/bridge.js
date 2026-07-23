@@ -530,6 +530,7 @@ const editorApiStatic = {
       call_manifest_editor_api('project.cleanupPortableSceneAssets', [payload || {}]),
     getAppVersion: () => call_manifest_editor_api('project.getAppVersion', []),
     getDefaultProjectPath: () => call_manifest_editor_api('project.getDefaultProjectPath', []),
+    getProjectLoadStatus: () => call_manifest_editor_api('project.getProjectLoadStatus', []),
     getRecentProjects: () => call_manifest_editor_api('project.getRecentProjects', []),
     migrateLegacyScene: (payload) =>
       call_manifest_editor_api('project.migrateLegacyScene', [payload || {}]),
@@ -1059,6 +1060,8 @@ export const projectLauncherService = {
     editorApi.project.setProjectMode(mode, settings),
   // 获取版本信息
   getAppVersion: () => editorApi.project.getAppVersion(),
+  // 获取当前项目异步资源加载进度
+  getProjectLoadStatus: () => editorApi.project.getProjectLoadStatus(),
   // 获取最近项目列表
   getRecentProjects: () => editorApi.project.getRecentProjects(),
 };
