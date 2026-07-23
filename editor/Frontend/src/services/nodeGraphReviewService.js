@@ -94,7 +94,7 @@ export function startNodeGraphReview({
   let requestSequence = 0;
   let activeTask = null;
   let pendingReview = null;
-  let lastSuccessfulRevision = '';
+  let lastSuccessfulReviewKey = '';
   let lastErrorKey = '';
 
   // Floating CEF panels may report document.visibilityState === 'hidden' even while
@@ -102,10 +102,16 @@ export function startNodeGraphReview({
   // not browser visibility, otherwise background node checks silently stop.
   const canReview = () => !stopped && enabled();
 
-  const currentCandidate = () => snapshotWithRevision(
-    getWorkspace?.(),
-    getRevisionScope?.()
-  );
+  const currentCandidate = () => {
+    const snapshot = snapshotWithRevision(getWorkspace?.(), getRevisionScope?.());
+    if (!snapshot) return null;
+    const projectContext = clone(getProjectContext?.());
+    return {
+      ...snapshot,
+      projectContext,
+      reviewKey: hashText(`${snapshot.revision}\n${JSON.stringify(projectContext)}`),
+    };
+  };
 
   const publishErrorOnce = (result, requestId, revision, projectScopeId = '') => {
     const errorKey = String(result?.error || result?.message || 'AI_REVIEW_FAILED');
@@ -122,13 +128,15 @@ export function startNodeGraphReview({
 
   const startCandidate = async (candidate) => {
     if (!candidate || stopped || activeTask || !canReview()) return;
-    if (candidate.revision === lastSuccessfulRevision) return;
+    if (candidate.reviewKey === lastSuccessfulReviewKey) return;
 
     const requestId = 'node_review_' + Date.now() + '_' + (++requestSequence);
     const task = {
       requestId,
       revision: candidate.revision,
+      reviewKey: candidate.reviewKey,
       workspace: candidate.workspace,
+      projectContext: candidate.projectContext,
       projectScopeId: candidate.projectScopeId,
       taskId: '',
     };
@@ -141,7 +149,7 @@ export function startNodeGraphReview({
         targetId: 'node_graph:project:global',
         workspace: candidate.workspace,
         projectScopeId: candidate.projectScopeId,
-        projectContext: clone(getProjectContext?.()),
+        projectContext: candidate.projectContext,
       });
       if (stopped || activeTask !== task) return;
       if (response?.success !== true || !response?.taskId) {
@@ -168,7 +176,7 @@ export function startNodeGraphReview({
     if (stopped || activeTask || !pendingReview || !canReview()) return;
     const candidate = pendingReview;
     pendingReview = null;
-    if (candidate.revision !== lastSuccessfulRevision) {
+    if (candidate.reviewKey !== lastSuccessfulReviewKey) {
       window.setTimeout(() => startCandidate(candidate), 0);
     }
   };
@@ -194,14 +202,14 @@ export function startNodeGraphReview({
       activeTask = null;
       const result = response.result || {};
       const latest = currentCandidate();
-      if (!latest || latest.revision !== task.revision) {
+      if (!latest || latest.reviewKey !== task.reviewKey) {
         if (latest) pendingReview = latest;
         continueWithPending();
         return;
       }
 
       if (result?.success === true && result?.status === 'ok') {
-        lastSuccessfulRevision = task.revision;
+        lastSuccessfulReviewKey = task.reviewKey;
         lastErrorKey = '';
         publishNodeGraphReview({
           ...result,
@@ -235,10 +243,10 @@ export function startNodeGraphReview({
       const candidate = currentCandidate();
       if (!candidate) return;
       if (activeTask) {
-        if (candidate.revision !== activeTask.revision) pendingReview = candidate;
+        if (candidate.reviewKey !== activeTask.reviewKey) pendingReview = candidate;
         return;
       }
-      if (candidate.revision === lastSuccessfulRevision) return;
+      if (candidate.reviewKey === lastSuccessfulReviewKey) return;
       await startCandidate(candidate);
     } finally {
       scanBusy = false;

@@ -488,7 +488,12 @@ import {
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
-import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
+import {
+  cabbageContextService,
+  cancelPendingTransformEvents,
+  publishCabbageAssistantContext,
+  subscribeCabbageAssistantContext,
+} from '@/services/cabbageAssistantContextService.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 
@@ -828,8 +833,11 @@ let pendingMainRenderSelection = null;
 const currentMainCameraId = () =>
   cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
 
-// Cabbage assistant: current unresolved node-logic tasks.
+// Cabbage assistant: world-scoped tutorial and node-logic tasks.
 let unsubscribeNodeGraphReview = null;
+let unsubscribeCabbageContext = null;
+let cabbageCandidateTimer = null;
+let cabbageWorldLoadGeneration = 0;
 const ACTIVE_PROJECT_PATH_KEY = 'corona.activeProjectPath';
 
 function normalizeActiveProjectPath(value) {
@@ -850,9 +858,43 @@ function currentProjectReviewScopeId() {
   return reviewScopeId(readActiveProjectPath());
 }
 
+async function persistCabbageTaskActions(actions = []) {
+  const validActions = Array.isArray(actions) ? actions.filter((item) => item?.task) : [];
+  for (const action of validActions) {
+    try {
+      await cabbageContextService.updateTask(action);
+    } catch (error) {
+      console.warn('[CabbageContext] failed to persist task', error?.message || error);
+    }
+  }
+  if (validActions.length) {
+    void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
+  }
+}
+
+async function loadCabbageWorldContext({ reset = true } = {}) {
+  const generation = ++cabbageWorldLoadGeneration;
+  if (reset) {
+    cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
+    publishCabbageAssistantContext(cabbageAssistant);
+  }
+  try {
+    const snapshot = await cabbageContextService.loadCurrentWorld();
+    if (generation !== cabbageWorldLoadGeneration) return null;
+    cabbageAssistant.hydrateContext(snapshot);
+    void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
+    return snapshot;
+  } catch (error) {
+    if (generation === cabbageWorldLoadGeneration) {
+      console.warn('[CabbageContext] failed to load world context', error?.message || error);
+    }
+    return null;
+  }
+}
+
 function clearNodeReviewForProjectChange() {
-  cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
-  publishCabbageAssistantContext(cabbageAssistant);
+  cancelPendingTransformEvents();
+  void loadCabbageWorldContext({ reset: true });
 }
 
 function refreshCameraAfterProjectChange() {
@@ -889,17 +931,39 @@ function onActiveProjectStorageChanged(event) {
   applyActualProjectChange(event?.newValue);
 }
 
-function handleNodeGraphReview(result) {
+async function handleNodeGraphReview(result) {
   if (result?.projectScopeId && result.projectScopeId !== currentProjectReviewScopeId()) return;
   if (result?.success !== true || result?.status !== 'ok') {
     if (result?.error) console.warn('[NodeGraphReview]', result.error);
     return;
   }
-  cabbageAssistant.applyReview(result);
+  const actions = cabbageAssistant.applyReview(result);
   publishCabbageAssistantContext(cabbageAssistant);
+  await persistCabbageTaskActions(actions);
 }
 
-// 加载菜单状态
+function promoteDueCabbageTasks(options = {}) {
+  const promoted = cabbageAssistant.promoteDueCandidates(options);
+  if (!promoted.length) return;
+  publishCabbageAssistantContext(cabbageAssistant);
+  void persistCabbageTaskActions(promoted.map((task) => ({ action: 'upsert', task })));
+}
+
+function onCabbageRunFailed(event) {
+  promoteDueCabbageTasks({ runtimeFailed: true });
+  if (event?.detail?.contextRecorded) return;
+  void cabbageContextService.recordEvent({
+    type: 'run_failed',
+    category: 'runtime',
+    success: false,
+    details: {
+      source: String(event?.detail?.source || 'editor'),
+      error: String(event?.detail?.error || '').slice(0, 500),
+    },
+  });
+}
+
+// Assistant state has been initialized above.
 const isLoadingMenu = ref(false);
 
 watch(showDialog, (newVal) => {
@@ -2477,8 +2541,15 @@ onMounted(async () => {
   await syncSceneCameraBinding(initialSceneId);
   broadcastViewportControlsState();
 
-  // Subscribe only to proactive DeepSeek node-graph review results.
+  // Subscribe to proactive DeepSeek reviews and the world-scoped assistant context.
   unsubscribeNodeGraphReview = subscribeNodeGraphReviews(handleNodeGraphReview);
+  unsubscribeCabbageContext = subscribeCabbageAssistantContext(
+    (snapshot) => cabbageAssistant.hydrateContext(snapshot),
+    { projectScopeId: currentProjectReviewScopeId, emitCurrent: true }
+  );
+  await loadCabbageWorldContext({ reset: true });
+  cabbageCandidateTimer = window.setInterval(() => promoteDueCabbageTasks(), 1000);
+  window.addEventListener('cabbage-run-failed', onCabbageRunFailed);
   window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.addEventListener('storage', onActiveProjectStorageChanged);
 });
@@ -2489,6 +2560,12 @@ onUnmounted(() => {
   unregisterEditorControls();
   unsubscribeNodeGraphReview?.();
   unsubscribeNodeGraphReview = null;
+  unsubscribeCabbageContext?.();
+  unsubscribeCabbageContext = null;
+  if (cabbageCandidateTimer) window.clearInterval(cabbageCandidateTimer);
+  cabbageCandidateTimer = null;
+  window.removeEventListener('cabbage-run-failed', onCabbageRunFailed);
+  void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
   coronaEventBus.off('panel-closed', handlePanelClosed);

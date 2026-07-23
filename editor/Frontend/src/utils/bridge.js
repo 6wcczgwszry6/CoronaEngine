@@ -917,6 +917,45 @@ export const aiService = {
     });
     return response?.data ?? response;
   },
+  loadCabbageContext: async () => {
+    const response = await editorApi.ai.submitRequest({ operation: 'cabbage.context.load' });
+    return response?.data ?? response;
+  },
+  recordCabbageEvent: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.record_event',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  updateCabbageTask: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.update_task',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  appendCabbageMessage: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.append_message',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startCabbageProfileScoreUpdate: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.profile.score.start',
+      payload,
+    });
+    return response?.data ?? response;
+  },
+  getCabbageProfileScoreStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.profile.score.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
 };
 
 export const aiClient = {
