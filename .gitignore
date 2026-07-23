@@ -20,6 +20,7 @@ Makefile
 .idea/
 .vs/
 .claude/
+.agents/
 .superpowers/
 codex.md
 AGENTS.md

@@ -1,4 +1,5 @@
 import warnings
+import json
 from langchain_core._api.deprecation import LangChainPendingDeprecationWarning
 
 warnings.filterwarnings("ignore", category=LangChainPendingDeprecationWarning)
@@ -32,6 +33,7 @@ from .services.request_service import AIRequestService
 from .services.stream_dispatcher import StreamDispatcher
 from .services.ai_hint_service import get_hint_service
 from .services.agent_runtime.flags import install_f5_runtime_provider_env_defaults
+from .services.node_graph_review_service import get_node_graph_review_service
 from .services.lanchat_agent_worker import LANChatAgentWorker
 
 try:
@@ -75,6 +77,7 @@ class AITool(PluginBase):
     )
     _request_states = _request_service.states
     _hint_service = get_hint_service()
+    _node_graph_review_service = get_node_graph_review_service()
 
     @classmethod
     def _init_hint_service(cls) -> None:
@@ -117,12 +120,23 @@ class AITool(PluginBase):
     @classmethod
     def submit_request(cls, request) -> dict:
         """AI script-service request entry for the C++ Editor API facade."""
+        try:
+            parsed = json.loads(request) if isinstance(request, str) else request
+        except Exception:
+            parsed = request
+        if isinstance(parsed, dict):
+            operation = parsed.get("operation")
+            if operation == "node_graph.review.start":
+                return cls._node_graph_review_service.start(parsed.get("payload") or {})
+            if operation == "node_graph.review.status":
+                return cls._node_graph_review_service.status(parsed.get("taskId") or parsed.get("task_id") or "")
         return cls._controller.submit_request(request)
 
     @classmethod
     def cleanup(cls):
         """清理资源"""
         cls._lanchat_agent_worker.stop()
+        cls._node_graph_review_service.shutdown()
         cls._controller.cleanup(cls._executor)
 
     @staticmethod

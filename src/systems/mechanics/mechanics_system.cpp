@@ -121,12 +121,17 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     const float floor_eps = 0.01f;                                       // 地板碰撞容差
     const float low_vel_threshold = 0.05f;                               // 低速衰减阈值
     const float zero_vel_threshold = 0.01f;                              // 速度归零阈值
-    const float friction_coeff = 0.35f;                                  // 统一摩擦系数
+    const float friction_coeff = 0.35f;                                  // 动态（滑动）摩擦系数
+    const float static_friction_coeff = 0.55f;                           // 静摩擦系数（坡面防微滑）
     const float sleep_threshold = 0.05f;                                 // 休眠速度阈值
     const float sleep_threshold_sq = sleep_threshold * sleep_threshold;  // 休眠速度阈值平方
     const float sleep_time_needed = 0.4f;                                // 静止多久后休眠
     const float min_inertia = 0.0001f;                                   // 最小转动惯量，防止除零
     const float rot_damping_factor = 0.97f;                              // 基础旋转阻尼系数
+    const float max_linear_speed = 80.0f;                                // 线速度上限 m/s，防碰飞
+    const float max_angular_speed = 30.0f;                               // 角速度上限 rad/s
+    const float max_impulse_per_contact = 500.0f;                        // 单次接触最大冲量 N·s
+    const float max_position_correction = 0.5f;                          // 单帧最大位置修正距离 m
 
     // 本帧临时表：质量/阻尼/恢复系数/碰撞开关
     std::unordered_map<std::uintptr_t, BodyFrameParams> frame_params;
@@ -290,6 +295,19 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         av.x *= effective_rot_damping;
         av.y *= effective_rot_damping;
         av.z *= effective_rot_damping;
+
+        // 4. 速度钳制：防止重力累积或异常冲量导致物体飞走
+        auto clamp_speed = [&](ktm::fvec3& v, float max_spd) {
+            float spd_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+            if (spd_sq > max_spd * max_spd) {
+                float inv = max_spd / std::sqrt(spd_sq);
+                v.x *= inv;
+                v.y *= inv;
+                v.z *= inv;
+            }
+        };
+        clamp_speed(impl_->body(h).velocity, max_linear_speed);
+        clamp_speed(impl_->body(h).angular_velocity, max_angular_speed);
     }
 
     // --- 阶段 2b：轴锁定强制执行 — 将已锁轴的速度/角速度分量清零 ---
@@ -489,8 +507,10 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         constexpr float min_overlap = 0.001f;          // 小于此视为数值噪声/SAT 抖振，跳过
         constexpr float k_positional_slop = 0.004f;    // Baumgarte 式校正：小穿透只靠冲量，不修位姿
         constexpr float k_positional_percent = 0.35f;  // 仅末轮按穿透拆分平移，且只推一部分，防过冲
-        constexpr int k_impulse_iterations = 5;        // 轮数↑ 堆叠更稳、成本↑；典型 3~8
+        constexpr int k_impulse_iterations = 8;        // 轮数↑ 堆叠更稳；提升到8以改善坡面接触收敛
+        constexpr float k_early_exit_vel_eps = 0.002f; // 本轮最大速度修正低于此值则提前退出
         for (int impulse_iter = 0; impulse_iter < k_impulse_iterations; ++impulse_iter) {
+            float max_delta_v_sq_this_iter = 0.0f;  // 本轮最大速度修正平方，用于收敛检测
             if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
                 return;
             }
@@ -720,7 +740,9 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 if (denom_n <= 1e-12f) {
                     continue;  // 近奇异（例如双臂共线且惯量项异常）
                 }
-                const float j = -(1.0f + rest_use) * v_n / denom_n;  // 法向冲量标量；约定 J = j·n 作用于 B 的正向
+                const float j_raw = -(1.0f + rest_use) * v_n / denom_n;  // 法向冲量标量（未钳制）
+                const float j = std::max(-max_impulse_per_contact,
+                                         std::min(max_impulse_per_contact, j_raw));  // 钳制防止单帧爆炸
 
                 va.x += normal.x * j * inv_ma;
                 va.y += normal.y * j * inv_ma;
@@ -745,6 +767,35 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     wb.z += dw.z;
                 }
 
+                // 法向冲量后钳制速度，防止累积过大
+                {
+                    auto clamp_speed_local = [&](ktm::fvec3& v, float max_spd) {
+                        float spd_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+                        if (spd_sq > max_spd * max_spd) {
+                            float inv = max_spd / std::sqrt(spd_sq);
+                            v.x *= inv;
+                            v.y *= inv;
+                            v.z *= inv;
+                        }
+                    };
+                    if (!sleep_a) {
+                        clamp_speed_local(va, max_linear_speed);
+                        clamp_speed_local(wa, max_angular_speed);
+                    }
+                    if (!sleep_b) {
+                        clamp_speed_local(vb, max_linear_speed);
+                        clamp_speed_local(wb, max_angular_speed);
+                    }
+                }
+
+                // 追踪本轮最大速度修正，用于提前终止判断
+                {
+                    float dv_a = std::abs(j) * inv_ma;
+                    float dv_b = std::abs(j) * inv_mb;
+                    float dv_max = std::max(dv_a, dv_b);
+                    max_delta_v_sq_this_iter = std::max(max_delta_v_sq_this_iter, dv_max * dv_max);
+                }
+
                 v_pa = velocity_at_point_world(va, wa, r_a);
                 v_pb = velocity_at_point_world(vb, wb, r_b);
                 v_rel = make_fvec3(v_pa.x - v_pb.x, v_pa.y - v_pb.y, v_pa.z - v_pb.z);
@@ -754,7 +805,10 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     v_rel.y - normal.y * v_n_rel,
                     v_rel.z - normal.z * v_n_rel);
                 const float vt_len = ktm::length(v_t);
-                if (vt_len > eps) {                                                                      // 无切向速度则跳过摩擦
+                // 追踪摩擦冲量导致的速度修正，纳入收敛判断
+                // （jt_abs 在摩擦块内赋值，此处默认为0；仅在摩擦块执行后被设为非零）
+                float jt_abs = 0.0f;
+                if (vt_len > eps) {
                     const ktm::fvec3 tdir = make_fvec3(v_t.x / vt_len, v_t.y / vt_len, v_t.z / vt_len);  // 滑移方向单位向量
                     const float v_slip = ktm::dot(v_rel, tdir);                                          // 沿 tdir 的标量滑移速度
                     const ktm::fvec3 raxt = ktm::cross(r_a, tdir);
@@ -766,8 +820,14 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     const float denom_t = inv_ma + inv_mb + ang_t_a + ang_t_b + eps;
                     if (denom_t > 1e-12f) {
                         const float jt_free = -v_slip / denom_t;                        // 无摩擦上限时的切向冲量（完全粘滞）
-                        const float jt_cap = friction_coeff * std::fabs(j);             // 库仑锥 |jt| ≤ μ|j|
+                        // 静/动摩擦区分：极低滑移速度时使用更高的静摩擦系数，防止坡面微滑循环
+                        constexpr float k_static_slip_threshold = 0.02f;               // 低于此速度视为"欲动未动"
+                        const float eff_friction = (vt_len < k_static_slip_threshold)
+                                                   ? static_friction_coeff
+                                                   : friction_coeff;
+                        const float jt_cap = eff_friction * std::fabs(j);              // 库仑锥 |jt| ≤ μ|j|
                         const float jt = std::max(-jt_cap, std::min(jt_cap, jt_free));  // 钳位到摩擦锥内
+                        jt_abs = std::abs(jt);  // 记录用于收敛判断
 
                         va.x += tdir.x * jt * inv_ma;
                         va.y += tdir.y * jt * inv_ma;
@@ -795,13 +855,44 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     }
                 }
 
+                // 摩擦冲量后再次钳制速度
+                {
+                    auto clamp_speed_local2 = [&](ktm::fvec3& v, float max_spd) {
+                        float spd_sq = v.x * v.x + v.y * v.y + v.z * v.z;
+                        if (spd_sq > max_spd * max_spd) {
+                            float inv = max_spd / std::sqrt(spd_sq);
+                            v.x *= inv;
+                            v.y *= inv;
+                            v.z *= inv;
+                        }
+                    };
+                    if (!sleep_a) {
+                        clamp_speed_local2(va, max_linear_speed);
+                        clamp_speed_local2(wa, max_angular_speed);
+                    }
+                    if (!sleep_b) {
+                        clamp_speed_local2(vb, max_linear_speed);
+                        clamp_speed_local2(wb, max_angular_speed);
+                    }
+                }
+
+                // 追踪摩擦冲量导致的速度修正，纳入收敛判断
+                if (jt_abs > 0.0f) {
+                    float dv_a_t = jt_abs * inv_ma;
+                    float dv_b_t = jt_abs * inv_mb;
+                    float dv_max_t = std::max(dv_a_t, dv_b_t);
+                    max_delta_v_sq_this_iter = std::max(max_delta_v_sq_this_iter, dv_max_t * dv_max_t);
+                }
+
                 if (impulse_iter == k_impulse_iterations - 1) {
                     // 末轮：按穿透深度记录软位置校正（延迟到 Phase 6 积分后统一应用，避免抖动）
                     const float pen = std::max(0.f, penetration - k_positional_slop);
-                    if (pen > 0.f) {
+                    // 钳制穿透深度以防止大穿透时的位置校正过大（如物体生成在碰撞体内部）
+                    const float pen_clamped = std::min(pen, max_position_correction / k_positional_percent);
+                    if (pen_clamped > 0.f) {
                         const float inv_sum = inv_ma + inv_mb;  // 按逆质量比例分摊平移
                         if (inv_sum > eps) {
-                            const float corr_scale = k_positional_percent * pen / inv_sum;
+                            const float corr_scale = k_positional_percent * pen_clamped / inv_sum;
                             const auto record_corr = [&](std::uintptr_t handle, float inv_eff, float sign) {
                                 if (inv_eff <= eps) return;
                                 auto& corr = position_correction[handle];  // 默认初始化为 {0,0,0}
@@ -879,7 +970,13 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     // =====================================================
                 }
             }
-        }  // 内层：collision_pairs；外层：impulse_iter
+    
+
+        // 收敛早退：本轮所有碰撞对的速度修正都极小，说明已稳定，无需继续迭代
+        if (max_delta_v_sq_this_iter < k_early_exit_vel_eps * k_early_exit_vel_eps) {
+            break;
+        }
+        }  // 外层：impulse_iter
 
         // ===== 碰撞结束检测：遍历上帧活跃但本帧消失的碰撞对，延迟触发 end 回调 =====
         for (const auto& old_pair : impl_->prev_active_collisions) {

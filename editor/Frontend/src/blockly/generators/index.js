@@ -234,7 +234,16 @@ const NODE_MOUSE_HATS = new Set([
   'event_mouse_contextmenu',
 ]);
 const NODE_PROCEDURE_BLOCKS = new Set(['procedures_defnoreturn', 'procedures_defreturn']);
-const GLOBAL_WORKSPACE_ROOT_TYPES = new Set(['variable_define', 'list_define', 'variable_show', 'variable_hide', 'list_show', 'list_hide']);
+const GLOBAL_WORKSPACE_ROOT_TYPES = new Set([
+  'variable_define',
+  'variable_set',
+  'variable_add',
+  'variable_show',
+  'variable_hide',
+  'list_define',
+  'list_show',
+  'list_hide',
+]);
 const BLOCKING_ACTIVE_LOOP_TYPES = new Set(['control_for', 'control_until', 'controls_whileUntil']);
 
 function hasWorkspaceBlocks(state) {

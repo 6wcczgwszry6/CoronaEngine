@@ -525,8 +525,8 @@ struct OpticsEventViewport {
     desc.depth_stencil.depth_compare_op = Corona::Horizon::CompareOp::LessOrEqual;
     desc.rasterizer.cull_mode = Corona::Horizon::CullMode::None;
     desc.blend.attachments = {Corona::Horizon::BlendStateDesc::opaque_attachment()};
-    desc.depth_attachment =
-        Corona::Horizon::DepthAttachmentDesc::with_format(Corona::Horizon::Format::D32);
+    // desc.depth_attachment =
+    //     Corona::Horizon::DepthAttachmentDesc::with_format(Corona::Horizon::Format::D32);
     return desc;
 }
 
@@ -543,8 +543,8 @@ struct OpticsEventViewport {
     desc.depth_stencil.depth_write_enabled = true;
     desc.depth_stencil.depth_compare_op = Corona::Horizon::CompareOp::LessOrEqual;
     desc.rasterizer.cull_mode = Corona::Horizon::CullMode::None;
-    desc.depth_attachment =
-        Corona::Horizon::DepthAttachmentDesc::with_format(Corona::Horizon::Format::D32);
+    // desc.depth_attachment =
+    //     Corona::Horizon::DepthAttachmentDesc::with_format(Corona::Horizon::Format::D32);
     return desc;
 }
 constexpr char kMouseIconRelativePath[] = "assets/icon/mouse_icon.png";

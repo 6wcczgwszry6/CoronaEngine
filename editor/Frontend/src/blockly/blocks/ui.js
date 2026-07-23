@@ -9,23 +9,6 @@ const setStatementBlock = (block, tooltip = '') => {
 };
 
 export const defineUiBlocks = () => {
-  Blockly.Blocks['ui_set_score'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('设置分数为')
-        .appendField(new Blockly.FieldNumber(0), 'VALUE');
-      setStatementBlock(this, '把当前运行时分数设置为指定数值');
-    },
-  };
-
-  Blockly.Blocks['ui_add_score'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('分数增加')
-        .appendField(new Blockly.FieldNumber(1), 'DELTA');
-      setStatementBlock(this, '在当前运行时分数上增加指定数值');
-    },
-  };
 
   Blockly.Blocks['ui_game_win'] = {
     init: function () {
@@ -40,37 +23,12 @@ export const defineUiBlocks = () => {
       setStatementBlock(this, '标记游戏失败并停止当前脚本');
     },
   };
-  Blockly.Blocks['ui_set_lives'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('设置生命为')
-        .appendField(new Blockly.FieldNumber(3), 'VALUE');
-      setStatementBlock(this, '把当前运行时生命值设置为指定数值');
-    },
-  };
-  Blockly.Blocks['ui_add_lives'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('生命增加')
-        .appendField(new Blockly.FieldNumber(1), 'DELTA');
-      setStatementBlock(this, '在当前生命值基础上增加或减少');
-    },
-  };
   Blockly.Blocks['ui_lives'] = {
     init: function () {
       this.appendDummyInput().appendField('生命');
       this.setOutput(true, 'Number');
       this.setStyle('ui_blocks');
       this.setTooltip('读取当前运行时生命值');
-    },
-  };
-  Blockly.Blocks['ui_set_countdown'] = {
-    init: function () {
-      this.appendDummyInput()
-        .appendField('设置倒计时')
-        .appendField(new Blockly.FieldNumber(30, 0), 'SECONDS')
-        .appendField('秒');
-      setStatementBlock(this, '启动一个基于运行时 monotonic time 的倒计时');
     },
   };
   Blockly.Blocks['ui_countdown_left'] = {
