@@ -8,27 +8,33 @@
       @wheel.stop
     >
       <transition name="task-board">
-        <section v-if="tasks.length" class="task-board" aria-label="节点问题任务">
+        <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
+          <strong>{{ assistant.ephemeralTip.title }}</strong>
+          <p>{{ assistant.ephemeralTip.message }}</p>
+        </section>
+      </transition>
+
+      <transition name="task-board">
+        <section v-if="tasks.length" class="task-board" aria-label="包菜任务">
           <header class="task-board-header">
-            <span>待处理节点问题</span>
+            <span>包菜任务</span>
             <span class="task-count">{{ tasks.length }}</span>
           </header>
           <div class="task-list">
-            <article v-for="task in tasks" :key="task.issueKey" class="task-item">
+            <article v-for="task in tasks" :key="task.taskKey || task.issueKey" class="task-item">
               <button
                 type="button"
                 class="task-title"
-                :class="{ selected: assistant.selectedTaskKey === task.issueKey }"
+                :class="{ selected: assistant.selectedTaskKey === (task.taskKey || task.issueKey) }"
                 @click="toggleTask(task)"
               >
-                <span class="task-dot"></span>
                 <span class="task-title-text">{{ task.title }}</span>
-                <span class="task-chevron" :class="{ expanded: expandedKeys.has(task.issueKey) }">⌄</span>
+                <span class="task-chevron" :class="{ expanded: expandedKeys.has(task.taskKey || task.issueKey) }">⌄</span>
               </button>
-              <div v-if="expandedKeys.has(task.issueKey)" class="task-detail">
+              <div v-if="expandedKeys.has(task.taskKey || task.issueKey)" class="task-detail">
                 <p v-if="task.message">{{ task.message }}</p>
                 <div v-if="task.suggestion" class="task-suggestion">
-                  <strong>这样修改</strong>
+                  <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
                   <p>{{ task.suggestion }}</p>
                 </div>
                 <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
@@ -54,7 +60,7 @@
 </template>
 
 <script setup>
-import { computed, reactive, watch } from 'vue';
+import { computed, onBeforeUnmount, reactive, watch } from 'vue';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { openFloatingPanel, toggleFloatingPanel } from '@/utils/panelWindows.js';
@@ -69,12 +75,21 @@ const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
 const chatOpen = computed(() => Boolean(dockStore.panels.CabbageChatPanel?.open));
+const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
+let optimizationTimer = null;
+
+function clearOptimizationTimer() {
+  if (optimizationTimer) window.clearTimeout(optimizationTimer);
+  optimizationTimer = null;
+}
 
 function toggleTask(task) {
-  assistant.selectTask(task.issueKey);
+  const key = taskKey(task);
+  if (!key) return;
+  assistant.selectTask(key);
   publishCabbageAssistantContext(assistant);
-  if (expandedKeys.has(task.issueKey)) expandedKeys.delete(task.issueKey);
-  else expandedKeys.add(task.issueKey);
+  if (expandedKeys.has(key)) expandedKeys.delete(key);
+  else expandedKeys.add(key);
 }
 
 async function toggleChat() {
@@ -83,13 +98,26 @@ async function toggleChat() {
 }
 
 async function openChat(task) {
-  assistant.selectTask(task.issueKey);
+  assistant.selectTask(taskKey(task));
   publishCabbageAssistantContext(assistant);
   await openFloatingPanel(dockStore, 'CabbageChatPanel');
 }
 
 watch(
-  () => props.tasks.map((task) => task.issueKey),
+  () => assistant.ephemeralTip?.expiresAt || 0,
+  (expiresAt) => {
+    clearOptimizationTimer();
+    if (!expiresAt) return;
+    const remaining = Math.max(0, Number(expiresAt) - Date.now());
+    optimizationTimer = window.setTimeout(() => assistant.clearOptimizationTip(), remaining);
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(clearOptimizationTimer);
+
+watch(
+  () => props.tasks.map((task) => taskKey(task)),
   (keys) => {
     const alive = new Set(keys);
     for (const key of Array.from(expandedKeys)) {
@@ -111,6 +139,18 @@ watch(
   transform: translateY(-50%);
   pointer-events: auto;
 }
+.optimization-tip {
+  width: min(330px, calc(100vw - 112px));
+  border: 1px solid #607255;
+  border-radius: 8px;
+  background: #2b3229;
+  color: #e7eee3;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, .5);
+  padding: 11px 12px;
+  line-height: 1.55;
+}
+.optimization-tip strong { display: block; color: #c6ddaf; font-size: 13px; }
+.optimization-tip p { margin: 5px 0 0; color: #cbd4c7; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-board {
   width: min(360px, calc(100vw - 112px));
   max-height: min(430px, calc(100vh - 72px));
@@ -158,7 +198,6 @@ watch(
   transition: background .14s ease, border-color .14s ease;
 }
 .task-title:hover, .task-title.selected { border-color: #718663; background: #343c32; }
-.task-dot { width: 8px; height: 8px; flex:0 0 auto; border-radius:50%; background:#f0ad3d; box-shadow:0 0 8px rgba(240,173,61,.35); }
 .task-title-text { min-width:0; flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:13px; font-weight:600; }
 .task-chevron { color:#9ca3af; transform:rotate(0deg); transition:transform .14s ease; }
 .task-chevron.expanded { transform:rotate(180deg); }

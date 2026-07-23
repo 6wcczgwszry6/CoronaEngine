@@ -8,10 +8,10 @@
     />
 
     <div class="context-strip">
-      <div class="context-title">当前节点问题</div>
+      <div class="context-title">当前任务</div>
       <select v-model="selectedKey" :disabled="!assistant.tasks.length" class="context-select">
-        <option value="">{{ assistant.tasks.length ? '全部未解决问题' : '当前没有未解决问题' }}</option>
-        <option v-for="task in assistant.tasks" :key="task.issueKey" :value="task.issueKey">
+        <option value="">{{ assistant.tasks.length ? '全部待处理任务' : '当前没有待处理任务' }}</option>
+        <option v-for="task in assistant.tasks" :key="task.taskKey || task.issueKey" :value="task.taskKey || task.issueKey">
           {{ task.title }}
         </option>
       </select>
@@ -22,7 +22,7 @@
       <div v-if="!assistant.messages.length" class="chat-empty">
         <img src="@/assets/cabbage.png" alt="" />
         <strong>继续问包菜</strong>
-        <p>可以询问当前节点问题为什么发生、积木应该接在哪里，或怎样确认已经修好。</p>
+        <p>可以询问当前任务为什么发生、积木应该接在哪里，或怎样确认已经修好。</p>
       </div>
       <article
         v-for="message in assistant.messages"
@@ -31,14 +31,14 @@
         :class="message.role"
       >
         <div class="chat-role">{{ message.role === 'assistant' ? '包菜' : '你' }}</div>
-        <div class="chat-content">{{ message.content }}</div>
+        <div class="chat-content">{{ message.role === 'assistant' ? cleanAssistantText(message.content) : message.content }}</div>
       </article>
       <article v-if="streamingContent" class="chat-message assistant streaming">
         <div class="chat-role">包菜</div>
-        <div class="chat-content">{{ streamingContent }}</div>
+        <div class="chat-content">{{ cleanedStreamingContent }}</div>
       </article>
       <div v-if="assistant.chatBusy && !streamingContent" class="chat-pending">
-        包菜正在查看当前节点逻辑…
+        包菜正在查看当前世界与任务…
       </div>
     </div>
 
@@ -49,7 +49,7 @@
         v-model="input"
         rows="3"
         maxlength="2000"
-        placeholder="继续询问这个节点问题…"
+        placeholder="继续询问当前任务或引擎操作…"
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="composer-actions">
@@ -71,6 +71,7 @@ import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { aiService } from '@/utils/bridge.js';
 import { reviewScopeId } from '@/services/nodeGraphReviewService.js';
 import {
+  cabbageContextService,
   publishCabbageAssistantContext,
   subscribeCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
@@ -84,6 +85,7 @@ const activeTaskId = ref('');
 let requestSequence = 0;
 let pollTimer = null;
 let unsubscribeAssistantContext = null;
+let activeMessageContext = null;
 
 const selectedKey = computed({
   get: () => assistant.selectedTaskKey,
@@ -92,6 +94,23 @@ const selectedKey = computed({
     publishCabbageAssistantContext(assistant);
   },
 });
+
+function cleanAssistantText(value = '') {
+  return String(value || '')
+    .replace(/^\s*```[^\n]*$/gm, '')
+    .replace(/^\s*#{1,6}\s+/gm, '')
+    .replace(/^\s*>\s?/gm, '')
+    .replace(/^\s*[-*_]{3,}\s*$/gm, '')
+    .replace(/\[([^\]]+)\]\([^\s)]+\)/g, '$1')
+    .replace(/\*\*|__/g, '')
+    .replace(/`([^`\n]+)`/g, '$1')
+    .replace(/^\s*[-*+]\s+/gm, '')
+    .replace(/[ \t]+$/gm, '')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+}
+
+const cleanedStreamingContent = computed(() => cleanAssistantText(streamingContent.value));
 
 function scrollToBottom() {
   nextTick(() => {
@@ -107,14 +126,21 @@ function clearPollTimer() {
 function finishRequest(requestId, { error = '', keepPartial = false } = {}) {
   if (assistant.activeRequestId !== requestId) return;
   clearPollTimer();
-  if (keepPartial && streamingContent.value.trim()) {
-    assistant.appendMessage({ role: 'assistant', content: streamingContent.value.trim() });
+  const completedContent = cleanAssistantText(streamingContent.value);
+  if (keepPartial && completedContent) {
+    const message = assistant.appendMessage({
+      role: 'assistant',
+      content: completedContent,
+      ...(activeMessageContext || {}),
+    });
+    if (message) void cabbageContextService.appendMessage(message);
   }
   streamingContent.value = '';
   activeTaskId.value = '';
   assistant.activeRequestId = '';
   assistant.chatBusy = false;
   assistant.chatError = error;
+  activeMessageContext = null;
   scrollToBottom();
 }
 
@@ -163,7 +189,16 @@ async function sendMessage() {
   const content = input.value.trim();
   if (!content || assistant.chatBusy) return;
   input.value = '';
-  assistant.appendMessage({ role: 'user', content });
+  const selectedTask = assistant.selectedTask;
+  const messageContext = {
+    taskKey: String(selectedTask?.taskKey || ''),
+    issueCode: selectedTask?.type === 'node-issue' ? String(selectedTask?.code || '') : '',
+    nodeId: String(selectedTask?.nodeId || ''),
+    blockId: String(selectedTask?.blockId || ''),
+  };
+  activeMessageContext = messageContext;
+  const userMessage = assistant.appendMessage({ role: 'user', content, ...messageContext });
+  if (userMessage) void cabbageContextService.appendMessage(userMessage);
   assistant.chatError = '';
   assistant.chatBusy = true;
   streamingContent.value = '';
@@ -174,9 +209,11 @@ async function sendMessage() {
   try {
     const response = await aiService.startNodeGraphReviewChat({
       requestId,
+      worldId: assistant.worldId,
       projectScopeId: assistant.projectScopeId,
       graphRevision: assistant.graphRevision,
-      selectedTaskKey: assistant.selectedTaskKey,
+      assistanceProfile: assistant.assistanceProfile,
+      selectedTaskKey: messageContext.taskKey,
       tasks: assistant.tasks,
       graphExcerpt: assistant.graphExcerpt,
       messages: assistant.messages.map(({ role, content: text }) => ({ role, content: text })),
@@ -199,14 +236,18 @@ async function stopWaiting() {
   const requestId = assistant.activeRequestId;
   const taskId = activeTaskId.value;
   if (!requestId) return;
-  const partial = streamingContent.value.trim();
+  const partial = cleanAssistantText(streamingContent.value);
   clearPollTimer();
   assistant.activeRequestId = '';
   activeTaskId.value = '';
   streamingContent.value = '';
   assistant.chatBusy = false;
   assistant.chatError = '已停止等待本次回答。';
-  if (partial) assistant.appendMessage({ role: 'assistant', content: partial });
+  if (partial) {
+    const message = assistant.appendMessage({ role: 'assistant', content: partial, ...(activeMessageContext || {}) });
+    if (message) void cabbageContextService.appendMessage(message);
+  }
+  activeMessageContext = null;
   if (taskId) {
     try { await aiService.cancelNodeGraphReviewChat(taskId); } catch (_) {}
   }
@@ -537,6 +578,3 @@ onBeforeUnmount(() => {
   50% { opacity: 1; transform: scale(1); }
 }
 </style>
-
-
-
