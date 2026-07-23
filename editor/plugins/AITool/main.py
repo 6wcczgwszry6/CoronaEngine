@@ -34,6 +34,7 @@ from .services.stream_dispatcher import StreamDispatcher
 from .services.ai_hint_service import get_hint_service
 from .services.node_graph_review_service import get_node_graph_review_service
 from .services.node_graph_review_chat_service import get_node_graph_review_chat_service
+from .services.cabbage_context_service import get_cabbage_context_service
 from .services.lanchat_agent_worker import LANChatAgentWorker
 
 try:
@@ -76,6 +77,7 @@ class AITool(PluginBase):
     _hint_service = get_hint_service()
     _node_graph_review_service = get_node_graph_review_service()
     _node_graph_review_chat_service = get_node_graph_review_chat_service()
+    _cabbage_context_service = get_cabbage_context_service()
 
     @classmethod
     def _init_hint_service(cls) -> None:
@@ -136,6 +138,18 @@ class AITool(PluginBase):
                 return cls._node_graph_review_chat_service.status(parsed.get("taskId") or parsed.get("task_id") or "")
             if operation == "node_graph.review.chat.cancel":
                 return cls._node_graph_review_chat_service.cancel(parsed.get("taskId") or parsed.get("task_id") or "")
+            if operation == "cabbage.context.load":
+                return cls._cabbage_context_service.load()
+            if operation == "cabbage.context.record_event":
+                return cls._cabbage_context_service.record_event(parsed.get("payload") or {})
+            if operation == "cabbage.context.update_task":
+                return cls._cabbage_context_service.update_task(parsed.get("payload") or {})
+            if operation == "cabbage.context.append_message":
+                return cls._cabbage_context_service.append_message(parsed.get("payload") or {})
+            if operation == "cabbage.profile.score.start":
+                return cls._cabbage_context_service.start_score_update(parsed.get("payload") or {})
+            if operation == "cabbage.profile.score.status":
+                return cls._cabbage_context_service.score_update_status(parsed.get("taskId") or parsed.get("task_id") or "")
         return cls._controller.submit_request(request)
 
     @classmethod
@@ -144,6 +158,7 @@ class AITool(PluginBase):
         cls._lanchat_agent_worker.stop()
         cls._node_graph_review_service.shutdown()
         cls._node_graph_review_chat_service.shutdown()
+        cls._cabbage_context_service.shutdown()
         cls._controller.cleanup(cls._executor)
 
     @staticmethod

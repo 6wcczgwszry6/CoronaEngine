@@ -1,4 +1,4 @@
-﻿"""Focused DeepSeek conversation for unresolved node-graph review tasks."""
+"""Focused DeepSeek conversation for unresolved node-graph review tasks."""
 
 from __future__ import annotations
 
@@ -50,11 +50,15 @@ class NodeGraphReviewChatService:
         for task in (payload.get("tasks") or [])[: cls.MAX_TASKS]:
             if not isinstance(task, dict):
                 continue
+            task_key = str(task.get("taskKey") or task.get("issueKey") or "")[:160]
             tasks.append({
-                "issueKey": str(task.get("issueKey") or "")[:160],
+                "taskKey": task_key,
+                "issueKey": task_key,
+                "type": "tutorial" if task.get("type") == "tutorial" else "node-issue",
                 "title": str(task.get("title") or "")[:160],
                 "message": str(task.get("message") or "")[:800],
                 "suggestion": str(task.get("suggestion") or "")[:800],
+                "completionCriteria": str(task.get("completionCriteria") or "")[:600],
                 "nodeId": str(task.get("nodeId") or "")[:160],
                 "blockId": str(task.get("blockId") or "")[:160],
             })
@@ -64,10 +68,21 @@ class NodeGraphReviewChatService:
         if len(graph_text) > cls.MAX_GRAPH_CHARS:
             graph_text = graph_text[: cls.MAX_GRAPH_CHARS] + "…"
 
+        raw_profile = payload.get("assistanceProfile")
+        raw_profile = raw_profile if isinstance(raw_profile, dict) else {}
+        try:
+            score = max(0, min(int(round(float(raw_profile.get("score", raw_profile.get("fluencyScore", 0)) or 0))), 100))
+        except (TypeError, ValueError):
+            score = 0
         return {
             "requestId": str(payload.get("requestId") or f"node_chat_{uuid.uuid4().hex}"),
+            "worldId": str(payload.get("worldId") or "")[:160],
             "projectScopeId": str(payload.get("projectScopeId") or "")[:160],
             "graphRevision": str(payload.get("graphRevision") or "")[:160],
+            "assistanceProfile": {
+                "score": score,
+                "updatedAt": max(0, int(raw_profile.get("updatedAt") or 0)),
+            },
             "selectedTaskKey": str(payload.get("selectedTaskKey") or "")[:160],
             "tasks": tasks,
             "graphText": graph_text,
@@ -77,29 +92,59 @@ class NodeGraphReviewChatService:
     @staticmethod
     def _build_messages(request: dict[str, Any]) -> list[dict[str, str]]:
         selected = next(
-            (task for task in request["tasks"] if task["issueKey"] == request["selectedTaskKey"]),
+            (task for task in request["tasks"] if task["taskKey"] == request["selectedTaskKey"]),
             None,
         )
         context = {
+            "worldId": request["worldId"],
             "projectScopeId": request["projectScopeId"],
             "graphRevision": request["graphRevision"],
             "selectedTask": selected,
-            "unresolvedTasks": request["tasks"],
+            "activeTasks": request["tasks"],
             "graphExcerpt": request["graphText"],
         }
+        profile = request.get("assistanceProfile") or {}
+        score = max(0, min(int(profile.get("score") or 0), 100))
+        has_score = int(profile.get("updatedAt") or 0) > 0
+        if not has_score:
+            score_instruction = (
+                "尚无稳定操作评分，请使用平和、清楚、适中详细度的回答。"
+            )
+        elif score >= 75:
+            score_instruction = (
+                "用户操作评分较高，请回答简洁、专业，给用户保留自主排查空间。"
+                "仅在直接相关时补充状态机、控制流、数据流、Boolean 求值、对象引用、"
+                "实时计算机图形学、变换或物理知识，不要展开无关教学。"
+            )
+        elif score <= 45:
+            score_instruction = (
+                "用户当前需要更具体的引导。请使用平和、通俗的语言，减少术语，"
+                "说清需要点击、拖拽、连接或修改的位置，并给出验证方法。"
+            )
+        else:
+            score_instruction = (
+                "请保持适中详细度，先给关键修改方向，再补充必要的操作步骤，"
+                "仅解释与当前问题直接相关的术语。"
+            )
         return [
             {
                 "role": "system",
                 "content": (
-                    "你是 CoronaEngine 的包菜节点答疑助手。只根据提供的未解决任务和可见节点片段回答。"
-                    "优先解释问题为什么发生、应该把哪个积木接到哪里、如何验证已经修好。"
-                    "不要编造项目中不存在的对象、节点、积木或接口；上下文不足时明确说明需要用户补充什么。"
-                    "使用简洁、友好的中文，不输出 JSON，不写 Python 脚本。"
+                    "你是 CoronaEngine 的包菜答疑助手。请围绕当前世界、待处理任务和节点图回答。"
+                    "对基础引导任务，说明如何在引擎内完成；对节点问题，说明原因、修改位置和验证方法。"
+                    "不得编造不存在的节点、积木、对象或 API。信息不足时应使用条件式建议。"
+                    "不要向用户显示内部评分，不要给用户贴美术、程序、入门、熟悉或熟练标签。"
+                    "不要输出 JSON，不要为用户生成或覆盖 Python 脚本。"
+
+                    "请使用干净的中文纯文本回答，不要使用 Markdown 标题、星号加粗、反引号、"
+                    "代码围栏或横线分隔符。需要分步骤时只使用‘1. 2. 3.’编号，"
+                    "每一步保持一到两句，不要堆叠装饰符号。"
+                    + score_instruction
                 ),
             },
             {
                 "role": "system",
-                "content": "当前节点上下文：" + json.dumps(context, ensure_ascii=False),
+                "content": "当前结构化上下文：" + json.dumps(context, ensure_ascii=False),
             },
             *request["messages"],
         ]

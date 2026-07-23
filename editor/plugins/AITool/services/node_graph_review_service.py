@@ -1,5 +1,6 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -127,16 +128,18 @@ class NodeGraphReviewService:
             return self._error("INVALID_REVIEW_DATA", str(exc))
 
         revision = request["graphRevision"]
+        cache_key = self._cache_key(request)
         task_id = "node_review_" + uuid.uuid4().hex
         now = time.time()
         with self._lock:
             if self._closed:
                 return self._error("AI_REVIEW_STOPPED", "Node graph review service has stopped.")
-            cached = self._result_cache.get(revision)
+            cached = self._result_cache.get(cache_key)
             if cached is not None:
                 self._tasks[task_id] = {
                     "taskId": task_id,
                     "graphRevision": revision,
+                    "cacheKey": cache_key,
                     "status": "completed",
                     "createdAt": now,
                     "completedAt": now,
@@ -153,14 +156,15 @@ class NodeGraphReviewService:
             self._tasks[task_id] = {
                 "taskId": task_id,
                 "graphRevision": revision,
+                "cacheKey": cache_key,
                 "status": "pending",
                 "createdAt": now,
             }
             self._prune_tasks_locked()
             future = self._executor.submit(self.review, request)
             future.add_done_callback(
-                lambda completed, current_task_id=task_id, current_revision=revision: self._complete_task(
-                    current_task_id, current_revision, completed
+                lambda completed, current_task_id=task_id, current_revision=revision, current_cache_key=cache_key: self._complete_task(
+                    current_task_id, current_revision, current_cache_key, completed
                 )
             )
 
@@ -198,7 +202,7 @@ class NodeGraphReviewService:
             self._closed = True
         self._executor.shutdown(wait=False, cancel_futures=True)
 
-    def _complete_task(self, task_id: str, revision: str, future: Any) -> None:
+    def _complete_task(self, task_id: str, revision: str, cache_key: str, future: Any) -> None:
         try:
             result = future.result()
         except Exception as exc:
@@ -215,7 +219,7 @@ class NodeGraphReviewService:
             task["completedAt"] = completed_at
             task["result"] = result
             if result.get("success") is True and result.get("status") == "ok":
-                self._result_cache[revision] = json.loads(
+                self._result_cache[cache_key] = json.loads(
                     json.dumps(result, ensure_ascii=False)
                 )
                 while len(self._result_cache) > self.MAX_CACHE_ENTRIES:
@@ -231,6 +235,13 @@ class NodeGraphReviewService:
         )
         for task in completed[: max(0, len(self._tasks) - self.MAX_TASKS)]:
             self._tasks.pop(str(task.get("taskId") or ""), None)
+
+    @staticmethod
+    def _cache_key(request: dict[str, Any]) -> str:
+        context = request.get("projectContext") if isinstance(request.get("projectContext"), dict) else {}
+        context_text = json.dumps(context, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        digest = hashlib.sha256(context_text.encode("utf-8")).hexdigest()[:20]
+        return f"{request.get('graphRevision', '')}:{digest}"
 
     @classmethod
     def _find_contract_path(cls, start_path: Path | str | None = None) -> Path:
@@ -484,13 +495,24 @@ class NodeGraphReviewService:
         result: dict[str, Any], request: dict[str, Any]
     ) -> None:
         if not isinstance(result.get("hasProblems"), bool):
-            raise ValueError("DeepSeek 结果缺少 hasProblems")
+            raise ValueError("DeepSeek 审查结果缺少 hasProblems")
+
+        project_context = request.get("projectContext") if isinstance(request.get("projectContext"), dict) else {}
+        optimization_enabled = project_context.get("optimizationHintsEnabled") is True
+        raw_tip = result.get("optimizationTip")
+        normalized_tip = None
+        if optimization_enabled and isinstance(raw_tip, dict):
+            tip_key = str(raw_tip.get("tipKey") or "").strip()[:120]
+            title = str(raw_tip.get("title") or "").strip()[:80]
+            message = str(raw_tip.get("message") or "").strip()[:360]
+            if tip_key and title and message:
+                normalized_tip = {"tipKey": tip_key, "title": title, "message": message}
 
         summary = result.get("summary", "")
         if result["hasProblems"] and (
             not isinstance(summary, str) or not summary.strip()
         ):
-            raise ValueError("DeepSeek 检测到问题但没有给出 summary")
+            raise ValueError("DeepSeek 审查结果缺少可显示的 summary")
         result["summary"] = summary.strip()[:160] if isinstance(summary, str) else ""
 
         issues = result.get("issues", [])
@@ -499,8 +521,10 @@ class NodeGraphReviewService:
         if not result["hasProblems"]:
             result["summary"] = ""
             result["issues"] = []
+            result["optimizationTip"] = normalized_tip
             return
 
+        result["optimizationTip"] = None
         node_ids = {
             str(node.get("id"))
             for node in request["workspace"]["nodes"]
@@ -530,7 +554,7 @@ class NodeGraphReviewService:
             if confidence < 0.8:
                 continue
             code = str(item.get("code") or "logic_issue")[:80]
-            title = str(item.get("title") or "\u8282\u70b9\u903b\u8f91\u9700\u8981\u5904\u7406").strip()[:80]
+            title = str(item.get("title") or "节点逻辑需要调整").strip()[:80]
             message = str(item.get("message") or result["summary"]).strip()[:500]
             suggestion = str(item.get("suggestion") or result["summary"]).strip()[:500]
             normalized.append(
@@ -550,6 +574,7 @@ class NodeGraphReviewService:
             result["hasProblems"] = False
             result["summary"] = ""
             result["issues"] = []
+            result["optimizationTip"] = normalized_tip
             return
         result["issues"] = normalized
 
@@ -921,34 +946,94 @@ class NodeGraphReviewService:
         catalog_json = json.dumps(
             catalog, ensure_ascii=False, separators=(",", ":")
         )
+        project_context = request.get("projectContext") or {}
+        assistance_profile = (
+            project_context.get("assistanceProfile")
+            if isinstance(project_context.get("assistanceProfile"), dict)
+            else {}
+        )
+        try:
+            score = max(
+                0,
+                min(
+                    int(
+                        round(
+                            float(
+                                assistance_profile.get(
+                                    "score", assistance_profile.get("fluencyScore", 0)
+                                )
+                                or 0
+                            )
+                        )
+                    ),
+                    100,
+                ),
+            )
+        except (TypeError, ValueError):
+            score = 0
+        has_score = int(assistance_profile.get("updatedAt") or 0) > 0
+        optimization_enabled = project_context.get("optimizationHintsEnabled") is True
+
+        if not has_score:
+            score_instruction = (
+                "尚无稳定的操作评分。请使用平和、清楚、适中详细度的表达，"
+                "既说明问题影响，也给出可执行的修复步骤。"
+            )
+        elif score >= 75:
+            score_instruction = (
+                f"内部操作评分为 {score}/100。请给用户保留更多自主编辑空间，回答简洁、专业，"
+                "不要展开基础教学。仅在与当前问题直接相关时，补充状态机、控制流、数据流、"
+                "Boolean 求值、对象引用、实时计算机图形学、变换或物理方面的专业知识。"
+            )
+        elif score <= 45:
+            score_instruction = (
+                f"内部操作评分为 {score}/100。请使用平和、通俗的语言，减少专业术语，"
+                "明确说明需要点击、拖拽、连接或修改哪个节点和积木，并说明如何验证修复结果。"
+            )
+        else:
+            score_instruction = (
+                f"内部操作评分为 {score}/100。请保持适中详细度，给出关键操作步骤，"
+                "必要时解释少量与当前问题直接相关的术语。"
+            )
+
+        optimization_instruction = (
+            "若确认当前节点逻辑没有错误，可以额外给出一条与现有逻辑直接相关的优化建议。"
+            "此时填写 optimizationTip={tipKey,title,message}，建议只能改善当前控制流、数据流、"
+            "对象引用、可读性或稳定性，不得要求用户添加额外玩法；没有可靠建议时返回 null。"
+            if optimization_enabled
+            else "本次不需要优化建议，optimizationTip 必须返回 null。"
+        )
         return (
-            "你只负责判断当前 CoronaEngine 节点图按它已经表达出的逻辑能否正确执行。\n"
-            "不要评价游戏是否有趣、丰富、完整或复杂；不要要求增加胜利、失败、分数、生命、"
-            "敌人、冷却、界面或任何额外玩法。单节点、简单逻辑、持续运行、没有结束状态都可以"
-            "是正确设计。不要参照坦克大战、下到一百层、躲避球或任何固定 Demo 模板，也不要猜测"
-            "用户原本想做什么。\n"
-            "只有从可见节点、连线、条件、积木和场景上下文中能够直接证明以下情况时，才返回 "
-            "hasProblems=true：图结构无效或无法启动；已有连线或条件无效；某条已经表达的流程确定性"
-            "地不可达；某个条件依赖的值按可见逻辑永远不可能满足；引用的节点、积木或场景对象不存在；"
-            "同一条流程中的状态读写明显矛盾；循环确定性地造成阻塞或失控。项目全局节点没有隐式"
-            "‘当前物体’：如果本地事实包含 missing_actor_target 或 actor_target_not_found，必须明确说明"
-            "哪个操作没有指向有效物体，并告诉用户在对象参数中选择场景对象，或改用带对象名称/标签参数的"
-            "项目级积木。缺少某种玩法功能不是错误，只是可能可以扩展也不是错误；证据不足或无法确定用户"
-            "意图时必须返回无问题。\n"
-            "如果逻辑正确，严格输出 {\"hasProblems\":false,\"summary\":\"\",\"issues\":[]}。\n"
-            "如果逻辑确实错误，严格输出 JSON：{\"hasProblems\":true,\"summary\":\"……有问题，"
-            "原因是……；把……改成……就好了。\",\"issues\":[{\"severity\":\"warning\","
-            "\"confidence\":0.95,\"nodeId\":\"真实节点ID或空字符串\","
-            "\"blockId\":\"真实积木ID或空字符串\",\"code\":\"稳定的英文问题代码\","
-            "\"title\":\"简短名称\",\"message\":\"错误原因\","
-            "\"suggestion\":\"直接修复方法\"}]}。\n"
-            "summary 只写一句简短中文，最多 160 字，把多个确定的问题合并说明；不要列清单，不要介绍"
-            "模块，不要输出玩法扩展、优化建议或鼓励语。issues 只记录 summary 所依据的真实问题。\n"
-            "本地确定性事实（只作为证据；没有事实不代表一定有错）："
+            "你是 CoronaEngine 节点逻辑审查助手。请在游戏运行前审查项目级节点图。\n"
+            "只判断当前可见节点、连线、跳转条件和积木是否存在会导致逻辑错误、无法执行、"
+            "对象引用缺失或结果明显不符合当前逻辑意图的问题。不要评价玩法是否丰富，"
+            "不要因为 Demo 简单就建议增加功能。\n"
+            "本地事实是确定性线索，必须优先核对。发现真实问题时 hasProblems=true；"
+            "没有真实问题时 hasProblems=false。不要把布局位置、节点数量少或缺少额外玩法当成错误。"
+            "若需要操作具体物体，但对象字段为空、仍是占位值或引用不存在，必须指出缺少对象目标，"
+            "并使用 missing_actor_target 或 actor_target_not_found 等稳定 code。"
+            "issues 中的 nodeId 和 blockId 必须引用输入中真实存在的 ID；无法定位时可留空，不能编造。\n"
+            + score_instruction
+            + "\n"
+            + optimization_instruction
+            + "\n"
+            "不要在输出中显示内部评分，也不要给用户贴美术、程序、入门、熟悉或熟练标签。\n"
+            "只返回一个 JSON 对象，不要 Markdown。无问题示例："
+            '{"hasProblems":false,"summary":"","issues":[],"optimizationTip":null}'
+            "；若有可靠优化建议，可将 optimizationTip 替换为"
+            '{"tipKey":"stable_tip_key","title":"short title","message":"relevant suggestion"}。\n'
+            "有问题示例："
+            '{"hasProblems":true,"summary":"logic has a problem; fix it this way",'
+            '"issues":[{"severity":"warning","confidence":0.95,"nodeId":"real node ID or empty",'
+            '"blockId":"real block ID or empty","code":"stable_issue_code","title":"short title",'
+            '"message":"cause","suggestion":"specific fix"}],"optimizationTip":null}。\n'
+            "summary 使用自然中文，总长度不超过 160 字；多个问题合并成一句总结。"
+            "issues 用于任务定位，内容必须与 summary 一致。\n"
+            "本地确定性事实："
             + facts_json
             + "\n项目上下文："
             + context_json
-            + "\n当前实际使用的积木合同摘要："
+            + "\n相关积木能力摘要："
             + catalog_json
             + "\n节点图："
             + graph_json
