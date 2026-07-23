@@ -7,6 +7,18 @@
       @click.stop
       @wheel.stop
     >
+      <button
+        type="button"
+        class="cabbage-button"
+        :class="{ active: chatOpen }"
+        :title="chatOpen ? '关闭包菜答疑' : '打开包菜答疑'"
+        :aria-pressed="chatOpen"
+        @click="toggleChat"
+      >
+        <img src="@/assets/cabbage.png" alt="包菜答疑" />
+        <span v-if="tasks.length" class="cabbage-badge">{{ tasks.length > 99 ? '99+' : tasks.length }}</span>
+      </button>
+
       <transition name="task-board">
         <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
           <strong>{{ assistant.ephemeralTip.title }}</strong>
@@ -15,9 +27,9 @@
       </transition>
 
       <transition name="task-board">
-        <section v-if="tasks.length" class="task-board" aria-label="包菜任务">
+        <section v-if="tasks.length" class="task-board" aria-label="包菜向你扔的屎">
           <header class="task-board-header">
-            <span>包菜任务</span>
+            <span>包菜向你扔的屎</span>
             <span class="task-count">{{ tasks.length }}</span>
           </header>
           <div class="task-list">
@@ -44,17 +56,6 @@
         </section>
       </transition>
 
-      <button
-        type="button"
-        class="cabbage-button"
-        :class="{ active: chatOpen }"
-        :title="chatOpen ? '关闭包菜答疑' : '打开包菜答疑'"
-        :aria-pressed="chatOpen"
-        @click="toggleChat"
-      >
-        <img src="@/assets/cabbage.png" alt="包菜答疑" />
-        <span v-if="tasks.length" class="cabbage-badge">{{ tasks.length > 99 ? '99+' : tasks.length }}</span>
-      </button>
     </div>
   </Teleport>
 </template>
@@ -130,17 +131,24 @@ watch(
 <style scoped>
 .cabbage-review-root {
   position: fixed;
-  right: 16px;
+  right: 18px;
   top: 50%;
   z-index: 2147483645;
   display: flex;
+  width: min(310px, calc(100vw - 36px));
+  max-height: calc(100vh - 128px);
+  flex-direction: column;
   align-items: center;
-  gap: 10px;
+  gap: 12px;
   transform: translateY(-50%);
+  pointer-events: none;
+}
+.cabbage-review-root > * {
   pointer-events: auto;
 }
 .optimization-tip {
-  width: min(330px, calc(100vw - 112px));
+  width: 100%;
+  box-sizing: border-box;
   border: 1px solid #607255;
   border-radius: 8px;
   background: #2b3229;
@@ -152,25 +160,34 @@ watch(
 .optimization-tip strong { display: block; color: #c6ddaf; font-size: 13px; }
 .optimization-tip p { margin: 5px 0 0; color: #cbd4c7; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-board {
-  width: min(360px, calc(100vw - 112px));
-  max-height: min(430px, calc(100vh - 72px));
+  position: relative;
+  width: 100%;
+  max-height: min(520px, calc(100vh - 222px));
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
   overflow: hidden;
-  border: 1px solid #444b45;
-  border-radius: 8px;
-  background: #242824;
+  border: 1px solid #4a554b;
+  border-left: 3px solid #789665;
+  border-radius: 9px;
+  background: #232824;
   color: #e5e9e4;
-  box-shadow: 0 16px 44px rgba(0, 0, 0, .58);
+  box-shadow: 0 18px 46px rgba(0, 0, 0, .62), 0 0 0 1px rgba(120, 150, 101, .08);
 }
 .task-board-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 12px;
-  border-bottom: 1px solid #3d443e;
-  background: #2d322e;
+  min-height: 42px;
+  box-sizing: border-box;
+  padding: 10px 12px 10px 13px;
+  border-bottom: 1px solid #465047;
+  background: #303730;
   color: #dce6d7;
-  font-size: 13px;
-  font-weight: 600;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .02em;
 }
 .task-count {
   min-width: 22px;
@@ -182,7 +199,17 @@ watch(
   color: #fff3c8;
   font-size: 11px;
 }
-.task-list { max-height: 380px; overflow-y: auto; padding: 6px; }
+.task-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: #59655b #252a26;
+}
+.task-list::-webkit-scrollbar { width: 7px; }
+.task-list::-webkit-scrollbar-track { background: #252a26; }
+.task-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #59655b; }
 .task-item + .task-item { margin-top: 5px; }
 .task-title {
   width: 100%;
@@ -208,8 +235,8 @@ watch(
 .task-discuss { margin-top:9px; border-radius:5px; background:#526847; color:#eef8e8; padding:5px 9px; font-size:11px; }
 .cabbage-button {
   position: relative;
-  width: 66px;
-  height: 66px;
+  width: 68px;
+  height: 68px;
   flex: 0 0 auto;
   overflow: visible;
   border: 2px solid rgba(110, 231, 183, .72);
@@ -221,6 +248,12 @@ watch(
 .cabbage-button:hover, .cabbage-button.active { transform:scale(1.05); border-color:#d1fae5; }
 .cabbage-button img { width:100%; height:100%; border-radius:50%; object-fit:cover; }
 .cabbage-badge { position:absolute; right:-3px; top:-4px; min-width:22px; height:22px; display:grid; place-items:center; border:2px solid #1b211c; border-radius:999px; background:#e89a2e; color:white; padding:0 4px; font-size:10px; font-weight:700; }
-.task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin:right center; }
-.task-board-enter-from, .task-board-leave-to { opacity:0; transform:translateX(8px) scale(.98); }
+.task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin:center bottom; }
+.task-board-enter-from, .task-board-leave-to { opacity:0; transform:translateY(8px) scale(.98); }
+
+@media (max-height: 620px) {
+  .cabbage-review-root { max-height: calc(100vh - 88px); }
+  .task-board { max-height: calc(100vh - 180px); }
+}
 </style>
+
