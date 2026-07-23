@@ -875,6 +875,20 @@ export const aiService = {
   sendMessageToAIStream: (payload) => editorApi.ai.sendMessageToAIStream(payload),
   readLocalFileAsBase64: (filePath) => editorApi.ai.readLocalFileAsBase64(filePath),
   generateHint: (elementType, context = {}) => editorApi.ai.generateHint(elementType, context),
+  startNodeGraphReview: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphReviewStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
 };
 
 export const aiClient = {
@@ -937,7 +951,6 @@ export const scriptingService = {
   saveBlocklyTarget: (payload) => editorApi.scratch.saveBlocklyTarget(payload),
 
   loadBlocklyTarget: (payload) => editorApi.scratch.loadBlocklyTarget(payload),
-
   startGamePreview: (payload = { scope: 'project' }) => editorApi.scratch.startGamePreview(payload),
 
   stopGamePreview: () => editorApi.scratch.stopGamePreview(),
@@ -1012,11 +1025,19 @@ export const projectLauncherService = {
     editorApi.project.createMultiplayerProject(projectData),
   // Open a project and force the active native scene to come from it.
   openProject: async (projectPath) => {
+    try {
+      await window.__coronaNodeGraphFlushSave?.();
+    } catch (error) {
+      console.warn('切换项目之前保存节点图失败，继续打开目标项目:', error);
+    }
     const result = await editorApi.project.openProject(projectPath);
     const success = result?.data ?? result;
     const activeProjectPath = success?.path || projectPath;
     if (success && activeProjectPath) {
       window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+      window.dispatchEvent(new CustomEvent('corona-active-project-changed', {
+        detail: { projectPath: activeProjectPath },
+      }));
       try {
         // Different projects commonly reuse Scene/default.scene. Reload the
         // native scene so actors from the previous project cannot leak across.

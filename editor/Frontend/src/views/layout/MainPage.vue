@@ -440,13 +440,10 @@
       </svg>
     </div>
 
-    <!-- 包菜自动提示气泡：每隔一段时间弹出，时长由 cabbage_hint_time 控制 -->
-    <AIHintBubble
-      :show="cabbageBubbleShow"
-      :hintText="cabbageBubbleText"
-      :loading="cabbageBubbleLoading"
-      :autoHideMs="cabbageHintTime * 1000"
-      @close="onCabbageBubbleClose"
+    <CabbageReviewAssistant
+      v-model:open="cabbageAssistantOpen"
+      :tasks="nodeReviewTasks"
+      :attention-token="nodeReviewAttentionToken"
     />
   </div>
 </template>
@@ -468,8 +465,9 @@ import {
   createViewportUiPointerController,
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
-import AIHintBubble from '@/components/ui/AIHintBubble.vue';
-import { startStageHints, stopStageHints, setHintShowMs } from '@/services/aiHintGenerator.js';
+import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
+import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
+import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
@@ -783,27 +781,96 @@ let pendingMainRenderSelection = null;
 const currentMainCameraId = () =>
   cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
 
-// ── 包菜提示气泡状态 ──
-const STORAGE_KEY = 'corona_editor_settings';
-const cabbageBubbleShow = ref(false);
-const cabbageBubbleText = ref('');
-const cabbageBubbleLoading = ref(false);
-const cabbageHintTime = ref(3.0); // 默认 3 秒，从设置中读取
+// Cabbage assistant: current unresolved node-logic tasks.
+const LEGACY_NODE_REVIEW_HISTORY_KEY = 'corona_node_graph_review_history_v1';
+const cabbageAssistantOpen = ref(false);
+const nodeReviewTasks = ref([]);
+const nodeReviewAttentionToken = ref(0);
+let unsubscribeNodeGraphReview = null;
 
-function readCabbageHintTime() {
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      if (typeof parsed.cabbage_hint_time === 'number' && parsed.cabbage_hint_time > 0) {
-        cabbageHintTime.value = parsed.cabbage_hint_time;
-      }
-    }
-  } catch (_) { /* keep default */ }
+function normalizeReviewTask(summary, graphRevision, previous = null) {
+  const message = String(summary || '').trim().slice(0, 160);
+  if (!message) return null;
+  const now = Date.now();
+  return {
+    issueKey: 'current_node_graph_logic',
+    code: 'node_graph_logic_issue',
+    severity: 'warning',
+    confidence: 1,
+    nodeId: '',
+    blockId: '',
+    title: '当前逻辑有问题',
+    message,
+    suggestion: '',
+    graphRevision: String(graphRevision || ''),
+    createdAt: Number(previous?.createdAt) || now,
+    updatedAt: now,
+  };
 }
 
-function onCabbageBubbleClose() {
-  cabbageBubbleShow.value = false;
+function removeLegacyReviewHistory() {
+  try {
+    localStorage.removeItem(LEGACY_NODE_REVIEW_HISTORY_KEY);
+  } catch (_) { /* storage may be unavailable */ }
+}
+
+function currentProjectReviewScopeId() {
+  return reviewScopeId(window.localStorage?.getItem('corona.activeProjectPath') || '');
+}
+
+function clearNodeReviewForProjectChange() {
+  nodeReviewTasks.value = [];
+  cabbageAssistantOpen.value = false;
+}
+
+function refreshCameraAfterProjectChange() {
+  window.setTimeout(() => {
+    void refreshSceneCameraBinding({
+      force: true,
+      preservePose: false,
+    });
+  }, 0);
+}
+
+function onActiveProjectChanged() {
+  clearNodeReviewForProjectChange();
+  clearKnownEditorCameraInputLocks();
+  void reconcileEditorCameraInputLocks();
+  refreshCameraAfterProjectChange();
+}
+
+function onActiveProjectStorageChanged(event) {
+  if (event?.key !== 'corona.activeProjectPath') return;
+  clearNodeReviewForProjectChange();
+  clearKnownEditorCameraInputLocks();
+  void reconcileEditorCameraInputLocks();
+  refreshCameraAfterProjectChange();
+}
+
+function handleNodeGraphReview(result) {
+  if (result?.projectScopeId && result.projectScopeId !== currentProjectReviewScopeId()) return;
+  if (result?.success !== true || result?.status !== 'ok') {
+    if (result?.error) console.warn('[NodeGraphReview]', result.error);
+    return;
+  }
+
+  if (result.hasProblems !== true) {
+    nodeReviewTasks.value = [];
+    return;
+  }
+
+  const previous = nodeReviewTasks.value[0] || null;
+  const task = normalizeReviewTask(result.summary, result.graphRevision, previous);
+  if (!task) {
+    nodeReviewTasks.value = [];
+    return;
+  }
+
+  const changed = !previous
+    || previous.message !== task.message
+    || previous.graphRevision !== task.graphRevision;
+  nodeReviewTasks.value = [task];
+  if (changed) nodeReviewAttentionToken.value += 1;
 }
 
 // 新增：加载状态
@@ -911,7 +978,12 @@ const cancelAddTab = () => {
 
 const isVector3 = (value) => Array.isArray(value) && value.length === 3;
 
-const applySceneSnapshot = (sceneId, payload) => {
+let sceneCameraBindingRequestRevision = 0;
+let sceneCameraBindingRefreshPromise = null;
+let sceneCameraBindingLastRefreshAt = 0;
+const SCENE_CAMERA_BINDING_REFRESH_INTERVAL_MS = 1000;
+
+const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => {
   const snapshot = payload?.scene ?? payload?.data?.scene ?? payload?.data ?? payload;
   if (!snapshot || typeof snapshot !== 'object') {
     cameraBindingState.value = {
@@ -954,6 +1026,8 @@ const applySceneSnapshot = (sceneId, payload) => {
 
   if (
     activeCamera &&
+    !preservePose &&
+    !isRealtimeCameraInputActive() &&
     (isVector3(activeCamera.position) ||
       isVector3(activeCamera.forward) ||
       isVector3(activeCamera.world_up))
@@ -975,17 +1049,42 @@ const applySceneSnapshot = (sceneId, payload) => {
   }
 };
 
-const syncSceneCameraBinding = async (sceneId) => {
+const syncSceneCameraBinding = async (sceneId, { preservePose = false } = {}) => {
   if (!sceneId) {
-    return;
+    return false;
   }
 
+  const requestRevision = ++sceneCameraBindingRequestRevision;
   try {
     const result = await sceneService.getScene(sceneId);
-    applySceneSnapshot(sceneId, result);
+    if (requestRevision !== sceneCameraBindingRequestRevision) return false;
+    applySceneSnapshot(sceneId, result, { preservePose });
+    return true;
   } catch (e) {
-    logError('Failed to sync scene camera binding', e);
+    if (requestRevision === sceneCameraBindingRequestRevision) {
+      logError('Failed to sync scene camera binding', e);
+    }
+    return false;
   }
+};
+
+const refreshSceneCameraBinding = ({ force = false, preservePose = true } = {}) => {
+  const sceneId = tabs.value[activeTab.value]?.id || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME;
+  const now = Date.now();
+  if (!force && sceneCameraBindingRefreshPromise) return sceneCameraBindingRefreshPromise;
+  if (!force && now - sceneCameraBindingLastRefreshAt < SCENE_CAMERA_BINDING_REFRESH_INTERVAL_MS) {
+    return Promise.resolve(true);
+  }
+
+  sceneCameraBindingLastRefreshAt = now;
+  const refreshPromise = syncSceneCameraBinding(sceneId, { preservePose });
+  const trackedPromise = refreshPromise.finally(() => {
+    if (sceneCameraBindingRefreshPromise === trackedPromise) {
+      sceneCameraBindingRefreshPromise = null;
+    }
+  });
+  sceneCameraBindingRefreshPromise = trackedPromise;
+  return trackedPromise;
 };
 
 const restoreCameraViews = async (sceneId) => {
@@ -1040,6 +1139,10 @@ const focusViewportInput = () => {
   viewportPickSurfaceRef.value?.focus?.({ preventScroll: true });
 };
 
+const handleMainWindowFocus = () => {
+  void refreshSceneCameraBinding({ preservePose: true });
+};
+
 const handleKeyDown = (event) => {
   // 检查输入框是否聚焦
   const inputElement = document.getElementById('new-tab-name');
@@ -1071,6 +1174,12 @@ const handleKeyDown = (event) => {
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
     event.preventDefault();
+    if (!movementKeys[key]) {
+      // A project/scene reload recreates native cameras and invalidates their old
+      // handles. Refresh once when a new movement gesture starts instead of
+      // continuing to publish WASD/QE updates to a released camera.
+      void refreshSceneCameraBinding({ preservePose: true });
+    }
     movementKeys[key] = true;
     startMoveLoop();
   }
@@ -1146,18 +1255,54 @@ const resetRealtimeCameraInput = () => {
   mouseRotate.active = false;
 };
 
-const setGamePreviewInputLocked = (locked) => {
+const setEditorCameraInputLock = (reason, locked) => {
   const locks = window.__coronaEditorInputLocks instanceof Set
     ? window.__coronaEditorInputLocks
     : new Set();
   window.__coronaEditorInputLocks = locks;
-  if (locked) locks.add('game_preview');
-  else locks.delete('game_preview');
+  if (locked) locks.add(reason);
+  else locks.delete(reason);
   window.__coronaGamePreviewInputLocked = locks.size > 0;
   if (window.__coronaGamePreviewInputLocked) {
     resetRealtimeCameraInput();
   }
 };
+
+const setGamePreviewInputLocked = (locked) => {
+  setEditorCameraInputLock('game_preview', Boolean(locked));
+};
+
+function clearKnownEditorCameraInputLocks() {
+  setEditorCameraInputLock('node_graph', false);
+  setEditorCameraInputLock('game_preview', false);
+}
+
+let cameraInputLockReconcileToken = 0;
+async function reconcileEditorCameraInputLocks() {
+  const token = ++cameraInputLockReconcileToken;
+  const [scriptResult, previewResult] = await Promise.allSettled([
+    scriptingService.getScriptStatus(),
+    scriptingService.getGamePreviewStatus(),
+  ]);
+  if (token !== cameraInputLockReconcileToken) return;
+
+  if (scriptResult.status === 'fulfilled') {
+    const scriptStatus = unwrapBridgeData(scriptResult.value) || {};
+    const scriptWorkerActive = Boolean(scriptStatus.threadAlive)
+      && ['starting', 'running', 'stopping'].includes(String(scriptStatus.status || ''));
+    setEditorCameraInputLock(
+      'node_graph',
+      scriptWorkerActive && Boolean(scriptStatus.inputLocked)
+    );
+  }
+  if (previewResult.status === 'fulfilled') {
+    const previewStatus = normalizePreviewDetails(unwrapBridgeData(previewResult.value) || {});
+    const previewWorkerActive = Boolean(previewStatus.workerActive || previewStatus.stopPending);
+    setGamePreviewInputLocked(
+      previewWorkerActive && Boolean(previewStatus.inputLocked)
+    );
+  }
+}
 
 const moveLoop = (now) => {
   if (isGamePreviewInputLocked()) {
@@ -1388,6 +1533,9 @@ const handleViewportPointer = (event) => {
 
 const handleViewportPointerDown = (event) => {
   focusViewportInput();
+  // Detached docks and project initialization may reload the native scene after
+  // MainPage's first snapshot. Rebind before the user starts interacting.
+  void refreshSceneCameraBinding({ preservePose: true });
   sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
@@ -1760,6 +1908,7 @@ const normalizePreviewDetails = (payload = {}) => ({
   restoreError: payload.restoreError ?? payload.restore_error ?? '',
   restored: Boolean(payload.restored),
   stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
+  workerActive: Boolean(payload.workerActive ?? payload.worker_active),
   errors: Array.isArray(payload.errors) ? payload.errors : [],
   warnings: Array.isArray(payload.warnings) ? payload.warnings : [],
   targets: Array.isArray(payload.targets) ? payload.targets : [],
@@ -1849,11 +1998,16 @@ const handleStartGamePreview = async (request = { scope: 'project' }) => {
       scope: previewRequest.scope,
       sceneName: previewRequest.scene_name || '',
     }));
-    if (typeof window.__coronaBlocklyFlushSave === 'function') {
-      await window.__coronaBlocklyFlushSave();
-    }
-    if (typeof window.__coronaNodeGraphFlushSave === 'function') {
-      await window.__coronaNodeGraphFlushSave();
+    if (previewRequest.scope === 'project') {
+      // Global run executes only node_graph:project:global.
+      await flushProjectNodeGraphBeforeRun();
+    } else {
+      if (typeof window.__coronaBlocklyFlushSave === 'function') {
+        await window.__coronaBlocklyFlushSave();
+      }
+      if (typeof window.__coronaNodeGraphFlushSave === 'function') {
+        await window.__coronaNodeGraphFlushSave();
+      }
     }
     const result = await scriptingService.startGamePreview(previewRequest);
     const payload = unwrapBridgeData(result);
@@ -2215,15 +2369,12 @@ const handlePanelClosed = (payload) => {
   dockStore.popIn(panelId);
 };
 
-// 监听其他窗口（如设置页面）修改了 cabbage_hint_time
-function onStorageChange(e) {
-  if (e.key === STORAGE_KEY) {
-    readCabbageHintTime();
-    setHintShowMs(cabbageHintTime.value * 1000);
-  }
-}
 
 onMounted(async () => {
+  removeLegacyReviewHistory();
+  // A reused CEF page must not inherit camera locks from a previous world.
+  // Real active workers are added back by reconcileEditorCameraInputLocks().
+  clearKnownEditorCameraInputLocks();
   const result = await projectService.OnInit();
   const initData = result?.data ?? result;
   const scenes = initData?.scenes ?? [];
@@ -2264,6 +2415,13 @@ onMounted(async () => {
     cameraViewportResizeObserver.observe(viewportPickSurfaceRef.value);
   }
   await restoreCameraViews(initialSceneId);
+  // Restoring detached camera windows can overlap native scene initialization.
+  // Always take a second snapshot after that phase so the main viewport owns the
+  // current camera handle rather than the camera object that was just destroyed.
+  await syncSceneCameraBinding(initialSceneId);
+  // The CEF window can survive project creation/switching, so discard stale
+  // frontend lock reasons using the backend's self-healed runtime truth.
+  await reconcileEditorCameraInputLocks();
 
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);
@@ -2273,6 +2431,7 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
+  window.addEventListener('focus', handleMainWindowFocus);
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
@@ -2288,28 +2447,25 @@ onMounted(async () => {
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   await openDefaultFloatingToolPanels();
+  // A floating tool can finish loading after the first recovery snapshot. Make
+  // the final settled binding authoritative before normal editor interaction.
+  await syncSceneCameraBinding(initialSceneId);
   broadcastViewportControlsState();
 
-  // 启动阶段性包菜提示：每隔一段时间根据用户操作自动弹出 AI 提示气泡
-  startStageHints(
-    (text) => {
-      cabbageBubbleText.value = text;
-      cabbageBubbleLoading.value = false;
-      cabbageBubbleShow.value = true;
-    },
-    () => {
-      cabbageBubbleShow.value = false;
-      cabbageBubbleLoading.value = true;
-    },
-    cabbageHintTime.value * 1000
-  );
+  // Subscribe only to proactive DeepSeek node-graph review results.
+  unsubscribeNodeGraphReview = subscribeNodeGraphReviews(handleNodeGraphReview);
+  window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.addEventListener('storage', onActiveProjectStorageChanged);
 });
 
 onUnmounted(() => {
   clearPreviewPoll();
-  setGamePreviewInputLocked(false);
+  clearKnownEditorCameraInputLocks();
   unregisterEditorControls();
-  stopStageHints();
+  unsubscribeNodeGraphReview?.();
+  unsubscribeNodeGraphReview = null;
+  window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.removeEventListener('storage', onActiveProjectStorageChanged);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   coronaEventBus.off('loading-show', showLoading);
   coronaEventBus.off('loading-update', updateLoading);
@@ -2334,8 +2490,10 @@ onUnmounted(() => {
     });
     sceneRenamedCallbackToken = null;
   }
-  window.removeEventListener('storage', onStorageChange);
   window.removeEventListener('resize', handleViewportLayoutChange);
+  window.removeEventListener('focus', handleMainWindowFocus);
+  sceneCameraBindingRequestRevision += 1;
+  sceneCameraBindingRefreshPromise = null;
   stopMoveLoop();
   if (cameraViewportSyncRafId != null) {
     cancelAnimationFrame(cameraViewportSyncRafId);

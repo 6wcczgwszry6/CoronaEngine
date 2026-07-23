@@ -76,6 +76,21 @@ export const defineDetectBlocks = () => {
     },
   };
 
+  Blockly.Blocks.detect_ask_answer = {
+    init() {
+      this.appendValueInput('QUESTION')
+        .setCheck('String')
+        .appendField('\u8be2\u95ee')
+        .appendField(new Blockly.FieldTextInput('\u4f60\u53eb\u4ec0\u4e48\uff1f'), 'QUESTION_TEXT')
+        .appendField('\u7684\u56de\u7b54');
+      this.setOutput(true, 'String');
+      this.setInputsInline(true);
+      this.setStyle('detect_blocks');
+      this.setTooltip('\u8be2\u95ee\u4e00\u4e2a\u95ee\u9898\u5e76\u628a\u7528\u6237\u8f93\u5165\u7684\u56de\u7b54\u4f5c\u4e3a\u6587\u672c\u8fd4\u56de');
+    },
+  };
+
+
   Blockly.Blocks['detect_keyboard1'] = {
     init: function () {
       this.appendDummyInput()
@@ -427,6 +442,13 @@ export const defineDetectBlocks = () => {
     this.appendDummyInput().appendField('\u9f20\u6807\u5728\u4e3b\u89c6\u53e3\u53f3\u534a\u8fb9\uff1f');
     this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');
   } };
+  Blockly.Blocks.detect_mouse_x_ratio = { init() {
+    this.appendDummyInput().appendField('\u9f20\u6807\u4e3b\u89c6\u53e3 X \u6bd4\u4f8b');
+    this.setOutput(true, 'Number');
+    this.setStyle('detect_blocks');
+    this.setTooltip('\u8bfb\u53d6\u9f20\u6807\u5728\u4e3b\u89c6\u53e3\u6a2a\u5411\u4f4d\u7f6e\u7684 0 \u5230 1 \u6bd4\u4f8b');
+  } };
+
   Blockly.Blocks.detect_mouse_pick_hit_tag = { init() {
     this.appendValueInput('TAG').setCheck('String').appendField('最近鼠标命中的对象有标签').appendField(new Blockly.FieldTextInput('target'), 'TAG_TEXT');
     this.appendDummyInput().appendField('?'); this.setOutput(true, 'Boolean'); this.setStyle('detect_blocks');

@@ -51,7 +51,7 @@ endfunction()
 # ------------------------------------------------------------------------------
 FetchContent_Declare(Horizon
     GIT_REPOSITORY https://github.com/CoronaEngine/Horizon.git
-    GIT_TAG 4b145f9f97ac826764ab9dac82bf9a38a2a91c87
+    GIT_TAG e1548739f334108ed7d430e5b641dc6e12fae063
     EXCLUDE_FROM_ALL
 )
 

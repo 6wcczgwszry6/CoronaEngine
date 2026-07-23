@@ -232,6 +232,15 @@
               </div>
             </div>
 
+            <!-- 场景 - 节点（项目全局逻辑） -->
+            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
+              <NodeGraphWorkspace
+                targetType="project"
+                :sceneName="sceneData.sceneId || sceneData.name"
+                :review-active="ActiveSubTab === 'NodeGraph'"
+              />
+            </div>
+
             <!-- 场景 - 脚本 -->
             <div v-show="ActiveSubTab === 'Script'" class="space-y-2 text-xs">
               <div class="bg-[#3c3c3c]/50 p-2 rounded border-l-2 border-blue-600">
@@ -732,18 +741,6 @@
                 :actorName="actorData.name"
                 :sceneName="actorData.parentScene || sceneData.name"
                 embedded
-              />
-              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
-                请先选中一个物体
-              </div>
-            </div>
-            <!-- 单位 - 节点 -->
-            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
-              <NodeGraphWorkspace
-                v-if="actorData.name"
-                :actorName="currentActorFile || actorData.name"
-                :sceneName="actorData.parentScene || sceneData.sceneId || sceneData.name"
-                targetType="actor"
               />
               <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
                 请先选中一个物体
@@ -1325,18 +1322,6 @@
                 请先选中一个物体
               </div>
             </div>
-            <!-- 模型 - 节点 -->
-            <div v-show="ActiveSubTab === 'NodeGraph'" class="flex flex-col" style="height: clamp(1200px, calc(100vh - 48px), 1600px); min-height: 1200px;">
-              <NodeGraphWorkspace
-                v-if="modelData.name"
-                :actorName="currentModelFile || modelData.name"
-                :sceneName="modelData.targetScene || sceneData.sceneId || sceneData.name"
-                targetType="model"
-              />
-              <div v-else class="flex items-center justify-center h-full text-[#909090] text-xs">
-                请先选中一个物体
-              </div>
-            </div>
           </template>
         </div>
       </template>
@@ -1387,6 +1372,7 @@ const ActiveSubTab = ref('Basic');
 const sceneTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Terrain', label: '地形' },
+  { id: 'NodeGraph', label: '节点' },
   { id: 'Script', label: '脚本' },
 ];
 
@@ -1394,7 +1380,6 @@ const actorTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
-  { id: 'NodeGraph', label: '节点' },
   { id: 'Script', label: '脚本' },
 ];
 
@@ -1402,7 +1387,6 @@ const modelTabs = [
   { id: 'Basic', label: '基础' },
   { id: 'Model', label: '模型' },
   { id: 'Blockly', label: '积木' },
-  { id: 'NodeGraph', label: '节点' },
 ];
 
 // ========== Blockly 工作区引用 ==========

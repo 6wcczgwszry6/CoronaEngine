@@ -46,7 +46,7 @@
         </button>
       </div>
     </div>
-    <div v-if="!actorName" class="ng-empty">请先选中一个物体</div>
+    <div v-if="!targetReady" class="ng-empty">请先选中一个物体</div>
     <div v-else class="ng-body">
       <aside class="ng-panel ng-toolbox">
         <div class="ng-section-title">
@@ -302,14 +302,18 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { appService, scriptingService, sceneService } from '@/utils/bridge.js';
+import { appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
+import { registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
+import { startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
   sceneName: { type: String, default: '' },
   targetType: { type: String, default: 'actor' },
+  reviewActive: { type: Boolean, default: true },
 });
 const { error: logError } = useErrorHandler('NodeGraphWorkspace');
 const NODE_WIDTH = 170,
@@ -375,8 +379,18 @@ const externalDrag = reactive({
   clientY: 0,
   pointerId: null,
 });
-const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v2';
-const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 320, inspectorWidth: 560, variablesHeight: 320 });
+const LAYOUT_STORAGE_KEY = 'corona-nodegraph-layout-v5';
+const LAYOUT_LIMITS = Object.freeze({
+  toolboxMin: 460,
+  toolboxMax: 980,
+  toolboxEmergencyMin: 320,
+  inspectorMin: 520,
+  inspectorMax: 960,
+  inspectorEmergencyMin: 340,
+  canvasMin: 420,
+  gridChrome: 60,
+});
+const DEFAULT_LAYOUT = Object.freeze({ toolboxWidth: 640, inspectorWidth: 720, variablesHeight: 240 });
 const layout = reactive({ ...DEFAULT_LAYOUT });
 const layoutStyle = computed(() => ({
   '--toolbox-width': `${layout.toolboxWidth}px`,
@@ -455,13 +469,67 @@ let isLoading = false,
   layoutResizeState = null,
   runPollTimer = null,
   gamePreviewGuardTimer = null,
-  startedRunForTarget = false;
+  startedRunForTarget = false,
+  unregisterAiNodeGraphConsumer = null,
+  stopNodeGraphReview = null,
+  unregisterProjectNodeGraphSaveHandler = null,
+  loadedProjectPath = '',
+  componentMounted = false;
 const targetEnabledByKey = new Map();
+function readActiveProjectPath() {
+  return String(window.localStorage?.getItem('corona.activeProjectPath') || '').trim();
+}
+function extractProjectPath(response) {
+  const candidates = [
+    response,
+    response?.data,
+    response?.result,
+    response?.data?.data,
+    response?.result?.data,
+  ];
+  for (const item of candidates) {
+    const value = String(item?.project_path || item?.projectPath || '').trim();
+    if (value) return value;
+  }
+  return '';
+}
+async function refreshActiveProjectPath() {
+  try {
+    const response = await projectSettingsService.getActiveProjectInfo();
+    const projectPath = extractProjectPath(response);
+    if (projectPath) {
+      activeProjectPath.value = projectPath;
+      window.localStorage?.setItem('corona.activeProjectPath', projectPath);
+      return projectPath;
+    }
+  } catch (error) {
+    console.warn('\u8bfb\u53d6\u5f53\u524d\u9879\u76ee\u8def\u5f84\u5931\u8d25\uff0c\u5c06\u4f7f\u7528\u5df2\u6709\u9879\u76ee\u4e0a\u4e0b\u6587:', error);
+  }
+  return activeProjectPath.value || readActiveProjectPath();
+}
+function normalizeProjectPath(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLocaleLowerCase('en-US');
+}
+const activeProjectPath = ref(readActiveProjectPath());
+const projectStorageScope = computed(() =>
+  encodeURIComponent(normalizeProjectPath(activeProjectPath.value) || 'unknown-project')
+);
+const normalizedTargetType = computed(() => (props.targetType === 'model' ? 'actor' : props.targetType || 'actor'));
+const isProjectTarget = computed(() => normalizedTargetType.value === 'project');
+const targetReady = computed(() => isProjectTarget.value || Boolean(props.actorName));
 const targetKey = computed(
-  () => `${props.targetType || 'actor'}:${props.sceneName || ''}:${props.actorName || ''}`
+  () => `${projectStorageScope.value}:${normalizedTargetType.value}:${isProjectTarget.value ? '' : props.sceneName || ''}:${isProjectTarget.value ? '' : props.actorName || ''}`
 );
 const targetLabel = computed(() =>
-  props.actorName ? `${props.actorName} [${props.sceneName || '未命名场景'}]` : '未选择目标'
+  isProjectTarget.value
+    ? '节点'
+    : props.actorName
+      ? `${props.actorName} [${props.sceneName || '未命名场景'}]`
+      : '未选择目标'
 );
 const nodes = computed(() => graph.nodes),
   edges = computed(() => graph.edges);
@@ -762,14 +830,23 @@ function persistLayout() {
 function loadLayout() {
   try {
     const saved = JSON.parse(window.localStorage?.getItem(LAYOUT_STORAGE_KEY) || '{}');
-    layout.toolboxWidth = Math.min(460, Math.max(240, Number(saved.toolboxWidth) || DEFAULT_LAYOUT.toolboxWidth));
-    layout.inspectorWidth = Math.min(760, Math.max(380, Number(saved.inspectorWidth) || DEFAULT_LAYOUT.inspectorWidth));
-    layout.variablesHeight = Math.max(140, Number(saved.variablesHeight) || DEFAULT_LAYOUT.variablesHeight);
+    layout.toolboxWidth = Math.min(
+      LAYOUT_LIMITS.toolboxMax,
+      Math.max(LAYOUT_LIMITS.toolboxMin, Number(saved.toolboxWidth) || DEFAULT_LAYOUT.toolboxWidth)
+    );
+    layout.inspectorWidth = Math.min(
+      LAYOUT_LIMITS.inspectorMax,
+      Math.max(LAYOUT_LIMITS.inspectorMin, Number(saved.inspectorWidth) || DEFAULT_LAYOUT.inspectorWidth)
+    );
+    layout.variablesHeight = Math.max(120, Number(saved.variablesHeight) || DEFAULT_LAYOUT.variablesHeight);
   } catch (_) {
     Object.assign(layout, DEFAULT_LAYOUT);
   }
 }
 function resizeEmbeddedWorkspaces() {
+  const clamped = clampLayoutWidths(layout.toolboxWidth, layout.inspectorWidth);
+  if (clamped.toolbox !== layout.toolboxWidth) layout.toolboxWidth = clamped.toolbox;
+  if (clamped.inspector !== layout.inspectorWidth) layout.inspectorWidth = clamped.inspector;
   nextTick(() => {
     updateCanvasSize();
     variablesBlocklyRef.value?.resizeBlockly?.();
@@ -778,16 +855,28 @@ function resizeEmbeddedWorkspaces() {
 }
 function clampLayoutWidths(toolboxWidth, inspectorWidth) {
   const total = workspaceRootRef.value?.getBoundingClientRect?.().width || window.innerWidth;
-  const available = Math.max(0, total - 12);
-  let toolbox = Math.min(460, Math.max(240, toolboxWidth));
-  let inspector = Math.min(760, Math.max(380, inspectorWidth));
-  const maxSides = Math.max(620, available - 480);
+  const available = Math.max(0, total - LAYOUT_LIMITS.gridChrome);
+  let toolbox = Math.min(LAYOUT_LIMITS.toolboxMax, Math.max(LAYOUT_LIMITS.toolboxMin, toolboxWidth));
+  let inspector = Math.min(LAYOUT_LIMITS.inspectorMax, Math.max(LAYOUT_LIMITS.inspectorMin, inspectorWidth));
+  const maxSides = Math.max(
+    LAYOUT_LIMITS.toolboxEmergencyMin + LAYOUT_LIMITS.inspectorEmergencyMin,
+    available - LAYOUT_LIMITS.canvasMin
+  );
   if (toolbox + inspector > maxSides) {
-    const overflow = toolbox + inspector - maxSides;
-    if (layoutResizeState?.kind === 'toolbox') toolbox = Math.max(240, toolbox - overflow);
-    else inspector = Math.max(380, inspector - overflow);
+    let overflow = toolbox + inspector - maxSides;
+    if (layoutResizeState?.kind === 'toolbox') {
+      const reduce = Math.min(overflow, toolbox - LAYOUT_LIMITS.toolboxEmergencyMin);
+      toolbox -= reduce;
+      overflow -= reduce;
+      inspector = Math.max(LAYOUT_LIMITS.inspectorEmergencyMin, inspector - overflow);
+    } else {
+      const reduce = Math.min(overflow, inspector - LAYOUT_LIMITS.inspectorEmergencyMin);
+      inspector -= reduce;
+      overflow -= reduce;
+      toolbox = Math.max(LAYOUT_LIMITS.toolboxEmergencyMin, toolbox - overflow);
+    }
   }
-  return { toolbox, inspector };
+  return { toolbox: Math.round(toolbox), inspector: Math.round(inspector) };
 }
 function beginLayoutResize(event, kind) {
   event.preventDefault();
@@ -807,8 +896,8 @@ function beginLayoutResize(event, kind) {
 function handleLayoutResize(event) {
   if (!layoutResizeState) return;
   if (layoutResizeState.kind === 'variables') {
-    const maxHeight = Math.max(140, layoutResizeState.inspectorHeight - 306);
-    layout.variablesHeight = Math.min(maxHeight, Math.max(140, layoutResizeState.variablesHeight + event.clientY - layoutResizeState.startY));
+    const maxHeight = Math.max(120, layoutResizeState.inspectorHeight - 366);
+    layout.variablesHeight = Math.min(maxHeight, Math.max(120, layoutResizeState.variablesHeight + event.clientY - layoutResizeState.startY));
   } else {
     const nextToolbox = layoutResizeState.kind === 'toolbox'
       ? layoutResizeState.toolboxWidth + event.clientX - layoutResizeState.startX
@@ -1344,7 +1433,7 @@ function applyGraph(next) {
   return portsRedistributed;
 }
 function scheduleSave() {
-  if (isLoading || !props.actorName) return;
+  if (isLoading || !targetReady.value) return;
   saveLabel.value = '未保存';
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
@@ -1353,19 +1442,30 @@ function scheduleSave() {
   }, SAVE_DELAY);
 }
 function storageKeyForTarget(target) {
-  return `corona-nodegraph-ui:${target.targetType || 'actor'}:${target.sceneName || ''}:${target.actorName || ''}`;
+  const projectScope = encodeURIComponent(
+    normalizeProjectPath(target?.projectPath || activeProjectPath.value || readActiveProjectPath()) || 'unknown-project'
+  );
+  return `corona-nodegraph-ui:v2:${projectScope}:${target.targetType || 'actor'}:${target.sceneName || ''}:${target.actorName || ''}`;
 }
-function currentTarget() {
+function currentTarget(projectPathOverride = '') {
   return {
-    targetType: props.targetType || 'actor',
-    sceneName: props.sceneName || '',
-    actorName: props.actorName || '',
+    targetType: normalizedTargetType.value,
+    sceneName: isProjectTarget.value ? '' : props.sceneName || '',
+    actorName: isProjectTarget.value ? '' : props.actorName || '',
+    projectPath: projectPathOverride || loadedProjectPath || activeProjectPath.value || readActiveProjectPath(),
   };
 }
 async function saveNow(targetOverride = null) {
   if (isLoading) return false;
-  const target = targetOverride || currentTarget();
-  if (!target.actorName) return false;
+  const target = { ...currentTarget(), ...(targetOverride || {}) };
+  const expectedProjectPath = normalizeProjectPath(target.projectPath);
+  const currentProjectPath = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+  if (expectedProjectPath && currentProjectPath && expectedProjectPath !== currentProjectPath) {
+    saveLabel.value = '项目已切换，已跳过旧节点图保存';
+    return false;
+  }
+  const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
+  if (!isProject && !target.actorName) return false;
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;
@@ -1389,9 +1489,10 @@ async function saveNow(targetOverride = null) {
   try {
     const response = bridgeResult(await scriptingService.saveBlocklyTarget({
       target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
-      scene_name: target.sceneName || '',
-      actor_name: target.actorName || '',
+      scene_name: isProject ? '' : target.sceneName || '',
+      actor_name: isProject ? '' : target.actorName || '',
       script_kind: 'node_graph',
+      project_path: target.projectPath || '',
       workspace: snapshot,
       code,
       enabled: targetEnabledByKey.get(storageKeyForTarget(target)) ?? true,
@@ -1411,43 +1512,74 @@ async function saveNow(targetOverride = null) {
 }
 async function loadGraphForCurrentTarget() {
   resetZoom();
-  if (!props.actorName) {
+  if (!targetReady.value) {
     applyGraph(normalizeGraph({}));
     return;
   }
   isLoading = true;
-  saveLabel.value = '项目加载中...';
+  saveLabel.value = '\u9879\u76ee\u52a0\u8f7d\u4e2d...';
   let shouldMigrateLocal = false;
   try {
-    const target = currentTarget();
-    const response = bridgeResult(await scriptingService.loadBlocklyTarget({
-      target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
-      scene_name: target.sceneName || '',
-      actor_name: target.actorName || '',
-      script_kind: 'node_graph',
-    }));
-    if (response?.status === 'error') throw new Error(response.message || '节点图加载失败');
+    await refreshActiveProjectPath();
+    let requestProjectPath = activeProjectPath.value || readActiveProjectPath();
+    let target = null;
+    let response = null;
+
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      target = currentTarget(requestProjectPath);
+      const isProject = (target.targetType === 'model' ? 'actor' : target.targetType || 'actor') === 'project';
+      response = bridgeResult(await scriptingService.loadBlocklyTarget({
+        target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
+        scene_name: isProject ? '' : target.sceneName || '',
+        actor_name: isProject ? '' : target.actorName || '',
+        script_kind: 'node_graph',
+        project_path: requestProjectPath,
+      }));
+
+      if (response?.status === 'error' && response?.code === 'PROJECT_CONTEXT_CHANGED' && attempt === 0) {
+        const backendProjectPath = String(response.project_path || '').trim();
+        if (backendProjectPath) {
+          requestProjectPath = backendProjectPath;
+          activeProjectPath.value = backendProjectPath;
+          window.localStorage?.setItem('corona.activeProjectPath', backendProjectPath);
+          continue;
+        }
+      }
+      break;
+    }
+
+    const responseProjectPath = String(response?.project_path || requestProjectPath || '').trim();
+    const currentProjectPath = activeProjectPath.value || readActiveProjectPath();
+    if (normalizeProjectPath(responseProjectPath) !== normalizeProjectPath(currentProjectPath)) return;
+
+    activeProjectPath.value = responseProjectPath;
+    loadedProjectPath = responseProjectPath;
+    window.localStorage?.setItem('corona.activeProjectPath', responseProjectPath);
+    target.projectPath = responseProjectPath;
+
+    if (response?.status === 'error') throw new Error(response.message || '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25');
     if (response?.status === 'loaded') {
       targetEnabledByKey.set(storageKeyForTarget(target), response.target?.enabled !== false);
       shouldMigrateLocal = applyGraph(normalizeGraph(response.workspace || {}));
-      saveLabel.value = '项目节点图已加载';
+      saveLabel.value = '\u9879\u76ee\u8282\u70b9\u56fe\u5df2\u52a0\u8f7d';
     } else {
       targetEnabledByKey.set(storageKeyForTarget(target), true);
       const raw = window.localStorage?.getItem(storageKeyForTarget(target));
       const portsRedistributed = applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
       shouldMigrateLocal = Boolean(raw) || portsRedistributed;
-      saveLabel.value = raw ? '已加载本地节点图，正在迁移...' : '新节点图';
+      saveLabel.value = raw ? '\u5df2\u52a0\u8f7d\u5f53\u524d\u9879\u76ee\u7684\u672c\u5730\u8282\u70b9\u56fe\uff0c\u6b63\u5728\u8fc1\u79fb...' : '\u65b0\u8282\u70b9\u56fe';
     }
   } catch (error) {
-    logError('加载项目节点图失败', error);
+    logError('\u52a0\u8f7d\u9879\u76ee\u8282\u70b9\u56fe\u5931\u8d25', error);
     try {
-      const raw = window.localStorage?.getItem(storageKeyForTarget(currentTarget()));
+      const target = currentTarget(activeProjectPath.value || readActiveProjectPath());
+      const raw = window.localStorage?.getItem(storageKeyForTarget(target));
       const portsRedistributed = applyGraph(normalizeGraph(raw ? JSON.parse(raw) : {}));
       shouldMigrateLocal = Boolean(raw) || portsRedistributed;
-      saveLabel.value = raw ? '项目加载失败，已使用本地副本' : '节点图加载失败';
+      saveLabel.value = raw ? '\u9879\u76ee\u52a0\u8f7d\u5931\u8d25\uff0c\u5df2\u4f7f\u7528\u5f53\u524d\u9879\u76ee\u672c\u5730\u526f\u672c' : '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25';
     } catch (_) {
       applyGraph(normalizeGraph({}));
-      saveLabel.value = '节点图加载失败';
+      saveLabel.value = '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25';
     }
   } finally {
     isLoading = false;
@@ -1458,9 +1590,79 @@ async function loadGraphForCurrentTarget() {
   }
   if (shouldMigrateLocal) await saveNow();
 }
+
 function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
 }
+
+async function loadEmbeddedWorkspaceStates() {
+  await nextTick();
+  variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
+  activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
+  updateCanvasSize();
+}
+
+async function handleGeneratedNodeGraph(result) {
+  if (!isProjectTarget.value) {
+    return { success: false, errors: ['\u5185\u90e8 AI \u7ed3\u679c\u53ea\u80fd\u5e94\u7528\u5230\u9879\u76ee\u5e38\u9a7b\u8282\u70b9\u56fe'], warnings: [] };
+  }
+
+  const previous = graphSnapshot();
+  const storageKey = storageKeyForTarget(currentTarget());
+  let previousLocal = null;
+  try {
+    previousLocal = window.localStorage?.getItem(storageKey) ?? null;
+  } catch (_) {}
+
+  try {
+    // The service validates the raw envelope first. Normalize only after that so
+    // missing IDs, invalid positions, and dangling edges cannot be silently repaired.
+    const candidate = normalizeGraph(result.workspace);
+    const analysis = validateNodeGraph(candidate);
+    nodeGraphToCode(candidate); // Deserializes every visible block and validates conditions/generators.
+
+    isLoading = true;
+    applyGraph(candidate);
+    await loadEmbeddedWorkspaceStates();
+    isLoading = false;
+
+    if (!(await saveNow())) throw new Error('\u5185\u90e8 AI \u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25');
+    saveLabel.value = '\u5185\u90e8 AI \u8282\u70b9\u56fe\u5df2\u5e94\u7528';
+    return {
+      success: true,
+      errors: [],
+      warnings: Array.isArray(analysis?.warnings) ? analysis.warnings : [],
+      summary: {
+        nodeCount: candidate.nodes.length,
+        edgeCount: candidate.edges.length,
+      },
+    };
+  } catch (error) {
+    isLoading = true;
+    applyGraph(normalizeGraph(previous));
+    await loadEmbeddedWorkspaceStates();
+    isLoading = false;
+    try {
+      if (previousLocal == null) window.localStorage?.removeItem(storageKey);
+      else window.localStorage?.setItem(storageKey, previousLocal);
+    } catch (_) {}
+    saveLabel.value = `\u5185\u90e8 AI \u5e94\u7528\u5931\u8d25\uff1a${error?.message || error}`;
+    return { success: false, errors: [String(error?.message || error)], warnings: [] };
+  } finally {
+    isLoading = false;
+  }
+}
+
+function syncGeneratedNodeGraphConsumer() {
+  unregisterAiNodeGraphConsumer?.();
+  unregisterAiNodeGraphConsumer = null;
+  if (componentMounted && isProjectTarget.value) {
+    unregisterAiNodeGraphConsumer = registerGeneratedNodeGraphConsumer(handleGeneratedNodeGraph);
+  }
+}
+
+
+
 function clearRunPoll() {
   if (runPollTimer) window.clearInterval(runPollTimer);
   runPollTimer = null;
@@ -1623,7 +1825,7 @@ async function handleToggleRun() {
       await stopNodeGraphRun('已停止', true);
       return;
     }
-    if (!props.actorName) {
+    if (!targetReady.value) {
       runStatus.value = '请先选择运行目标';
       return;
     }
@@ -1660,9 +1862,9 @@ async function handleToggleRun() {
       await scriptingService.executePythonCode(
         code,
         0,
-        props.sceneName || '',
-        props.actorName,
-        props.targetType === 'model' ? 'actor' : props.targetType || 'actor'
+        isProjectTarget.value ? '' : props.sceneName || '',
+        isProjectTarget.value ? '' : props.actorName,
+        normalizedTargetType.value
       )
     );
     if (response?.outcome === 'preview_running') {
@@ -1729,6 +1931,30 @@ function updateCanvasSize() {
   canvasSize.height = Math.max(CANVAS_WORLD_HEIGHT, Math.ceil(r.height / 0.4));
   clampViewport();
 }
+async function onActiveProjectChanged(event) {
+  const nextProjectPath = String(event?.detail?.projectPath || readActiveProjectPath()).trim();
+  if (!nextProjectPath || normalizeProjectPath(nextProjectPath) === normalizeProjectPath(activeProjectPath.value)) return;
+  if (saveTimer) {
+    clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  activeProjectPath.value = nextProjectPath;
+  loadedProjectPath = '';
+  targetEnabledByKey.clear();
+  applyGraph(normalizeGraph({}));
+  runStatus.value = '';
+  currentRunNodeId.value = '';
+  runWarnings.value = [];
+  if (!componentMounted) return;
+  await loadGraphForCurrentTarget();
+  await refreshSceneActorOptions();
+}
+function onProjectStorageChanged(event) {
+  if (event?.key !== 'corona.activeProjectPath') return;
+  onActiveProjectChanged({ detail: { projectPath: event.newValue || '' } });
+}
+
+
 watch(
   () => [props.sceneName, props.actorName, props.targetType],
   async (_n, old) => {
@@ -1740,10 +1966,11 @@ watch(
     if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('已停止');
     clearExternalDrag();
     cancelMacroPointerDrag();
-    if (oldTarget.actorName && !isLoading) await saveNow(oldTarget);
+    if ((oldTarget.targetType === 'project' || oldTarget.actorName) && !isLoading) await saveNow(oldTarget);
     runStatus.value = '';
     currentRunNodeId.value = '';
     runWarnings.value = [];
+    syncGeneratedNodeGraphConsumer();
     await refreshSceneActorOptions();
     await loadGraphForCurrentTarget();
   },
@@ -1755,9 +1982,15 @@ function registerNodeGraphFlusher() {
     : new Set();
   window.__coronaNodeGraphFlushers = flushers;
   flushers.add(saveNow);
-  window.__coronaNodeGraphFlushSave = () => Promise.all(
-    Array.from(window.__coronaNodeGraphFlushers || []).map((flush) => Promise.resolve().then(() => flush()))
-  );
+  window.__coronaNodeGraphFlushSave = async () => {
+    const results = await Promise.all(
+      Array.from(window.__coronaNodeGraphFlushers || []).map((flush) => Promise.resolve().then(() => flush()))
+    );
+    if (results.some((result) => result === false)) {
+      throw new Error('\u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25\uff0c\u5df2\u53d6\u6d88\u5168\u5c40\u8fd0\u884c');
+    }
+    return true;
+  };
 }
 function unregisterNodeGraphFlusher() {
   window.__coronaNodeGraphFlushers?.delete?.(saveNow);
@@ -1767,6 +2000,32 @@ function unregisterNodeGraphFlusher() {
   }
 }
 onMounted(() => {
+  componentMounted = true;
+  activeProjectPath.value = readActiveProjectPath() || activeProjectPath.value;
+  window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.addEventListener('storage', onProjectStorageChanged);
+  syncGeneratedNodeGraphConsumer();
+  if (isProjectTarget.value) {
+    stopNodeGraphReview = startNodeGraphReview({
+      getWorkspace: () => ({
+        version: graph.version,
+        nodes: graph.nodes,
+        edges: graph.edges,
+        globalVariablesWorkspace: graph.globalVariablesWorkspace,
+      }),
+      getRevisionScope: () => normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+      getProjectContext: () => ({
+        sceneName: props.sceneName || 'default',
+        actors: (window.__coronaBlocklyActorOptions || []).map(([name]) => ({
+          name: String(name || ''),
+          type: 'actor',
+          tags: [],
+        })).filter((actor) => actor.name),
+      }),
+      enabled: () => componentMounted && props.reviewActive && isProjectTarget.value && !isLoading,
+      intervalMs: 10000,
+    });
+  }
   window.addEventListener('corona-game-preview-status', onGamePreviewStatus);
   window.addEventListener('keydown', handleFullscreenKey);
   coronaEventBus.on('viewport-controls-state', onViewportControlsState);
@@ -1776,12 +2035,24 @@ onMounted(() => {
   refreshGamePreviewGuard();
   startGamePreviewGuardPoll();
   registerNodeGraphFlusher();
+  if (isProjectTarget.value) {
+    unregisterProjectNodeGraphSaveHandler = registerProjectNodeGraphSaveHandler(saveNow);
+  }
   loadLayout();
   resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
   if (canvasRef.value) resizeObserver.observe(canvasRef.value);
   updateCanvasSize();
 });
 onBeforeUnmount(() => {
+  componentMounted = false;
+  window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
+  window.removeEventListener('storage', onProjectStorageChanged);
+  stopNodeGraphReview?.();
+  stopNodeGraphReview = null;
+  unregisterProjectNodeGraphSaveHandler?.();
+  unregisterProjectNodeGraphSaveHandler = null;
+  unregisterAiNodeGraphConsumer?.();
+  unregisterAiNodeGraphConsumer = null;
   window.removeEventListener('corona-game-preview-status', onGamePreviewStatus);
   window.removeEventListener('keydown', handleFullscreenKey);
   if (isFullscreen.value) {
@@ -1952,7 +2223,7 @@ onBeforeUnmount(() => {
   min-height: 0;
   flex: 1 1 auto;
   display: grid;
-  grid-template-columns: var(--toolbox-width) 6px minmax(480px, 1fr) 6px var(--inspector-width);
+  grid-template-columns: var(--toolbox-width) 6px minmax(420px, 1fr) 6px var(--inspector-width);
   gap: 8px;
   padding: 8px;
 }
@@ -1964,8 +2235,15 @@ onBeforeUnmount(() => {
   overflow: hidden;
 }
 .ng-toolbox {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
   padding: 10px;
-  overflow: auto;
+  overflow: hidden;
+}
+.ng-native-palette {
+  flex: 1 1 auto;
+  min-height: 0;
 }
 .ng-section-title {
   display: flex;
@@ -2408,7 +2686,7 @@ onBeforeUnmount(() => {
 }
 .ng-inspector {
   display: grid;
-  grid-template-rows: minmax(140px, var(--variables-height)) 6px minmax(300px, 1fr);
+  grid-template-rows: minmax(120px, var(--variables-height)) 6px minmax(360px, 1fr);
   gap: 0;
   padding: 8px;
   background: rgba(15, 23, 42, 0.9);
