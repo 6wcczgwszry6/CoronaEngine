@@ -213,6 +213,8 @@
             workspace-role="global"
             @change="onGlobalWorkspaceChange"
             @reject="onWorkspaceReject"
+            @block-added="onBlockAdded"
+            @block-changed="onBlockChanged"
           />
         </section>
         <div class="ng-splitter horizontal" title="拖动调整全局变量池高度" @pointerdown="beginLayoutResize($event, 'variables')"></div>
@@ -275,6 +277,8 @@
             :workspace-role="selectedEdge ? 'condition' : 'node'"
             @change="onActiveWorkspaceChange"
             @reject="onWorkspaceReject"
+            @block-added="onBlockAdded"
+            @block-changed="onBlockChanged"
           />
           <div v-else class="ng-editor-empty">选择节点或连线后可编辑内部积木</div>
         </section>
@@ -308,6 +312,10 @@ import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 import { registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
 import { startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import {
+  cabbageContextService,
+  readCabbageAssistantContext,
+} from '@/services/cabbageAssistantContextService.js';
 import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
 
 const props = defineProps({
@@ -491,8 +499,63 @@ let isLoading = false,
   saveInFlight = null,
   saveQueued = false;
 const targetEnabledByKey = new Map();
+const nodeRunLifecycle = { active: false, terminalReported: false };
 function requestNodeGraphReview(delay = 250) {
   stopNodeGraphReview?.scanNow?.(delay);
+}
+function currentAssistanceProfile() {
+  const profile = readCabbageAssistantContext()?.profile || {};
+  return {
+    score: Math.max(0, Math.min(100, Number(profile.score ?? profile.fluencyScore) || 0)),
+    updatedAt: Math.max(0, Number(profile.updatedAt) || 0),
+  };
+}
+function optimizationHintsEnabled() {
+  const context = readCabbageAssistantContext() || {};
+  const taskHistory = Array.isArray(context.taskHistory) ? context.taskHistory : [];
+  const hasCompletedTutorial = taskHistory.some((task) => (
+    task?.type === 'tutorial' && (String(task?.status || '') === 'completed' || Number(task?.completedAt || 0) > 0)
+  ));
+  const hasAdaptiveScore = Number(context?.profile?.updatedAt || 0) > 0;
+  // Once the user has completed a basic operation and the adaptive score is ready,
+  // allow short, non-persistent optimization tips without waiting for every tutorial.
+  return hasCompletedTutorial && hasAdaptiveScore;
+}
+function beginNodeRunAttempt() {
+  nodeRunLifecycle.active = false;
+  nodeRunLifecycle.terminalReported = false;
+}
+function reportNodeRunStarted() {
+  if (nodeRunLifecycle.active) return;
+  nodeRunLifecycle.active = true;
+  void cabbageContextService.recordEvent({
+    type: 'run_started',
+    category: 'runtime',
+    success: true,
+    details: { source: 'node_graph' },
+  });
+}
+function reportNodeRunTerminal(success, error = '') {
+  if (nodeRunLifecycle.terminalReported) return;
+  nodeRunLifecycle.terminalReported = true;
+  nodeRunLifecycle.active = false;
+  const type = success ? 'run_succeeded' : 'run_failed';
+  void cabbageContextService.recordEvent({
+    type,
+    category: 'runtime',
+    success,
+    details: { source: 'node_graph', error: String(error || '').slice(0, 500) },
+  });
+  if (!success) {
+    requestNodeGraphReview(0);
+    window.dispatchEvent(new CustomEvent('cabbage-run-failed', {
+      detail: { source: 'node_graph', error: String(error || ''), contextRecorded: true },
+    }));
+  }
+}
+function resetNodeRunLifecycle() {
+  nodeRunLifecycle.active = false;
+  nodeRunLifecycle.terminalReported = false;
 }
 function readActiveProjectPath() {
   return String(window.localStorage?.getItem('corona.activeProjectPath') || '').trim();
@@ -644,6 +707,12 @@ function addMacroNodeAt(macroType, clientX, clientY) {
   };
   graph.nodes.push(node);
   selectNode(node);
+  void cabbageContextService.recordEvent({
+    type: 'node_created',
+    category: 'node',
+    success: true,
+    details: { nodeId: String(node.id || ''), nodeType: String(node.nodeType || '') },
+  });
   scheduleSave();
   return true;
 }
@@ -1151,7 +1220,13 @@ function startNodeDrag(e, node) {
   if (e.target?.closest?.('button,.ng-port')) return;
   selectNode(node);
   const world = screenToWorld(e.clientX, e.clientY);
-  dragState = { node, offsetX: world.x - node.x, offsetY: world.y - node.y };
+  dragState = {
+    node,
+    offsetX: world.x - node.x,
+    offsetY: world.y - node.y,
+    startX: Number(node.x) || 0,
+    startY: Number(node.y) || 0,
+  };
   window.addEventListener('mousemove', onDragMove);
   window.addEventListener('mouseup', stopNodeDrag, { once: true });
 }
@@ -1168,7 +1243,23 @@ function onDragMove(e) {
   );
 }
 function stopNodeDrag() {
-  if (dragState) scheduleSave();
+  const finished = dragState;
+  if (finished) {
+    scheduleSave();
+    const moved = Math.abs((Number(finished.node.x) || 0) - finished.startX) > 0.5
+      || Math.abs((Number(finished.node.y) || 0) - finished.startY) > 0.5;
+    if (moved) {
+      void cabbageContextService.recordEvent({
+        type: 'node_moved',
+        category: 'node',
+        success: true,
+        details: {
+          nodeId: String(finished.node.id || ''),
+          nodeType: String(finished.node.nodeType || ''),
+        },
+      });
+    }
+  }
   dragState = null;
   window.removeEventListener('mousemove', onDragMove);
 }
@@ -1235,12 +1326,23 @@ function handlePortClick(node, p) {
     connectionPointer.active = false;
     return;
   }
-  graph.edges.push({
+  const newEdge = {
     id: makeId('edge'),
     source: { ...pendingPort.value },
     target: clicked,
     name: '',
     conditionWorkspace: {},
+  };
+  graph.edges.push(newEdge);
+  void cabbageContextService.recordEvent({
+    type: 'node_connected',
+    category: 'node',
+    success: true,
+    details: {
+      edgeId: String(newEdge.id || ''),
+      sourceNodeId: String(newEdge.source.nodeId || ''),
+      targetNodeId: String(newEdge.target.nodeId || ''),
+    },
   });
   pendingPort.value = null;
   connectionPointer.active = false;
@@ -1332,6 +1434,38 @@ function conditionStyle(e) {
   const p = edgeMidpoint(e);
   return { left: `${p.x - 56}px`, top: `${p.y - 17}px` };
 }
+function onBlockAdded(payload = {}) {
+  void cabbageContextService.recordEvent({
+    type: 'block_added',
+    category: 'node',
+    success: true,
+    details: {
+      nodeId: selectedNode.value?.id || '',
+      edgeId: selectedEdge.value?.id || '',
+      blockId: String(payload.blockId || ''),
+      blockType: String(payload.blockType || ''),
+      workspaceRole: String(payload.workspaceRole || paletteWorkspaceRole.value || ''),
+      interaction: String(payload.interaction || ''),
+    },
+  });
+}
+
+function onBlockChanged(payload = {}) {
+  void cabbageContextService.recordEvent({
+    type: 'block_parameter_changed',
+    category: 'node',
+    success: true,
+    details: {
+      nodeId: selectedNode.value?.id || '',
+      edgeId: selectedEdge.value?.id || '',
+      blockId: String(payload.blockId || ''),
+      blockType: String(payload.blockType || ''),
+      fieldName: String(payload.fieldName || ''),
+      workspaceRole: String(payload.workspaceRole || paletteWorkspaceRole.value || ''),
+    },
+  });
+}
+
 function onGlobalWorkspaceChange(s) {
   if (isLoading) return;
   graph.globalVariablesWorkspace = s || {};
@@ -1801,6 +1935,9 @@ function startRunPoll() {
       runStatus.value = formatRunState(status);
       runDetail.value = formatRunDetail(status);
       if (!['starting', 'running'].includes(status?.status)) {
+        if (status?.status === 'completed') reportNodeRunTerminal(true);
+        else if (status?.status === 'error') reportNodeRunTerminal(false, status?.error || runStatus.value);
+        else resetNodeRunLifecycle();
         clearRunPoll();
         codeRunning.value = false;
         runBusy.value = false;
@@ -1808,6 +1945,7 @@ function startRunPoll() {
         setNodeGraphInputLocked(false);
       }
     } catch (error) {
+      reportNodeRunTerminal(false, error?.message || error);
       clearRunPoll();
       codeRunning.value = false;
       startedRunForTarget = false;
@@ -1847,6 +1985,7 @@ async function stopNodeGraphRun(statusText = '已停止', restoreState = false) 
     codeRunning.value = false;
     currentRunNodeId.value = '';
     setNodeGraphInputLocked(false);
+    resetNodeRunLifecycle();
   }
 }
 
@@ -1913,13 +2052,16 @@ async function handleToggleRun() {
       await stopNodeGraphRun('已停止', true);
       return;
     }
+    beginNodeRunAttempt();
     if (!targetReady.value) {
       runStatus.value = '请先选择运行目标';
+      reportNodeRunTerminal(false, runStatus.value);
       return;
     }
     const preview = await refreshGamePreviewGuard();
     if (preview.active) {
       runStatus.value = globalPreviewRunLabel.value;
+      resetNodeRunLifecycle();
       return;
     }
     // A terminal error is a diagnostic, not a latch. Keep it visible until the
@@ -1942,6 +2084,7 @@ async function handleToggleRun() {
       code = nodeGraphToCode(snapshot);
     } catch (error) {
       runStatus.value = `生成失败：${error?.message || error}`;
+      reportNodeRunTerminal(false, error?.message || error);
       logError('生成节点图代码失败', error);
       return;
     }
@@ -1958,6 +2101,7 @@ async function handleToggleRun() {
     if (response?.outcome === 'preview_running') {
       // A global preview owns this target. Treat the race as an ownership handoff
       // instead of leaving a misleading node-graph execution error.
+      resetNodeRunLifecycle();
       applyGamePreviewGuard({
         status: response.previewStatus || 'running',
         scope: response.previewScope || 'project',
@@ -1970,6 +2114,7 @@ async function handleToggleRun() {
     }
     startedRunForTarget = true;
     codeRunning.value = true;
+    reportNodeRunStarted();
     setNodeGraphInputLocked(true);
     runStatus.value = runWarnings.value.length ? `\u8fd0\u884c\u4e2d\uff08${runWarnings.value[0]}\uff09` : '\u8fd0\u884c\u4e2d';
     startRunPoll();
@@ -1980,6 +2125,7 @@ async function handleToggleRun() {
     currentRunNodeId.value = '';
     setNodeGraphInputLocked(false);
     runStatus.value = `执行失败：${error?.message || error}`;
+    reportNodeRunTerminal(false, error?.message || error);
     logError('执行节点图失败', error);
   } finally {
     runBusy.value = false;
@@ -2109,6 +2255,8 @@ onMounted(() => {
           type: 'actor',
           tags: [],
         })).filter((actor) => actor.name),
+        assistanceProfile: currentAssistanceProfile(),
+        optimizationHintsEnabled: optimizationHintsEnabled(),
       }),
       enabled: () => componentMounted && props.reviewActive && isProjectTarget.value && !isLoading,
       intervalMs: 10000,
