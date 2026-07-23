@@ -23,6 +23,15 @@ class PythonScriptServiceRegistryTests(unittest.TestCase):
             spec.loader.exec_module(module)
         return module
 
+    def test_project_archive_service_is_registered_for_native_project_opening(self):
+        registry = self._load_registry()
+
+        self.assertIn("ProjectArchive", registry.PYTHON_SCRIPT_SERVICES)
+        self.assertEqual(
+            registry.PYTHON_SCRIPT_SERVICES["ProjectArchive"],
+            ("plugins.ProjectArchive.main", "ProjectArchive"),
+        )
+
     def test_later_services_register_when_an_earlier_import_fails(self):
         registry = self._load_registry()
         registry.PYTHON_SCRIPT_SERVICES = {

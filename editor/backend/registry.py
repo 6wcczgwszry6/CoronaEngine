@@ -12,6 +12,7 @@ PYTHON_SCRIPT_SERVICES = {
     "AITool": ("plugins.AITool.main", "AITool"),
     "ScratchTool": (f"{_SCRIPT_PACKAGE}.blockly.main", "ScratchTool"),
     "MainView": ("plugins.MainView.main", "MainView"),
+    "ProjectArchive": ("plugins.ProjectArchive.main", "ProjectArchive"),
     "ProjectLauncher": ("plugins.ProjectLauncher.main", "ProjectLauncher"),
     "FileManager": (f"{_SCRIPT_PACKAGE}.file_system.main", "FileManager"),
     "ProjectSettings": (f"{_SCRIPT_PACKAGE}.project_settings.main", "ProjectSettings"),
