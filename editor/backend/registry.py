@@ -1,9 +1,11 @@
+import logging
 from importlib import import_module
 
 from CoronaCore.core.corona_editor import CoronaEditor
 
 
 _SCRIPT_PACKAGE = __package__ or "backend"
+logger = logging.getLogger(__name__)
 
 
 PYTHON_SCRIPT_SERVICES = {
@@ -30,11 +32,19 @@ class PythonScriptService:
 def register_python_script_services():
     registered = []
     for service_name, (module_path, class_name) in PYTHON_SCRIPT_SERVICES.items():
-        module = import_module(module_path)
-        service_class = getattr(module, class_name)
-        CoronaEditor.register_page(
-            service_name,
-            PythonScriptService(service_name, service_class),
-        )
-        registered.append(service_name)
+        try:
+            module = import_module(module_path)
+            service_class = getattr(module, class_name)
+            CoronaEditor.register_page(
+                service_name,
+                PythonScriptService(service_name, service_class),
+            )
+            registered.append(service_name)
+        except Exception:
+            logger.exception(
+                "Failed to register Python script service %s from %s.%s",
+                service_name,
+                module_path,
+                class_name,
+            )
     return registered
