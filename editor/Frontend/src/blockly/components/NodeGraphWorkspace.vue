@@ -323,7 +323,7 @@ const NODE_WIDTH = 170,
   CANVAS_WORLD_WIDTH = 4800,
   CANVAS_WORLD_HEIGHT = 3200,
   CANVAS_OVERSCROLL = 180,
-  SAVE_DELAY = 900;
+  SAVE_DELAY = 300;
 const isFullscreen = ref(false);
 const fullscreenTransitionBusy = ref(false);
 const mode = ref('select'),
@@ -485,7 +485,11 @@ let isLoading = false,
   stopNodeGraphReview = null,
   unregisterProjectNodeGraphSaveHandler = null,
   loadedProjectPath = '',
-  componentMounted = false;
+  componentMounted = false,
+  initialLoadComplete = false,
+  graphDirty = false,
+  saveInFlight = null,
+  saveQueued = false;
 const targetEnabledByKey = new Map();
 function requestNodeGraphReview(delay = 250) {
   stopNodeGraphReview?.scanNow?.(delay);
@@ -1474,14 +1478,16 @@ function applyGraph(next) {
   return portsRedistributed;
 }
 function scheduleSave() {
-  if (isLoading || !targetReady.value) return;
-  saveLabel.value = '未保存';
+  if (isLoading || !initialLoadComplete || !targetReady.value) return;
+  graphDirty = true;
+  saveLabel.value = '正在保存到当前世界...';
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
     saveTimer = null;
     saveNow();
   }, SAVE_DELAY);
 }
+
 function storageKeyForTarget(target) {
   const projectScope = encodeURIComponent(
     normalizeProjectPath(target?.projectPath || activeProjectPath.value || readActiveProjectPath()) || 'unknown-project'
@@ -1496,8 +1502,17 @@ function currentTarget(projectPathOverride = '') {
     projectPath: projectPathOverride || loadedProjectPath || activeProjectPath.value || readActiveProjectPath(),
   };
 }
-async function saveNow(targetOverride = null) {
-  if (isLoading) return false;
+async function saveNow(targetOverride = null, { force = false } = {}) {
+  if (isLoading || (!initialLoadComplete && !force)) return false;
+  if (!graphDirty && !force) return true;
+  if (saveInFlight) {
+    saveQueued = true;
+    const currentSaveSucceeded = await saveInFlight;
+    if (!currentSaveSucceeded) return false;
+    if (graphDirty) return saveNow(targetOverride, { force });
+    return true;
+  }
+
   const target = { ...currentTarget(), ...(targetOverride || {}) };
   const expectedProjectPath = normalizeProjectPath(target.projectPath);
   const currentProjectPath = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
@@ -1512,6 +1527,7 @@ async function saveNow(targetOverride = null) {
     saveTimer = null;
   }
   const snapshot = graphSnapshot();
+  const snapshotFingerprint = JSON.stringify(snapshot);
   let runnable = true;
   let code = '';
   const validationErrors = [];
@@ -1523,38 +1539,62 @@ async function saveNow(targetOverride = null) {
     validationErrors.push(String(error?.message || error));
   }
   try {
-    window.localStorage?.setItem(storageKeyForTarget(target), JSON.stringify(snapshot));
+    window.localStorage?.setItem(storageKeyForTarget(target), snapshotFingerprint);
   } catch (error) {
     logError('保存本地节点图失败', error);
   }
+
+  saveInFlight = (async () => {
+    try {
+      const response = bridgeResult(await scriptingService.saveBlocklyTarget({
+        target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
+        scene_name: isProject ? '' : target.sceneName || '',
+        actor_name: isProject ? '' : target.actorName || '',
+        script_kind: 'node_graph',
+        project_path: target.projectPath || '',
+        workspace: snapshot,
+        code,
+        enabled: targetEnabledByKey.get(storageKeyForTarget(target)) ?? true,
+        runnable,
+        validation_errors: validationErrors,
+      }));
+      if (response?.status === 'error') throw new Error(response.message || '保存节点图失败');
+      graphDirty = JSON.stringify(graphSnapshot()) !== snapshotFingerprint;
+      saveLabel.value = runnable
+        ? `已实时保存到当前世界 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
+        : `已实时保存（不可运行：${validationErrors[0]}）`;
+      return true;
+    } catch (error) {
+      graphDirty = true;
+      logError('保存项目节点图失败', error);
+      saveLabel.value = '项目保存失败（本地副本已保留）';
+      return false;
+    }
+  })();
+
   try {
-    const response = bridgeResult(await scriptingService.saveBlocklyTarget({
-      target_type: target.targetType === 'model' ? 'actor' : target.targetType || 'actor',
-      scene_name: isProject ? '' : target.sceneName || '',
-      actor_name: isProject ? '' : target.actorName || '',
-      script_kind: 'node_graph',
-      project_path: target.projectPath || '',
-      workspace: snapshot,
-      code,
-      enabled: targetEnabledByKey.get(storageKeyForTarget(target)) ?? true,
-      runnable,
-      validation_errors: validationErrors,
-    }));
-    if (response?.status === 'error') throw new Error(response.message || '保存节点图失败');
-    saveLabel.value = runnable
-      ? `项目已保存 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
-      : `项目已保存（不可运行：${validationErrors[0]}）`;
-    return true;
-  } catch (error) {
-    logError('保存项目节点图失败', error);
-    saveLabel.value = '项目保存失败（本地副本已保留）';
-    return false;
+    return await saveInFlight;
+  } finally {
+    saveInFlight = null;
+    const shouldSaveAgain = saveQueued || graphDirty;
+    saveQueued = false;
+    if (shouldSaveAgain && componentMounted && initialLoadComplete && !saveTimer) {
+      saveTimer = setTimeout(() => {
+        saveTimer = null;
+        saveNow();
+      }, SAVE_DELAY);
+    }
   }
 }
+
 async function loadGraphForCurrentTarget() {
   resetZoom();
+  initialLoadComplete = false;
   if (!targetReady.value) {
     applyGraph(normalizeGraph({}));
+    initialLoadComplete = true;
+    graphDirty = false;
+    saveLabel.value = '等待当前世界加载';
     return;
   }
   isLoading = true;
@@ -1624,13 +1664,18 @@ async function loadGraphForCurrentTarget() {
     }
   } finally {
     isLoading = false;
+    initialLoadComplete = true;
+    graphDirty = false;
     await nextTick();
     variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
     activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
     updateCanvasSize();
     requestNodeGraphReview();
   }
-  if (shouldMigrateLocal) await saveNow();
+  if (shouldMigrateLocal) {
+    graphDirty = true;
+    await saveNow();
+  }
 }
 
 function bridgeResult(response) {
@@ -1667,6 +1712,7 @@ async function handleGeneratedNodeGraph(result) {
     applyGraph(candidate);
     await loadEmbeddedWorkspaceStates();
     isLoading = false;
+    graphDirty = true;
 
     if (!(await saveNow())) throw new Error('\u5185\u90e8 AI \u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25');
     saveLabel.value = '\u5185\u90e8 AI \u8282\u70b9\u56fe\u5df2\u5e94\u7528';
@@ -2109,7 +2155,8 @@ onBeforeUnmount(() => {
   }
   unregisterNodeGraphFlusher();
   if (saveTimer) clearTimeout(saveTimer);
-  saveNow();
+  saveTimer = null;
+  if (initialLoadComplete && graphDirty) saveNow(null, { force: true });
   resizeObserver?.disconnect?.();
   if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
   resizeFrame = 0;

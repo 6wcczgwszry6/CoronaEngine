@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Optional
@@ -94,6 +95,7 @@ class ScratchTool:
     }
     _exec_state_snapshot: Optional[dict[str, Any]] = None
     _exec_input_locked = False
+    _persistence_lock = threading.RLock()
 
     _preview_lock = threading.RLock()
     _preview_threads: list[dict[str, Any]] = []
@@ -206,11 +208,44 @@ class ScratchTool:
             logger.exception("[ScratchTool] failed to load manifest: %s", path)
             return {"targets": []}
 
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str) -> None:
+        """Atomically replace a project file so concurrent floating panels never see it half-written."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
+    @classmethod
+    def _atomic_write_json(cls, path: Path, payload: Any) -> None:
+        cls._atomic_write_text(
+            path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
     @classmethod
     def _write_manifest(cls, manifest: dict, project_path: Optional[Path] = None) -> None:
-        path = cls._manifest_path(project_path)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+        cls._atomic_write_json(cls._manifest_path(project_path), manifest)
 
     @staticmethod
     def _normalize_script_kind(script_kind: Any) -> str:
@@ -289,10 +324,6 @@ class ScratchTool:
             code = cls._with_context_prelude(
                 str(data.get("code") or ""), target_type, scene_name, actor_name
             )
-            with open(code_path, "w", encoding="utf-8") as f:
-                f.write(code)
-            with open(workspace_path, "w", encoding="utf-8") as f:
-                json.dump(data.get("workspace") or {}, f, ensure_ascii=False, indent=2)
 
             def _rel(path: Path) -> str:
                 return path.relative_to(project_path).as_posix()
@@ -314,19 +345,26 @@ class ScratchTool:
                 "validation_errors": [str(item) for item in validation_errors if str(item)],
             }
 
-            manifest = cls._load_manifest(project_path)
-            targets = [t for t in manifest.get("targets", []) if t.get("id") != target_id]
-            targets.append(target)
-            targets.sort(
-                key=lambda t: (
-                    0 if t.get("target_type") == "project" else 1,
-                    t.get("scene_name", ""),
-                    t.get("actor_name", ""),
-                    cls._normalize_script_kind(t.get("script_kind")),
+            # NodeGraph can be opened in a detached CEF panel. Serialize the complete
+            # workspace/code/manifest transaction and atomically replace every file so
+            # another panel can never interpret a temporarily truncated manifest as an
+            # empty world and overwrite the user's graph.
+            with cls._persistence_lock:
+                cls._atomic_write_text(code_path, code)
+                cls._atomic_write_json(workspace_path, data.get("workspace") or {})
+                manifest = cls._load_manifest(project_path)
+                targets = [t for t in manifest.get("targets", []) if t.get("id") != target_id]
+                targets.append(target)
+                targets.sort(
+                    key=lambda t: (
+                        0 if t.get("target_type") == "project" else 1,
+                        t.get("scene_name", ""),
+                        t.get("actor_name", ""),
+                        cls._normalize_script_kind(t.get("script_kind")),
+                    )
                 )
-            )
-            manifest["targets"] = targets
-            cls._write_manifest(manifest, project_path)
+                manifest["targets"] = targets
+                cls._write_manifest(manifest, project_path)
             return {"status": "saved", "target": target, "project_path": str(project_path)}
         except Exception as exc:
             logger.exception("[ScratchTool] save_blockly_target failed")
@@ -354,37 +392,38 @@ class ScratchTool:
                 return {"status": "error", "message": "actor target requires scene_name and actor_name"}
 
             target_id = cls._target_id(target_type, scene_name, actor_name, script_kind)
-            manifest = cls._load_manifest(project_path)
-            target = next((item for item in manifest.get("targets", []) if item.get("id") == target_id), None)
-            if not target:
-                return {
-                    "status": "missing",
-                    "target": {
-                        "id": target_id,
-                        "target_type": target_type,
-                        "script_kind": script_kind,
-                        "scene_name": scene_name,
-                        "actor_name": actor_name,
-                    },
-                    "workspace": {},
-                    "project_path": str(project_path),
-                }
+            with cls._persistence_lock:
+                manifest = cls._load_manifest(project_path)
+                target = next((item for item in manifest.get("targets", []) if item.get("id") == target_id), None)
+                if not target:
+                    return {
+                        "status": "missing",
+                        "target": {
+                            "id": target_id,
+                            "target_type": target_type,
+                            "script_kind": script_kind,
+                            "scene_name": scene_name,
+                            "actor_name": actor_name,
+                        },
+                        "workspace": {},
+                        "project_path": str(project_path),
+                    }
 
-            workspace_rel = target.get("workspace_path") or ""
-            workspace_path = (project_path / workspace_rel).resolve()
-            try:
-                workspace_path.relative_to(project_path)
-            except ValueError:
-                return {"status": "error", "message": "workspace_path escapes active project"}
-            if not workspace_path.exists():
-                return {
-                    "status": "missing",
-                    "target": target,
-                    "workspace": {},
-                    "project_path": str(project_path),
-                }
-            with open(workspace_path, "r", encoding="utf-8") as f:
-                workspace = json.load(f)
+                workspace_rel = target.get("workspace_path") or ""
+                workspace_path = (project_path / workspace_rel).resolve()
+                try:
+                    workspace_path.relative_to(project_path)
+                except ValueError:
+                    return {"status": "error", "message": "workspace_path escapes active project"}
+                if not workspace_path.exists():
+                    return {
+                        "status": "missing",
+                        "target": target,
+                        "workspace": {},
+                        "project_path": str(project_path),
+                    }
+                with open(workspace_path, "r", encoding="utf-8") as f:
+                    workspace = json.load(f)
             if not isinstance(workspace, dict):
                 workspace = {}
             return {
