@@ -268,6 +268,16 @@ def _required_text_list(payload: Mapping[str, Any], field: str, errors: list[str
         errors.append(f"{field}:required_nonempty_text_list")
 
 
+def _required_text_list_allow_empty(payload: Mapping[str, Any], field: str, errors: list[str]) -> None:
+    """Require a list of non-empty strings while allowing an intentionally empty list."""
+    value = payload.get(field)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        errors.append(f"{field}:required_text_list")
+        return
+    if any(not _text(item) for item in value):
+        errors.append(f"{field}:invalid_text_list_item")
+
+
 def _validate_gameplay_logic_plan(payload: Mapping[str, Any], errors: list[str]) -> None:
     slots = payload.get("entity_slots")
     primitives = payload.get("primitives")
@@ -306,7 +316,6 @@ def _validate_gameplay_logic_plan(payload: Mapping[str, Any], errors: list[str])
             capabilities = []
         slot_capabilities[slot_id] = frozenset(capabilities)
 
-    primitive_edges: dict[str, set[str]] = {}
     primitive_ids: set[str] = set()
     for index, primitive in enumerate(primitives):
         if not isinstance(primitive, Mapping):
@@ -330,8 +339,8 @@ def _validate_gameplay_logic_plan(payload: Mapping[str, Any], errors: list[str])
             errors.append(f"primitives[{index}].subject_slot:unknown")
         if target_slot not in slot_capabilities:
             errors.append(f"primitives[{index}].target_slot:unknown")
-        if subject_slot and target_slot:
-            primitive_edges.setdefault(subject_slot, set()).add(target_slot)
+        if subject_slot and subject_slot == target_slot:
+            errors.append(f"primitives[{index}]:self_slot_reference")
         if not isinstance(parameters, Mapping):
             errors.append(f"primitives[{index}].parameters:required_mapping")
             parameters = {}
@@ -354,24 +363,6 @@ def _validate_gameplay_logic_plan(payload: Mapping[str, Any], errors: list[str])
                 f"primitives[{index}].parameters:requires_{'_and_'.join(missing_parameters)}"
             )
 
-    visited: set[str] = set()
-    active: set[str] = set()
-
-    def has_cycle(slot_id: str) -> bool:
-        if slot_id in active:
-            return True
-        if slot_id in visited:
-            return False
-        visited.add(slot_id)
-        active.add(slot_id)
-        cyclic = any(has_cycle(target) for target in primitive_edges.get(slot_id, ()))
-        active.remove(slot_id)
-        return cyclic
-
-    if any(has_cycle(slot_id) for slot_id in primitive_edges):
-        errors.append("primitives:cyclic_slot_reference")
-
-
 def gameplay_logic_contract_manifest() -> Mapping[str, Any]:
     """Return the prompt-facing view of the authoritative gameplay validator."""
 
@@ -393,8 +384,8 @@ def gameplay_logic_contract_manifest() -> Mapping[str, Any]:
             "slot_id values must be unique",
             "semantic_role values must be unique canonical identifiers matching ^[a-z][a-z0-9_.-]{2,63}$",
             "primitive_id values must be unique",
-            "subject_slot and target_slot must reference declared slot_id values",
-            "slot references must not form a cycle",
+            "subject_slot and target_slot must reference declared slot_id values and must differ",
+            "subject_slot and target_slot identify interaction participants and may be reused across primitives",
         ),
     })
 
@@ -424,7 +415,7 @@ def validate_artifact_payload(artifact_type: str, payload: Any) -> ValidationRes
     list_fields: dict[str, tuple[str, ...]] = {
         "GameDesignBrief": ("player_experience", "core_rules", "acceptance_criteria"),
         "LevelPlan": ("zones", "progression", "acceptance_criteria"),
-        "ArtDirection": ("style_keywords", "palette", "lighting", "avoid_keywords"),
+        "ArtDirection": ("style_keywords", "palette", "lighting"),
         "SceneCompositionPlan": (
             "environment_requirements",
             "entity_requirements",
@@ -437,6 +428,8 @@ def validate_artifact_payload(artifact_type: str, payload: Any) -> ValidationRes
         _required_text(normalized, field, errors)
     for field in list_fields.get(normalized_type, ()):
         _required_text_list(normalized, field, errors)
+    if normalized_type == "ArtDirection":
+        _required_text_list_allow_empty(normalized, "avoid_keywords", errors)
 
     if normalized_type == "GameplayLogicPlan":
         _validate_gameplay_logic_plan(normalized, errors)

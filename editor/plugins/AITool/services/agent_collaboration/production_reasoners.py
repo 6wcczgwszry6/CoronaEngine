@@ -36,6 +36,7 @@ class CollaborationReasoningError(RuntimeError):
         error_code: str,
         field_path: str = "",
         response_hash: str = "",
+        diagnostic_refs: tuple[str, ...] = (),
     ) -> None:
         summary = str(safe_summary or "Collaboration reasoning failed.").strip()
         super().__init__(summary)
@@ -44,14 +45,20 @@ class CollaborationReasoningError(RuntimeError):
         self.field_path = str(field_path or "").strip()
         self.safe_summary = summary
         self.response_hash = str(response_hash or "").strip()
+        self.diagnostic_refs = tuple(
+            str(item or "").strip()[:160]
+            for item in diagnostic_refs
+            if str(item or "").strip()
+        )[:8]
 
-    def as_dict(self) -> dict[str, str]:
+    def as_dict(self) -> dict[str, object]:
         return {
             "stage": self.stage,
             "error_code": self.error_code,
             "field_path": self.field_path,
             "safe_summary": self.safe_summary,
             "response_hash": self.response_hash,
+            "diagnostic_refs": list(self.diagnostic_refs),
         }
 
 
@@ -199,8 +206,8 @@ def _validation_error_code(errors: tuple[str, ...]) -> tuple[str, str]:
         return "invalid_semantic_role", field_path
     if ":requires_" in first and ("subject_slot" in first or "target_slot" in first):
         return "capability_mismatch", field_path
-    if "cyclic_slot_reference" in first:
-        return "cyclic_reference", field_path
+    if ":self_slot_reference" in first:
+        return "self_slot_reference", field_path
     if ".slot_id:duplicate" in first:
         return "duplicate_slot_id", field_path
     if ".semantic_role:duplicate" in first:
@@ -210,6 +217,24 @@ def _validation_error_code(errors: tuple[str, ...]) -> tuple[str, str]:
     if ":duplicate" in first:
         return "duplicate_identity", field_path
     return "artifact_validation_failed", field_path
+
+
+def _validation_diagnostic_refs(
+    artifact_type: str,
+    value: Any,
+    errors: tuple[str, ...],
+) -> tuple[str, ...]:
+    """Return bounded structural diagnostics without exposing model prose."""
+
+    refs = [f"artifact:{artifact_type}"]
+    refs.extend(f"validation:{item}" for item in errors[:4])
+    if artifact_type == "GameplayLogicPlan" and is_dataclass(value):
+        for index, primitive in enumerate(getattr(value, "primitives", ())):
+            primitive_id = str(getattr(primitive, "primitive_id", "") or "").strip()
+            subject = str(getattr(primitive, "subject_slot", "") or "").strip()
+            target = str(getattr(primitive, "target_slot", "") or "").strip()
+            refs.append(f"primitive[{index}]:{primitive_id}:{subject}->{target}")
+    return tuple(refs[:8])
 
 
 def _assert_artifact_valid(
@@ -228,6 +253,7 @@ def _assert_artifact_valid(
             error_code=error_code,
             field_path=field_path,
             response_hash=response_hash,
+            diagnostic_refs=_validation_diagnostic_refs(artifact_type, value, validation.errors),
         )
 
 
@@ -354,7 +380,8 @@ class _LegacyProductionProgramReasoner:
         system = (
             "你是游戏程序设计 Agent。只输出一个 JSON 对象，不要输出脚本、Markdown 或执行承诺。"
             "严格遵守 validator_manifest；不要发明 primitive、参数、capability 或 slot。"
-            "每个 primitive 的 subject_slot/target_slot 必须引用 entity_slots，ID 必须唯一且引用不得成环。"
+            "每个 primitive 的 subject_slot/target_slot 必须引用 entity_slots 且不得相同。"
+            "它们是交互参与者，不是前置依赖边，可以在不同 primitive 中重复引用。"
         )
         validator_manifest = gameplay_logic_contract_manifest()
         user = _json_prompt({
@@ -627,7 +654,8 @@ class ProductionProgramReasoner(_LegacyProductionProgramReasoner):
         "Markdown, scripts, explanations, or execution promises. Follow validator_manifest exactly. "
         "gameplay_logic_plan.entity_roles must be an object keyed by canonical semantic_role. Each "
         "semantic_role key and each slot_id must be globally unique. Primitive subject_slot and "
-        "target_slot must reference declared slot_id values, and references must not form a cycle. "
+        "target_slot must reference declared slot_id values and must differ. They identify interaction "
+        "participants, so they may be reused across primitives and do not form a dependency graph. "
         "Do not invent primitives, parameters, capabilities, or undeclared slots."
     )
 

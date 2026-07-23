@@ -127,6 +127,8 @@ class ProductionProgramReasonerTests(unittest.TestCase):
             "semantic_role values must be unique",
             " ".join(prompt["validator_manifest"]["identity_rules"]),
         )
+        self.assertNotIn("form a cycle", " ".join(prompt["validator_manifest"]["identity_rules"]))
+        self.assertIn("must differ", " ".join(prompt["validator_manifest"]["identity_rules"]))
 
     def test_unknown_slot_is_reported(self) -> None:
         payload = deepcopy(_valid_payload())
@@ -148,7 +150,7 @@ class ProductionProgramReasonerTests(unittest.TestCase):
         payload["gameplay_logic_plan"]["primitives"][1]["parameters"]["script"] = "open()"
         self._assert_error(payload, "invalid_parameters")
 
-    def test_cyclic_slot_reference_is_reported(self) -> None:
+    def test_bidirectional_interaction_participants_are_not_a_dependency_cycle(self) -> None:
         payload = deepcopy(_valid_payload())
         payload["gameplay_logic_plan"]["primitives"] = [
             {
@@ -166,7 +168,15 @@ class ProductionProgramReasonerTests(unittest.TestCase):
                 "parameters": {"state_key": "b", "value": True},
             },
         ]
-        self._assert_error(payload, "cyclic_reference")
+        result = self._generate(payload)
+        self.assertEqual(len(result.gameplay_logic_plan.primitives), 2)
+
+    def test_self_slot_reference_is_reported_with_safe_diagnostics(self) -> None:
+        payload = deepcopy(_valid_payload())
+        payload["gameplay_logic_plan"]["primitives"][0]["target_slot"] = "key"
+        error = self._assert_error(payload, "self_slot_reference")
+        self.assertIn("validation:primitives[0]:self_slot_reference", error.diagnostic_refs)
+        self.assertIn("primitive[0]:collect:key->key", error.diagnostic_refs)
 
     def test_duplicate_primitive_identity_is_reported(self) -> None:
         payload = deepcopy(_valid_payload())
@@ -307,6 +317,14 @@ class ProductionArtReasonerTests(unittest.TestCase):
             list(composition.entity_requirements),
         )
         self.assertNotIn("entity_requirements", prompt["output_schema"]["scene_composition_plan"])
+
+    def test_empty_avoid_keywords_is_a_valid_art_direction(self) -> None:
+        payload = _valid_art_payload()
+        payload["art_direction"]["avoid_keywords"] = []
+
+        result = self._generate(payload)
+
+        self.assertEqual(result.art_direction.avoid_keywords, ())
 
     def test_unknown_role_override_is_rejected(self) -> None:
         payload = _valid_art_payload()

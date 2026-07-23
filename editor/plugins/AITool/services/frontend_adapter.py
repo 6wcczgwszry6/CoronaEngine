@@ -74,6 +74,8 @@ class ProgressEvent:
     event_type: str
     status: str
     detail: Mapping[str, Any] | None
+    origin_message_id: str = ""
+    origin_correlation_id: str = ""
 
     def __post_init__(self) -> None:
         if self.schema_version != FRONTEND_INTERACTION_SCHEMA_VERSION:
@@ -93,6 +95,11 @@ class ProgressEvent:
         if not status:
             raise ValueError("status is required")
         object.__setattr__(self, "status", status)
+        for field_name in ("origin_message_id", "origin_correlation_id"):
+            value = str(getattr(self, field_name) or "").strip()
+            if len(value) > 256:
+                raise ValueError(f"{field_name} is too long")
+            object.__setattr__(self, field_name, value)
         if self.detail is not None:
             object.__setattr__(self, "detail", _mapping(self.detail, "detail"))
 
@@ -232,6 +239,8 @@ class FrontendBusinessProtocolAdapter:
                 event_type=raw_event.get("event_type", ""),
                 status=raw_event.get("status", ""),
                 detail=raw_event.get("detail"),
+                origin_message_id=raw_event.get("origin_message_id", ""),
+                origin_correlation_id=raw_event.get("origin_correlation_id", ""),
             )
         except (TypeError, ValueError):
             return self._blocked(
@@ -257,6 +266,8 @@ class FrontendBusinessProtocolAdapter:
             event_type=event_type,
             status="accepted",
             detail={"command_type": command.command_type},
+            origin_message_id=str(payload.get("origin_message_id") or "").strip(),
+            origin_correlation_id=str(payload.get("origin_correlation_id") or "").strip(),
         )
 
     @staticmethod

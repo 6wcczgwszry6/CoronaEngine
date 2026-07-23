@@ -140,6 +140,7 @@ _HIGH_RISK_PATTERNS = (
 
 _STATUS_QUERY_PATTERNS += (
     r"(现在|当前)?(生成|执行|进度|计划|方案).*(哪里|哪步|情况|状态|是什么)",
+    r"(方案|计划)?.*(进度如何|进度怎么样)",
     r"(到哪|到哪里|哪一步|卡住|为什么不执行|开始了吗)",
 )
 _GENERATION_START_PATTERNS += (
@@ -152,6 +153,7 @@ _PLAN_DRAFT_PATTERNS += (
 )
 _PLAN_REVISION_PATTERNS += (
     r"^(补充|说明|调整|修改)[:：]?",
+    r"再给.*(方案|计划)",
     r"(在.*基础上|基于.*方案|基于.*设计|我希望|希望|不要|别|不能|更|风格|统一|一致|温暖|灯光|休息区|暗黑风|恐怖)",
 )
 _PLAN_SUPPLEMENT_PATTERNS += (
@@ -298,6 +300,10 @@ class IntentUnderstandingService:
         generation_active: bool,
     ) -> IntentDecision | None:
         normalized = re.sub(r"@\S+\s*", "", value).strip()
+        # A request to create or revise a proposal may include the word "方案".
+        # Give its explicit action verb precedence over generic status wording.
+        if _contains(_PLAN_DRAFT_PATTERNS, normalized):
+            return IntentDecision("plan_drafting", 0.97, target_agent, reason="protocol/plan drafting")
         if _contains(_STATUS_QUERY_PATTERNS, normalized):
             return IntentDecision("status_query", 0.98, target_agent, reason="protocol/status query")
         if _contains(_OPINION_DISCUSSION_PATTERNS, normalized):

@@ -1,6 +1,22 @@
 # R3-min 推进记录
 
-更新时间：2026-07-21
+更新时间：2026-07-23
+
+## E8 当前执行覆盖（优先于下方历史锚点）
+
+```text
+当前工作块：B7.1 E8 Program 原语语义与伪循环收敛
+当前任务：E8.1 GameplayLogicPlan 交互参与者契约
+任务状态：code_complete / pending_focused_verification
+当前执行角色：架构 AI
+Full R3 Gate：red / pending_reevaluation
+B7.1：blocked / collaboration_program_contract_failed
+B7.2：blocked_by_B7.1
+Collaboration schema：1.3（不升级）
+Skeleton：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+最新只读证据：2026-07-22_23-46-45，二轮会话；B7_1_CONTROL_BLOCKED / PASS=15 WARN=1 FAIL=2
+下一任务：E8 聚焦测试；随后使用全新独立 Session 执行完整六轮 B7.1
+```
 
 ## 0. 当前执行锚点
 
@@ -4193,3 +4209,56 @@ Collaboration ReadOnly/Context/Intent/Budget/Probe：26 passed
 - 本轮没有进入图片、模型、Actor、Finalizer、GameplayManifest 或 Engine 写链；B7.2 继续由 B7.1 阻断。
 
 下一唯一任务：使用全新独立 Session 原样执行 B7.1 固定六条消息；另以辅助状态查询验证 AttemptReport 回复低于 1 秒。只有 `B7_1_CONTROL_READY / WARN=0 / FAIL=0` 才进入 B7.2。
+# E7 执行覆盖（2026-07-22）
+
+\`\`\`text
+当前工作块：B7.1 E7 控制面修复
+当前任务：全新独立 Session 原样执行 B7.1 六条消息
+任务状态：code_complete / pending_f5
+当前执行角色：实机验证
+Full R3 Gate：red / pending_reevaluation
+B7.1：blocked / collaboration_art_contract_failed（旧失败证据）；E7 修复待新的 F5 证实
+B7.2：blocked_by_B7.1
+Collaboration schema：1.3
+Frontend interaction schema：r3-interaction-week1-v2
+Skeleton：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+\`\`\`
+
+## 107. 2026-07-22 B7.1 E7 美术契约与控制面修复
+
+- 只读失败证据已固化：\`docs/probes/fixtures/r3_f5/2026-07-22_19-37-55_corona.log.txt\` 与 \`2026-07-22_19-37-55_history.jsonl\`；原始 probe 结果为 \`B7_1_CONTROL_BLOCKED / PASS=14 / WARN=1 / FAIL=3\`。
+- F5 正向事实：Discussion、Planning、Program 和 Art 均调用 \`deepseek/deepseek-v4-pro\`；Art 模型返回成功，但 \`avoid_keywords=[]\` 被本地 Artifact Validator 误判为非法，Narrator/Proposal/Runtime 未启动。
+- E7 已修复：\`avoid_keywords\` 现在必须是字符串列表但可为空；\`style_keywords/palette/lighting\` 仍为非空列表。受影响旧 Artifact/Proposal 由协作 schema \`1.3\` 失效，不迁移失败尝试。
+- E7 已修复：状态查询只接受明确查询短语；“给出/设计/做一个方案”优先进入 Collaboration Coordinator。成功 Proposal 的“再给一个方案”在后续请求中形成版本化修订；失败 Attempt 则重走 \`plan_drafting\`。
+- E7 已修复：普通 \`@GM 确认生成\` 在旧 \`LANChatAgentOrchestrator\` 之前由 Coordinator 处理；无 Proposal 返回一条 \`collaboration_blocked\` final reply，有 Proposal 时核对 version/hash/artifact refs，Red 下保持 pending 且零 Runtime 写入。
+- E7 已修复：\`ProgressEvent\` 携带 origin message/correlation；同一稳定 event ID 继续作为前端原位更新键。控制面 reply/model summary 保持在 RuntimeState 之外。
+- 未扩展：本轮没有修改图片、模型、Actor、Finalizer、GameplayManifest 或 Engine 写链；Quasar capability warnings 记录为后续 B7.2a 输入，不构成本轮绕过条件。
+
+验证证据：
+
+\`\`\`text
+E7 contracts/reasoners/intent/frontend/LANChat 聚焦组合：52 passed
+新 F5 前状态：B7.1 blocked / pending_independent_f5
+\`\`\`
+
+下一唯一任务：使用全新独立 Session 原样执行 B7.1 固定六条消息，并运行 \`docs/probes/r3_f5_log_check.py --profile control-plane\`。只有 \`B7_1_CONTROL_READY / WARN=0 / FAIL=0\` 才将 B7.1 标记 verified。
+
+## 108. 2026-07-23 B7.1 E8 Program 原语语义与伪循环收敛
+
+```text
+任务 ID / 状态：B7.1-E8.0..E8.4 / code_complete / pending_focused_verification
+contract_status：GameplayLogicPlan participant semantics updated
+production_integration_status：pending_independent_f5
+B7.1：blocked / collaboration_program_contract_failed
+B7.2：blocked_by_B7.1
+Full R3 Gate：red / pending_reevaluation
+Collaboration schema：1.3（不变）
+Skeleton：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d2575f1c61152100a426f5729e1cd（不变）
+```
+
+- 固化只读失败证据：`docs/probes/fixtures/r3_f5/2026-07-22_23-46-45_corona.log.txt` 与 `2026-07-22_23-46-45_history.jsonl`。该会话只有两条用户消息；Probe 为 `B7_1_CONTROL_BLOCKED / PASS=15 WARN=1 FAIL=2`，两项 FAIL 包含固定六轮缺失，不能作为完整 B7.1 的失败结论。
+- 实机事实：Discussion 真实调用 `deepseek/deepseek-v4-pro` 并完成；Planning 10172ms 完成；Program 78831ms 返回后遭旧 `cyclic_reference` 拒绝；Art/Narration/Proposal/Runtime 未启动，Red 期间保持零 Runtime 业务写入。
+- 修复：移除将全部 primitive participant 关系当作依赖 DAG 的 DFS；新增 `self_slot_reference`；继续校验 slot、primitive ID、semantic role、capability、参数白名单及必填参数。不同 primitive 可以复用 subject/target。
+- Prompt/Manifest/Reasoner 统一为参与者语义；错误对象与日志保留 stage、error code、field path、response hash 和受限 diagnostic refs，不保存模型原文或提示词。
+- 聚焦验证：Contracts、Production Reasoners 与 LANChat Collaboration Proposal 共 42 项通过；Python syntax compile 与 `git diff --check` 通过。全量 `test_lanchat_runtime_guard.py` 仍有 4 项旧 Runtime 路由期望失败，未作为 E8 通过证据，留待控制面后续单独收口。
+- 验证边界：E8 聚焦测试通过后，使用全新独立 Session 完整运行 B7.1 六条消息；未得到 `B7_1_CONTROL_READY / WARN=0 / FAIL=0` 前，不进入 B7.2、媒体、Actor、Finalizer、GameplayManifest 或 Engine 写链。

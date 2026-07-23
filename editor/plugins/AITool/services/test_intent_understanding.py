@@ -38,6 +38,16 @@ class IntentUnderstandingDiscussionTests(unittest.TestCase):
 
         self.assertEqual(decision.intent, "plan_drafting")
 
+    def test_plan_request_beats_status_keyword_matching(self) -> None:
+        decision = self.service.classify("@长者 请你给出一个方案", allow_llm=False)
+
+        self.assertEqual(decision.intent, "plan_drafting")
+
+    def test_explicit_progress_question_stays_status_query(self) -> None:
+        decision = self.service.classify("@GM 方案进度如何", allow_llm=False)
+
+        self.assertEqual(decision.intent, "status_query")
+
 
 if __name__ == "__main__":
     unittest.main()

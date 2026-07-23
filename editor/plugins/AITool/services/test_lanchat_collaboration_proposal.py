@@ -307,6 +307,9 @@ class LANChatCollaborationProposalTests(unittest.TestCase):
             "message_kind": "chat",
             "text": "@GM \u73b0\u5728\u662f\u4ec0\u4e48\u60c5\u51b5",
         }
+        # Keep this source fixture ASCII-safe on Windows while exercising the
+        # same explicit status-query route.
+        status_trigger["text"] = "@GM status"
         status_reply = worker._handle_coordinator_status_query(status_trigger)
         self.assertIn("程序：阻断（unknown_slot）", status_reply)
         self.assertNotIn("Runtime 状态", status_reply)
@@ -349,14 +352,38 @@ class LANChatCollaborationProposalTests(unittest.TestCase):
         self.assertEqual(reply["sender_name"], "GM")
         self.assertEqual(reply["metadata"]["reply_contract"], "runtime_write_blocked")
         self.assertIn("Full R3 Gate", reply["text"])
-        pending = get_lanchat_scene_runtime().pending_planning_snapshot()
-        self.assertEqual(len(pending), 1)
-        self.assertEqual(pending[0]["status"], "pending")
-
         project_id = worker._stable_collaboration_id("project", "", seed="room-red-confirmation")
         proposal = worker._get_collaboration_coordinator().current(project_id)
         self.assertIsNotNone(proposal)
         self.assertEqual(proposal.status, "proposal_ready")
+        self.assertEqual(engine.messages[-1]["metadata"]["origin_message_id"], "message-red-confirmation")
+
+    def test_gm_confirmation_without_proposal_is_final_control_plane_reply(self) -> None:
+        worker, engine = self._worker()
+        runtime_before = deepcopy(worker._agent_runtime.state.rooms)
+        operation_count_before = len(worker._agent_runtime.operation_log.entries())
+        trigger = {
+            "room_id": "room-no-proposal",
+            "message_id": "message-no-proposal-confirmation",
+            "text": "@GM 确认生成",
+            "sender_id": "host",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "gm",
+            "agent_name": "GM",
+            "_dispatch_owner": "agent_trigger",
+        }
+
+        self.assertTrue(worker._handle_gm_pending_planning_confirmation(trigger))
+
+        reply = engine.messages[-1]
+        self.assertEqual(reply["sender_name"], "GM")
+        self.assertEqual(reply["metadata"]["reply_contract"], "collaboration_blocked")
+        self.assertEqual(reply["metadata"]["resolved_intent"], "generation_start")
+        self.assertEqual(reply["metadata"]["reply_to"], "message-no-proposal-confirmation")
+        self.assertEqual(worker._agent_runtime.state.rooms, runtime_before)
+        self.assertEqual(len(worker._agent_runtime.operation_log.entries()), operation_count_before)
 
     def test_gm_delegation_enters_collaboration_proposal(self) -> None:
         worker, engine = self._worker()
@@ -407,6 +434,41 @@ class LANChatCollaborationProposalTests(unittest.TestCase):
         proposals = [row for row in engine.messages if row["message_kind"] == "gm_proposal"]
         self.assertEqual(proposals[-1]["metadata"]["revision_status"], "unchanged")
         self.assertIn("不重复调用三职能模型", proposals[-1]["text"])
+
+    def test_alternative_plan_request_becomes_a_versioned_revision(self) -> None:
+        worker, engine = self._worker()
+        base = {
+            "room_id": "room-proposal-revision",
+            "sender_id": "host",
+            "sender_name": "房主",
+            "sender_type": "host",
+            "message_kind": "chat",
+            "agent_id": "girl",
+            "agent_name": "小女孩",
+        }
+        def revision_completion(trigger, *, purpose, **kwargs):
+            payload = _collaboration_completion(trigger, purpose=purpose, **kwargs)
+            if purpose != "art_artifact_reasoning" or trigger.get("message_id") != "message-revision-2":
+                return payload
+            revised = json.loads(payload)
+            revised["art_direction"]["palette"].append("midnight blue")
+            return json.dumps(revised, ensure_ascii=False)
+
+        with patch.object(worker, "_complete_tool_free_chat", side_effect=revision_completion):
+            self.assertTrue(worker._handle_collaboration_proposal({
+                **base,
+                "message_id": "message-revision-1",
+                "text": "@小女孩 设计一个迪士尼风格卧室方案",
+            }))
+            self.assertTrue(worker._handle_collaboration_proposal({
+                **base,
+                "message_id": "message-revision-2",
+                "text": "@小女孩 再给一个方案，改成夜晚氛围",
+            }))
+
+        proposals = [row for row in engine.messages if row["message_kind"] == "gm_proposal"]
+        self.assertEqual(proposals[-1]["metadata"]["proposal_version"], 2)
+        self.assertEqual(proposals[-1]["metadata"]["resolved_intent"], "plan_revision")
 
     def test_narration_failure_discards_candidate_proposal(self) -> None:
         worker, engine = self._worker()

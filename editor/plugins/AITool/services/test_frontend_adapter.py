@@ -83,6 +83,27 @@ class FrontendBusinessProtocolAdapterTests(unittest.TestCase):
         self.assertEqual(replay.error_code, "duplicate_event_id")
         self.assertEqual(replay.owner_domain, "frontend")
 
+    def test_progress_event_preserves_origin_turn_identifiers(self) -> None:
+        adapter = FrontendBusinessProtocolAdapter()
+        event = adapter.forward_event({
+            "schema_version": FRONTEND_INTERACTION_SCHEMA_VERSION,
+            "event_id": "event.origin.progress",
+            "command_id": "command.origin",
+            "room_id": "room.origin",
+            "project_id": "project.origin",
+            "task_id": "task.origin",
+            "plan_id": "",
+            "scene_version": 0,
+            "event_type": "planning_in_progress",
+            "status": "in_progress",
+            "detail": {"owner_role": "planning"},
+            "origin_message_id": "message:origin-1",
+            "origin_correlation_id": "correlation:origin-1",
+        })
+
+        self.assertEqual(event.origin_message_id, "message:origin-1")
+        self.assertEqual(event.origin_correlation_id, "correlation:origin-1")
+
     def test_adapter_has_no_runtime_or_engine_write_dependency(self) -> None:
         assert_module_has_no_forbidden_imports(
             self,

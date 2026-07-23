@@ -49,6 +49,26 @@ def _envelope(**overrides) -> ArtifactEnvelope:
 
 
 class AgentCollaborationContractTests(unittest.TestCase):
+    def test_art_direction_avoid_keywords_may_be_empty_but_must_be_a_clean_list(self) -> None:
+        base = {
+            "style_keywords": ["storybook"],
+            "palette": ["rose"],
+            "lighting": ["soft window light"],
+        }
+        valid = validate_artifact_payload("ArtDirection", {**base, "avoid_keywords": []})
+        self.assertTrue(valid.valid)
+
+        cases = {
+            "missing": base,
+            "not_a_list": {**base, "avoid_keywords": "horror"},
+            "empty_item": {**base, "avoid_keywords": [""]},
+            "normal": {**base, "avoid_keywords": ["horror"]},
+        }
+        self.assertFalse(validate_artifact_payload("ArtDirection", cases["missing"]).valid)
+        self.assertFalse(validate_artifact_payload("ArtDirection", cases["not_a_list"]).valid)
+        self.assertFalse(validate_artifact_payload("ArtDirection", cases["empty_item"]).valid)
+        self.assertTrue(validate_artifact_payload("ArtDirection", cases["normal"]).valid)
+
     def test_artifact_type_has_one_functional_producer_role(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires producer_role planning"):
             _envelope(producer_role="art")
@@ -270,7 +290,7 @@ class AgentCollaborationContractTests(unittest.TestCase):
         self.assertTrue(artifact.validation_result.valid)
         self.assertEqual(artifact.status, "validated")
 
-    def test_gameplay_logic_plan_v1_1_rejects_unknown_parameters_and_slot_cycles(self) -> None:
+    def test_gameplay_logic_plan_v1_1_rejects_unknown_parameters_without_dependency_cycle_inference(self) -> None:
         result = validate_artifact_payload(
             "GameplayLogicPlan",
             {
@@ -303,7 +323,32 @@ class AgentCollaborationContractTests(unittest.TestCase):
         self.assertFalse(result.valid)
         self.assertIn("primitives[0].parameters:unknown:unexpected", result.errors)
         self.assertIn("primitives[1].target_slot:requires_lockable", result.errors)
-        self.assertIn("primitives:cyclic_slot_reference", result.errors)
+        self.assertNotIn("primitives:cyclic_slot_reference", result.errors)
+
+    def test_gameplay_logic_plan_v1_1_rejects_self_slot_reference(self) -> None:
+        result = validate_artifact_payload(
+            "GameplayLogicPlan",
+            {
+                "states": ["ready"],
+                "entity_slots": [
+                    {"slot_id": "key", "semantic_role": "collectible_key", "required_capabilities": ["collectible"]},
+                ],
+                "primitives": [
+                    {
+                        "primitive_id": "collect-self",
+                        "kind": "on_collect",
+                        "subject_slot": "key",
+                        "target_slot": "key",
+                        "parameters": {"state_key": "ready", "set_value": True},
+                    },
+                ],
+                "win_conditions": ["ready"],
+                "lose_conditions": ["none"],
+            },
+        )
+
+        self.assertFalse(result.valid)
+        self.assertIn("primitives[0]:self_slot_reference", result.errors)
 
     def test_legacy_gameplay_logic_payload_is_retained_for_audit_but_invalid_for_new_use(self) -> None:
         legacy = ArtifactEnvelope(

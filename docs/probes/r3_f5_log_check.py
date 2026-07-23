@@ -1410,6 +1410,13 @@ def summarize(checks: list[Check], *, profile: str = "full-r3") -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    # Windows consoles otherwise render Chinese evidence summaries using the
+    # active code page, which makes a failed probe hard to audit or diff.
+    if sys.platform == "win32":
+        for stream in (sys.stdout, sys.stderr):
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="backslashreplace")
     parser = argparse.ArgumentParser()
     parser.add_argument("log", nargs="?", type=Path, help="Path to *_corona.log; defaults to latest")
     parser.add_argument("--history", type=Path, help="Path to the corresponding LANChat JSONL history")

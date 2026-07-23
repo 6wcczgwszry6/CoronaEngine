@@ -4662,6 +4662,10 @@ class LANChatAgentWorker:
                 reply=pending_discussion_reply if sent else "",
             )
             return sent
+        # R3 confirmations are owned by CollaborationCoordinator.  They must
+        # not be consumed by the legacy orchestrator's separate pending-plan state.
+        if self._handle_gm_pending_planning_confirmation(trigger):
+            return True
         deterministic_control = self._get_orchestrator().handle_control_trigger(trigger)
         if deterministic_control is not None:
             action_payload = self._prepare_confirmed_action_payload(
@@ -4824,8 +4828,6 @@ class LANChatAgentWorker:
                 "当前没有可确认的三职能方案。请先讨论并形成带 proposal_id、版本和 hash 的方案。",
                 trigger,
             ))
-        if self._handle_gm_pending_planning_confirmation(trigger):
-            return True
         generation_start_reply = self._handle_coordinator_generation_start(trigger)
         if generation_start_reply is not None:
             return bool(self._send_final_reply("gm-system", "GM", generation_start_reply, trigger))
@@ -5164,6 +5166,12 @@ class LANChatAgentWorker:
                 ):
                     if trigger.get(key):
                         reply_metadata[key] = str(trigger.get(key) or "")
+                reply_metadata["origin_message_id"] = str(
+                    trigger.get("origin_message_id") or trigger.get("message_id") or ""
+                )
+                reply_metadata["origin_correlation_id"] = str(
+                    trigger.get("origin_correlation_id") or self._correlation_id(trigger) or ""
+                )
                 if trigger.get("proposal_version"):
                     reply_metadata["proposal_version"] = int(trigger.get("proposal_version") or 0)
                 if trigger.get("proposal_hash"):
@@ -10556,6 +10564,86 @@ class LANChatAgentWorker:
             or not self._is_pure_generation_confirmation_text(text)
         ):
             return False
+        room_id = str(trigger.get("room_id") or "default")
+        project_id = self._stable_collaboration_id("project", "", seed=room_id)
+        coordinator = self._get_collaboration_coordinator()
+        proposal = coordinator.current(project_id)
+        metadata = self._metadata_from_trigger(trigger)
+
+        # R3 proposals are versioned Artifacts.  Resolve their confirmation
+        # before the legacy orchestrator can inspect its own pending-plan cache.
+        if proposal is not None:
+            reference = {
+                "proposal_id": proposal.proposal_id,
+                "agent_plan_id": proposal.proposal_id,
+                "artifact_ref": proposal.artifact_ref,
+                "proposal_version": proposal.proposal_version,
+                "proposal_hash": proposal.proposal_hash,
+                "artifact_refs": list(proposal.artifact_refs),
+            }
+            explicit_identity = any(
+                str(metadata.get(key) or trigger.get(key) or "").strip()
+                for key in ("proposal_id", "agent_plan_id", "proposal_version", "proposal_hash")
+            )
+            provided_refs = metadata.get("artifact_refs") or trigger.get("artifact_refs") or []
+            if isinstance(provided_refs, str):
+                provided_refs = [provided_refs]
+            self._bind_confirmation_identity(reference, trigger)
+            reference_refs = tuple(reference["artifact_refs"])
+            refs_match = (
+                not explicit_identity
+                or (
+                    bool(provided_refs)
+                    and tuple(str(value) for value in provided_refs) == reference_refs
+                )
+            )
+            trigger["reply_to"] = self._dispatch_message_id(trigger)
+            trigger["origin_message_id"] = trigger["reply_to"]
+            trigger["origin_correlation_id"] = self._correlation_id(trigger)
+            trigger["resolved_intent"] = "generation_start"
+            trigger["_control_plane_only"] = True
+            if not refs_match or not self._proposal_confirmation_matches(reference, trigger):
+                trigger["reply_contract"] = "collaboration_blocked"
+                return bool(self._send_final_reply(
+                    "gm",
+                    "GM",
+                    "确认引用的方案 ID、版本、hash 或 Artifact 列表不一致；当前方案仍保留，未写入场景。",
+                    trigger,
+                ))
+            if not self._agent_runtime_flags.can_execute_collaboration_runtime_write():
+                trigger["reply_contract"] = "runtime_write_blocked"
+                return bool(self._send_final_reply(
+                    "gm",
+                    "GM",
+                    "当前 Full R3 Gate 仍为 Red；方案引用已核对，但待确认方案会继续保留，本轮不创建 Runtime 写入。",
+                    trigger,
+                ))
+            trigger["reply_contract"] = "runtime_write_blocked"
+            return bool(self._send_final_reply(
+                "gm",
+                "GM",
+                "R3 协作方案已核对，但 Runtime 交接尚未在当前控制面启用；方案仍保留为待确认状态，未写入场景。",
+                trigger,
+            ))
+
+        # A generic R3 confirmation is never delegated to the legacy pending
+        # plan registry.  An explicit legacy route is the sole compatibility
+        # exception below.
+        if not bool(metadata.get("legacy_route") or trigger.get("legacy_route")):
+            trigger.update({
+                "reply_contract": "collaboration_blocked",
+                "resolved_intent": "generation_start",
+                "reply_to": self._dispatch_message_id(trigger),
+                "origin_message_id": self._dispatch_message_id(trigger),
+                "origin_correlation_id": self._correlation_id(trigger),
+                "_control_plane_only": True,
+            })
+            return bool(self._send_final_reply(
+                "gm",
+                "GM",
+                "当前没有可确认的三职能方案；本轮没有写入场景。请先形成带 proposal_id、版本和 hash 的方案。",
+                trigger,
+            ))
         try:
             from .lanchat_scene_runtime import get_lanchat_scene_runtime
 
@@ -10564,8 +10652,6 @@ class LANChatAgentWorker:
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Pending planning confirmation lookup failed: %s", type(exc).__name__)
             return False
-        metadata = self._metadata_from_trigger(trigger)
-        room_id = str(trigger.get("room_id") or "default")
         context = self._conversation_turn_contexts.get(room_id)
         candidates = [
             str(metadata.get("artifact_ref") or "").strip(),
@@ -12421,10 +12507,25 @@ class LANChatAgentWorker:
         coordinator = self._get_collaboration_coordinator()
         proposal = coordinator.current(project_id)
         report = coordinator.last_attempt(project_id)
-        status_tokens = (
-            "\u65b9\u6848", "\u8ba1\u5212", "\u8bbe\u8ba1", "\u60c5\u51b5", "\u8fdb\u5ea6", "\u5230\u54ea", "\u5728\u54ea",
+        normalized = "".join(text.lower().split())
+        # History fixtures may preserve a JSON-escaped user payload.  Decode
+        # that representation only for intent matching; the original text
+        # remains untouched for audit and replies.
+        if chr(92) + "u" in normalized:
+            try:
+                normalized = normalized.encode("ascii").decode("unicode_escape")
+            except UnicodeError:
+                pass
+        status_phrases = (
+            "方案在哪里", "方案在哪", "计划在哪里", "计划在哪",
+            "进度如何", "进度怎么样", "现在什么情况", "当前什么情况",
+            "到哪了", "到哪里了", "什么状态", "查询状态", "查看状态",
         )
-        if not any(token in text for token in status_tokens):
+        if (
+            normalized not in {"状态", "status"}
+            and not normalized.endswith("status")
+            and not any(phrase in normalized for phrase in status_phrases)
+        ):
             return None
         if report is None:
             return None
@@ -12564,6 +12665,10 @@ class LANChatAgentWorker:
             trigger["agent_plan_id"] = proposal_id
         trigger["proposal_version"] = int(reference.get("proposal_version") or 0)
         trigger["proposal_hash"] = str(reference.get("proposal_hash") or "")
+        trigger["artifact_ref"] = str(reference.get("artifact_ref") or "")
+        trigger["artifact_refs"] = [
+            str(value) for value in list(reference.get("artifact_refs") or []) if str(value)
+        ]
 
     def _handle_tool_free_discussion(self, trigger: dict[str, Any]) -> bool:
         text = str(trigger.get("text") or "").strip()
@@ -12669,14 +12774,19 @@ class LANChatAgentWorker:
         )
         coordinator = self._get_collaboration_coordinator()
         current_proposal = coordinator.current(project_id)
+        alternative_requested = (
+            "再给" in text
+            and any(token in text for token in ("方案", "计划", "设计"))
+        )
         effective_proposal_intent = (
             "plan_revision"
-            if current_proposal is not None and decision.intent == "plan_revision"
+            if current_proposal is not None
+            and (decision.intent == "plan_revision" or alternative_requested)
             else "plan_drafting"
         )
         proposal_deadline_at = time.monotonic() + 180.0
         if current_proposal is not None and (
-            decision.intent == "plan_revision"
+            effective_proposal_intent == "plan_revision"
             or self._conversation_turn_contexts.is_instruction_only(text)
         ) and not coordinator.matches_current_request(project_id, planning_text):
             planning_text = (
@@ -12713,7 +12823,7 @@ class LANChatAgentWorker:
             report = coordinator.last_attempt(project_id)
             self._logger.warning(
                 "[CollaborationCoordinator] proposal blocked room=%s message=%s error=%s "
-                "stage=%s error_code=%s field_path=%s response_hash=%s",
+                "stage=%s error_code=%s field_path=%s response_hash=%s diagnostic_refs=%s",
                 room_id,
                 message_id,
                 type(exc).__name__,
@@ -12721,6 +12831,7 @@ class LANChatAgentWorker:
                 str(getattr(exc, "error_code", "") or ""),
                 str(getattr(exc, "field_path", "") or ""),
                 str(getattr(exc, "response_hash", "") or ""),
+                ",".join(str(item) for item in getattr(exc, "diagnostic_refs", ()) or ()),
             )
             trigger["reply_contract"] = "collaboration_blocked"
             trigger["resolved_intent"] = effective_proposal_intent
@@ -12734,31 +12845,9 @@ class LANChatAgentWorker:
         proposal = result.proposal
         for event in result.progress_events:
             self._emit_collaboration_progress_event(event)
-        payloads = proposal.artifact_payloads
-        composition = payloads.get("SceneCompositionPlan", {})
-        proposed_items = [
-            str(item).strip()
-            for item in composition.get("entity_requirements", ())
-            if str(item).strip()
-        ]
-        try:
-            from .lanchat_scene_runtime import get_lanchat_scene_runtime
-
-            get_lanchat_scene_runtime().register_structured_proposal(
-                target_agent=target_agent,
-                proposal_id=proposal.proposal_id,
-                proposal_version=proposal.proposal_version,
-                proposal_hash=proposal.proposal_hash,
-                scene_goal=planning_text,
-                proposed_items=proposed_items,
-                artifact_refs=list(proposal.artifact_refs),
-            )
-        except Exception as exc:  # noqa: BLE001
-            self._logger.warning(
-                "[CollaborationCoordinator] compatibility proposal registration failed: %s",
-                type(exc).__name__,
-            )
-            return False
+        # Coordinator is the authoritative pending-Proposal registry for R3.
+        # Do not mirror a successful control-plane proposal into the legacy
+        # LANChat SceneRuntime, which would create a second confirmation owner.
         narration_error: Exception | None = None
         if result.revision_status == "unchanged":
             reply = (
@@ -12987,6 +13076,8 @@ class LANChatAgentWorker:
             "event_type": str(getattr(event, "event_type", "") or ""),
             "status": str(getattr(event, "status", "") or ""),
             "detail": detail,
+            "origin_message_id": str(getattr(event, "origin_message_id", "") or ""),
+            "origin_correlation_id": str(getattr(event, "origin_correlation_id", "") or ""),
         }
         event_type = event_payload["event_type"]
         text = str(detail.get("stage_text") or "").strip()
@@ -13064,6 +13155,8 @@ class LANChatAgentWorker:
                 else "collaboration_stage_not_started"
             ),
             status=status,
+            origin_message_id=message_id,
+            origin_correlation_id=self._correlation_id(trigger),
             detail={
                 "owner_role": "gm" if stage == "narration" else stage,
                 "artifact_refs": list(getattr(event, "artifact_refs", ()) or ()),

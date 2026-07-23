@@ -1396,6 +1396,7 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
                 "agent_name": "GM",
                 "target_agent_id": "gm",
                 "target_agent_name": "GM",
+                "legacy_route": True,
             }
 
             self.assertTrue(worker._handle_gm_pending_planning_confirmation(trigger))
@@ -1405,18 +1406,15 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             metadata = json.loads(engine.replies[0]["metadata_json"])
             self.assertEqual(metadata["proposal_id"], reference["agent_plan_id"])
             self.assertEqual(metadata["artifact_ref"], reference["artifact_ref"])
-            self.assertEqual(metadata["reply_contract"], "generation_confirmation")
-            self.assertTrue(metadata["runtime_plan_id"])
+            self.assertEqual(metadata["reply_contract"], "runtime_write_blocked")
+            self.assertNotIn("runtime_plan_id", metadata)
             state = worker._agent_runtime.query_state("room-gm-confirm")["room"]
             execution_ref = (
                 f"{reference['agent_plan_id']}@{reference['proposal_version']}:"
                 f"{reference['proposal_hash'].removeprefix('sha256:')}"
             )
-            self.assertEqual(
-                state["external_plan_links"][execution_ref],
-                metadata["runtime_plan_id"],
-            )
-            self.assertEqual(scene_runtime.pending_planning_snapshot(), [])
+            self.assertNotIn(execution_ref, state["external_plan_links"])
+            self.assertEqual(len(scene_runtime.pending_planning_snapshot()), 1)
         finally:
             scene_runtime.clear_pending_planning()
 
