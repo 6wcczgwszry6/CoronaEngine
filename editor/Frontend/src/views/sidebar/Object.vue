@@ -129,10 +129,13 @@ const { closePanel, isDocked } = useDockPanel();
 const { error: logError } = useErrorHandler('Object');
 const axes = ['x', 'y', 'z'];
 const transformGroups = [
-  { key: 'position', label: '位置', operation: 'SetPosition', step: 0.1 },
-  { key: 'rotation', label: '旋转', operation: 'SetRotation', step: 1 },
-  { key: 'scale', label: '缩放', operation: 'SetScale', step: 0.05 },
+  { key: 'position', label: '位置', operation: 'SetPosition', operationCode: 0, step: 0.1 },
+  { key: 'rotation', label: '旋转', operation: 'SetRotation', operationCode: 1, step: 1 },
+  { key: 'scale', label: '缩放', operation: 'SetScale', operationCode: 2, step: 0.05 },
 ];
+const transformOperationCodes = Object.fromEntries(
+  transformGroups.map((group) => [group.operation, group.operationCode])
+);
 
 const selectedSceneName = ref(DEFAULT_SCENE_NAME);
 const selectedActorName = ref('');
@@ -145,6 +148,9 @@ let selectionToken = null;
 let transformToken = null;
 let loadSequence = 0;
 const updateTimers = new Map();
+const pendingTransformUpdates = new Map();
+let transformFrameId = null;
+let transformBridgeWarningShown = false;
 
 const actor = reactive({
   name: '',
@@ -271,19 +277,53 @@ function schedule(key, callback, delay = 120) {
   }, delay));
 }
 
+function flushTransformUpdates() {
+  transformFrameId = null;
+  const bridge = window.coronaBridge;
+  if (!bridge || typeof bridge.actorTransform !== 'function') {
+    pendingTransformUpdates.clear();
+    if (!transformBridgeWarningShown) {
+      transformBridgeWarningShown = true;
+      logError('更新对象变换失败', new Error('coronaBridge.actorTransform 不可用'));
+    }
+    return;
+  }
+
+  for (const update of pendingTransformUpdates.values()) {
+    try {
+      bridge.actorTransform(update.handle, update.operationCode, update.vector);
+    } catch (error) {
+      logError('更新对象变换失败', error);
+    }
+  }
+  pendingTransformUpdates.clear();
+}
+
 function scheduleTransform(operation) {
-  schedule(operation, () => applyTransform(operation));
+  const operationCode = transformOperationCodes[operation];
+  if (!selectedActorName.value || !actor.handle || operationCode === undefined) return;
+  pendingTransformUpdates.set(operation, {
+    handle: actor.handle,
+    operationCode,
+    vector: vectorFor(operation),
+  });
+  if (transformFrameId === null) {
+    transformFrameId = window.requestAnimationFrame(flushTransformUpdates);
+  }
 }
 
 async function applyTransform(operation) {
   if (!selectedActorName.value) return;
-  clearTimeout(updateTimers.get(operation));
-  updateTimers.delete(operation);
-  try {
-    await sceneService.actorOperation(selectedSceneName.value, selectedActorName.value, operation, vectorFor(operation));
-  } catch (error) {
-    logError('更新对象变换失败', error);
-  }
+  scheduleTransform(operation);
+  clearTimeout(updateTimers.get(`save:${operation}`));
+  updateTimers.delete(`save:${operation}`);
+  schedule(`save:${operation}`, async () => {
+    try {
+      await sceneService.saveActor(selectedSceneName.value, selectedActorName.value);
+    } catch (error) {
+      logError('保存对象变换失败', error);
+    }
+  }, 180);
 }
 
 async function setRenderSpace(enabled) {
@@ -412,6 +452,9 @@ onUnmounted(() => {
   loadSequence += 1;
   for (const timer of updateTimers.values()) clearTimeout(timer);
   updateTimers.clear();
+  pendingTransformUpdates.clear();
+  if (transformFrameId !== null) window.cancelAnimationFrame(transformFrameId);
+  transformFrameId = null;
   if (selectionToken) editorApi.off(selectionToken).catch(() => {});
   if (transformToken) editorApi.off(transformToken).catch(() => {});
   selectionToken = null;
