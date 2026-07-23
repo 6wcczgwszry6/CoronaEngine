@@ -1,4 +1,4 @@
-﻿import importlib.util
+import importlib.util
 import io
 import json
 import pathlib
@@ -414,9 +414,9 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         prompt = NodeGraphReviewService._build_prompt(
             {"workspace": graph(), "projectContext": {}}, [], []
         )
-        self.assertIn("不要评价游戏是否有趣", prompt)
-        self.assertIn("缺少某种玩法功能不是错误", prompt)
-        self.assertIn("证据不足或无法确定用户意图时必须返回无问题", prompt)
+        self.assertIn("不要评价玩法是否丰富", prompt)
+        self.assertIn("不要因为 Demo 简单就建议增加功能", prompt)
+        self.assertIn("没有真实问题时 hasProblems=false", prompt)
         self.assertIn("missing_actor_target", prompt)
         self.assertIn("actor_target_not_found", prompt)
         self.assertNotIn("胜利/失败条件能否由可见积木实际触发", prompt)
@@ -594,6 +594,113 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         self.assertEqual("修正计分逻辑", issue["title"])
         self.assertEqual("当前积木没有更新胜利条件读取的分数。", issue["message"])
         self.assertEqual("把命中分支连接到正确的加分积木。", issue["suggestion"])
+
+
+    def test_prompt_uses_high_score_professional_style(self):
+        prompt = NodeGraphReviewService._build_prompt({
+            "workspace": graph(),
+            "projectContext": {
+                "assistanceProfile": {"score": 88, "updatedAt": 1},
+            },
+        }, [], [])
+        self.assertIn("内部操作评分为 88/100", prompt)
+        self.assertIn("回答简洁、专业", prompt)
+        self.assertIn("状态机、控制流、数据流", prompt)
+        self.assertIn("实时计算机图形学", prompt)
+        self.assertIn("仅在与当前问题直接相关时", prompt)
+
+    def test_prompt_uses_low_score_calm_detailed_style(self):
+        prompt = NodeGraphReviewService._build_prompt({
+            "workspace": graph(),
+            "projectContext": {
+                "assistanceProfile": {"score": 25, "updatedAt": 1},
+            },
+        }, [], [])
+        self.assertIn("内部操作评分为 25/100", prompt)
+        self.assertIn("平和、通俗", prompt)
+        self.assertIn("减少专业术语", prompt)
+        self.assertIn("点击、拖拽、连接或修改", prompt)
+        self.assertIn("如何验证修复结果", prompt)
+
+    def test_prompt_uses_neutral_style_before_first_score(self):
+        prompt = NodeGraphReviewService._build_prompt({
+            "workspace": graph(),
+            "projectContext": {
+                "assistanceProfile": {"score": 90, "updatedAt": 0},
+            },
+        }, [], [])
+        self.assertIn("尚无稳定的操作评分", prompt)
+        self.assertIn("平和、清楚、适中详细度", prompt)
+
+    def test_no_problem_result_keeps_valid_optimization_tip_when_enabled(self):
+        result = {
+            "hasProblems": False,
+            "summary": "",
+            "issues": [],
+            "optimizationTip": {
+                "tipKey": "reuse_condition",
+                "title": "Reuse condition result",
+                "message": "Keep repeated Boolean checks in one data flow.",
+            },
+        }
+        NodeGraphReviewService._validate_model_result(result, {
+            "workspace": graph(),
+            "projectContext": {"optimizationHintsEnabled": True},
+        })
+        self.assertEqual("reuse_condition", result["optimizationTip"]["tipKey"])
+
+    def test_problem_result_discards_optimization_tip(self):
+        result = {
+            "hasProblems": True,
+            "summary": "Connect a concrete actor reference.",
+            "issues": [{"code": "missing_actor_target", "confidence": 0.95}],
+            "optimizationTip": {
+                "tipKey": "unrelated",
+                "title": "Optimization",
+                "message": "Must not be shown",
+            },
+        }
+        NodeGraphReviewService._validate_model_result(result, {
+            "workspace": graph(),
+            "projectContext": {"optimizationHintsEnabled": True},
+        })
+        self.assertIsNone(result["optimizationTip"])
+
+    def test_disabled_or_invalid_optimization_tip_is_discarded(self):
+        disabled = {
+            "hasProblems": False,
+            "summary": "",
+            "issues": [],
+            "optimizationTip": {"tipKey": "tip", "title": "Title", "message": "Message"},
+        }
+        NodeGraphReviewService._validate_model_result(disabled, {
+            "workspace": graph(),
+            "projectContext": {"optimizationHintsEnabled": False},
+        })
+        self.assertIsNone(disabled["optimizationTip"])
+
+        invalid = {
+            "hasProblems": False,
+            "summary": "",
+            "issues": [],
+            "optimizationTip": {"tipKey": "tip", "title": "", "message": "Message"},
+        }
+        NodeGraphReviewService._validate_model_result(invalid, {
+            "workspace": graph(),
+            "projectContext": {"optimizationHintsEnabled": True},
+        })
+        self.assertIsNone(invalid["optimizationTip"])
+
+    def test_cache_key_changes_when_project_context_changes(self):
+        first = NodeGraphReviewService._cache_key({
+            "graphRevision": "same",
+            "projectContext": {"assistanceProfile": {"score": 20, "updatedAt": 1}},
+        })
+        second = NodeGraphReviewService._cache_key({
+            "graphRevision": "same",
+            "projectContext": {"assistanceProfile": {"score": 80, "updatedAt": 2}},
+        })
+        self.assertNotEqual(first, second)
 
 
 if __name__ == "__main__":
