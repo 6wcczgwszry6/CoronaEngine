@@ -440,10 +440,24 @@
       </svg>
     </div>
 
+    <nav class="dock-shortcut-bar" aria-label="Dock 开关">
+      <button
+        v-for="shortcut in dockShortcuts"
+        :key="shortcut.id"
+        type="button"
+        class="dock-shortcut-button"
+        :class="{ active: isShortcutOpen(shortcut.id) }"
+        :title="`${isShortcutOpen(shortcut.id) ? '关闭' : '打开'}${shortcut.label}`"
+        @click.stop="toggleDockShortcut(shortcut.id)"
+      >
+        <span class="dock-shortcut-icon">{{ shortcut.icon }}</span>
+        <span>{{ shortcut.label }}</span>
+      </button>
+    </nav>
+
     <CabbageReviewAssistant
-      v-model:open="cabbageAssistantOpen"
-      :tasks="nodeReviewTasks"
-      :attention-token="nodeReviewAttentionToken"
+      :tasks="cabbageAssistant.tasks"
+      :attention-token="cabbageAssistant.attentionToken"
     />
   </div>
 </template>
@@ -457,7 +471,13 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
-import { floatingPanelManifests, isFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
+import {
+  closeFloatingPanel,
+  consumeExpectedPanelClosed,
+  isFloatingPanel,
+  openFloatingPanel,
+  toggleFloatingPanel,
+} from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
   createViewportUiModeStore,
@@ -467,12 +487,31 @@ import {
 } from '@/utils/viewportUiMode.js';
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
+import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
+import {
+  cabbageContextService,
+  cancelPendingTransformEvents,
+  publishCabbageAssistantContext,
+  subscribeCabbageAssistantContext,
+} from '@/services/cabbageAssistantContextService.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
+import { setActorContext } from '@/blockly/composables/useActorContext.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
 const router = useRouter();
 const dockStore = useDockStore();
+const cabbageAssistant = useCabbageAssistantStore();
+const dockShortcuts = [
+  { id: 'AITalkBar', label: 'AI 对话', icon: 'AI' },
+  { id: 'SceneTools', label: '场景管理', icon: '景' },
+  { id: 'SceneDatas', label: '对象', icon: '物' },
+  { id: 'NodeGraphPanel', label: '节点', icon: '点' },
+];
+const isShortcutOpen = (id) => Boolean(dockStore.panels[id]?.open);
+const toggleDockShortcut = async (id) => {
+  await toggleFloatingPanel(dockStore, id);
+};
 
 const goToHome = () => {
   router.push('/');
@@ -500,6 +539,7 @@ const cameraBindingState = ref({
 });
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
+let actorSelectionCallbackToken = null;
 let sceneAddedCallbackToken = null;
 let sceneRenamedCallbackToken = null;
 const viewportPickSurfaceRef = ref(null);
@@ -588,6 +628,18 @@ const emitActorChangeFast = (type, sceneId, actorName) => {
   editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
     logError('Failed to publish actor selection', error);
   });
+};
+
+const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = '', maybeActorName = '') => {
+  const actorType = String(payload?.actor_type || payload?.type || '').trim().toLowerCase();
+  const sceneId = String(payload?.scene || payload?.scene_id || maybeSceneId || '').trim();
+  const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
+  if (!actorName || actorType === 'scene') return;
+
+  setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
+  if (!dockStore.panels.SceneDatas?.open) {
+    await openFloatingPanel(dockStore, 'SceneDatas');
+  }
 };
 
 const viewportPickController = createViewportPickController({
@@ -781,46 +833,68 @@ let pendingMainRenderSelection = null;
 const currentMainCameraId = () =>
   cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
 
-// Cabbage assistant: current unresolved node-logic tasks.
-const LEGACY_NODE_REVIEW_HISTORY_KEY = 'corona_node_graph_review_history_v1';
-const cabbageAssistantOpen = ref(false);
-const nodeReviewTasks = ref([]);
-const nodeReviewAttentionToken = ref(0);
+// Cabbage assistant: world-scoped tutorial and node-logic tasks.
 let unsubscribeNodeGraphReview = null;
+let unsubscribeCabbageContext = null;
+let cabbageCandidateTimer = null;
+let cabbageWorldLoadGeneration = 0;
+const ACTIVE_PROJECT_PATH_KEY = 'corona.activeProjectPath';
 
-function normalizeReviewTask(summary, graphRevision, previous = null) {
-  const message = String(summary || '').trim().slice(0, 160);
-  if (!message) return null;
-  const now = Date.now();
-  return {
-    issueKey: 'current_node_graph_logic',
-    code: 'node_graph_logic_issue',
-    severity: 'warning',
-    confidence: 1,
-    nodeId: '',
-    blockId: '',
-    title: '当前逻辑有问题',
-    message,
-    suggestion: '',
-    graphRevision: String(graphRevision || ''),
-    createdAt: Number(previous?.createdAt) || now,
-    updatedAt: now,
-  };
+function normalizeActiveProjectPath(value) {
+  return String(value || '')
+    .trim()
+    .replace(/[\\/]+$/, '')
+    .replace(/\\/g, '/')
+    .toLowerCase();
 }
 
-function removeLegacyReviewHistory() {
-  try {
-    localStorage.removeItem(LEGACY_NODE_REVIEW_HISTORY_KEY);
-  } catch (_) { /* storage may be unavailable */ }
+function readActiveProjectPath() {
+  return String(window.localStorage?.getItem(ACTIVE_PROJECT_PATH_KEY) || '').trim();
 }
+
+let activeProjectPathSnapshot = normalizeActiveProjectPath(readActiveProjectPath());
 
 function currentProjectReviewScopeId() {
-  return reviewScopeId(window.localStorage?.getItem('corona.activeProjectPath') || '');
+  return reviewScopeId(readActiveProjectPath());
+}
+
+async function persistCabbageTaskActions(actions = []) {
+  const validActions = Array.isArray(actions) ? actions.filter((item) => item?.task) : [];
+  for (const action of validActions) {
+    try {
+      await cabbageContextService.updateTask(action);
+    } catch (error) {
+      console.warn('[CabbageContext] failed to persist task', error?.message || error);
+    }
+  }
+  if (validActions.length) {
+    void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
+  }
+}
+
+async function loadCabbageWorldContext({ reset = true } = {}) {
+  const generation = ++cabbageWorldLoadGeneration;
+  if (reset) {
+    cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
+    publishCabbageAssistantContext(cabbageAssistant);
+  }
+  try {
+    const snapshot = await cabbageContextService.loadCurrentWorld();
+    if (generation !== cabbageWorldLoadGeneration) return null;
+    cabbageAssistant.hydrateContext(snapshot);
+    void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
+    return snapshot;
+  } catch (error) {
+    if (generation === cabbageWorldLoadGeneration) {
+      console.warn('[CabbageContext] failed to load world context', error?.message || error);
+    }
+    return null;
+  }
 }
 
 function clearNodeReviewForProjectChange() {
-  nodeReviewTasks.value = [];
-  cabbageAssistantOpen.value = false;
+  cancelPendingTransformEvents();
+  void loadCabbageWorldContext({ reset: true });
 }
 
 function refreshCameraAfterProjectChange() {
@@ -832,48 +906,64 @@ function refreshCameraAfterProjectChange() {
   }, 0);
 }
 
-function onActiveProjectChanged() {
+function applyActualProjectChange(projectPath) {
+  const normalizedPath = normalizeActiveProjectPath(projectPath);
+  if (normalizedPath === activeProjectPathSnapshot) return false;
+
+  activeProjectPathSnapshot = normalizedPath;
   clearNodeReviewForProjectChange();
   clearKnownEditorCameraInputLocks();
   void reconcileEditorCameraInputLocks();
   refreshCameraAfterProjectChange();
+  return true;
+}
+
+function onActiveProjectChanged(event) {
+  const detail = event?.detail;
+  const projectPath = typeof detail === 'string'
+    ? detail
+    : detail?.projectPath || detail?.path || readActiveProjectPath();
+  applyActualProjectChange(projectPath);
 }
 
 function onActiveProjectStorageChanged(event) {
-  if (event?.key !== 'corona.activeProjectPath') return;
-  clearNodeReviewForProjectChange();
-  clearKnownEditorCameraInputLocks();
-  void reconcileEditorCameraInputLocks();
-  refreshCameraAfterProjectChange();
+  if (event?.key !== ACTIVE_PROJECT_PATH_KEY) return;
+  applyActualProjectChange(event?.newValue);
 }
 
-function handleNodeGraphReview(result) {
+async function handleNodeGraphReview(result) {
   if (result?.projectScopeId && result.projectScopeId !== currentProjectReviewScopeId()) return;
   if (result?.success !== true || result?.status !== 'ok') {
     if (result?.error) console.warn('[NodeGraphReview]', result.error);
     return;
   }
-
-  if (result.hasProblems !== true) {
-    nodeReviewTasks.value = [];
-    return;
-  }
-
-  const previous = nodeReviewTasks.value[0] || null;
-  const task = normalizeReviewTask(result.summary, result.graphRevision, previous);
-  if (!task) {
-    nodeReviewTasks.value = [];
-    return;
-  }
-
-  const changed = !previous
-    || previous.message !== task.message
-    || previous.graphRevision !== task.graphRevision;
-  nodeReviewTasks.value = [task];
-  if (changed) nodeReviewAttentionToken.value += 1;
+  const actions = cabbageAssistant.applyReview(result);
+  publishCabbageAssistantContext(cabbageAssistant);
+  await persistCabbageTaskActions(actions);
 }
 
-// 新增：加载状态
+function promoteDueCabbageTasks(options = {}) {
+  const promoted = cabbageAssistant.promoteDueCandidates(options);
+  if (!promoted.length) return;
+  publishCabbageAssistantContext(cabbageAssistant);
+  void persistCabbageTaskActions(promoted.map((task) => ({ action: 'upsert', task })));
+}
+
+function onCabbageRunFailed(event) {
+  promoteDueCabbageTasks({ runtimeFailed: true });
+  if (event?.detail?.contextRecorded) return;
+  void cabbageContextService.recordEvent({
+    type: 'run_failed',
+    category: 'runtime',
+    success: false,
+    details: {
+      source: String(event?.detail?.source || 'editor'),
+      error: String(event?.detail?.error || '').slice(0, 500),
+    },
+  });
+}
+
+// Assistant state has been initialized above.
 const isLoadingMenu = ref(false);
 
 watch(showDialog, (newVal) => {
@@ -1137,10 +1227,6 @@ const handleWheel = (event) => {
 
 const focusViewportInput = () => {
   viewportPickSurfaceRef.value?.focus?.({ preventScroll: true });
-};
-
-const handleMainWindowFocus = () => {
-  void refreshSceneCameraBinding({ preservePose: true });
 };
 
 const handleKeyDown = (event) => {
@@ -2251,12 +2337,6 @@ const registerEditorControls = () => {
   };
 };
 
-const openDefaultFloatingToolPanels = async () => {
-  for (const panel of floatingPanelManifests()) {
-    await openFloatingPanel(dockStore, panel.id);
-  }
-};
-
 const unregisterEditorControls = () => {
   if (window[EDITOR_CONTROLS_KEY]?.getState === getEditorControlsState) {
     delete window[EDITOR_CONTROLS_KEY];
@@ -2363,6 +2443,9 @@ const handlePanelClosed = (payload) => {
   const panelId = payload?.panelId;
   if (!panelId) return;
   if (isFloatingPanel(panelId)) {
+    // Ignore the delayed native event produced by our own close request. The
+    // queued shortcut operation may already have opened a replacement tab.
+    if (consumeExpectedPanelClosed(panelId)) return;
     dockStore.markExternalClosed(panelId);
     return;
   }
@@ -2371,7 +2454,6 @@ const handlePanelClosed = (payload) => {
 
 
 onMounted(async () => {
-  removeLegacyReviewHistory();
   // A reused CEF page must not inherit camera locks from a previous world.
   // Real active workers are added back by reconcileEditorCameraInputLocks().
   clearKnownEditorCameraInputLocks();
@@ -2431,7 +2513,6 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
-  window.addEventListener('focus', handleMainWindowFocus);
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
@@ -2443,17 +2524,32 @@ onMounted(async () => {
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
   sceneAddedCallbackToken = await editorApi.events.onSceneAdded(onSceneAddedEvent);
   sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
+  actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
   actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
-  await openDefaultFloatingToolPanels();
-  // A floating tool can finish loading after the first recovery snapshot. Make
-  // the final settled binding authoritative before normal editor interaction.
+  // Primary work docks start hidden. If this main CEF page is reused, close any native
+  // floating tab left by the previous project before resetting the shortcut state.
+  for (const panelId of [...dockShortcuts.map((item) => item.id), 'CabbageChatPanel']) {
+    const panelState = dockStore.panels[panelId];
+    if (panelState?.mode === 'external') {
+      await closeFloatingPanel(dockStore, panelId);
+    } else {
+      dockStore.closePanel(panelId);
+    }
+  }
   await syncSceneCameraBinding(initialSceneId);
   broadcastViewportControlsState();
 
-  // Subscribe only to proactive DeepSeek node-graph review results.
+  // Subscribe to proactive DeepSeek reviews and the world-scoped assistant context.
   unsubscribeNodeGraphReview = subscribeNodeGraphReviews(handleNodeGraphReview);
+  unsubscribeCabbageContext = subscribeCabbageAssistantContext(
+    (snapshot) => cabbageAssistant.hydrateContext(snapshot),
+    { projectScopeId: currentProjectReviewScopeId, emitCurrent: true }
+  );
+  await loadCabbageWorldContext({ reset: true });
+  cabbageCandidateTimer = window.setInterval(() => promoteDueCabbageTasks(), 1000);
+  window.addEventListener('cabbage-run-failed', onCabbageRunFailed);
   window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.addEventListener('storage', onActiveProjectStorageChanged);
 });
@@ -2464,6 +2560,12 @@ onUnmounted(() => {
   unregisterEditorControls();
   unsubscribeNodeGraphReview?.();
   unsubscribeNodeGraphReview = null;
+  unsubscribeCabbageContext?.();
+  unsubscribeCabbageContext = null;
+  if (cabbageCandidateTimer) window.clearInterval(cabbageCandidateTimer);
+  cabbageCandidateTimer = null;
+  window.removeEventListener('cabbage-run-failed', onCabbageRunFailed);
+  void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
   coronaEventBus.off('panel-closed', handlePanelClosed);
@@ -2478,6 +2580,12 @@ onUnmounted(() => {
     });
     actorPickResultCallbackToken = null;
   }
+  if (actorSelectionCallbackToken) {
+    editorApi.off(actorSelectionCallbackToken).catch((error) => {
+      logError('Failed to unregister actor selection callback', error);
+    });
+    actorSelectionCallbackToken = null;
+  }
   if (sceneAddedCallbackToken) {
     editorApi.off(sceneAddedCallbackToken).catch((error) => {
       logError('Failed to unregister scene added callback', error);
@@ -2491,7 +2599,6 @@ onUnmounted(() => {
     sceneRenamedCallbackToken = null;
   }
   window.removeEventListener('resize', handleViewportLayoutChange);
-  window.removeEventListener('focus', handleMainWindowFocus);
   sceneCameraBindingRequestRevision += 1;
   sceneCameraBindingRefreshPromise = null;
   stopMoveLoop();
@@ -2517,5 +2624,25 @@ onUnmounted(() => {
 .viewport-cursor-hidden,
 .viewport-cursor-hidden * {
   cursor: none !important;
+}
+
+.dock-shortcut-bar {
+  position: fixed; right: 16px; bottom: 16px; z-index: 2147483000;
+  display: flex; align-items: center; gap: 7px; padding: 7px;
+  border: 1px solid rgba(91, 103, 92, .78); border-radius: 9px;
+  background: rgba(31, 35, 32, .94); box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  backdrop-filter: blur(8px);
+}
+.dock-shortcut-button {
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid #454c46;
+  border-radius: 6px; background: #2b302c; color: #cbd2c9; padding: 7px 10px;
+  font-size: 12px; line-height: 1; transition: border-color .15s ease, background .15s ease, color .15s ease;
+}
+.dock-shortcut-button:hover { border-color: #718365; color: #f1f5ef; }
+.dock-shortcut-button.active { border-color: #8fac76; background: #42533b; color: #effbe8; box-shadow: inset 0 0 0 1px rgba(143, 172, 118, .18); }
+.dock-shortcut-icon { display:grid; place-items:center; width:19px; height:19px; border-radius:4px; background:#202421; color:#9fbd88; font-size:10px; font-weight:700; }
+@media (max-width: 720px) {
+  .dock-shortcut-bar { max-width: calc(100vw - 32px); overflow-x: auto; }
+  .dock-shortcut-button { padding: 7px 8px; white-space: nowrap; }
 }
 </style>

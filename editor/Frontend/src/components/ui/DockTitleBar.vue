@@ -145,6 +145,8 @@ const ROUTE_TO_PANEL_ID = {
   '/ProjectSettings': 'ProjectSettings',
   '/ScratchTool': 'ScratchTool',
   '/AITalkBar': 'AITalkBar',
+  '/NodeGraph': 'NodeGraphPanel',
+  '/CabbageChat': 'CabbageChatPanel',
   '/Network': 'Network',
   '/SetUp': 'EditorSettings',
 };

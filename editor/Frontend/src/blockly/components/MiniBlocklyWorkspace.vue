@@ -26,7 +26,7 @@ const props = defineProps({
   workspaceRole: { type: String, default: 'node' },
 });
 
-const emit = defineEmits(['change', 'ready', 'reject']);
+const emit = defineEmits(['change', 'ready', 'reject', 'block-added', 'block-changed']);
 
 const { t, locale } = useI18n();
 const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
@@ -328,6 +328,12 @@ function addBlock(blockType, clientX, clientY) {
     block.moveBy(Math.max(0, x), Math.max(0, y));
     workspace.setSelected?.(block);
     emitChange();
+    emit('block-added', {
+      blockId: String(block.id || ''),
+      blockType: String(block.type || blockType),
+      workspaceRole: props.workspaceRole,
+      interaction: hasScreenPoint ? 'drag' : 'pick',
+    });
     return true;
   } catch (e) {
     logError(`创建积木失败: ${blockType}`, e);
@@ -372,6 +378,22 @@ async function initBlockly() {
     workspace = BlocklyLib.inject(container, config);
     changeListener = (event) => {
       maybeDeleteClickedBlock(event);
+      if (!isLoadingWorkspace) {
+        const blockChangeType = BlocklyLib.Events?.BLOCK_CHANGE || 'change';
+        if (
+          (event?.type === blockChangeType || event?.type === 'change')
+          && event?.element === 'field'
+          && event?.oldValue !== event?.newValue
+        ) {
+          const block = workspace?.getBlockById?.(event.blockId);
+          emit('block-changed', {
+            blockId: String(event.blockId || ''),
+            blockType: String(block?.type || ''),
+            fieldName: String(event.name || ''),
+            workspaceRole: props.workspaceRole,
+          });
+        }
+      }
       if (props.workspaceRole === 'condition') applyWorkspaceRoleVisualStyles();
       emitChange();
       validateWorkspace();

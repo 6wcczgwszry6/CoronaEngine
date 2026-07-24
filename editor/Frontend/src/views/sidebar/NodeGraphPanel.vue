@@ -1,0 +1,78 @@
+<template>
+  <div class="node-graph-panel flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden">
+    <DockTitleBar
+      v-if="!isDocked"
+      title="节点"
+      routePath="/NodeGraph"
+      @close="closeFloat"
+    />
+    <NodeGraphWorkspace
+      class="min-h-0 flex-1"
+      actor-name=""
+      :scene-name="sceneName"
+      target-type="project"
+      :review-active="true"
+    />
+  </div>
+</template>
+
+<script setup>
+import { onBeforeUnmount, onMounted, ref } from 'vue';
+import NodeGraphWorkspace from '@/blockly/components/NodeGraphWorkspace.vue';
+import DockTitleBar from '@/components/ui/DockTitleBar.vue';
+import { useDockPanel } from '@/composables/useDockPanel.js';
+import { appService } from '@/utils/bridge.js';
+import { coronaEventBus } from '@/utils/eventBus.js';
+
+const { closePanel, isDocked } = useDockPanel();
+// Keep the route empty until MainPage reports the active scene. Passing the generic
+// DEFAULT_SCENE_NAME into listActorTree can make the native scene router reload a
+// different scene, which resets the main viewport camera when this panel opens.
+const sceneName = ref('');
+
+function applyViewportState(state = {}) {
+  const nextSceneName = String(state?.sceneId || '').trim();
+  if (nextSceneName && nextSceneName !== sceneName.value) {
+    sceneName.value = nextSceneName;
+  }
+}
+
+function requestViewportState() {
+  const controls = window.__coronaEditorControls;
+  if (controls && typeof controls.getState === 'function') {
+    try {
+      applyViewportState(controls.getState());
+      return;
+    } catch {
+      // A detached panel does not share the main page window; use the cross-tab path below.
+    }
+  }
+  appService.crossTabBroadcast('viewport-controls-request', { action: 'getState' }).catch(() => {});
+}
+
+onMounted(() => {
+  // Read the scene initialized by MainPage. Calling MainView.on_init here would reset
+  // the scene and camera every time the node panel is opened.
+  coronaEventBus.on('viewport-controls-state', applyViewportState);
+  requestViewportState();
+});
+
+onBeforeUnmount(() => {
+  coronaEventBus.off('viewport-controls-state', applyViewportState);
+});
+
+function closeFloat() {
+  closePanel();
+}
+</script>
+
+<style scoped>
+.node-graph-panel {
+  position: relative;
+  z-index: 2147483100;
+  background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 8px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+}
+</style>

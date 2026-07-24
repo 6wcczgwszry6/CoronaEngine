@@ -276,20 +276,38 @@ export const defineObjectBlocks = () => {
 
   const actorDropdownOptions = () => {
     const raw = typeof window !== 'undefined' && Array.isArray(window.__coronaBlocklyActorOptions)
-      ? window.__coronaBlocklyActorOptions : [];
-    const options = raw.map((item) => Array.isArray(item) ? item : [String(item), String(item)]).filter((item) => item[1]);
-    return [...options, ['手动输入', '__manual__']].length > 1 ? [...options, ['手动输入', '__manual__']] : [['当前物体', ''], ['手动输入', '__manual__']];
+      ? window.__coronaBlocklyActorOptions
+      : [];
+    const seen = new Set();
+    const options = raw
+      .map((item) => (Array.isArray(item) ? item : [String(item), String(item)]))
+      .map(([label, value]) => [String(label || value || '').trim(), String(value || label || '').trim()])
+      .filter(([label, value]) => label && value && !seen.has(value) && seen.add(value));
+    return [['请选择对象', '__none__'], ...options, ['手动输入', '__manual__']];
+  };
+
+  const setManualObjectFieldVisible = (block, visible) => {
+    block.getField('MANUAL_LABEL')?.setVisible(Boolean(visible));
+    block.getField('MANUAL')?.setVisible(Boolean(visible));
+    if (block.rendered) block.render();
   };
 
   Blockly.Blocks.object_reference = { init() {
+    const objectField = new Blockly.FieldDropdown(actorDropdownOptions, function (value) {
+      setManualObjectFieldVisible(this.getSourceBlock(), value === '__manual__');
+      return value;
+    });
     this.appendDummyInput()
-      .appendField('场景对象')
-      .appendField(new Blockly.FieldDropdown(actorDropdownOptions), 'OBJECT')
-      .appendField('或输入')
+      .appendField('对象')
+      .appendField(objectField, 'OBJECT')
+      .appendField('名称', 'MANUAL_LABEL')
       .appendField(new Blockly.FieldTextInput(''), 'MANUAL');
+    setManualObjectFieldVisible(this, false);
     this.setOutput(true, 'String');
     this.setStyle('object_blocks');
-    this.setTooltip('从当前场景选择对象；选择手动输入后可填写运行时生成对象名称');
+    this.setTooltip(() => this.getFieldValue('OBJECT') === '__manual__'
+      ? '输入运行时生成的对象名称，并把它连接到需要对象参数的积木'
+      : '从当前场景选择一个指定物体，并把它连接到需要对象参数的积木');
   } };
 
   Blockly.Blocks.object_set_logical_collision = { init() {

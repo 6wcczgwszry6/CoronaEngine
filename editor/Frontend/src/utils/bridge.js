@@ -821,8 +821,8 @@ export const projectService = {
 };
 
 export const appService = {
-  createPanelTab: (panelId, routePath, width, height, dockingPos) =>
-    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
+  createPanelTab: (panelId, routePath, width, height, dockingPos, zPriority = 0) =>
+    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos, zPriority }),
   // Create a panel that is born directly as its own borderless OS window (skips the
   // main-window docked-rectangle stage, so no 1-frame flash). x/y/width/height are the
   // desired initial geometry in logical px. Returns { tab_id, panel_id }.
@@ -885,6 +885,73 @@ export const aiService = {
   getNodeGraphReviewStatus: async (taskId) => {
     const response = await editorApi.ai.submitRequest({
       operation: 'node_graph.review.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  chatAboutNodeGraph: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startNodeGraphReviewChat: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphReviewChatStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  cancelNodeGraphReviewChat: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.cancel',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  loadCabbageContext: async () => {
+    const response = await editorApi.ai.submitRequest({ operation: 'cabbage.context.load' });
+    return response?.data ?? response;
+  },
+  recordCabbageEvent: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.record_event',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  updateCabbageTask: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.update_task',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  appendCabbageMessage: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.append_message',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startCabbageProfileScoreUpdate: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.profile.score.start',
+      payload,
+    });
+    return response?.data ?? response;
+  },
+  getCabbageProfileScoreStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.profile.score.status',
       taskId: String(taskId || ''),
     });
     return response?.data ?? response;
