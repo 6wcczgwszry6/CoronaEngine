@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 import threading
 import time
@@ -53,8 +55,19 @@ class PlanningConfirmation:
     proposed_items: list[str] = field(default_factory=list)
     constraints: list[str] = field(default_factory=list)
     source_context_agents: list[str] = field(default_factory=list)
+    proposal_version: int = 1
+    proposal_hash: str = ""
+    artifact_refs: list[str] = field(default_factory=list)
     status: str = "pending"
     created_at: float = field(default_factory=time.time)
+
+    @property
+    def agent_plan_id(self) -> str:
+        return self.proposal_id
+
+    @property
+    def artifact_ref(self) -> str:
+        return f"legacy-plan:{self.proposal_id}"
 
 
 @dataclass
@@ -148,19 +161,27 @@ class LanChatSceneRuntime:
             pending = self._pending_confirmations.get(key)
             if pending and decision.intent == "generation_start":
                 compose_text = self._compose_text_from_confirmation(pending, value)
-                pending.status = "confirmed"
-                self._pending_confirmations.pop(key, None)
-                self._mode = MODE_EXECUTING
+                pending.status = "confirming"
+                self._mode = MODE_PLANNING
                 return "compose", compose_text
 
             if pending and self._is_pending_plan_elaboration_text(value):
                 return "reply", self._format_plan_elaboration(pending)
 
             if pending and self.is_plan_supplement(value):
+                previous_hash = pending.proposal_hash
                 pending.constraints.append(value)
                 for item in self._extract_requested_items(value):
                     if item not in pending.proposed_items:
                         pending.proposed_items.append(item)
+                next_hash = self._confirmation_hash(
+                    pending.scene_goal,
+                    pending.proposed_items,
+                    pending.constraints,
+                )
+                if next_hash != previous_hash:
+                    pending.proposal_version += 1
+                    pending.proposal_hash = next_hash
                 return "reply", self._format_confirmation(pending, updated=True)
 
             if decision.intent == "plan_drafting":
@@ -261,24 +282,122 @@ class LanChatSceneRuntime:
             return [
                 {
                     "proposal_id": item.proposal_id,
+                    "agent_plan_id": item.agent_plan_id,
+                    "artifact_ref": item.artifact_ref,
                     "target_agent": item.target_agent,
                     "scene_goal": item.scene_goal,
                     "proposed_items": list(item.proposed_items),
                     "constraints": list(item.constraints),
                     "source_context_agents": list(item.source_context_agents),
+                    "proposal_version": item.proposal_version,
+                    "proposal_hash": item.proposal_hash,
+                    "artifact_refs": list(item.artifact_refs),
                     "status": item.status,
                     "created_at": item.created_at,
                 }
                 for item in pending
             ]
 
-    def _pending_agent_for_target(self, target: str) -> str:
+    def pending_planning_reference(self, target: str) -> dict[str, Any]:
+        with self._lock:
+            agent_key = self._pending_agent_for_target(target)
+            if not agent_key:
+                agent_key = self._pending_agent_for_target(
+                    target,
+                    allowed_statuses={"pending", "confirming"},
+                )
+            if not agent_key:
+                return {}
+            pending = self._pending_confirmations.get(agent_key)
+            if pending is None or pending.status not in {"pending", "confirming"}:
+                return {}
+            return {
+                "agent_plan_id": pending.agent_plan_id,
+                "artifact_ref": pending.artifact_ref,
+                "target_agent": pending.target_agent,
+                "proposal_version": str(pending.proposal_version),
+                "proposal_hash": pending.proposal_hash,
+                "artifact_refs": list(pending.artifact_refs),
+            }
+
+    def register_structured_proposal(
+        self,
+        *,
+        target_agent: str,
+        proposal_id: str,
+        proposal_version: int,
+        proposal_hash: str,
+        scene_goal: str,
+        proposed_items: list[str],
+        artifact_refs: list[str],
+    ) -> PlanningConfirmation:
+        if not proposal_id or proposal_version <= 0 or not proposal_hash:
+            raise ValueError("structured proposal identity is required")
+        key = self._agent_key(target_agent)
+        confirmation = PlanningConfirmation(
+            proposal_id=str(proposal_id),
+            target_agent=key,
+            scene_goal=str(scene_goal or "").strip(),
+            proposed_items=[str(item).strip() for item in proposed_items if str(item).strip()],
+            proposal_version=int(proposal_version),
+            proposal_hash=str(proposal_hash),
+            artifact_refs=[str(item).strip() for item in artifact_refs if str(item).strip()],
+        )
+        with self._lock:
+            self._pending_confirmations[key] = confirmation
+            self._mode = MODE_PLANNING
+        return confirmation
+
+    def finalize_planning_confirmation(self, target: str, *, succeeded: bool) -> bool:
+        """Commit or roll back a prepared confirmation after Runtime enqueue."""
+
+        with self._lock:
+            agent_key = self._pending_agent_for_target(
+                target,
+                allowed_statuses={"pending", "confirming"},
+            )
+            if not agent_key:
+                return False
+            pending = self._pending_confirmations.get(agent_key)
+            if pending is None:
+                return False
+            if succeeded:
+                pending.status = "confirmed"
+                self._pending_confirmations.pop(agent_key, None)
+                self._mode = MODE_EXECUTING
+            else:
+                pending.status = "pending"
+                self._mode = MODE_PLANNING
+            return True
+
+    def discard_planning_confirmation(self, target: str) -> bool:
+        """Remove a proposal that never became safe for user confirmation."""
+
+        with self._lock:
+            agent_key = self._pending_agent_for_target(
+                target,
+                allowed_statuses={"pending", "confirming"},
+            )
+            if not agent_key:
+                return False
+            self._pending_confirmations.pop(agent_key, None)
+            if not self._pending_confirmations:
+                self._mode = MODE_DISCUSSING
+            return True
+
+    def _pending_agent_for_target(
+        self,
+        target: str,
+        *,
+        allowed_statuses: set[str] | None = None,
+    ) -> str:
         wanted = str(target or "").strip()
         if not wanted:
             return ""
+        statuses = allowed_statuses or {"pending"}
         wanted_lower = wanted.lower()
         for key, pending in self._pending_confirmations.items():
-            if pending.status != "pending":
+            if pending.status not in statuses:
                 continue
             if (
                 key == wanted
@@ -286,6 +405,7 @@ class LanChatSceneRuntime:
                 or pending.target_agent == wanted
                 or pending.target_agent.lower() == wanted_lower
                 or pending.proposal_id == wanted
+                or pending.artifact_ref == wanted
             ):
                 return key
         return ""
@@ -394,6 +514,10 @@ class LanChatSceneRuntime:
         brief = self._design_brief_lines(confirmation)
         parts = [
             f"用户确认开始生成：{confirmation.scene_goal}",
+            f"agent_plan_id：{confirmation.agent_plan_id}",
+            f"artifact_ref：{confirmation.artifact_ref}",
+            f"proposal_version：{confirmation.proposal_version}",
+            f"proposal_hash：{confirmation.proposal_hash}",
             "确认方案内容：",
             *brief,
             "建议物体清单：" + "、".join(confirmation.proposed_items),
@@ -718,13 +842,34 @@ class LanChatSceneRuntime:
 
     @classmethod
     def _new_confirmation(cls, agent_key: str, text: str) -> PlanningConfirmation:
+        scene_goal = cls._extract_scene_goal(text)
+        proposed_items = cls._seed_items_from_text(text)
         return PlanningConfirmation(
             proposal_id=f"plan-{uuid.uuid4().hex[:8]}",
             target_agent=agent_key,
-            scene_goal=cls._extract_scene_goal(text),
-            proposed_items=cls._seed_items_from_text(text),
+            scene_goal=scene_goal,
+            proposed_items=proposed_items,
             constraints=[],
+            proposal_hash=cls._confirmation_hash(scene_goal, proposed_items, []),
         )
+
+    @staticmethod
+    def _confirmation_hash(
+        scene_goal: str,
+        proposed_items: list[str],
+        constraints: list[str],
+    ) -> str:
+        canonical = json.dumps(
+            {
+                "scene_goal": str(scene_goal or "").strip(),
+                "proposed_items": sorted(str(item).strip() for item in proposed_items if str(item).strip()),
+                "constraints": [str(item).strip() for item in constraints if str(item).strip()],
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @staticmethod
     def _clone_confirmation_for_target(
@@ -749,6 +894,11 @@ class LanChatSceneRuntime:
             proposed_items=LanChatSceneRuntime._concrete_items(list(base.proposed_items)),
             constraints=constraints,
             source_context_agents=sources,
+            proposal_hash=LanChatSceneRuntime._confirmation_hash(
+                base.scene_goal,
+                list(base.proposed_items),
+                constraints,
+            ),
         )
 
     @staticmethod

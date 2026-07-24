@@ -16,6 +16,7 @@ import json
 import logging
 import os
 import time
+import importlib
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -44,6 +45,19 @@ def _with_generation_prompt_guardrail(prompt: str, name: str = "") -> str:
     return f"{base}. {_GENERATION_PROMPT_GUARDRAIL}."
 
 
+def _config_get(config: Any, key: str, default: Any = None) -> Any:
+    if isinstance(config, dict):
+        return config.get(key, default)
+    return getattr(config, key, default)
+
+
+def _import_quasar_module(module_name: str) -> Any:
+    try:
+        return importlib.import_module(module_name)
+    except ImportError:
+        return importlib.import_module(f"plugins.AITool.{module_name}")
+
+
 def _resolve_model_file(path: str) -> str:
     """从目录或文件路径中提取第一个支持的 3D 模型文件。"""
     path_text = str(path or "").strip()
@@ -56,8 +70,8 @@ def _resolve_model_file(path: str) -> str:
         candidates.append(raw_path)
     else:
         try:
-            from Quasar.ai_config.paths_config import _get_active_project_path
-            project_path = Path(_get_active_project_path())
+            paths_config = _import_quasar_module("Quasar.ai_config.paths_config")
+            project_path = Path(paths_config._get_active_project_path())
             candidates.append(project_path / raw_path)
         except Exception:
             pass
@@ -307,13 +321,13 @@ class ModelProvider:
 
     def _get_tool(self, name: str) -> Any:
         try:
-            from Quasar.ai_tools.registry import get_tool_registry
-            registry = get_tool_registry()
+            registry_module = _import_quasar_module("Quasar.ai_tools.registry")
+            registry = registry_module.get_tool_registry()
             tools = registry.list_tools()
             if not tools:
-                from Quasar.ai_tools.load_tools import load_tools
-                from Quasar.ai_config.ai_config import get_ai_config
-                load_tools(get_ai_config())
+                load_tools_module = _import_quasar_module("Quasar.ai_tools.load_tools")
+                config_module = _import_quasar_module("Quasar.ai_config.ai_config")
+                load_tools_module.load_tools(config_module.get_ai_config())
                 tools = registry.list_tools()
             return {t.name: t for t in tools}.get(name)
         except Exception as e:
@@ -322,10 +336,10 @@ class ModelProvider:
 
     def _get_3d_generate_tool(self) -> Any:
         try:
-            from Quasar.ai_config.ai_config import get_ai_config
-            config = get_ai_config()
-            hunyuan_cfg = getattr(config, 'hunyuan3d', None)
-            if hunyuan_cfg is not None and getattr(hunyuan_cfg, 'enable', False):
+            config_module = _import_quasar_module("Quasar.ai_config.ai_config")
+            config = config_module.get_ai_config()
+            hunyuan_cfg = _config_get(config, 'hunyuan3d', None)
+            if hunyuan_cfg is not None and bool(_config_get(hunyuan_cfg, 'enable', False)):
                 tool = self._get_tool("hunyuan_generate_3d")
                 if tool:
                     return tool
@@ -413,9 +427,9 @@ class ModelProvider:
 
     def _wait_for_mesh(self, object_id: str) -> None:
         try:
-            from Quasar.ai_modules.three_d_generate.tools.model_tools import wait_for_mesh_ready
+            model_tools = _import_quasar_module("Quasar.ai_modules.three_d_generate.tools.model_tools")
             logger.info("[ModelProvider][mesh] waiting for %r...", object_id)
-            wait_for_mesh_ready(object_id)
+            model_tools.wait_for_mesh_ready(object_id)
             logger.info("[ModelProvider][mesh] %r download complete", object_id)
         except ImportError:
             time.sleep(1.0)  # fallback

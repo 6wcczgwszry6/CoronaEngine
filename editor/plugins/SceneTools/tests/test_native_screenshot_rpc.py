@@ -59,6 +59,15 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             self._repo_root() / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
         ).read_text(encoding="utf-8")
 
+    def _network_system_source(self):
+        return (
+            self._repo_root()
+            / "src"
+            / "systems"
+            / "network"
+            / "network_system.cpp"
+        ).read_text(encoding="utf-8")
+
     def _frontend_rpc_calls(self):
         bridge_source = self._frontend_bridge_source()
         return set(
@@ -1137,8 +1146,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
         self.assertIn("editorApi.sceneTools.selectActor(sceneId, type, actorName)", main_page_source)
         self.assertIn("editorApi.sceneTools.selectActor(currentSceneName.value, scene.type || 'actor', scene.name)", scene_bar_source)
-        self.assertIn("editorApi.events.onActorSelectionChanged(onActorSelectionChangedEvent)", object_source)
-        self.assertIn("editorApi.off(actorSelectionChangedCallbackToken)", object_source)
+        self.assertIn("editorApi.events.onActorSelectionChanged(handleSelection)", object_source)
+        self.assertIn("editorApi.off(selectionToken)", object_source)
         for source_name, frontend_source in (
             ("MainPage", main_page_source),
             ("SceneBar", scene_bar_source),
@@ -1197,8 +1206,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source + bridge_source + python_api_source + corona_editor_source)
 
-        self.assertIn("editorApi.events.onActorTransformUpdated(onActorTransformUpdatedEvent)", object_source)
-        self.assertIn("editorApi.off(actorTransformUpdatedCallbackToken)", object_source)
+        self.assertIn("editorApi.events.onActorTransformUpdated(handleTransform)", object_source)
+        self.assertIn("editorApi.off(transformToken)", object_source)
         self.assertNotIn("coronaEventBus.on('transform-update'", object_source)
         self.assertNotIn("coronaEventBus.off('transform-update'", object_source)
         self.assertNotIn("event === 'transform-update'", event_bus_source)
@@ -3385,6 +3394,74 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("std::atomic<std::uint64_t>", guid_body.group(0))
         self.assertIn("fetch_add", guid_body.group(0))
 
+    def test_native_actor_runtime_identity_survives_snapshot_persistence_and_transform(self):
+        source = self._handler_source()
+
+        for snippet in (
+            "std::string runtime_entity_id;",
+            "std::string asset_id;",
+            "std::string model_ref;",
+            "std::string source_plan_id;",
+            "std::string source_batch_id;",
+            "int actor_version{1};",
+            'item["entity_id"] = actor.runtime_entity_id;',
+            'item["actor_version"] = std::max(actor.actor_version, 1);',
+            '".runtime.entity_id = "',
+            '".runtime.actor_version = "',
+            'actor_value(".runtime.entity_id")',
+            'actor_value(".runtime.actor_version", "1")',
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        create_body = re.search(
+            r"NativeResult create_native_editor_actor\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(create_body)
+        self.assertIn("apply_runtime_metadata", create_body.group(0))
+        self.assertIn(
+            'json_string_value(actor_data, {"entity_id", "runtime_entity_id"})',
+            create_body.group(0),
+        )
+
+        transform_body = re.search(
+            r"NativeResult set_native_editor_actor_transform\(.*?\n\}",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(transform_body)
+        self.assertIn(
+            "actor->actor_version = std::max(actor->actor_version + 1, 1);",
+            transform_body.group(0),
+        )
+
+    def test_actor_file_transfer_uses_runtime_asset_identity_without_wire_changes(self):
+        source = self._network_system_source()
+
+        for snippet in (
+            "std::string actor_asset_id(const std::string& actor_json)",
+            'document.find("asset_id")',
+            "std::unordered_map<std::string, uint64_t> asset_to_transfer_group;",
+            "std::unordered_map<std::string, CachedIncomingAsset> received_asset_cache;",
+            "std::vector<PendingAction> actor_actions;",
+            "Coalesced actor onto asset transfer",
+            "Reused received asset",
+        ):
+            with self.subTest(snippet=snippet):
+                self.assertIn(snippet, source)
+
+        self.assertIn(
+            "impl_->asset_to_transfer_group[asset_id] = group_id;",
+            source,
+        )
+        self.assertIn(
+            "impl_->received_asset_cache[ft_it->second.asset_id]",
+            source,
+        )
+        self.assertNotIn("asset_id = r.read_string", source)
+
     def test_embedded_vision_reload_logs_shape_guid_uniqueness(self):
         source = self._handler_source()
         refresh_body = re.search(
@@ -3735,7 +3812,14 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn('? collision_shape_name(*actor.mechanics)', api_source)
         self.assertIn(': actor.persisted_collision_type', api_source)
         self.assertIn("set_collision_shape", api_source)
-        self.assertIn("normalizeCollisionType(data.collision)", object_source)
+        self.assertIn("const normalizeCollisionType", object_source)
+        self.assertIn("actor.collision = normalizeCollisionType(", object_source)
+        scratch_source = (
+            repo_root / "editor" / "CoronaCore" / "utils" / "corona_engine_scratch.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def _normalize_native_collision_type", scratch_source)
+        self.assertIn("[self._collision_type]", scratch_source)
+        self.assertNotIn('[bool(actor_data.get("collision", True))]', scratch_source)
         mechanics_source = (
             repo_root / "src" / "systems" / "mechanics" / "mechanics_system.cpp"
         ).read_text(encoding="utf-8")
@@ -3936,6 +4020,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("[projectPath, options]", bridge)
         self.assertNotIn("editorApi.main.onInit", open_body)
         self.assertNotIn("reloadScene", open_body)
+        self.assertIn("__coronaNodeGraphFlushSave", open_body)
+        self.assertIn("corona-active-project-changed", open_body)
         self.assertIn("decision_required", recent)
         self.assertIn("loadPolicy: 'degraded'", recent)
         self.assertIn('data-testid="actor-load-warning"', scene_bar)
@@ -3943,6 +4029,31 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("unresolved_actor_count", scene_bar)
         self.assertIn('data-testid="actor-placeholder-warning"', object_panel)
         self.assertIn("rebindPlaceholderResource", object_panel)
+
+    def test_archive_materialization_preserves_runtime_actor_metadata(self):
+        source = self._handler_source()
+        materialize_start = source.index("NativeEditorActor native_actor_from_snapshot")
+        materialize_end = source.index(
+            "void append_actor_materialization_diagnostic", materialize_start
+        )
+        materialize = source[materialize_start:materialize_end]
+        actor_json_start = source.index("nlohmann::json actor_to_json")
+        actor_json_end = source.index("nlohmann::json scene_to_json", actor_json_start)
+        actor_json = source[actor_json_start:actor_json_end]
+
+        for field in (
+            "runtime_entity_id",
+            "asset_id",
+            "model_ref",
+            "entity_type",
+            "semantic_role",
+            "source_plan_id",
+            "source_batch_id",
+            "source_scene_version",
+            "actor_version",
+        ):
+            self.assertIn(field, materialize)
+            self.assertIn(field, actor_json)
 
     def test_legacy_scene_migration_has_prompt_and_permanent_file_manager_action(self):
         repo_root = self._repo_root()

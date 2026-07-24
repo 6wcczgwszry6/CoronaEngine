@@ -90,16 +90,19 @@ _GENERATION_START_PATTERNS = (
 )
 _PLAN_DRAFT_PATTERNS = (
     r"(帮我)?(写|整理|给出|生成|设计).*(方案|计划)",
+    r"(让|请|叫).*(给我|提供|写|整理|设计).*(方案|计划)",
+    r"(给我|提供).*(方案|计划)",
+    r"(生成|创建|制作|构建|布置|搭建)一个",
     r"(我想做|我希望做|帮我设计|设计一个|规划一个|搭建一个|建立一个|做一个)",
 )
 _PLAN_REVISION_PATTERNS = (
     r"^(补充|说明|调整|修改)[:：]?",
-    r"(我希望|希望|不要|别|不能|更|风格|统一|一致|温暖|灯光|灯笼|休息区|暗黑风|恐怖)",
+    r"(在.*基础上|基于.*方案|基于.*设计|我希望|希望|不要|别|不能|更|风格|统一|一致|温暖|灯光|灯笼|休息区|暗黑风|恐怖)",
 )
 _PLAN_SUPPLEMENT_PATTERNS = (
     r"^(补充|补充要求|补充方案|说明)[:：，,\s]?",
     r"^(我希望|希望|不要|别|不能|整体|风格|布局|限制|要求)",
-    r"(更|统一|一致|温暖|灯光|灯笼|休息区|暗黑风|恐怖)",
+    r"(在.*基础上|基于.*方案|基于.*设计|更|统一|一致|温暖|灯光|灯笼|休息区|暗黑风|恐怖)",
 )
 _PLAN_ELABORATION_PATTERNS = (
     r"(继续|展开|详细|具体|细化|列出|输出|给出).*(方案|风格|布局|清单|物品|动线|材质|灯光)",
@@ -123,10 +126,12 @@ _LAYOUT_CONSTRAINT_PATTERNS = (
 _DISCUSSION_PATTERNS = (
     r"^(你好|你是谁|谢谢|哈喽|hello|hi|在吗|介绍一下)",
     r"(怎么看|觉得|建议|可以吗|为什么)",
+    r"围绕.*(主题)?(讨论|聊聊)",
+    r"围绕.*进行讨论",
 )
 _OPINION_DISCUSSION_PATTERNS = (
-    r"(怎么看|怎么评价|如何评价|看法|观点|觉得|认为).*(方案|设计|布局|计划)",
-    r"(方案|设计|布局|计划).*(怎么看|怎么评价|如何评价|看法|观点|觉得|认为|是否合理|合不合理)",
+    r"(怎么看|怎么评价|如何评价|评价一下|评价|看法|观点|觉得|认为).*(方案|设计|布局|计划)",
+    r"(方案|设计|布局|计划).*(怎么看|怎么评价|如何评价|评价一下|评价|看法|观点|觉得|认为|是否合理|合不合理)",
 )
 _HIGH_RISK_PATTERNS = (
     r"(删除|删掉|移除|清空|重置|覆盖|全部|所有)",
@@ -135,6 +140,7 @@ _HIGH_RISK_PATTERNS = (
 
 _STATUS_QUERY_PATTERNS += (
     r"(现在|当前)?(生成|执行|进度|计划|方案).*(哪里|哪步|情况|状态|是什么)",
+    r"(方案|计划)?.*(进度如何|进度怎么样)",
     r"(到哪|到哪里|哪一步|卡住|为什么不执行|开始了吗)",
 )
 _GENERATION_START_PATTERNS += (
@@ -142,16 +148,18 @@ _GENERATION_START_PATTERNS += (
 )
 _PLAN_DRAFT_PATTERNS += (
     r"(帮我)?(写|整理|给出|生成|设计).*(方案|计划)",
-    r"(我想做|我希望做|帮我设计|设计一个|规划一个|搭建一个|建立一个|做一个|围绕.*进行讨论)",
+    r"(生成|创建|制作|构建|布置|搭建)一个",
+    r"(我想做|我希望做|帮我设计|设计一个|规划一个|搭建一个|建立一个|做一个|围绕.*设计方向)",
 )
 _PLAN_REVISION_PATTERNS += (
     r"^(补充|说明|调整|修改)[:：]?",
-    r"(在.*方案基础上|基于.*方案|我希望|希望|不要|别|不能|更|风格|统一|一致|温暖|灯光|休息区|暗黑风|恐怖)",
+    r"再给.*(方案|计划)",
+    r"(在.*基础上|基于.*方案|基于.*设计|我希望|希望|不要|别|不能|更|风格|统一|一致|温暖|灯光|休息区|暗黑风|恐怖)",
 )
 _PLAN_SUPPLEMENT_PATTERNS += (
     r"^(补充|补充要求|补充方案|说明)[:：，,\s]?",
     r"^(我希望|希望|不要|别|不能|整体|风格|布局|限制|要求)",
-    r"(在.*方案基础上|基于.*方案|更|统一|一致|温暖|灯光|休息区|暗黑风|恐怖)",
+    r"(在.*基础上|基于.*方案|基于.*设计|更|统一|一致|温暖|灯光|休息区|暗黑风|恐怖)",
 )
 _PLAN_ELABORATION_PATTERNS += (
     r"(整理|汇总|总结|梳理|继续|展开|详细|具体|细化|列出|输出|给出).*(方案|风格|布局|清单|物品|动线|材质|灯光|讨论)",
@@ -166,10 +174,12 @@ _LAYOUT_CONSTRAINT_PATTERNS += (r"(不要挡|别挡|留空|开阔|中央活动�
 _DISCUSSION_PATTERNS += (
     r"^(你好|你是谁|谢谢|哈喽|hello|hi|在吗|介绍一下)",
     r"(怎么看|觉得|建议|可以吗|为什么)",
+    r"围绕.*(主题)?(讨论|聊聊)",
+    r"围绕.*进行讨论",
 )
 _OPINION_DISCUSSION_PATTERNS += (
-    r"(怎么看|怎么评价|如何评价|看法|观点|觉得|认为).*(方案|设计|布局|计划)",
-    r"(方案|设计|布局|计划).*(怎么看|怎么评价|如何评价|看法|观点|觉得|认为|是否合理|合不合理)",
+    r"(怎么看|怎么评价|如何评价|评价一下|评价|看法|观点|觉得|认为).*(方案|设计|布局|计划)",
+    r"(方案|设计|布局|计划).*(怎么看|怎么评价|如何评价|评价一下|评价|看法|观点|觉得|认为|是否合理|合不合理)",
 )
 _HIGH_RISK_PATTERNS += (r"(删除|删掉|移除|清空|重置|覆盖|全部|所有)",)
 
@@ -290,6 +300,10 @@ class IntentUnderstandingService:
         generation_active: bool,
     ) -> IntentDecision | None:
         normalized = re.sub(r"@\S+\s*", "", value).strip()
+        # A request to create or revise a proposal may include the word "方案".
+        # Give its explicit action verb precedence over generic status wording.
+        if _contains(_PLAN_DRAFT_PATTERNS, normalized):
+            return IntentDecision("plan_drafting", 0.97, target_agent, reason="protocol/plan drafting")
         if _contains(_STATUS_QUERY_PATTERNS, normalized):
             return IntentDecision("status_query", 0.98, target_agent, reason="protocol/status query")
         if _contains(_OPINION_DISCUSSION_PATTERNS, normalized):
@@ -303,6 +317,8 @@ class IntentUnderstandingService:
                 risk_level="medium",
                 reason="protocol/generation start",
             )
+        if _contains(_FINAL_LAYOUT_PATTERNS, normalized):
+            return IntentDecision("final_adjustment_request", 0.94, target_agent, reason="protocol/final layout")
         if generation_active and _contains(_ADD_PATTERNS, normalized):
             return IntentDecision("intervention_add", 0.94, target_agent, reason="active generation add")
         if generation_active and _contains(_MODIFY_PATTERNS, normalized):

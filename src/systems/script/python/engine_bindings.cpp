@@ -731,6 +731,23 @@ void BindAll(nanobind::module_& m) {
             return nb::object(item);
         }, "Pop one LANChat room lifecycle event for Python scheduler/Coordinator cleanup.");
 
+        m.def("network_pop_lanchat_sync_event", []() -> nb::object {
+            auto sys = get_network_system();
+            if (!sys) {
+                return nb::none();
+            }
+            auto event = sys->lanchat_pop_sync_event();
+            if (!event.has_value()) {
+                return nb::none();
+            }
+            nb::dict item;
+            item["channel"] = "lanchat_sync";
+            item["event"] = event->event;
+            item["room_id"] = event->room_id;
+            item["payload_json"] = event->payload_json;
+            return nb::object(item);
+        }, "Pop one LANChat actor/asset sync fact for AgentRuntime reconciliation.");
+
 		    m.def("network_lanchat_history_snapshot", [](int limit) -> nb::list {
 	        nb::list history;
 	        auto sys = get_network_system();

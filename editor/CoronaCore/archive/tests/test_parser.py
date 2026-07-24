@@ -36,6 +36,15 @@ class ArchiveParserTests(unittest.TestCase):
                         "chair.actor_guid = chair-guid",
                         "chair.actor_type = actor",
                         "chair.route = assets/chair.obj",
+                        "chair.runtime.entity_id = entity-chair",
+                        "chair.runtime.asset_id = asset-chair",
+                        "chair.runtime.model_ref = catalog/chair",
+                        "chair.runtime.entity_type = prop",
+                        "chair.runtime.semantic_role = seating",
+                        "chair.runtime.source_plan_id = plan-1",
+                        "chair.runtime.source_batch_id = batch-1",
+                        "chair.runtime.source_scene_version = 3",
+                        "chair.runtime.actor_version = 7",
                         "chair.geometry.position = 1, 2, 3",
                         "chair.optics.diffuse = 0.2, 0.3, 0.4",
                         "chair.optics.metallic = 0.5",
@@ -62,6 +71,15 @@ class ArchiveParserTests(unittest.TestCase):
             self.assertEqual(snapshot["scene"]["active_camera_id"], "main-camera")
             actor = snapshot["scene"]["actors"][0]
             self.assertEqual(actor["actor_guid"], "chair-guid")
+            self.assertEqual(actor["runtime_entity_id"], "entity-chair")
+            self.assertEqual(actor["asset_id"], "asset-chair")
+            self.assertEqual(actor["model_ref"], "catalog/chair")
+            self.assertEqual(actor["entity_type"], "prop")
+            self.assertEqual(actor["semantic_role"], "seating")
+            self.assertEqual(actor["source_plan_id"], "plan-1")
+            self.assertEqual(actor["source_batch_id"], "batch-1")
+            self.assertEqual(actor["source_scene_version"], 3)
+            self.assertEqual(actor["actor_version"], 7)
             self.assertEqual(actor["transform"]["position"], [1.0, 2.0, 3.0])
             self.assertEqual(actor["transform"]["scale"], [1.0, 1.0, 1.0])
             self.assertEqual(actor["asset_path"], str(asset.resolve()))

@@ -209,6 +209,19 @@ def _parse_actor(
         "actor_type": section.get(f"{key}.actor_type", "actor"),
         "route": route,
         "asset_path": str(asset_path),
+        "runtime_entity_id": section.get(f"{key}.runtime.entity_id", ""),
+        "asset_id": section.get(f"{key}.runtime.asset_id", ""),
+        "model_ref": section.get(f"{key}.runtime.model_ref", ""),
+        "entity_type": section.get(f"{key}.runtime.entity_type", ""),
+        "semantic_role": section.get(f"{key}.runtime.semantic_role", ""),
+        "source_plan_id": section.get(f"{key}.runtime.source_plan_id", ""),
+        "source_batch_id": section.get(f"{key}.runtime.source_batch_id", ""),
+        "source_scene_version": max(
+            section.getint(f"{key}.runtime.source_scene_version", fallback=1), 1
+        ),
+        "actor_version": max(
+            section.getint(f"{key}.runtime.actor_version", fallback=1), 1
+        ),
         "follow_camera": section.getboolean(f"{key}.follow_camera", fallback=False),
         "transform": {
             "position": _float3(

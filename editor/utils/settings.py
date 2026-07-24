@@ -150,6 +150,10 @@ class CoronaSettings:
         self.config.set('General', 'version', version)
         self.save()
 
+    @staticmethod
+    def _canonical_project_path(project_path: str) -> str:
+        return str(Path(str(project_path)).expanduser().resolve())
+
     def get_recent_projects(self) -> list:
         raw = self.config.get('History', 'recent_projects', fallback='[]')
         try:
@@ -157,8 +161,29 @@ class CoronaSettings:
         except:
             return []
 
-        refined_projects = []
+        canonical_paths = []
+        seen_paths = set()
         for raw_path in path_list:
+            if not isinstance(raw_path, str) or not raw_path.strip():
+                continue
+            canonical_path = self._canonical_project_path(raw_path)
+            path_key = os.path.normcase(canonical_path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            canonical_paths.append(canonical_path)
+        if canonical_paths != path_list:
+            if not self.config.has_section('History'):
+                self.config.add_section('History')
+            self.config.set(
+                'History',
+                'recent_projects',
+                json.dumps(canonical_paths, ensure_ascii=False),
+            )
+            self.save()
+
+        refined_projects = []
+        for raw_path in canonical_paths:
             ini_path = self._project_config_path(raw_path)
             project_name = os.path.basename(raw_path)
             if ini_path:
@@ -198,10 +223,23 @@ class CoronaSettings:
 
     def add_recent_project(self, project_path: str):
         projects = json.loads(self.config.get('History', 'recent_projects', fallback='[]'))
-        if project_path in projects:
-            projects.remove(project_path)
-        projects.insert(0, project_path)
+        project_path = self._canonical_project_path(project_path)
+        project_key = os.path.normcase(project_path)
+        normalized_projects = []
+        seen_paths = {project_key}
+        for existing in projects:
+            if not isinstance(existing, str) or not existing.strip():
+                continue
+            canonical_path = self._canonical_project_path(existing)
+            path_key = os.path.normcase(canonical_path)
+            if path_key in seen_paths:
+                continue
+            seen_paths.add(path_key)
+            normalized_projects.append(canonical_path)
+        projects = [project_path, *normalized_projects]
         projects = projects[:10]
+        if not self.config.has_section('History'):
+            self.config.add_section('History')
         self.config.set('History', 'recent_projects', json.dumps(projects, ensure_ascii=False))
         self.save()
 

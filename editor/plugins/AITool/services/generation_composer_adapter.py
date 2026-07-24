@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
+from .agent_runtime import AgentRuntimeFlags
 from .generation_scheduler import GenerationJob
 
 
@@ -13,11 +14,27 @@ class SceneComposerJobRunner:
     passed as runtime-only kwargs so batch boundaries can flow back as events.
     """
 
-    def __init__(self, composer_factory: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        composer_factory: Callable[[], Any],
+        *,
+        agent_runtime_flags: AgentRuntimeFlags | None = None,
+    ) -> None:
         self._composer_factory = composer_factory
+        self._agent_runtime_flags = agent_runtime_flags or AgentRuntimeFlags.from_env()
 
     def compose(self, job: GenerationJob) -> dict[str, Any]:
+        if not self._agent_runtime_flags.can_call_legacy_main_workflow():
+            raise RuntimeError(
+                "legacy SceneComposer main workflow is disabled by AgentRuntimeFlags"
+            )
         composer = self._composer_factory()
+        runtime_status_provider = job.runtime_context.get("runtime_status_provider")
+        if callable(runtime_status_provider):
+            try:
+                setattr(composer, "_runtime_status_provider", runtime_status_provider)
+            except Exception:  # noqa: BLE001
+                pass
         seed_plan = job.payload.get("seed_plan") if isinstance(job.payload.get("seed_plan"), dict) else {}
         prompt = self._compose_prompt_from_payload(job.payload, seed_plan)
         if not prompt:

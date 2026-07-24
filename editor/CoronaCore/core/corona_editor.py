@@ -2,6 +2,7 @@
 import math
 import os
 import sys
+import threading
 
 from CoronaCore.core.corona_engine import get_corona_engine
 from utils.settings import core_path
@@ -147,30 +148,35 @@ class CoronaEditor:
     _held_keys = set()
     _editor_camera_input_enabled = True
     _editor_camera_input_locks = set()
+    _editor_camera_input_state_lock = threading.RLock()
 
     @classmethod
     def set_editor_camera_input_enabled(cls, enabled, reason="global"):
         reason_key = str(reason or "global")
-        if enabled:
-            cls._editor_camera_input_locks.discard(reason_key)
-        else:
-            cls._editor_camera_input_locks.add(reason_key)
-        input_enabled = not cls._editor_camera_input_locks
-        previous = cls._editor_camera_input_enabled
-        cls._editor_camera_input_enabled = input_enabled
-        if not input_enabled:
-            cls._held_keys.clear()
-            cls._follow_rmb_down = False
-            cls._follow_prev_mouse = None
-        if previous == input_enabled:
-            return
-        try:
-            import CoronaEngine
-            setter = getattr(CoronaEngine, "camera_follow_set_input_enabled", None)
-            if setter is not None:
-                setter(input_enabled)
-        except Exception:
-            logger.debug("CameraFollowController input gate unavailable", exc_info=True)
+        # Status RPCs can arrive on different bridge threads. Keep the reason set,
+        # aggregate value and native setter ordered as one operation so an older
+        # disable call cannot run after the final unlock.
+        with cls._editor_camera_input_state_lock:
+            if enabled:
+                cls._editor_camera_input_locks.discard(reason_key)
+            else:
+                cls._editor_camera_input_locks.add(reason_key)
+            input_enabled = not cls._editor_camera_input_locks
+            cls._editor_camera_input_enabled = input_enabled
+            if not input_enabled:
+                cls._held_keys.clear()
+                cls._follow_rmb_down = False
+                cls._follow_prev_mouse = None
+            # Always re-apply the aggregate state. The native input gate can be
+            # recreated while this long-lived Python class still remembers the old
+            # value (for example after switching projects in the same editor process).
+            try:
+                import CoronaEngine
+                setter = getattr(CoronaEngine, "camera_follow_set_input_enabled", None)
+                if setter is not None:
+                    setter(input_enabled)
+            except Exception:
+                logger.debug("CameraFollowController input gate unavailable", exc_info=True)
 
     @classmethod
     def camera_lock_set(cls, enabled, ox=0.0, oy=0.0, oz=2.0, rx=0.0, ry=0.0, rz=0.0):

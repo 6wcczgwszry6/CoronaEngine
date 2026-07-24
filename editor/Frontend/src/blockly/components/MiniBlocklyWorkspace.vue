@@ -26,7 +26,7 @@ const props = defineProps({
   workspaceRole: { type: String, default: 'node' },
 });
 
-const emit = defineEmits(['change', 'ready', 'reject']);
+const emit = defineEmits(['change', 'ready', 'reject', 'block-added', 'block-changed']);
 
 const { t, locale } = useI18n();
 const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
@@ -36,7 +36,16 @@ const loadingLabel = ref('');
 const dropActive = ref(false);
 const dropInvalid = ref(false);
 const validationMessage = ref('');
-const GLOBAL_ROOT_TYPES = new Set(['variable_define', 'list_define', 'variable_show', 'variable_hide', 'list_show', 'list_hide']);
+const GLOBAL_ROOT_TYPES = new Set([
+  'variable_define',
+  'variable_set',
+  'variable_add',
+  'variable_show',
+  'variable_hide',
+  'list_define',
+  'list_show',
+  'list_hide',
+]);
 
 let workspace = null;
 let BlocklyLib = null;
@@ -123,6 +132,21 @@ async function registerBlocks() {
   blocksRegistered = true;
 }
 
+function applyRoleVisualStyle(block) {
+  if (!block) return;
+  if (props.workspaceRole === 'condition' && block.outputConnection) {
+    try {
+      block.setStyle('condition_blocks');
+      if (block.rendered) block.render?.();
+    } catch {}
+  }
+}
+
+function applyWorkspaceRoleVisualStyles() {
+  if (!workspace) return;
+  for (const block of workspace.getAllBlocks?.(false) || []) applyRoleVisualStyle(block);
+}
+
 function getState() {
   if (!workspace || !BlocklyLib) return {};
   try {
@@ -143,6 +167,7 @@ function loadState(state) {
     if (hasSerializedWorkspaceContent(nextState)) {
       BlocklyLib.serialization.workspaces.load(nextState, workspace);
     }
+    applyWorkspaceRoleVisualStyles();
   } catch (e) {
     logError('加载子工作区状态失败', e);
   } finally {
@@ -290,6 +315,7 @@ function addBlock(blockType, clientX, clientY) {
       window.setTimeout(() => { if (validationMessage.value === acceptance.message) validationMessage.value = ''; }, 2400);
       return false;
     }
+    applyRoleVisualStyle(block);
     block.initSvg();
     block.render();
 
@@ -302,6 +328,12 @@ function addBlock(blockType, clientX, clientY) {
     block.moveBy(Math.max(0, x), Math.max(0, y));
     workspace.setSelected?.(block);
     emitChange();
+    emit('block-added', {
+      blockId: String(block.id || ''),
+      blockType: String(block.type || blockType),
+      workspaceRole: props.workspaceRole,
+      interaction: hasScreenPoint ? 'drag' : 'pick',
+    });
     return true;
   } catch (e) {
     logError(`创建积木失败: ${blockType}`, e);
@@ -346,6 +378,23 @@ async function initBlockly() {
     workspace = BlocklyLib.inject(container, config);
     changeListener = (event) => {
       maybeDeleteClickedBlock(event);
+      if (!isLoadingWorkspace) {
+        const blockChangeType = BlocklyLib.Events?.BLOCK_CHANGE || 'change';
+        if (
+          (event?.type === blockChangeType || event?.type === 'change')
+          && event?.element === 'field'
+          && event?.oldValue !== event?.newValue
+        ) {
+          const block = workspace?.getBlockById?.(event.blockId);
+          emit('block-changed', {
+            blockId: String(event.blockId || ''),
+            blockType: String(block?.type || ''),
+            fieldName: String(event.name || ''),
+            workspaceRole: props.workspaceRole,
+          });
+        }
+      }
+      if (props.workspaceRole === 'condition') applyWorkspaceRoleVisualStyles();
       emitChange();
       validateWorkspace();
     };

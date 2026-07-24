@@ -11,6 +11,7 @@ SELF_REFLECTION_PROMPT = """你是质量检查员。评估操作质量。5维度
 
 class AgentCoordinator:
     def __init__(self, timeout: float = 30.0): self.timeout = timeout; self._intent_agent = None; self._spatial_agent = None; self._style_agent = None
+    _RUNTIME_CONTROLLED_ACTIONS = frozenset({"add", "delete", "move", "modify"})
 
     @property
     def intent_agent(self):
@@ -38,6 +39,18 @@ class AgentCoordinator:
     def execute(self, intent, spatial, validation, scene_state=None) -> Dict[str, Any]:
         decision = validation.get("decision", "execute"); action = intent.get("action", "")
         if decision == "ask_user": return {"status": "pending_user_approval", "message": self._format_ask_user(intent, validation), "action": action}
+        if action in self._RUNTIME_CONTROLLED_ACTIONS and not self._legacy_direct_execute_allowed(scene_state):
+            result = {
+                "status": "blocked",
+                "action": action,
+                "reason": "agent_runtime_required",
+                "execution": "agent_runtime_required",
+                "message": "该操作已由 AgentRuntime 接管，请通过确认方案/布局调整链路执行。",
+                "steps": [],
+            }
+            self._broadcast(intent, spatial, result)
+            self._record(intent, spatial, result, scene_state)
+            return result
         result = {"status": "executed", "action": action, "steps": []}
         try:
             if action == "add": result.update(self._execute_add(intent, spatial, scene_state))
@@ -48,6 +61,20 @@ class AgentCoordinator:
         except Exception as e: logger.error("[Coordinator] execute failed: %s", e); result["status"] = "error"; result["error"] = str(e)
         self._broadcast(intent, spatial, result); self._record(intent, spatial, result, scene_state)
         return result
+
+    def _legacy_direct_execute_allowed(self, scene_state=None) -> bool:
+        scene = scene_state if isinstance(scene_state, dict) else {}
+        metadata = scene.get("metadata", {}) if isinstance(scene.get("metadata"), dict) else {}
+        for source in (metadata, scene):
+            if bool(source.get("allow_legacy_direct_agent_execute")):
+                return True
+            if bool(source.get("allow_legacy_agent_coordinator_execute")):
+                return True
+        try:
+            from plugins.AITool.services.agent_runtime.flags import AgentRuntimeFlags
+            return not AgentRuntimeFlags.from_env().old_workflow_direct_entry_disabled
+        except Exception:
+            return False
 
     def handle(self, user_text: str, scene_state=None, style_bible=None) -> Dict[str, Any]:
         start = time.time(); scene = scene_state or {}

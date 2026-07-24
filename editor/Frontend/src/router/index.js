@@ -7,6 +7,8 @@ import ObjectPanel from '../views/sidebar/Object.vue';
 import LogView from '../views/sidebar/LogView.vue';
 import FileManager from '../views/sidebar/FileManager.vue';
 import AITalkBar from '../views/sidebar/AITalkBar.vue';
+import NodeGraphPanel from '../views/sidebar/NodeGraphPanel.vue';
+import CabbageChatPanel from '../views/sidebar/CabbageChatPanel.vue';
 import Pet from '../views/tools/Pet.vue';
 import ProjectSettings from '../views/sidebar/ProjectSettings.vue';
 import BlocklyWorkspace from '../blockly/components/BlocklyWorkspace.vue';
@@ -49,6 +51,16 @@ const routes = [
     path: '/SceneBar',
     name: 'SceneBar',
     component: SceneBar,
+  },
+  {
+    path: '/NodeGraph',
+    name: 'NodeGraphPanel',
+    component: NodeGraphPanel,
+  },
+  {
+    path: '/CabbageChat',
+    name: 'CabbageChatPanel',
+    component: CabbageChatPanel,
   },
   {
     path: '/Object',

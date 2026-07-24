@@ -837,8 +837,8 @@ export const projectService = {
 };
 
 export const appService = {
-  createPanelTab: (panelId, routePath, width, height, dockingPos) =>
-    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos }),
+  createPanelTab: (panelId, routePath, width, height, dockingPos, zPriority = 0) =>
+    Bridge.callDockCommand({ cmd: 'createPanelTab', panelId, routePath, width, height, dockingPos, zPriority }),
   // Create a panel that is born directly as its own borderless OS window (skips the
   // main-window docked-rectangle stage, so no 1-frame flash). x/y/width/height are the
   // desired initial geometry in logical px. Returns { tab_id, panel_id }.
@@ -891,6 +891,87 @@ export const aiService = {
   sendMessageToAIStream: (payload) => editorApi.ai.sendMessageToAIStream(payload),
   readLocalFileAsBase64: (filePath) => editorApi.ai.readLocalFileAsBase64(filePath),
   generateHint: (elementType, context = {}) => editorApi.ai.generateHint(elementType, context),
+  startNodeGraphReview: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphReviewStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  chatAboutNodeGraph: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startNodeGraphReviewChat: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphReviewChatStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  cancelNodeGraphReviewChat: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.review.chat.cancel',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  loadCabbageContext: async () => {
+    const response = await editorApi.ai.submitRequest({ operation: 'cabbage.context.load' });
+    return response?.data ?? response;
+  },
+  recordCabbageEvent: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.record_event',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  updateCabbageTask: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.update_task',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  appendCabbageMessage: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.append_message',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startCabbageProfileScoreUpdate: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.profile.score.start',
+      payload,
+    });
+    return response?.data ?? response;
+  },
+  getCabbageProfileScoreStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.profile.score.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
 };
 
 export const aiClient = {
@@ -953,7 +1034,6 @@ export const scriptingService = {
   saveBlocklyTarget: (payload) => editorApi.scratch.saveBlocklyTarget(payload),
 
   loadBlocklyTarget: (payload) => editorApi.scratch.loadBlocklyTarget(payload),
-
   startGamePreview: (payload = { scope: 'project' }) => editorApi.scratch.startGamePreview(payload),
 
   stopGamePreview: () => editorApi.scratch.stopGamePreview(),
@@ -1045,6 +1125,11 @@ export const projectLauncherService = {
     editorApi.project.createMultiplayerProject(projectData),
   // 打开项目并让原生场景同步到该项目。
   openProject: async (projectPath, options = {}) => {
+    try {
+      await window.__coronaNodeGraphFlushSave?.();
+    } catch (error) {
+      console.warn('切换项目之前保存节点图失败，继续打开目标项目:', error);
+    }
     const loadPolicy = options.loadPolicy || options.load_policy || 'prompt';
     const result = await editorApi.project.openProject(projectPath, { load_policy: loadPolicy });
     const success = result?.data ?? result;
@@ -1052,6 +1137,9 @@ export const projectLauncherService = {
     if (success?.ok && activeProjectPath) {
       window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
       window.localStorage?.setItem('corona.activeProjectLegacy', success?.legacy ? 'true' : 'false');
+      window.dispatchEvent(new CustomEvent('corona-active-project-changed', {
+        detail: { projectPath: activeProjectPath },
+      }));
     }
     return result;
   },

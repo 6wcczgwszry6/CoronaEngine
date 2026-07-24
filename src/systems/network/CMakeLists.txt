@@ -13,6 +13,7 @@ corona_add_system(network
     DEPENDENCIES
         Horizon
         enet
+        nlohmann_json
 )
 
 if(WIN32)
