@@ -10,7 +10,7 @@
 
     <!-- 局域网聊天（单一模式） -->
     <div class="ai-talk-content w-full flex-1 min-h-0">
-      <RoomPanel />
+      <RoomPanel in-world />
     </div>
   </div>
 </template>

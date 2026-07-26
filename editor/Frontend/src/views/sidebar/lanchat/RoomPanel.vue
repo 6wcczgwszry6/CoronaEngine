@@ -1,7 +1,7 @@
 <template>
   <div class="lanchat-panel relative flex flex-col h-full text-base text-gray-100">
     <!-- 未进房：大厅（开房 / 加入） -->
-    <div v-if="!s.inRoom" class="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
+    <div v-if="!s.inRoom && !props.inWorld" class="flex-1 min-h-0 overflow-y-auto p-4 flex flex-col gap-4">
       <div class="space-y-4">
         <div class="grid grid-cols-2 gap-2">
           <button
@@ -171,14 +171,39 @@
     </div>
 
     <!-- 已进房：聊天界面 -->
+    <div
+      v-else-if="!s.inRoom"
+      class="flex flex-1 min-h-0 items-center justify-center p-5"
+    >
+      <div class="w-full max-w-sm rounded-lg border border-[#4a4a4a] bg-[#2a2a2a]/90 p-5 text-center shadow-xl">
+        <div class="text-base font-medium text-gray-100">正在准备当前世界的对话房间</div>
+        <div v-if="!s.error" class="mt-2 text-sm text-gray-400">初始化完成后会直接进入对话，无需再选择模式。</div>
+        <div v-else class="mt-2 text-sm text-red-400">{{ errorText }}</div>
+        <button
+          v-if="s.error"
+          class="mt-4 rounded bg-[#84A65B] px-4 py-2 text-sm text-white hover:bg-[#95B86C]"
+          @click="ensureInWorldRoom"
+        >
+          重新连接
+        </button>
+      </div>
+    </div>
+
     <div v-else class="flex flex-col h-full">
       <!-- 房间信息条 -->
       <div class="flex items-center justify-between gap-3 px-3 py-2.5 bg-[#343434]/60 text-sm">
         <div class="min-w-0">
-          <div class="text-[13px] text-gray-400">{{ s.mode === 'single' ? '本地单人协作' : '局域网协作' }}</div>
+          <div class="text-[13px] text-gray-400">{{ props.inWorld ? 'IP地址' : (s.mode === 'single' ? '本地单人协作' : '局域网协作') }}</div>
           <div class="truncate text-base font-semibold text-gray-100">
-            {{ s.mode === 'single' ? '单人聊天室' : s.room }}
-            <template v-if="s.role === 'host' && s.mode === 'multi'"> · {{ s.ip }}:{{ s.port }}</template>
+            <template v-if="props.inWorld">
+              {{ s.ip }}<template v-if="s.port">:{{ s.port }}</template>
+            </template>
+            <template v-else>
+              {{ s.mode === 'single' ? s.ip : s.room }}
+              <template v-if="s.mode !== 'single' && s.ip">
+                · {{ s.ip }}<template v-if="s.port">:{{ s.port }}</template>
+              </template>
+            </template>
           </div>
         </div>
         <div class="flex shrink-0 items-center gap-2">
@@ -495,6 +520,13 @@ import {
   selectedExpertPayloads as buildSelectedExpertPayloads,
 } from './expertGroupConfig.js';
 
+const props = defineProps({
+  inWorld: {
+    type: Boolean,
+    default: false,
+  },
+});
+
 const s = lanchat.state;
 const draft = ref('');
 const normalizeVisibleWorkspaceMode = (mode) => (
@@ -520,6 +552,7 @@ const pendingReply = ref(null);
 let waitClock = null;
 let modelTransferPollTimer = null;
 let actorSyncBroadcastCallbackToken = null;
+let inWorldRoomPromise = null;
 const DRAFT_MIN_ROWS = 2;
 const DRAFT_MAX_ROWS = 4;
 const PENDING_MODEL_TRANSFER_POLL_LIMIT = 16;
@@ -814,7 +847,57 @@ function formatHistoryTime(ts) {
   return `${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
-onMounted(refreshHistoryRooms);
+async function ensureInWorldRoom() {
+  if (!props.inWorld) return null;
+  if (s.inRoom) {
+    if (s.role === 'host' && !(s.agents || []).length) {
+      await addDefaultExpertGroup();
+    }
+    return { ok: true, existing: true };
+  }
+  if (inWorldRoomPromise) return inWorldRoomPromise;
+
+  inWorldRoomPromise = (async () => {
+    lanchat.setWorkspaceMode('multiplayer_multi_agent');
+    const res = await lanchat.openRoom({
+      room: makeInWorldRoomId(),
+      password: '',
+      port: 27960,
+      mode: 'multi',
+    });
+    if (res && res.ok) {
+      selectedTargetKey.value = 'scene';
+      applyInputRouteState();
+      await addDefaultExpertGroup();
+    }
+    return res;
+  })().finally(() => {
+    inWorldRoomPromise = null;
+  });
+
+  return inWorldRoomPromise;
+}
+
+async function handleInWorldProjectChanged() {
+  if (!props.inWorld) return;
+  clearPendingReply();
+  if (
+    s.inRoom &&
+    s.role === 'host' &&
+    (s.room === makeInWorldRoomId() || s.room === makeLocalRoomId())
+  ) {
+    await lanchat.closeRoom();
+  }
+  await ensureInWorldRoom();
+}
+
+onMounted(() => {
+  if (props.inWorld) {
+    void ensureInWorldRoom();
+  } else {
+    void refreshHistoryRooms();
+  }
+});
 
 onMounted(() => {
   resizeDraftInput();
@@ -829,6 +912,7 @@ onMounted(() => {
     })
     .catch(() => {});
   document.addEventListener('pointerdown', onDocumentPointerDown);
+  window.addEventListener('corona-active-project-changed', handleInWorldProjectChanged);
 });
 
 onBeforeUnmount(() => {
@@ -841,6 +925,7 @@ onBeforeUnmount(() => {
     });
   }
   document.removeEventListener('pointerdown', onDocumentPointerDown);
+  window.removeEventListener('corona-active-project-changed', handleInWorldProjectChanged);
 });
 
 watch(
@@ -956,6 +1041,10 @@ async function continueHistoryAsMulti(room = s.selectedHistoryRoom) {
 
 function makeLocalRoomId() {
   return 'single-default';
+}
+
+function makeInWorldRoomId() {
+  return 'world-default';
 }
 
 function isLocalSingleRoomId(roomId) {
@@ -1472,6 +1561,9 @@ async function onLeave() {
     await lanchat.closeRoom();
   } else {
     await lanchat.leaveRoom();
+  }
+  if (props.inWorld) {
+    await ensureInWorldRoom();
   }
 }
 

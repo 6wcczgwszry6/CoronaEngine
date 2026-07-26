@@ -101,6 +101,7 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService } from '@/utils/bridge';
+import lanchat from '@/stores/lanchat.js';
 
 const router = useRouter();
 
@@ -153,6 +154,24 @@ const handleCreate = async () => {
       await projectLauncherService.setProjectMode(mode.value, { prompt });
       const opened = await projectLauncherService.openProject(info.path);
       if (opened?.data) {
+        try {
+          if (lanchat.state.inRoom) {
+            if (lanchat.state.role === 'host') {
+              await lanchat.closeRoom();
+            } else {
+              await lanchat.leaveRoom();
+            }
+          }
+          lanchat.setWorkspaceMode('multiplayer_multi_agent');
+          await lanchat.openRoom({
+            room: 'world-default',
+            password: '',
+            port: 27960,
+            mode: 'multi',
+          });
+        } catch (roomError) {
+          console.warn('Default AI conversation room initialization failed:', roomError);
+        }
         router.push('/');
         return;
       }

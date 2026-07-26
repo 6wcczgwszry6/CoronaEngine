@@ -10,7 +10,7 @@
  * 不直接监听 window 回调；由 AITalkBar 统一分流，避免与 AI 流式回调争用。
  */
 import { reactive, readonly } from 'vue';
-import { lanChatService } from '../utils/bridge.js';
+import { lanChatService, networkService } from '../utils/bridge.js';
 import {
   disclosureVisibleForRole,
   disclosureVisibleForRoom,
@@ -335,6 +335,29 @@ function removeAgentFromRoster(agentId) {
 
 // ---- 动作 -----------------------------------------------------------------
 
+async function resolveRoomDisplayAddress(roomResponse = {}) {
+  const responseIp = String(roomResponse?.ip || '').trim();
+  if (responseIp) return responseIp;
+
+  try {
+    const info = await networkService.getSessionInfo();
+    const localIp = String(info?.local_ip || '').trim();
+    if (localIp) return localIp;
+  } catch (_) {
+    // Address display must not prevent world or room creation.
+  }
+
+  return '127.0.0.1';
+}
+
+async function withRoomDisplayAddress(roomResponse = {}) {
+  if (!roomResponse?.ok) return roomResponse;
+  return {
+    ...roomResponse,
+    ip: await resolveRoomDisplayAddress(roomResponse),
+  };
+}
+
 function applyHostRoomState({ room, mode, res, hostNickname = HOST_NICKNAME }) {
   state.role = ROLE.HOST;
   state.mode = mode;
@@ -420,10 +443,11 @@ async function openLocalRoom({ room, password, nickname }) {
     nickname: hostNickname,
   });
   if (res && res.ok) {
-    applyHostRoomState({ room, mode: 'single', res, hostNickname });
-  } else {
-    state.error = (res && res.error) || 'START_FAILED';
+    const roomResponse = await withRoomDisplayAddress(res);
+    applyHostRoomState({ room, mode: 'single', res: roomResponse, hostNickname });
+    return roomResponse;
   }
+  state.error = (res && res.error) || 'START_FAILED';
   return res;
 }
 
@@ -447,7 +471,8 @@ async function continueHistoryAsLocalRoom({ room, nickname } = {}) {
     history_room: roomId,
   });
   if (res && res.ok) {
-    applyHostRoomState({ room: roomId, mode: 'single', res, hostNickname });
+    const roomResponse = await withRoomDisplayAddress(res);
+    applyHostRoomState({ room: roomId, mode: 'single', res: roomResponse, hostNickname });
     const restoredHistory = Array.isArray(res.history) && res.history.length
       ? res.history
       : previewMessages;
@@ -459,9 +484,9 @@ async function continueHistoryAsLocalRoom({ room, nickname } = {}) {
       .filter((agent) => !agent.owner || agent.owner === state.peerId || agent.owner === 'local-single-player')
       .map((agent) => ({ ...agent }));
     applyHistorySnapshot(restoredHistory, true);
-  } else {
-    state.error = (res && res.error) || 'START_FAILED';
+    return roomResponse;
   }
+  state.error = (res && res.error) || 'START_FAILED';
   return res;
 }
 
@@ -484,7 +509,8 @@ async function continueHistoryAsMultiRoom({ room, port, nickname } = {}) {
     history_room: roomId,
   });
   if (res && res.ok) {
-    applyHostRoomState({ room: roomId, mode: 'multi', res, hostNickname });
+    const roomResponse = await withRoomDisplayAddress(res);
+    applyHostRoomState({ room: roomId, mode: 'multi', res: roomResponse, hostNickname });
     const restoredHistory = Array.isArray(res.history) && res.history.length
       ? res.history
       : previewMessages;
@@ -496,9 +522,9 @@ async function continueHistoryAsMultiRoom({ room, port, nickname } = {}) {
       .filter((agent) => !agent.owner || agent.owner === state.peerId)
       .map((agent) => ({ ...agent }));
     applyHistorySnapshot(restoredHistory, true);
-  } else {
-    state.error = (res && res.error) || 'START_FAILED';
+    return roomResponse;
   }
+  state.error = (res && res.error) || 'START_FAILED';
   return res;
 }
 
@@ -517,10 +543,11 @@ async function openRoom({ room, password, port, nickname, mode = 'multi' }) {
     mode: 'multi',
   });
   if (res && res.ok) {
-    applyHostRoomState({ room, mode: 'multi', res, hostNickname });
-  } else {
-    state.error = (res && res.error) || 'START_FAILED';
+    const roomResponse = await withRoomDisplayAddress(res);
+    applyHostRoomState({ room, mode: 'multi', res: roomResponse, hostNickname });
+    return roomResponse;
   }
+  state.error = (res && res.error) || 'START_FAILED';
   return res;
 }
 
