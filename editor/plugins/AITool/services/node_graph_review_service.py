@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import os
@@ -375,34 +376,53 @@ class NodeGraphReviewService:
 
     @classmethod
     def _resolve_settings(cls) -> DeepSeekSettings:
-        provider: Any = None
-        raw_provider: dict[str, Any] = {}
-        try:
-            from Quasar.ai_service.entrance import get_ai_entrance
+        def lookup_editor_provider() -> tuple[Any, dict[str, Any]]:
+            provider: Any = None
+            raw_provider: dict[str, Any] = {}
+            try:
+                from Quasar.ai_service.entrance import get_ai_entrance
 
-            collector = get_ai_entrance().collector
-            providers = getattr(collector.AIConfig, "providers", {}) or {}
-            provider = providers.get("deepseek") if hasattr(providers, "get") else None
-            if provider is None:
-                raw = getattr(collector, "AI_SETTINGS", {})
-                candidate = (
-                    (raw.get("providers") or {}).get("deepseek")
-                    if isinstance(raw, dict)
-                    else None
+                collector = get_ai_entrance().collector
+                providers = getattr(collector.AIConfig, "providers", {}) or {}
+                provider = providers.get("deepseek") if hasattr(providers, "get") else None
+                if provider is None:
+                    raw = getattr(collector, "AI_SETTINGS", {})
+                    candidate = (
+                        (raw.get("providers") or {}).get("deepseek")
+                        if isinstance(raw, dict)
+                        else None
+                    )
+                    if isinstance(candidate, dict):
+                        raw_provider = candidate
+            except Exception as exc:
+                logger.debug(
+                    "DeepSeek editor configuration lookup failed: %s",
+                    type(exc).__name__,
                 )
-                if isinstance(candidate, dict):
-                    raw_provider = candidate
-        except Exception as exc:
-            logger.debug(
-                "DeepSeek editor configuration lookup failed: %s",
-                type(exc).__name__,
-            )
+            return provider, raw_provider
+
+        provider, raw_provider = lookup_editor_provider()
 
         def read(name: str) -> str:
             value = getattr(provider, name, "") if provider is not None else ""
             return str(value or raw_provider.get(name, "") or "").strip()
 
         editor_key = read("api_key")
+        if not editor_key:
+            # The node review/generation services can be used before the LAN-chat
+            # worker finishes its warm-up. Load the editor-owned settings lazily so
+            # the first Cabbage generation request does not incorrectly fall back to
+            # an empty environment configuration.
+            try:
+                importlib.import_module("..utils.ai_setting", package=__package__)
+            except Exception as exc:
+                logger.debug(
+                    "DeepSeek editor settings lazy-load failed: %s",
+                    type(exc).__name__,
+                )
+            provider, raw_provider = lookup_editor_provider()
+            editor_key = read("api_key")
+
         editor_model = read("model")
         if editor_key:
             return DeepSeekSettings(
