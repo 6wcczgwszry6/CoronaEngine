@@ -1,25 +1,41 @@
 <?xml version='1.0' encoding='utf-8'?>
-<CoronaBlocksDocument schemaVersion="1" documentPurpose="internal-ai-node-graph-contract" contractVersion="1" updatedAt="2026-07-18">
+<CoronaBlocksDocument schemaVersion="1" documentPurpose="internal-ai-node-graph-contract" contractVersion="3" updatedAt="2026-07-27">
   <InternalAiContract catalogLocked="true" visualGraphIsSourceOfTruth="true" pythonProducedByEngine="true">
-    <Purpose lang="zh-CN">这是 CoronaEngine 内部 AI 的只读节点积木能力合同。宿主提供用户的 3D Demo 描述、当前项目运行时上下文和 Catalog；模型返回内存中的 JSON 节点图，宿主将其应用到项目常驻节点图。</Purpose>
-    <Purpose lang="en-US">Read-only capability contract for the in-editor AI. The host supplies the user demo request, current project runtime context, and this Catalog. The model returns an in-memory JSON node graph that the host applies to the project-global graph.</Purpose>
+    <Purpose lang="zh-CN">这是 CoronaEngine 包菜答疑使用的项目级节点积木能力与生成合同。宿主会提供用户指令、当前世界上下文、完整现有节点图和本文档；AI 只能返回完整、可见、可校验的 JSON 节点图。</Purpose>
+    <Purpose lang="en-US">Project-global node graph capability and generation contract used by Cabbage Q&amp;A. The host sends the user instruction, current world context, complete current graph, and this file; the model may return only a complete visible JSON node graph.</Purpose>
     <FixedTarget targetId="node_graph:project:global" targetType="project" scriptKind="node_graph" actorBinding="none" />
+    <SupportedOperations values="create extend edit delete" queryRoute="node_graph.review.chat" />
     <SourceOfTruth>Nodes, edges, Blockly workspaces, Boolean edge conditions, global data blocks, and node x/y layout are the complete visible logic source. The model must not hide gameplay in text or code.</SourceOfTruth>
-    <NoPythonFromModel>The model must not produce Python. After validation and application, CoronaEngine calls nodeGraphToCode on the visible workspace and saves the compiled Python itself.</NoPythonFromModel>
-    <HostApplicationApi function="applyGeneratedNodeGraph" accepts="JSON object" atomic="true">The host validates the result before changing the editor. Invalid results leave the current project graph unchanged.</HostApplicationApi>
+    <NoPythonFromModel>The model must not produce Python. After validation and atomic application, CoronaEngine calls nodeGraphToCode on the visible workspace and saves the compiled Python itself.</NoPythonFromModel>
+    <HostApplicationApi function="applyGeneratedNodeGraph" accepts="JSON object" atomic="true" staleResponseRejected="true">The host validates and compiles the complete result before changing the editor. Invalid, stale, cancelled, or cross-world results leave the current project graph unchanged.</HostApplicationApi>
   </InternalAiContract>
   <HostInputContract>
-    <UserDemoDescription>Natural-language description of the requested 3D demo, controls, win/lose rules, camera style, and presentation.</UserDemoDescription>
-    <RuntimeContext>Current scenes, object names, object tags, available assets, audio names, checkpoints, and other project identifiers.</RuntimeContext>
-    <BlockCatalog>The Catalog in this document. Only listed block type, field, input, output, and dropdown values may be used.</BlockCatalog>
-    <ExistingGraph>Optional current project-global graph when the user asks to extend or revise existing logic.</ExistingGraph>
-    <ContextRule>Object names and tags used by blocks must come from RuntimeContext or be explicitly requested by the user. Do not invent scene bindings or actor targets.</ContextRule>
+    <RequestIdentity required="true" fields="requestId targetId projectScopeId baseGraphRevision operation" />
+    <UserInstruction>Natural-language request to create, extend, edit, or delete 3D game/demo/function logic. The word deno is treated as demo.</UserInstruction>
+    <ResponseLanguage values="zh-CN en-US">The required language for summary and newly created or renamed visible node and edge labels.</ResponseLanguage>
+    <RuntimeContext>Current scene and real object names, object types, object tags, available assets, audio names, checkpoints, and other project identifiers.</RuntimeContext>
+    <BlockCatalog>The complete Catalog in this document. Only listed block type, field, input, output, dropdown values, and project-safe combinations may be used.</BlockCatalog>
+    <ExistingGraph required="true">The complete current project-global graph. It is the base for every operation, including create. Extend, edit, and delete must preserve unrelated graph content.</ExistingGraph>
+    <ContextRule>Object names and tags used by blocks must come from RuntimeContext or already-valid ExistingGraph references. Do not invent scene bindings, actor targets, empty placeholder actors, or unnamed objects.</ContextRule>
   </HostInputContract>
+  <OperationSemantics>
+    <Operation name="create">Build the requested playable logic in the project-global graph. Replace only when the instruction explicitly asks for a new graph; otherwise preserve useful existing logic.</Operation>
+    <Operation name="extend">Add requested states, edges, conditions, variables, and blocks while preserving all unrelated existing content.</Operation>
+    <Operation name="edit">Modify only logic identified by the instruction and preserve unrelated nodes, edges, workspaces, IDs, and layout where practical.</Operation>
+    <Operation name="delete">Remove only logic identified by the instruction, reconnect or remove affected edges safely, and keep exactly one valid start node.</Operation>
+    <Operation name="query" mutating="false">Questions and explanations do not mutate the graph and must use the normal Cabbage Q&amp;A route rather than this generation contract.</Operation>
+    <FinalWorkspaceRule>Every mutating operation returns the complete final workspace. Never return JSON Patch, diffs, partial nodes, partial Blockly fragments, or instructions for the host to finish.</FinalWorkspaceRule>
+  </OperationSemantics>
   <ModelOutputContract mediaType="application/json" transport="in-memory" schemaVersion="1">
-    <OutputRule>Return one JSON object matching ResultShape. Do not return XML, Python, a path, a file wrapper, Markdown, or explanation text in the result value consumed by the host.</OutputRule>
+    <OutputRule>Return one JSON object matching ResultShape. Do not return XML, Python, a path, a file wrapper, Markdown, or explanation text outside the JSON value consumed by the host.</OutputRule>
     <ResultShape>{
   "schemaVersion": 1,
+  "requestId": "same value as host request",
   "targetId": "node_graph:project:global",
+  "projectScopeId": "same value as host request",
+  "baseGraphRevision": "same value as host request",
+  "operation": "create|extend|edit|delete",
+  "summary": "short user-facing completion summary",
   "workspace": {
     "version": 1,
     "nodes": [],
@@ -27,27 +43,80 @@
     "globalVariablesWorkspace": {}
   }
 }</ResultShape>
-    <ForbiddenKeys values="python sourceCode xml filePath actorTarget sceneTarget" />
+    <ForbiddenKeys values="python sourceCode generatedCode xml filePath actorTarget sceneTarget" />
+    <IdentityRule>Copy requestId, targetId, projectScopeId, baseGraphRevision, and operation exactly from HostInput. Never calculate, rewrite, or omit them.</IdentityRule>
   </ModelOutputContract>
   <GenerationRules>
-    <NodeGraphRule index="1">Generate exactly one node whose nodeType is start. Other nodeType values are custom or end.</NodeGraphRule>
-    <NodeGraphRule index="2">Every node, edge, and serialized block has a non-empty ID unique within its graph or workspace scope.</NodeGraphRule>
+    <NodeGraphRule index="1">Return exactly one node whose nodeType is start. Other nodeType values are custom or end.</NodeGraphRule>
+    <NodeGraphRule index="2">Every node, edge, and serialized block has a non-empty ID unique within its graph or workspace scope. Preserve existing IDs for unchanged content.</NodeGraphRule>
     <NodeGraphRule index="3">Every edge endpoint references an existing node and uses side left, right, or bottom with a non-negative integer index.</NodeGraphRule>
-    <NodeGraphRule index="4">Every major gameplay state is reachable from start. Prefer explicit start, play, win, and lose states for complete demos.</NodeGraphRule>
+    <NodeGraphRule index="4">Every major gameplay state is reachable from start. Prefer explicit initialization, play, win, and lose states for complete demos.</NodeGraphRule>
     <NodeGraphRule index="5">Node x and y are finite numbers. Lay the main flow left-to-right with about 340 to 460 pixels horizontal spacing and at least 220 pixels vertical spacing for branches.</NodeGraphRule>
-    <NodeGraphRule index="6">Node workspace contains visible lifecycle and action blocks. Do not describe a behavior only in node names.</NodeGraphRule>
+    <NodeGraphRule index="6">Node workspaces contain visible lifecycle and action blocks. Do not describe behavior only in node names or summary text.</NodeGraphRule>
+    <NodeGraphRule index="7">Extend, edit, and delete preserve unrelated nodes, edges, block chains, global data, and readable layout.</NodeGraphRule>
     <BlocklyRule index="1">Use official Blockly serialization JSON under workspace.blocks.blocks.</BlocklyRule>
-    <BlocklyRule index="2">Sequential statement blocks connect with next.block. Value and statement parameters connect with inputs.NAME.block or inputs.NAME.shadow.</BlocklyRule>
-    <BlocklyRule index="3">Use only block type values listed in Catalog. Use only Catalog field names, input names, dropdown option values, and compatible output types.</BlocklyRule>
-    <BlocklyRule index="4">Each serialized block must include type and id. Top-level blocks should include x and y for readable internal layout.</BlocklyRule>
-    <BlocklyRule index="5">Use lifecycle hat blocks such as node_when_enter and node_while_active inside state nodes so execution timing is visible.</BlocklyRule>
-    <BlocklyRule index="6">Use globalVariablesWorkspace only for Catalog GlobalWorkspaceRootTypes. Connect value blocks beneath their initialization or assignment inputs.</BlocklyRule>
+    <BlocklyRule index="2">Sequential statement blocks connect only through next.block. Never put a sibling statement block beside a chain when it is intended to execute next.</BlocklyRule>
+    <BlocklyRule index="3">Value and statement parameters connect through inputs.NAME.block or inputs.NAME.shadow according to the Catalog input kind and check type.</BlocklyRule>
+    <BlocklyRule index="4">For control_if, place the condition in its value input and all actions that belong to the branch under inputs.DO.block. For control_else, keep branch actions under its Catalog statement inputs such as DO or ELSE. Continue a surrounding sequence with next.block rather than nesting unrelated blocks inside the branch.</BlocklyRule>
+    <BlocklyRule index="5">Never swallow, duplicate, or orphan blocks while editing nested control flow. Every preserved executable block must remain reachable from exactly one top-level lifecycle/event chain.</BlocklyRule>
+    <BlocklyRule index="6">Use only block type values listed in Catalog. Use only Catalog field names, input names, dropdown option values, compatible output types, and projectUsage=project-safe blocks.</BlocklyRule>
+    <BlocklyRule index="7">Each serialized block includes type and id. Top-level blocks include x and y for readable internal layout.</BlocklyRule>
+    <BlocklyRule index="8">Use lifecycle hat blocks such as node_when_enter, node_while_active, and node_when_exit inside state nodes so execution timing is visible.</BlocklyRule>
+    <BlocklyRule index="9">Use globalVariablesWorkspace only for Catalog GlobalWorkspaceRootTypes. Connect initializer and assignment values through the exact Catalog input names.</BlocklyRule>
     <EdgeConditionRule index="1">Every edge has conditionWorkspace with exactly one visible top-level block whose output type is Boolean.</EdgeConditionRule>
     <EdgeConditionRule index="2">An unconditional transition uses logic_boolean with field BOOL equal to TRUE. Never represent unconditional flow with an empty conditionWorkspace.</EdgeConditionRule>
-    <EdgeConditionRule index="3">Conditional flow uses logic_compare, logic_operation, logic_negate, input detection, collision, raycast, region, variable, score, lives, or countdown Boolean combinations.</EdgeConditionRule>
+    <EdgeConditionRule index="3">Conditional flow uses logic_compare, logic_operation, logic_negate, input detection, collision, raycast, region, distance, variable, score, lives, or countdown Boolean combinations.</EdgeConditionRule>
     <EdgeConditionRule index="4">Number, text, coordinate, distance, score, and lives blocks are not valid outer conditions; connect them to a comparison block.</EdgeConditionRule>
-    <BlocklyRule index="7">Use only Catalog blocks whose projectUsage is project-safe. actor-context blocks require an actor-bound workspace and are invalid in the fixed project-global graph.</BlocklyRule>
+    <ObjectTargetRule index="1">Project-global object actions must identify a real scene object or tag. Prefer the Catalog object_reference output connected to OBJECT value inputs when available.</ObjectTargetRule>
+    <ObjectTargetRule index="2">Do not leave movement, rotation, physics, collision, camera-follow, damage, spawn ownership, or deletion actions without a concrete target.</ObjectTargetRule>
+    <ObjectTargetRule index="3">Do not serialize placeholder actor names such as object, actor, target, TODO, unknown, empty string, or arbitrary names absent from RuntimeContext.</ObjectTargetRule>
+    <GameplaySafetyRule index="1">Repeated shooting, spawning, damage, audio, or expensive raycast logic inside active loops requires a cooldown, wait, edge-trigger, or equivalent rate limit.</GameplaySafetyRule>
+    <GameplaySafetyRule index="2">Variables used by win, loss, lives, score, layer, checkpoint, wave, or objective conditions must be initialized and updated on reachable paths.</GameplaySafetyRule>
+    <GameplaySafetyRule index="3">Movement and camera logic must target real RuntimeContext objects and use compatible first-person, third-person, orbit, follow, or free-camera behavior.</GameplaySafetyRule>
+    <GameplaySafetyRule index="4">Use collision, raycast, region, distance, ground, and tag detection blocks for 3D interactions rather than inventing unsupported physics behavior.</GameplaySafetyRule>
   </GenerationRules>
+  <ProjectObjectBindingRules fixedTargetActorBinding="none">
+    <Rule index="1">The project-global graph has no implicit current actor. Every newly generated single-object action must bind a concrete RuntimeContext object through its exact NAME field or an OBJECT value input.</Rule>
+    <Rule index="2">When a block exposes an OBJECT value input, connect object_reference. Set object_reference.OBJECT to an exact current-scene object option; use OBJECT=__manual__ with MANUAL only for a runtime-created object name that is explicitly established by reachable logic.</Rule>
+    <Rule index="3">When a project-safe block exposes a direct NAME, PLAYER, BALL, PADDLE, CAMERA, TARGET, or similar object field instead of OBJECT, copy an exact object name from RuntimeContext or a valid runtime-created name from ExistingGraph.</Rule>
+    <Rule index="4">Never emit empty object names, __none__, default sample names, translated object names, or placeholders such as Actor, Object, Player, Target, TODO, and unknown unless that exact name exists in RuntimeContext.</Rule>
+    <Rule index="5">Blocks that cooperate on one controlled object, such as movement, jump, camera follow, health, collision response, and checkpoint restore, must use the same exact object binding unless the user explicitly requests different objects.</Rule>
+    <Rule index="6">Use tags only for groups whose real tag is present in RuntimeContext or ExistingGraph. Do not replace a unique object request with a tag-wide action.</Rule>
+    <Rule index="7">Do not introduce projectUsage=actor-context blocks into this fixed project-global graph. They require an implicit actor that this target does not provide; choose a project-safe explicit-object or tag-based alternative instead.</Rule>
+  </ProjectObjectBindingRules>
+  <NodeLifecycleRootRules>
+    <Rule index="1">For newly generated state-node logic, top-level execution roots must be node_when_enter, node_while_active, or node_when_exit. Put executable statements under the root's DO input; never leave a statement block as an orphan top-level root.</Rule>
+    <Rule index="2">Use node_when_enter for one-time initialization, camera setup, initial placement, variable initialization, initial spawning, and audio start.</Rule>
+    <Rule index="3">Use node_while_active for repeated input polling, movement, physics stepping, enemy updates, collision or raycast checks, cooldown checks, and other per-update gameplay.</Rule>
+    <Rule index="4">Use node_when_exit only for cleanup, stopping temporary effects or audio, and state hand-off work that must happen once.</Rule>
+    <Rule index="5">Generate at most one root of each lifecycle type per node. Combine actions through next.block under the same DO chain rather than creating duplicate lifecycle roots.</Rule>
+    <Rule index="6">End nodes normally use node_when_enter for their one-time win, lose, or completion action and must not contain an unbounded active loop unless explicitly requested.</Rule>
+    <Rule index="7">Preserve unrelated valid existing roots during edit, extend, and delete operations; normalize only the roots touched by the requested change.</Rule>
+  </NodeLifecycleRootRules>
+  <EdgeConditionRules sideEffectsAllowed="false">
+    <Rule index="1">A conditionWorkspace contains exactly one top-level Boolean output expression. It must not contain lifecycle, statement, definition, terminal, mutation, audio, spawn, delete, damage, score-update, or variable-update blocks.</Rule>
+    <Rule index="2">Use logic_boolean TRUE for unconditional transitions. For conditional transitions, compose Boolean outputs with logic_compare, logic_operation, or logic_negate.</Rule>
+    <Rule index="3">A numeric or string sensor output must be connected to a Boolean comparison; it cannot be the condition root by itself.</Rule>
+    <Rule index="4">Collision conditions may use only project-safe collision blocks with an explicit subject. Because this contract target has actorBinding=none, do not introduce actor-context detect_touch, detect_touch_tag, detect_touch_started, detect_touch_tag_started, ground, or last-collision blocks.</Rule>
+    <Rule index="5">When an explicit-context collision API is available in a future Catalog, use a started or edge-triggered condition for one-shot damage, scoring, collection, and transitions; use a continuous condition only for sustained contact behavior.</Rule>
+    <Rule index="6">Keep side effects inside the source node lifecycle chain. The edge condition decides only whether the graph may jump.</Rule>
+  </EdgeConditionRules>
+  <BlockSelectionPriority>
+    <Priority rank="1">Use recommended=true and projectUsage=project-safe blocks that express the user's requested behavior directly.</Priority>
+    <Priority rank="2">For single-object WASD, jump, first-person, third-person, camera follow, or common gameplay behavior, prefer the dedicated project-safe template whose fields explicitly name the object.</Priority>
+    <Priority rank="3">For generic transforms and movement blocks with an OBJECT input, connect object_reference rather than relying on an implicit actor.</Priority>
+    <Priority rank="4">Use tag-based blocks only when the user requests a group or RuntimeContext confirms a real tag shared by multiple objects.</Priority>
+    <Avoid>Do not choose projectUsage=actor-context, recommended=false legacy blocks when an equivalent project-safe explicit-object block exists.</Avoid>
+    <Avoid>Do not combine multiple overlapping movement systems on the same object in the same active chain unless the user explicitly requests layered control.</Avoid>
+  </BlockSelectionPriority>
+  <SafeCompositionPatterns>
+    <Pattern name="SingleObjectWasdAndJump">In one reachable node_while_active DO chain, use object_third_person_move followed by object_arcade_jump. Bind both NAME fields to the same exact RuntimeContext object. Do not add camera, score, lives, combat, or win/lose logic unless requested.</Pattern>
+    <Pattern name="FirstPersonControl">In node_when_enter configure camera_first_person_follow for the controlled object, then in node_while_active use object_first_person_move and optional object_arcade_jump with the same object name. Use only a real obstacle tag; if no obstacle tag exists, do not invent one.</Pattern>
+    <Pattern name="RateLimitedShooting">Gate mouse or key input with control_cooldown_ready or an equivalent edge trigger, perform the raycast and hit action, then consume or start the cooldown. Never fire, damage, spawn, or play audio every active update without a rate limit.</Pattern>
+    <Pattern name="RateLimitedSpawning">Any spawn or object-generation action reachable from node_while_active must be guarded by control_wait, control_cooldown_ready, control_start_cooldown, a one-shot input edge, or a state transition.</Pattern>
+    <Pattern name="ProgressVariable">Initialize score, lives, floor, wave, checkpoint, or objective data on a reachable enter path, update the same variable on a reachable gameplay path, and compare that same variable in win or lose transitions.</Pattern>
+    <Pattern name="MinimalFeatureEdit">For a feature-level request, reuse an existing reachable gameplay node when possible. Add only the lifecycle root or statement chain needed for that feature and preserve all unrelated graph content.</Pattern>
+  </SafeCompositionPatterns>
   <ThreeDDemoCompositionPatterns>
     <Pattern name="StateMachine">Use start for initialization, one or more custom nodes for active gameplay, and end nodes for win and lose. Give every transition a visible Boolean condition.</Pattern>
     <Pattern name="Initialization">In node_when_enter, initialize score/lives/global data, configure camera, spawn or place objects, set physics, and start audio.</Pattern>
@@ -60,328 +129,52 @@
     <Pattern name="ProgressAndRules">Use score, lives, countdown, cooldown, checkpoints, object counts, and variables to make explicit win, lose, wave, or objective conditions.</Pattern>
   </ThreeDDemoCompositionPatterns>
   <HostValidationPipeline>
-    <Step index="1">Validate schemaVersion, fixed targetId, workspace shape, IDs, finite positions, node types, and edge endpoints.</Step>
+    <Step index="1">Validate schemaVersion, request identity, fixed targetId, projectScopeId, baseGraphRevision, operation, workspace shape, IDs, finite positions, node types, and edge endpoints.</Step>
     <Step index="2">Validate every serialized block against Catalog type, fields, inputs, dropdown options, connection shape, and output type.</Step>
     <Step index="3">Validate exactly one start node, graph reachability, global workspace roots, and one Boolean condition block per edge.</Step>
     <Step index="4">Deserialize candidate Blockly workspaces and run validateNodeGraph and nodeGraphToCode before changing the visible graph.</Step>
-    <Step index="5">Apply atomically to the mounted project-global editor and save only after successful compilation; otherwise restore the previous graph.</Step>
+    <Step index="5">Reject stale or cross-world responses, then apply atomically to the mounted project-global editor and save only after successful compilation; otherwise restore the previous graph.</Step>
   </HostValidationPipeline>
-  <ExampleResult mediaType="application/json" illustrative="true">{
+  <GenerationScopingRules>
+    <Rule index="1">Implement only the capabilities explicitly requested by UserInstruction. A request to add object controls is not permission to add score, lives, combat, enemies, win, lose, or unrelated states.</Rule>
+    <Rule index="2">All examples in this contract are schema illustrations only. Never copy an example as gameplay logic.</Rule>
+    <Rule index="3">For a small feature request, prefer the smallest valid change to ExistingGraph and preserve unrelated nodes, edges, blocks, IDs, and layout.</Rule>
+  </GenerationScopingRules>
+  <ResponseLanguageRules>
+    <Rule index="1">Use HostInput responseLanguage for summary and every newly created or renamed custom node name and edge name.</Rule>
+    <Rule index="2">Do not mix Chinese and English UI labels. Block types, field names, IDs, WASD, API names, and real RuntimeContext object names are identifiers and must not be translated.</Rule>
+  </ResponseLanguageRules>
+  <RequestedControlPatterns>
+    <Pattern name="ObjectWasdAndSpaceJump">Inside one reachable node_while_active DO statement chain, connect object_third_person_move followed by object_arcade_jump. Both NAME fields must exactly match the same real RuntimeContext object. Use object_first_person_move only when first-person control is explicitly requested.</Pattern>
+    <Rule>For movement templates, copy a real obstacle tag only when RuntimeContext provides one. Do not leave sample tags such as obstacle unless that exact tag exists.</Rule>
+    <Rule>Choose movement bounds that contain the current object position when RuntimeContext provides position data. Preserve existing valid bounds during edits and do not invent a narrow play area that can pin the object.</Rule>
+    <Rule>object_set_tag_velocity_axis is tag-wide axis velocity and must not substitute for single-object WASD control.</Rule>
+    <Rule>A request for controls is a minimal feature request: do not add score, lives, enemies, combat, UI, audio, win/lose states, or unrelated Demo structure.</Rule>
+  </RequestedControlPatterns>
+  <ExampleResult mediaType="application/json" illustrative="true" nonCopyable="true">{
   "schemaVersion": 1,
+  "requestId": "same-as-request",
   "targetId": "node_graph:project:global",
+  "projectScopeId": "same-as-request",
+  "baseGraphRevision": "same-as-request",
+  "operation": "same-as-request",
+  "summary": "Use responseLanguage here.",
   "workspace": {
     "version": 1,
     "nodes": [
       {
-        "id": "start",
+        "id": "preserve-or-create-one-start-node",
         "macroType": "state",
         "nodeType": "start",
         "name": "Start",
-        "customName": "Initialize",
+        "customName": "Use responseLanguage here.",
         "x": 80,
-        "y": 160,
-        "workspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "node_when_enter",
-                "id": "start_enter",
-                "x": 24,
-                "y": 24,
-                "inputs": {
-                  "DO": {
-                    "block": {
-                      "type": "ui_set_score",
-                      "id": "set_score",
-                      "fields": {
-                        "VALUE": 0
-                      },
-                      "next": {
-                        "block": {
-                          "type": "ui_set_lives",
-                          "id": "set_lives",
-                          "fields": {
-                            "VALUE": 3
-                          },
-                          "next": {
-                            "block": {
-                              "type": "camera_first_person_follow",
-                              "id": "setup_camera",
-                              "fields": {
-                                "NAME": "Player",
-                                "HEIGHT": 1.55,
-                                "SENSITIVITY": 0.16,
-                                "WEAPON": "Weapon"
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
-      },
-      {
-        "id": "play",
-        "macroType": "state",
-        "nodeType": "custom",
-        "name": "Combat",
-        "customName": "Combat",
-        "x": 500,
-        "y": 160,
-        "workspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "node_while_active",
-                "id": "play_active",
-                "x": 24,
-                "y": 24,
-                "inputs": {
-                  "DO": {
-                    "block": {
-                      "type": "object_first_person_move",
-                      "id": "player_move",
-                      "fields": {
-                        "NAME": "Player",
-                        "SPEED": 0.2,
-                        "OBSTACLE_TAG": "obstacle",
-                        "MIN_X": -50,
-                        "MAX_X": 50,
-                        "MIN_Z": -50,
-                        "MAX_Z": 50
-                      },
-                      "next": {
-                        "block": {
-                          "type": "combat_enemy_chase_tag",
-                          "id": "enemy_chase",
-                          "fields": {
-                            "TAG": "enemy",
-                            "PLAYER": "Player",
-                            "SPEED": 0.05,
-                            "STOP_DISTANCE": 2
-                          },
-                          "next": {
-                            "block": {
-                              "type": "combat_enemy_contact_damage",
-                              "id": "enemy_damage",
-                              "fields": {
-                                "TAG": "enemy",
-                                "PLAYER": "Player",
-                                "DAMAGE": 1,
-                                "COOLDOWN": 1
-                              }
-                            }
-                          }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
-      },
-      {
-        "id": "win",
-        "macroType": "state",
-        "nodeType": "end",
-        "name": "End",
-        "customName": "Win",
-        "x": 940,
-        "y": 60,
-        "workspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "node_when_enter",
-                "id": "win_enter",
-                "x": 24,
-                "y": 24,
-                "inputs": {
-                  "DO": {
-                    "block": {
-                      "type": "ui_game_win",
-                      "id": "game_win"
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
-      },
-      {
-        "id": "lose",
-        "macroType": "state",
-        "nodeType": "end",
-        "name": "End",
-        "customName": "Lose",
-        "x": 940,
-        "y": 320,
-        "workspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "node_when_enter",
-                "id": "lose_enter",
-                "x": 24,
-                "y": 24,
-                "inputs": {
-                  "DO": {
-                    "block": {
-                      "type": "ui_game_over",
-                      "id": "game_over"
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
+        "y": 120,
+        "workspace": {}
       }
     ],
-    "edges": [
-      {
-        "id": "start_to_play",
-        "source": {
-          "nodeId": "start",
-          "side": "right",
-          "index": 0
-        },
-        "target": {
-          "nodeId": "play",
-          "side": "left",
-          "index": 0
-        },
-        "name": "Start Combat",
-        "conditionWorkspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "logic_boolean",
-                "id": "always_start",
-                "fields": {
-                  "BOOL": "TRUE"
-                },
-                "x": 24,
-                "y": 24
-              }
-            ]
-          }
-        }
-      },
-      {
-        "id": "play_to_win",
-        "source": {
-          "nodeId": "play",
-          "side": "right",
-          "index": 0
-        },
-        "target": {
-          "nodeId": "win",
-          "side": "left",
-          "index": 0
-        },
-        "name": "Reach Target Score",
-        "conditionWorkspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "logic_compare",
-                "id": "win_compare",
-                "fields": {
-                  "OP": "GTE"
-                },
-                "x": 24,
-                "y": 24,
-                "inputs": {
-                  "A": {
-                    "block": {
-                      "type": "ui_score",
-                      "id": "read_score"
-                    }
-                  },
-                  "B": {
-                    "block": {
-                      "type": "math_number",
-                      "id": "win_score",
-                      "fields": {
-                        "NUM": 5
-                      }
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
-      },
-      {
-        "id": "play_to_lose",
-        "source": {
-          "nodeId": "play",
-          "side": "right",
-          "index": 1
-        },
-        "target": {
-          "nodeId": "lose",
-          "side": "left",
-          "index": 0
-        },
-        "name": "Lives Depleted",
-        "conditionWorkspace": {
-          "blocks": {
-            "languageVersion": 0,
-            "blocks": [
-              {
-                "type": "logic_compare",
-                "id": "lose_compare",
-                "fields": {
-                  "OP": "LTE"
-                },
-                "x": 24,
-                "y": 24,
-                "inputs": {
-                  "A": {
-                    "block": {
-                      "type": "ui_lives",
-                      "id": "read_lives"
-                    }
-                  },
-                  "B": {
-                    "block": {
-                      "type": "math_number",
-                      "id": "zero_lives",
-                      "fields": {
-                        "NUM": 0
-                      }
-                    }
-                  }
-                }
-              }
-            ]
-          }
-        }
-      }
-    ],
-    "globalVariablesWorkspace": {
-      "blocks": {
-        "languageVersion": 0,
-        "blocks": []
-      }
-    }
+    "edges": [],
+    "globalVariablesWorkspace": {}
   }
 }</ExampleResult>
   <Catalog generatedFrom="editor/Frontend/src/blockly/configs/toolboxConfig.js and registered Blockly definitions" blockCount="261" locked="true">
