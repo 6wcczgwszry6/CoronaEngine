@@ -68,6 +68,8 @@ corona_add_system(ui
         SDL3::SDL3-static
         ws2_32
         shlwapi
+        ole32
+        shell32
         dbghelp
         psapi
         version

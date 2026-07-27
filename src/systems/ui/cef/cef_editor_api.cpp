@@ -1111,6 +1111,11 @@ void unregister_python_script_service_dispatcher() {
     PyGILState_Release(state);
 }
 
+bool python_script_service_dispatcher_registered() {
+    std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
+    return g_python_script_service_dispatcher != nullptr;
+}
+
 std::uint64_t register_python_script_callback_callable(const std::string& event_name,
                                                        PyObject* callback) {
     return EditorApiCallbackRegistry::instance().register_python_script_callback_callable(event_name,
