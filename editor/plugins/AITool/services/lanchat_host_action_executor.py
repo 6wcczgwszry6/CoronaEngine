@@ -23,6 +23,13 @@ _SENSITIVE_TEXT_MARKERS = (
     "session_id",
     "token",
     "api_key",
+    "http://",
+    "https://",
+    "file://",
+    ":\\",
+    "e:/",
+    "c:/",
+    "/private/",
 )
 
 
@@ -50,6 +57,8 @@ class LanChatHostActionExecutor:
         agent_factory: Callable[[], Any] | None = None,
         engine_gate: Any = None,
         structured_action_handler: Callable[[dict[str, Any]], str] | None = None,
+        send_audit_callback: Callable[[dict[str, Any]], Any] | None = None,
+        allow_legacy_agent_fallback: bool = False,
         system_sender_id: str = "gm-system",
         system_sender_name: str = "GM",
     ) -> None:
@@ -57,6 +66,8 @@ class LanChatHostActionExecutor:
         self._agent_factory = agent_factory
         self._engine_gate = engine_gate or self._default_engine_gate()
         self._structured_action_handler = structured_action_handler
+        self._send_audit_callback = send_audit_callback
+        self._allow_legacy_agent_fallback = bool(allow_legacy_agent_fallback)
         self._system_sender_id = system_sender_id
         self._system_sender_name = system_sender_name
         self._queue: Deque[dict[str, Any]] = deque()
@@ -88,12 +99,16 @@ class LanChatHostActionExecutor:
                 else:
                     result_text = self._execute_payload(payload)
             except Exception as exc:
-                self._logger.warning("Host GM action execution failed", exc_info=True)
+                self._logger.warning(
+                    "Host GM action execution failed: exc_type=%s",
+                    type(exc).__name__,
+                )
+                safe_message = "执行失败，请稍后重试或换一个助手。"
                 result = HostActionExecutionResult(
                     ok=False,
                     event_type="CommandRejected",
-                    message="执行失败，请稍后重试或换一个助手。",
-                    payload=self._result_payload(payload, "CommandRejected", False, str(exc)),
+                    message=safe_message,
+                    payload=self._result_payload(payload, "CommandRejected", False, safe_message),
                 )
                 self._broadcast_status(payload, "host_action_failed")
                 self._send_system_message(result.message, payload, "failed")
@@ -101,7 +116,7 @@ class LanChatHostActionExecutor:
 
             result_text = str(result_text or "").strip()
             if not result_text or self._looks_failed_result(result_text):
-                message = result_text or "host action produced no execution result"
+                message = self._safe_text(result_text) or "host action produced no execution result"
                 result = HostActionExecutionResult(
                     ok=False,
                     event_type="CommandRejected",
@@ -124,7 +139,7 @@ class LanChatHostActionExecutor:
                 self._send_system_message(result.message, payload, "accepted_no_delta")
                 return result
 
-            message = result_text
+            message = self._safe_text(result_text)
             result = HostActionExecutionResult(
                 ok=True,
                 event_type="SceneDelta",
@@ -140,8 +155,21 @@ class LanChatHostActionExecutor:
         return self.process_next()
 
     def _execute_payload(self, payload: dict[str, Any]) -> str:
-        if self._structured_action_handler is not None and self._is_structured_seed_plan_action(payload):
+        if self._is_structured_seed_plan_payload(payload):
+            if not self._is_structured_seed_plan_action(payload):
+                return (
+                    "无法执行该结构化方案动作：当前 action_type 未纳入 "
+                    "AgentRuntime 受控入口。"
+                )
+            if self._structured_action_handler is None:
+                return "无法执行该结构化方案动作：AgentRuntime 结构化入口不可用。"
             return str(self._structured_action_handler(dict(payload)))
+
+        if not self._allow_legacy_agent_fallback:
+            return (
+                "无法执行该非结构化确认动作：旧 Agent 执行回退已关闭。"
+                "请先形成结构化方案并通过 AgentRuntime 受控入口执行。"
+            )
 
         agent = self._get_agent()
         if agent is None:
@@ -171,20 +199,30 @@ class LanChatHostActionExecutor:
         try:
             return str(agent(persona, messages))
         except Exception as exc:  # noqa: BLE001
-            self._logger.warning("Host executor agent failed", exc_info=True)
+            self._logger.warning("Host executor agent failed: exc_type=%s", type(exc).__name__)
             return self._safe_agent_error_text(exc)
 
     @staticmethod
-    def _is_structured_seed_plan_action(payload: dict[str, Any]) -> bool:
+    def _is_structured_seed_plan_payload(payload: dict[str, Any]) -> bool:
         if not isinstance(payload, dict):
             return False
-        if payload.get("seed_plan") or payload.get("plan_id"):
-            return str(payload.get("action_type") or "") in {
-                "start_generation",
-                "execute_seed_plan",
-                "post_generation_add",
-            }
-        return False
+        return bool(
+            payload.get("seed_plan")
+            or payload.get("plan_id")
+            or payload.get("external_plan_id")
+            or payload.get("seed_plan_id")
+            or payload.get("runtime_plan_id")
+        )
+
+    @staticmethod
+    def _is_structured_seed_plan_action(payload: dict[str, Any]) -> bool:
+        if not LanChatHostActionExecutor._is_structured_seed_plan_payload(payload):
+            return False
+        return str(payload.get("action_type") or "") in {
+            "start_generation",
+            "execute_seed_plan",
+            "post_generation_add",
+        }
 
     @staticmethod
     def _looks_failed_result(text: str) -> bool:
@@ -233,27 +271,81 @@ class LanChatHostActionExecutor:
         visible_status = self._visible_status_text(status)
         if hasattr(self._corona_engine, "network_send_system_message_ex"):
             try:
-                self._corona_engine.network_send_system_message_ex(
+                text = f"【执行状态】{visible_status}: {tooltip}"
+                self._audit_send(payload, status, text, "action_status", "host_action_status_ex", "requested")
+                sent = bool(self._corona_engine.network_send_system_message_ex(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【执行状态】{visible_status}: {tooltip}",
+                    text,
                     "action_status",
                     str(payload.get("proposal_id") or ""),
                     json.dumps(self._action_status_metadata(payload, status), ensure_ascii=False),
+                ))
+                self._audit_send(
+                    payload,
+                    status,
+                    text,
+                    "action_status",
+                    "host_action_status_ex",
+                    "succeeded" if sent else "failed",
+                    sent=sent,
                 )
             except Exception as exc:
-                self._logger.debug("Failed to send structured host action status %s: %s", status, exc)
+                self._logger.debug(
+                    "Failed to send structured host action status %s: exc_type=%s",
+                    status,
+                    type(exc).__name__,
+                )
+                self._audit_send(
+                    payload,
+                    status,
+                    f"【执行状态】{visible_status}: {tooltip}",
+                    "action_status",
+                    "host_action_status_ex",
+                    "failed",
+                    sent=False,
+                )
         if not hasattr(self._corona_engine, "network_broadcast_intent"):
             return
         try:
-            self._corona_engine.network_broadcast_intent(
+            self._audit_send(
+                payload,
+                status,
+                tooltip,
+                "intent_broadcast",
+                "host_action_intent_broadcast",
+                "requested",
+            )
+            sent = bool(self._corona_engine.network_broadcast_intent(
                 source_user_id,
                 tooltip,
                 [0.0, 0.0, 0.0],
                 status,
+            ))
+            self._audit_send(
+                payload,
+                status,
+                tooltip,
+                "intent_broadcast",
+                "host_action_intent_broadcast",
+                "succeeded" if sent else "failed",
+                sent=sent,
             )
         except Exception as exc:
-            self._logger.debug("Failed to broadcast host action status %s: %s", status, exc)
+            self._logger.debug(
+                "Failed to broadcast host action status %s: exc_type=%s",
+                status,
+                type(exc).__name__,
+            )
+            self._audit_send(
+                payload,
+                status,
+                tooltip,
+                "intent_broadcast",
+                "host_action_intent_broadcast",
+                "failed",
+                sent=False,
+            )
 
     def _send_system_message(
         self,
@@ -267,25 +359,95 @@ class LanChatHostActionExecutor:
         safe_message = self._safe_text(message)
         try:
             if hasattr(self._corona_engine, "network_send_system_message_ex"):
-                self._corona_engine.network_send_system_message_ex(
+                text = f"【执行结果】{safe_message}"
+                self._audit_send(payload, status or "executed", text, "action_status", "host_action_result_ex", "requested")
+                sent = bool(self._corona_engine.network_send_system_message_ex(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【执行结果】{safe_message}",
+                    text,
                     "action_status",
                     str(payload.get("proposal_id") or ""),
                     json.dumps({
                         **self._action_status_metadata(payload, status or "executed"),
                         "message": safe_message,
                     }, ensure_ascii=False),
+                ))
+                self._audit_send(
+                    payload,
+                    status or "executed",
+                    text,
+                    "action_status",
+                    "host_action_result_ex",
+                    "succeeded" if sent else "failed",
+                    sent=sent,
                 )
             else:
-                self._corona_engine.network_send_system_message(
+                text = f"【执行结果】{safe_message}"
+                self._audit_send(payload, status or "executed", text, "action_status", "host_action_result", "requested")
+                sent = bool(self._corona_engine.network_send_system_message(
                     self._system_sender_id,
                     self._system_sender_name,
-                    f"【执行结果】{safe_message}",
+                    text,
+                ))
+                self._audit_send(
+                    payload,
+                    status or "executed",
+                    text,
+                    "action_status",
+                    "host_action_result",
+                    "succeeded" if sent else "failed",
+                    sent=sent,
                 )
         except Exception as exc:
-            self._logger.debug("Failed to send host action system message: %s", exc)
+            self._logger.debug(
+                "Failed to send host action system message: exc_type=%s",
+                type(exc).__name__,
+            )
+            self._audit_send(
+                payload,
+                status or "executed",
+                f"【执行结果】{safe_message}",
+                "action_status",
+                "host_action_result",
+                "failed",
+                sent=False,
+            )
+
+    def _audit_send(
+        self,
+        payload: dict[str, Any],
+        status: str,
+        message: str,
+        message_kind: str,
+        channel: str,
+        phase: str,
+        *,
+        sent: bool | None = None,
+    ) -> None:
+        callback = self._send_audit_callback
+        if not callable(callback):
+            return
+        audit_payload = {
+            "phase": str(phase or ""),
+            "status": str(status or ""),
+            "message": self._safe_text(message),
+            "message_kind": str(message_kind or "action_status"),
+            "channel": str(channel or ""),
+            "room_id": str(payload.get("room_id") or ""),
+            "external_plan_id": str(payload.get("external_plan_id") or ""),
+            "seed_plan_id": str(payload.get("seed_plan_id") or ""),
+            "plan_id": str(payload.get("plan_id") or ""),
+            "runtime_plan_id": str(payload.get("runtime_plan_id") or ""),
+            "batch_id": str(payload.get("batch_id") or payload.get("runtime_batch_id") or ""),
+            "proposal_id": str(payload.get("proposal_id") or ""),
+            "source_user_id": str(payload.get("source_user_id") or ""),
+        }
+        if sent is not None:
+            audit_payload["sent"] = bool(sent)
+        try:
+            callback(audit_payload)
+        except Exception as exc:  # noqa: BLE001
+            self._logger.debug("Host action send audit callback failed: exc_type=%s", type(exc).__name__)
 
     @classmethod
     def _action_status_metadata(cls, payload: dict[str, Any], status: str) -> dict[str, Any]:

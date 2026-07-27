@@ -43,6 +43,8 @@ function getPanelIdFromRoute() {
     '/ProjectSettings': 'ProjectSettings',
     '/ScratchTool': 'ScratchTool',
     '/AITalkBar': 'AITalkBar',
+    '/NodeGraph': 'NodeGraphPanel',
+    '/CabbageChat': 'CabbageChatPanel',
     '/Network': 'Network',
     '/SetUp': 'EditorSettings',
   };

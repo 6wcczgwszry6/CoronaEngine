@@ -1,202 +1,259 @@
 <template>
   <Teleport to="body">
-    <div class="fixed bottom-4 left-4 z-[2147483645] pointer-events-none">
-      <transition name="assistant-panel">
-        <section
-          v-if="open"
-          class="pointer-events-auto mb-3 flex h-[min(420px,calc(100vh-112px))] w-[min(400px,calc(100vw-32px))] flex-col overflow-hidden rounded-lg border border-[#3c3c3c] bg-[#1e1e1e] text-gray-100 shadow-[0_14px_42px_rgba(0,0,0,0.58)]"
-          role="region"
-          aria-label="包菜助手节点逻辑检查"
-          @mousedown.stop
-          @click.stop
-          @wheel.stop
-        >
-          <header class="flex items-center gap-3 border-b border-[#3c3c3c] bg-[#2d2d2d] px-4 py-3">
-            <div class="h-11 w-11 flex-shrink-0 overflow-hidden rounded-full border-2 border-emerald-400/60 bg-emerald-300 shadow-md">
-              <img src="@/assets/cabbage.png" alt="包菜助手" class="h-full w-full object-cover" />
-            </div>
-            <div class="min-w-0 flex-1">
-              <div class="flex items-center gap-2">
-                <h2 class="truncate text-base font-semibold text-white">包菜助手</h2>
-                <span class="inline-flex items-center gap-1 rounded-full border border-[#48614d] bg-[#26352a] px-2 py-0.5 text-[11px] text-emerald-200">
-                  <span class="h-1.5 w-1.5 rounded-full" :class="tasks.length ? 'bg-amber-400' : 'bg-emerald-400'"></span>
-                  {{ tasks.length ? '逻辑有问题' : '逻辑正常' }}
-                </span>
-              </div>
-            </div>
-            <button
-              type="button"
-              class="flex h-8 w-8 items-center justify-center rounded-md text-lg text-gray-400 transition hover:bg-[#3d3d3d] hover:text-white"
-              title="收起包菜助手"
-              aria-label="收起包菜助手"
-              @click="setOpen(false)"
-            >
-              −
-            </button>
-          </header>
+    <div
+      class="cabbage-review-root"
+      @mousedown.stop
+      @pointerdown.stop
+      @click.stop
+      @wheel.stop
+    >
+      <button
+        type="button"
+        class="cabbage-button"
+        :class="{ active: chatOpen }"
+        :title="chatOpen ? '关闭包菜答疑' : '打开包菜答疑'"
+        :aria-pressed="chatOpen"
+        @click="toggleChat"
+      >
+        <img src="@/assets/cabbage.png" alt="包菜答疑" />
+        <span v-if="tasks.length" class="cabbage-badge">{{ tasks.length > 99 ? '99+' : tasks.length }}</span>
+      </button>
 
-          <div ref="scrollRef" class="min-h-0 flex-1 overflow-y-auto px-3 py-3 assistant-scrollbar">
-            <div v-if="!tasks.length" class="flex h-full min-h-48 flex-col items-center justify-center px-6 text-center">
-              <div class="mb-3 h-16 w-16 overflow-hidden rounded-full border border-emerald-400/30 bg-emerald-300/90 opacity-90">
-                <img src="@/assets/cabbage.png" alt="" class="h-full w-full object-cover" />
-              </div>
-              <p class="text-sm font-medium text-gray-200">当前逻辑没有发现问题</p>
-            </div>
-
-            <ol v-else class="space-y-3">
-              <li
-                v-for="task in tasks"
-                :key="task.issueKey"
-                class="rounded-md border border-[#454545] border-l-2 border-l-amber-500 bg-[#262626] px-3.5 py-3 shadow-sm"
-              >
-                <div class="flex items-start justify-between gap-3">
-                  <div class="min-w-0">
-                    <div class="flex items-center gap-2">
-                      <span class="h-2 w-2 flex-shrink-0 rounded-full bg-amber-400"></span>
-                      <h3 class="truncate text-sm font-semibold text-gray-100">{{ task.title }}</h3>
-                    </div>
-                  </div>
-                  <time class="flex-shrink-0 text-[10px] text-gray-600" :datetime="toIso(task.updatedAt)">
-                    {{ formatTime(task.updatedAt) }}
-                  </time>
-                </div>
-                <p v-if="task.message" class="mt-2 whitespace-pre-wrap break-words text-sm leading-6 text-gray-300">
-                  {{ task.message }}
-                </p>
-              </li>
-            </ol>
-          </div>
-
-          <footer class="flex items-center justify-between border-t border-[#3c3c3c] bg-[#252525] px-3.5 py-2.5 text-xs text-gray-500">
-            <span>当前节点逻辑</span>
-            <span>{{ tasks.length ? '等待修改' : '检查通过' }}</span>
-          </footer>
+      <transition name="task-board">
+        <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
+          <strong>{{ assistant.ephemeralTip.title }}</strong>
+          <p>{{ assistant.ephemeralTip.message }}</p>
         </section>
       </transition>
 
-      <button
-        type="button"
-        class="pointer-events-auto relative flex h-16 w-16 items-center justify-center overflow-hidden rounded-full border-2 border-emerald-400/70 bg-emerald-300 shadow-[0_10px_32px_rgba(16,185,129,0.35)] transition duration-200 hover:scale-105 hover:border-emerald-300 focus:outline-none focus:ring-2 focus:ring-emerald-300/70"
-        :title="open ? '收起包菜助手' : '打开包菜助手'"
-        :aria-expanded="open"
-        aria-label="包菜助手"
-        @click="setOpen(!open)"
-      >
-        <img src="@/assets/cabbage.png" alt="包菜助手" class="h-full w-full object-cover" />
-        <span
-          v-if="unreadCount > 0 && !open"
-          class="absolute right-0 top-0 flex min-h-5 min-w-5 items-center justify-center rounded-full border-2 border-[#151b18] bg-amber-500 px-1 text-[10px] font-bold leading-none text-white"
-        >
-          {{ unreadCount > 99 ? '99+' : unreadCount }}
-        </span>
-      </button>
+      <transition name="task-board">
+        <section v-if="tasks.length" class="task-board" aria-label="包菜向你扔的屎">
+          <header class="task-board-header">
+            <span>包菜向你扔的屎</span>
+            <span class="task-count">{{ tasks.length }}</span>
+          </header>
+          <div class="task-list">
+            <article v-for="task in tasks" :key="task.taskKey || task.issueKey" class="task-item">
+              <button
+                type="button"
+                class="task-title"
+                :class="{ selected: assistant.selectedTaskKey === (task.taskKey || task.issueKey) }"
+                @click="toggleTask(task)"
+              >
+                <span class="task-title-text">{{ task.title }}</span>
+                <span class="task-chevron" :class="{ expanded: expandedKeys.has(task.taskKey || task.issueKey) }">⌄</span>
+              </button>
+              <div v-if="expandedKeys.has(task.taskKey || task.issueKey)" class="task-detail">
+                <p v-if="task.message">{{ task.message }}</p>
+                <div v-if="task.suggestion" class="task-suggestion">
+                  <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
+                  <p>{{ task.suggestion }}</p>
+                </div>
+                <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
+              </div>
+            </article>
+          </div>
+        </section>
+      </transition>
+
     </div>
   </Teleport>
 </template>
 
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, reactive, watch } from 'vue';
+import { useDockStore } from '@/stores/dockStore.js';
+import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
+import { openFloatingPanel, toggleFloatingPanel } from '@/utils/panelWindows.js';
+import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
 
 const props = defineProps({
-  open: { type: Boolean, default: false },
   tasks: { type: Array, default: () => [] },
   attentionToken: { type: Number, default: 0 },
 });
 
-const emit = defineEmits(['update:open']);
-const scrollRef = ref(null);
-const unreadCount = ref(0);
+const dockStore = useDockStore();
+const assistant = useCabbageAssistantStore();
+const expandedKeys = reactive(new Set());
+const chatOpen = computed(() => Boolean(dockStore.panels.CabbageChatPanel?.open));
+const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
+let optimizationTimer = null;
 
-function setOpen(value) {
-  emit('update:open', value);
-  if (value) {
-    unreadCount.value = 0;
-    scrollToLatest();
-  }
+function clearOptimizationTimer() {
+  if (optimizationTimer) window.clearTimeout(optimizationTimer);
+  optimizationTimer = null;
 }
 
-function scrollToLatest() {
-  nextTick(() => {
-    const el = scrollRef.value;
-    if (el) el.scrollTop = el.scrollHeight;
-  });
+function toggleTask(task) {
+  const key = taskKey(task);
+  if (!key) return;
+  assistant.selectTask(key);
+  publishCabbageAssistantContext(assistant);
+  if (expandedKeys.has(key)) expandedKeys.delete(key);
+  else expandedKeys.add(key);
 }
 
-function formatTime(value) {
-  const date = new Date(Number(value) || Date.now());
-  return new Intl.DateTimeFormat('zh-CN', {
-    hour: '2-digit',
-    minute: '2-digit',
-    second: '2-digit',
-    hour12: false,
-  }).format(date);
+async function toggleChat() {
+  publishCabbageAssistantContext(assistant);
+  await toggleFloatingPanel(dockStore, 'CabbageChatPanel');
 }
 
-function toIso(value) {
-  const date = new Date(Number(value) || Date.now());
-  return Number.isNaN(date.getTime()) ? '' : date.toISOString();
+async function openChat(task) {
+  assistant.selectTask(taskKey(task));
+  publishCabbageAssistantContext(assistant);
+  await openFloatingPanel(dockStore, 'CabbageChatPanel');
 }
 
 watch(
-  () => props.attentionToken,
-  (value, oldValue) => {
-    if (!value || value === oldValue) return;
-    if (props.open) {
-      scrollToLatest();
-      return;
-    }
-    unreadCount.value += 1;
-    emit('update:open', true);
-    unreadCount.value = 0;
-    scrollToLatest();
-  }
+  () => assistant.ephemeralTip?.expiresAt || 0,
+  (expiresAt) => {
+    clearOptimizationTimer();
+    if (!expiresAt) return;
+    const remaining = Math.max(0, Number(expiresAt) - Date.now());
+    optimizationTimer = window.setTimeout(() => assistant.clearOptimizationTip(), remaining);
+  },
+  { immediate: true }
 );
 
+onBeforeUnmount(clearOptimizationTimer);
+
 watch(
-  () => props.open,
-  (value) => {
-    if (value) {
-      unreadCount.value = 0;
-      scrollToLatest();
+  () => props.tasks.map((task) => taskKey(task)),
+  (keys) => {
+    const alive = new Set(keys);
+    for (const key of Array.from(expandedKeys)) {
+      if (!alive.has(key)) expandedKeys.delete(key);
     }
   }
 );
-
-watch(
-  () => props.tasks.length,
-  () => {
-    if (props.open) scrollToLatest();
-  }
-);
-
-onMounted(() => {
-  if (props.open) scrollToLatest();
-});
 </script>
 
 <style scoped>
-.assistant-panel-enter-active,
-.assistant-panel-leave-active {
-  transition: opacity 160ms ease, transform 160ms ease;
-  transform-origin: left bottom;
+.cabbage-review-root {
+  position: fixed;
+  right: 18px;
+  top: 50%;
+  z-index: 2147483645;
+  display: flex;
+  width: min(310px, calc(100vw - 36px));
+  max-height: calc(100vh - 128px);
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  transform: translateY(-50%);
+  pointer-events: none;
 }
-.assistant-panel-enter-from,
-.assistant-panel-leave-to {
-  opacity: 0;
-  transform: translateY(8px) scale(0.97);
+.cabbage-review-root > * {
+  pointer-events: auto;
 }
-.assistant-scrollbar {
-  scrollbar-width: thin;
-  scrollbar-color: rgba(52, 211, 153, 0.35) rgba(255, 255, 255, 0.04);
+.optimization-tip {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #607255;
+  border-radius: 8px;
+  background: #2b3229;
+  color: #e7eee3;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, .5);
+  padding: 11px 12px;
+  line-height: 1.55;
 }
-.assistant-scrollbar::-webkit-scrollbar {
-  width: 7px;
+.optimization-tip strong { display: block; color: #c6ddaf; font-size: 13px; }
+.optimization-tip p { margin: 5px 0 0; color: #cbd4c7; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-board {
+  position: relative;
+  width: 100%;
+  max-height: min(520px, calc(100vh - 222px));
+  box-sizing: border-box;
+  display: flex;
+  flex: 0 1 auto;
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid #4a554b;
+  border-left: 3px solid #789665;
+  border-radius: 9px;
+  background: #232824;
+  color: #e5e9e4;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, .62), 0 0 0 1px rgba(120, 150, 101, .08);
 }
-.assistant-scrollbar::-webkit-scrollbar-track {
-  background: rgba(255, 255, 255, 0.04);
+.task-board-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  box-sizing: border-box;
+  padding: 10px 12px 10px 13px;
+  border-bottom: 1px solid #465047;
+  background: #303730;
+  color: #dce6d7;
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: .02em;
 }
-.assistant-scrollbar::-webkit-scrollbar-thumb {
+.task-count {
+  min-width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
   border-radius: 999px;
-  background: rgba(52, 211, 153, 0.35);
+  background: #7d5d24;
+  color: #fff3c8;
+  font-size: 11px;
+}
+.task-list {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 8px;
+  scrollbar-width: thin;
+  scrollbar-color: #59655b #252a26;
+}
+.task-list::-webkit-scrollbar { width: 7px; }
+.task-list::-webkit-scrollbar-track { background: #252a26; }
+.task-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #59655b; }
+.task-item + .task-item { margin-top: 5px; }
+.task-title {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #3e4540;
+  border-radius: 6px;
+  background: #2b302c;
+  color: #e5e7eb;
+  padding: 9px 10px;
+  text-align: left;
+  transition: background .14s ease, border-color .14s ease;
+}
+.task-title:hover, .task-title.selected { border-color: #718663; background: #343c32; }
+.task-title-text { min-width:0; flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:13px; font-weight:600; }
+.task-chevron { color:#9ca3af; transform:rotate(0deg); transition:transform .14s ease; }
+.task-chevron.expanded { transform:rotate(180deg); }
+.task-detail { margin:-1px 5px 0; border:1px solid #3e4540; border-top:0; border-radius:0 0 6px 6px; background:#202421; padding:10px; color:#cbd2c9; font-size:12px; line-height:1.65; }
+.task-detail p { white-space:pre-wrap; overflow-wrap:anywhere; }
+.task-suggestion { margin-top:8px; border-left:2px solid #83a36b; padding-left:8px; }
+.task-suggestion strong { color:#aaca92; font-size:11px; }
+.task-discuss { margin-top:9px; border-radius:5px; background:#526847; color:#eef8e8; padding:5px 9px; font-size:11px; }
+.cabbage-button {
+  position: relative;
+  width: 68px;
+  height: 68px;
+  flex: 0 0 auto;
+  overflow: visible;
+  border: 2px solid rgba(110, 231, 183, .72);
+  border-radius: 50%;
+  background: #b8de93;
+  box-shadow: 0 10px 32px rgba(16, 185, 129, .32);
+  transition: transform .16s ease, border-color .16s ease;
+}
+.cabbage-button:hover, .cabbage-button.active { transform:scale(1.05); border-color:#d1fae5; }
+.cabbage-button img { width:100%; height:100%; border-radius:50%; object-fit:cover; }
+.cabbage-badge { position:absolute; right:-3px; top:-4px; min-width:22px; height:22px; display:grid; place-items:center; border:2px solid #1b211c; border-radius:999px; background:#e89a2e; color:white; padding:0 4px; font-size:10px; font-weight:700; }
+.task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin:center bottom; }
+.task-board-enter-from, .task-board-leave-to { opacity:0; transform:translateY(8px) scale(.98); }
+
+@media (max-height: 620px) {
+  .cabbage-review-root { max-height: calc(100vh - 88px); }
+  .task-board { max-height: calc(100vh - 180px); }
 }
 </style>
+

@@ -24,6 +24,19 @@ project(
     LANGUAGES    C CXX
 )
 
+# MSVC emits localized /showIncludes lines as UTF-8 when Ninja is launched
+# from VS Code/CMake Tools, while CMake may cache the prefix in the Windows
+# ANSI code page. The byte mismatch makes Ninja silently record zero header
+# dependencies, leaving stale Horizon objects after a fetched header update.
+# Keep the generated Ninja prefix UTF-8 and deterministic.
+if(MSVC)
+    set(_CORONA_MSVC_SHOWINCLUDES_PREFIX "注意: 包含文件:  ")
+    set(CMAKE_CL_SHOWINCLUDES_PREFIX "${_CORONA_MSVC_SHOWINCLUDES_PREFIX}")
+    set(CMAKE_C_CL_SHOWINCLUDES_PREFIX "${_CORONA_MSVC_SHOWINCLUDES_PREFIX}")
+    set(CMAKE_CXX_CL_SHOWINCLUDES_PREFIX "${_CORONA_MSVC_SHOWINCLUDES_PREFIX}")
+    unset(_CORONA_MSVC_SHOWINCLUDES_PREFIX)
+endif()
+
 set(_CORONA_DEFAULT_FETCHCONTENT_BASE "${CMAKE_BINARY_DIR}/_deps")
 set(_CORONA_FETCHCONTENT_BASE_IS_STALE_HORIZON OFF)
 

@@ -50,8 +50,10 @@ class EngineWriteGate:
         tool 为 None 时返回 None（调用方按未注册处理），不抛异常。
         """
         if tool is None:
-            logger.warning("[EngineWriteGate] invoke_tool: tool 未注册，跳过 payload=%s",
-                           {k: payload.get(k) for k in ("actor_name", "model_path")})
+            logger.warning(
+                "[EngineWriteGate] invoke_tool: tool 未注册，跳过 actor_name=%s",
+                str((payload or {}).get("actor_name") or "")[:80],
+            )
             return None
         with self._lock:
             return tool.invoke(payload)

@@ -41,7 +41,10 @@ atexit.register(editor.unregister_script_dispatcher)
 
 def run():
     try:
-        from plugins.AITool.Quasar.ai_tools.warmup import warmup_all
+        aitool_root = REPO_ROOT / "editor" / "plugins" / "AITool"
+        if str(aitool_root) not in sys.path:
+            sys.path.insert(0, str(aitool_root))
+        from Quasar.ai_tools.warmup import warmup_all
         from plugins.AITool.utils.load_local_ai_setting import load_ai_setting
         load_ai_setting()
         warmup_all()

@@ -472,7 +472,7 @@
 <script setup>
 import { reactive, ref, computed, nextTick, watch, onMounted, onBeforeUnmount } from 'vue';
 import lanchat from '../../../stores/lanchat.js';
-import { editorApi, networkService } from '../../../utils/bridge.js';
+import { editorApi, networkService, sceneService } from '../../../utils/bridge.js';
 import { getActorContext } from '../../../blockly/composables/useActorContext.js';
 import {
   buildGmDecisionMessage,
@@ -526,6 +526,12 @@ const PENDING_MODEL_TRANSFER_POLL_LIMIT = 16;
 const modelTransferSnapshotRequests = new Set();
 const remoteRegisteredActorIdentities = new Set();
 const snapshotActorCreateKeys = new Set();
+const remoteAppliedActorVersions = new Map();
+const remoteSnapshotActors = new Map();
+const remoteActorRecords = new Map();
+const lastBroadcastSnapshotHashes = new Map();
+const latestRemoteSceneSnapshots = new Map();
+const lastPeerSnapshotAckHashes = new Map();
 
 const roleTemplates = [
   {
@@ -972,6 +978,17 @@ function hashString(str) {
   return hash >>> 0;
 }
 
+function stableStringify(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableStringify(item)).join(',')}]`;
+  }
+  if (value && typeof value === 'object') {
+    const keys = Object.keys(value).sort();
+    return `{${keys.map((key) => `${JSON.stringify(key)}:${stableStringify(value[key])}`).join(',')}}`;
+  }
+  return JSON.stringify(value);
+}
+
 function lastPathPart(value) {
   return (
     String(value || '')
@@ -987,12 +1004,34 @@ function isInternalSyncName(value) {
   return text.startsWith('__') || lastPathPart(text).startsWith('__');
 }
 
+const AI_SCENE_FRAMEWORK_SYNC_NAMES = new Set([
+  '__room_box',
+  '__room_terrain',
+  '__terrain_grass',
+  '__terrain_boundary',
+  '__interior_floor',
+  '__foundation_surface',
+]);
+
+function isAiSceneFrameworkSyncName(value) {
+  const text = String(value || '').trim();
+  const leaf = lastPathPart(text);
+  return AI_SCENE_FRAMEWORK_SYNC_NAMES.has(text)
+    || AI_SCENE_FRAMEWORK_SYNC_NAMES.has(leaf)
+    || text.startsWith('__shell_')
+    || leaf.startsWith('__shell_');
+}
+
+function isInternalActorSyncName(value) {
+  return isInternalSyncName(value) && !isAiSceneFrameworkSyncName(value);
+}
+
 function isActorSyncable(actorData) {
   if (!actorData) return false;
   if (actorData._suppress_network_broadcast) return false;
   if (actorData.actor_type === 'actor') return false;
   if (!actorData.geometry || typeof actorData.geometry !== 'object') return false;
-  if (isInternalSyncName(actorData.name)) return false;
+  if (isInternalActorSyncName(actorData.name)) return false;
   if (isInternalSyncName(actorData.scene)) return false;
   return Boolean(actorData.path || actorData.model);
 }
@@ -1028,11 +1067,124 @@ function stopModelTransferPolling() {
   modelTransferSnapshotRequests.clear();
   remoteRegisteredActorIdentities.clear();
   snapshotActorCreateKeys.clear();
+  remoteAppliedActorVersions.clear();
+  remoteSnapshotActors.clear();
+  remoteActorRecords.clear();
+  lastBroadcastSnapshotHashes.clear();
+  latestRemoteSceneSnapshots.clear();
+  lastPeerSnapshotAckHashes.clear();
+}
+
+function snapshotIdentityRow(actorData) {
+  return {
+    actor_guid: String(actorData?.actor_guid || '').trim(),
+    entity_id: String(actorData?.entity_id || actorData?.runtime_entity_id || '').trim(),
+    asset_id: String(actorData?.asset_id || actorData?.actor_asset_id || '').trim(),
+    actor_version: actorVersion(actorData),
+    source_plan_id: String(actorData?.source_plan_id || actorData?.plan_id || '').trim(),
+    source_scene_version: Math.max(
+      1,
+      Number(actorData?.source_scene_version ?? actorData?.scene_version ?? 1) || 1,
+    ),
+  };
+}
+
+function snapshotIdentityRows(actors, planId) {
+  const targetPlanId = String(planId || '').trim();
+  if (!targetPlanId) return [];
+  return (Array.isArray(actors) ? actors : [])
+    .map((actor) => snapshotIdentityRow(actor))
+    .filter((row) => row.actor_guid && row.entity_id && row.source_plan_id === targetPlanId)
+    .sort((left, right) => (
+      left.actor_guid.localeCompare(right.actor_guid)
+      || left.entity_id.localeCompare(right.entity_id)
+    ));
+}
+
+function snapshotIdentityFingerprint(rows) {
+  const serialized = stableStringify(Array.isArray(rows) ? rows : []);
+  return `scene-id-v1-${hashString(serialized).toString(16)}-${serialized.length}`;
 }
 
 async function getActorSnapshot(sceneName) {
-  console.info('[LANChat] SceneTools native snapshot interface is not connected', sceneName);
-  return null;
+  const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
+  const result = await sceneService.listActorTree(targetScene);
+  const actors = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.actors)
+      ? result.actors
+      : Array.isArray(result?.data)
+        ? result.data
+        : [];
+  const latestRuntimeActor = [...actors]
+    .reverse()
+    .find((actor) => String(actor?.source_plan_id || '').trim());
+  const planId = String(latestRuntimeActor?.source_plan_id || '').trim();
+  const sceneVersion = planId
+    ? actors.reduce((version, actor) => {
+        if (String(actor?.source_plan_id || '').trim() !== planId) return version;
+        const candidate = Number(actor?.source_scene_version ?? actor?.scene_version ?? 1);
+        return Number.isFinite(candidate) ? Math.max(version, Math.floor(candidate)) : version;
+      }, 1)
+    : 0;
+  const identityRows = snapshotIdentityRows(actors, planId);
+  return {
+    status: 'success',
+    snapshot_kind: 'host_snapshot',
+    scene: targetScene,
+    plan_id: planId,
+    scene_version: sceneVersion,
+    snapshot_authority: 'host',
+    entity_count: identityRows.length,
+    identity_fingerprint: snapshotIdentityFingerprint(identityRows),
+    actors,
+  };
+}
+
+function actorVersion(actorData) {
+  const value = Number(actorData?.actor_version ?? actorData?.version ?? 1);
+  return Number.isFinite(value) && value > 0 ? Math.floor(value) : 1;
+}
+
+function remoteActorKey(sceneName, actorGuid) {
+  return `${String(sceneName || '').trim()}:${String(actorGuid || '').trim()}`;
+}
+
+async function applyRemoteActor(sceneName, modelPath, actorData, { update = false } = {}) {
+  const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
+  const actorGuid = String(actorData?.actor_guid || '').trim();
+  const localModelPath = String(modelPath || actorData?.path || actorData?.model || '').trim();
+  if (!actorGuid || !localModelPath) return false;
+  const key = remoteActorKey(targetScene, actorGuid);
+  const version = actorVersion(actorData);
+  const appliedVersion = Number(remoteAppliedActorVersions.get(key) || 0);
+  if (version < appliedVersion || (version === appliedVersion && !update)) return true;
+
+  const merged = {
+    ...(remoteSnapshotActors.get(key) || {}),
+    ...(actorData || {}),
+    actor_guid: actorGuid,
+    actor_version: version,
+    version,
+    scene: targetScene,
+    path: localModelPath,
+    model: localModelPath,
+    skip_if_exists: true,
+    update_if_exists: Boolean(update || appliedVersion > 0),
+    _suppress_network_broadcast: true,
+  };
+  const created = await sceneService.createActor(
+    targetScene,
+    localModelPath,
+    merged.actor_type || 'model',
+    merged,
+  );
+  if (!created || created.status === 'error' || created.ok === false) return false;
+  const createdActor = created?.actor || created?.actor_data || created || {};
+  remoteAppliedActorVersions.set(key, Math.max(appliedVersion, version));
+  remoteActorRecords.set(key, { sceneName: targetScene, modelPath: localModelPath, actorData: merged });
+  await registerActorIdentityFromData({ ...merged, ...createdActor }, false).catch(() => false);
+  return true;
 }
 
 async function registerActorIdentityFromData(actorData, locallyOwned = true) {
@@ -1050,7 +1202,7 @@ async function registerActorIdentityFromData(actorData, locallyOwned = true) {
   return true;
 }
 
-async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = true) {
+async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = true, force = false) {
   if (!modelTransferActive()) return;
   const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
   const snapshot = await getActorSnapshot(targetScene);
@@ -1071,7 +1223,79 @@ async function broadcastCurrentSceneSnapshot(sceneName, includeActorCreates = tr
       if (sent) rememberActorCreateBroadcast(targetScene, actorGuid, modelPath);
     }
   }
+  const snapshotHash = hashString(stableStringify(snapshot));
+  if (!force && lastBroadcastSnapshotHashes.get(targetScene) === snapshotHash) return;
+  lastBroadcastSnapshotHashes.set(targetScene, snapshotHash);
   await networkService.broadcastSceneSnapshot(targetScene, snapshot).catch(() => {});
+}
+
+function buildPeerSnapshotAck(sceneName, snapshot) {
+  const targetScene = String(sceneName || '').trim() || currentModelTransferSceneName();
+  const planId = String(snapshot?.plan_id || '').trim();
+  const expectedRows = snapshotIdentityRows(snapshot?.actors, planId);
+  const appliedRows = [];
+  let identityDriftCount = 0;
+  let versionDriftCount = 0;
+  let missingEntityCount = 0;
+  for (const expected of expectedRows) {
+    const key = remoteActorKey(targetScene, expected.actor_guid);
+    const appliedVersion = Number(remoteAppliedActorVersions.get(key) || 0);
+    const record = remoteActorRecords.get(key);
+    if (!record || appliedVersion <= 0) {
+      missingEntityCount += 1;
+      continue;
+    }
+    const actual = snapshotIdentityRow(record.actorData || {});
+    if (actual.entity_id !== expected.entity_id || actual.asset_id !== expected.asset_id) {
+      identityDriftCount += 1;
+      continue;
+    }
+    if (appliedVersion !== expected.actor_version || actual.actor_version !== expected.actor_version) {
+      versionDriftCount += 1;
+      continue;
+    }
+    appliedRows.push(actual);
+  }
+  const hostFingerprint = String(
+    snapshot?.identity_fingerprint || snapshotIdentityFingerprint(expectedRows),
+  ).trim();
+  const peerFingerprint = snapshotIdentityFingerprint(appliedRows);
+  const partialEntityCount = missingEntityCount + identityDriftCount + versionDriftCount;
+  return {
+    status: partialEntityCount === 0 && peerFingerprint === hostFingerprint
+      ? 'peer_confirmed'
+      : 'partial',
+    snapshot_kind: 'peer_ack',
+    scene: targetScene,
+    plan_id: planId,
+    scene_version: Math.max(1, Number(snapshot?.scene_version || 1) || 1),
+    host_identity_fingerprint: hostFingerprint,
+    peer_identity_fingerprint: peerFingerprint,
+    entity_count: expectedRows.length,
+    applied_entity_count: appliedRows.length,
+    partial_entity_count: partialEntityCount,
+    identity_drift_count: identityDriftCount,
+    version_drift_count: versionDriftCount,
+    missing_fields_explicit: true,
+  };
+}
+
+async function broadcastPeerSnapshotAck(sceneName, snapshot) {
+  if (!modelTransferActive() || s.role !== 'guest') return;
+  const ack = buildPeerSnapshotAck(sceneName, snapshot);
+  if (!ack.plan_id) return;
+  const ackKey = `${ack.scene}:${ack.plan_id}:${ack.scene_version}`;
+  const ackHash = hashString(stableStringify(ack));
+  if (lastPeerSnapshotAckHashes.get(ackKey) === ackHash) return;
+  lastPeerSnapshotAckHashes.set(ackKey, ackHash);
+  await networkService.broadcastSceneSnapshot(ack.scene, ack).catch(() => {});
+}
+
+async function refreshPeerSnapshotAcks() {
+  if (!modelTransferActive() || s.role !== 'guest') return;
+  for (const [sceneName, snapshot] of latestRemoteSceneSnapshots.entries()) {
+    await broadcastPeerSnapshotAck(sceneName, snapshot);
+  }
 }
 
 async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
@@ -1085,19 +1309,24 @@ async function applyRemoteSceneSnapshot(sceneName, snapshotPayload) {
     }
   }
   if (!snapshot || !Array.isArray(snapshot.actors)) return;
-  snapshot.actors = snapshot.actors.map((actor) => ({
-    ...(actor || {}),
-    _suppress_network_broadcast: true,
-  }));
+  latestRemoteSceneSnapshots.set(targetScene, snapshot);
   await networkService.setSyncPaused(true);
   try {
-    console.info('[LANChat] Remote scene snapshot received; native SceneTools apply is not connected', {
-      sceneName: targetScene,
-      actorCount: snapshot.actors.length,
-    });
+    for (const actor of snapshot.actors) {
+      const actorGuid = String(actor?.actor_guid || '').trim();
+      if (!actorGuid) continue;
+      const key = remoteActorKey(targetScene, actorGuid);
+      const actorData = { ...(actor || {}), actor_guid: actorGuid, _suppress_network_broadcast: true };
+      remoteSnapshotActors.set(key, actorData);
+      const record = remoteActorRecords.get(key);
+      if (record) {
+        await applyRemoteActor(targetScene, record.modelPath, actorData, { update: true });
+      }
+    }
   } finally {
     await networkService.setSyncPaused(false);
   }
+  await broadcastPeerSnapshotAck(targetScene, snapshot);
 }
 
 async function pollPendingActorCreates() {
@@ -1109,12 +1338,50 @@ async function pollPendingActorCreates() {
       pending.actor_data = pending.actor_data || {};
       pending.actor_data.actor_guid = pending.actor_guid || '';
       pending.actor_data._suppress_network_broadcast = true;
-      console.info('[LANChat] Remote actor create received; native SceneTools create is not connected', {
-        sceneName: pending.scene_name,
-        modelPath: pending.model_path,
-      });
+      await applyRemoteActor(pending.scene_name, pending.model_path, pending.actor_data);
     } finally {
       await networkService.setSyncPaused(false);
+    }
+  }
+}
+
+async function pollPendingActorUpdates() {
+  for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
+    const pending = await networkService.pollPendingActorStateUpdate();
+    if (!pending || !pending.has_pending) break;
+    let actorData = {};
+    try {
+      actorData = JSON.parse(pending.actor_json || '{}');
+    } catch (_) {
+      actorData = {};
+    }
+    const actorGuid = String(actorData.actor_guid || pending.actor_guid || '').trim();
+    const sceneName = String(pending.scene_name || actorData.scene || '').trim() || currentModelTransferSceneName();
+    const key = remoteActorKey(sceneName, actorGuid);
+    const record = remoteActorRecords.get(key);
+    if (record) {
+      await applyRemoteActor(sceneName, record.modelPath, { ...record.actorData, ...actorData, actor_guid: actorGuid }, { update: true });
+    }
+  }
+  for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
+    const pending = await networkService.pollPendingActorTransform();
+    if (!pending || !pending.has_pending) break;
+    const actorGuid = String(pending.actor_guid || '').trim();
+    const sceneName = String(pending.scene_name || '').trim() || currentModelTransferSceneName();
+    const key = remoteActorKey(sceneName, actorGuid);
+    const record = remoteActorRecords.get(key);
+    if (record) {
+      await applyRemoteActor(
+        sceneName,
+        record.modelPath,
+        {
+          ...record.actorData,
+          actor_guid: actorGuid,
+          version: pending.version || pending.actor_version || actorVersion(record.actorData) + 1,
+          geometry: pending.geometry || record.actorData.geometry || {},
+        },
+        { update: true },
+      );
     }
   }
 }
@@ -1123,12 +1390,20 @@ async function pollModelTransfer() {
   if (!modelTransferActive()) return;
   try {
     await pollPendingActorCreates();
+    await pollPendingActorUpdates();
     if (s.role === 'host') {
       for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
         const pendingRequest = await networkService.pollPendingSceneSnapshotRequest();
         if (!pendingRequest || !pendingRequest.has_pending) break;
-        await broadcastCurrentSceneSnapshot(pendingRequest.scene_name || currentModelTransferSceneName(), true);
+        await broadcastCurrentSceneSnapshot(
+          pendingRequest.scene_name || currentModelTransferSceneName(),
+          true,
+          true,
+        );
       }
+      // Actor geometry can become visible after the create callback. Rebuild the
+      // identity snapshot on each poll; hash deduplication keeps the wire quiet.
+      await broadcastCurrentSceneSnapshot(currentModelTransferSceneName(), false, false);
     } else if (s.role === 'guest') {
       for (let i = 0; i < PENDING_MODEL_TRANSFER_POLL_LIMIT; i += 1) {
         const pendingSnapshot = await networkService.pollPendingSceneSnapshot();
@@ -1138,6 +1413,7 @@ async function pollModelTransfer() {
           pendingSnapshot.snapshot_json,
         );
       }
+      await refreshPeerSnapshotAcks();
     }
   } catch (error) {
     console.warn('[LANChat] model transfer polling failed', error);
@@ -1157,8 +1433,9 @@ function handleActorSyncBroadcast(actorData) {
   registerActorIdentityFromData(actorData).catch(() => {});
   networkService
     .broadcastActorCreate(actorGuid, sceneName, modelPath, actorData)
-    .then(() => {
+    .then(async () => {
       rememberActorCreateBroadcast(sceneName, actorGuid, modelPath);
+      await broadcastCurrentSceneSnapshot(sceneName, false, false);
     })
     .catch(() => {});
 }

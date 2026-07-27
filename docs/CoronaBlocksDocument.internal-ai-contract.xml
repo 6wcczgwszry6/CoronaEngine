@@ -641,65 +641,91 @@
       <Block type="ui_score" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="当前分数" />
       <Block type="ui_lives" category="条件" shape="output" projectUsage="project-safe" recommended="true" outputCheck="Number" dynamic="false" label="生命" />
       <Block type="ui_countdown_left" category="条件" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="倒计时剩余" />
-      <Block type="engine_move" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="移动 10 步">
+      <Block type="engine_move" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="移动 10 步">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="STEPS" kind="number" defaultJson="10" inputOwner="" />
       </Block>
-      <Block type="engine_rotateX" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="水平旋转 15 度">
+      <Block type="engine_rotateX" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="水平旋转 15 度">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="ANGLE" kind="number" defaultJson="15" inputOwner="" />
       </Block>
-      <Block type="engine_rotateY" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="竖直旋转 15 度">
+      <Block type="engine_rotateY" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="竖直旋转 15 度">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="ANGLE" kind="number" defaultJson="15" inputOwner="" />
       </Block>
-      <Block type="engine_rotateZ" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="旋转 15 度">
+      <Block type="engine_rotateZ" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="旋转 15 度">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="ANGLE" kind="number" defaultJson="15" inputOwner="" />
       </Block>
-      <Block type="engine_face" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="面向 0 度方向">
+      <Block type="engine_face" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="面向 0 度方向">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="DIRECTION" kind="number" defaultJson="0" inputOwner="" />
       </Block>
-      <Block type="engine_moveto" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="移动到 随机位置">
+      <Block type="engine_moveto" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="移动到 随机位置">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="POSITION" kind="dropdown" defaultJson="&quot;random_position&quot;" inputOwner="" optionValues="random_position|sight_position" optionLabels="随机位置|准星位置" />
       </Block>
-      <Block type="engine_movetoXYZ" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="移到 X: 0 Y: 0 Z: 0">
+      <Block type="engine_movetoXYZ" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="移到 X: 0 Y: 0 Z: 0">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="X" kind="number" defaultJson="0" inputOwner="" />
         <Field name="Y" kind="number" defaultJson="0" inputOwner="" />
         <Field name="Z" kind="number" defaultJson="0" inputOwner="" />
       </Block>
-      <Block type="engine_movetoXYZtime" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="在 1 秒内移到 0 0 0">
+      <Block type="engine_movetoXYZtime" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="在 1 秒内移到 0 0 0">
+        <Input name="OBJECT" kind="value" check="String" />
         <Field name="TIME" kind="number" defaultJson="1" inputOwner="" />
         <Field name="X" kind="number" defaultJson="0" inputOwner="" />
         <Field name="Y" kind="number" defaultJson="0" inputOwner="" />
         <Field name="Z" kind="number" defaultJson="0" inputOwner="" />
       </Block>
-      <Block type="engine_Xset" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 X 为 0 或接入变量/运算 …">
+      <Block type="engine_Xset" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置 X 为 0 或接入变量/运算 …">
+        <Input name="OBJECT" kind="value" check="String" />
         <Input name="VALUE" kind="value" check="Number" />
         <Field name="X" kind="number" defaultJson="0" inputOwner="VALUE" />
       </Block>
-      <Block type="engine_Yset" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 Y 为 0 或接入变量/运算 …">
+      <Block type="engine_Yset" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置 Y 为 0 或接入变量/运算 …">
+        <Input name="OBJECT" kind="value" check="String" />
         <Input name="VALUE" kind="value" check="Number" />
         <Field name="Y" kind="number" defaultJson="0" inputOwner="VALUE" />
       </Block>
-      <Block type="engine_Zset" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="设置 Z 为 0 或接入变量/运算 …">
+      <Block type="engine_Zset" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="设置 Z 为 0 或接入变量/运算 …">
+        <Input name="OBJECT" kind="value" check="String" />
         <Input name="VALUE" kind="value" check="Number" />
         <Field name="Z" kind="number" defaultJson="0" inputOwner="VALUE" />
       </Block>
-      <Block type="engine_Xadd" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="X 增加 0 或接入变量/运算 …">
+      <Block type="engine_Xadd" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="X 增加 0 或接入变量/运算 …">
+        <Input name="OBJECT" kind="value" check="String" />
         <Input name="VALUE" kind="value" check="Number" />
         <Field name="DX" kind="number" defaultJson="0" inputOwner="VALUE" />
       </Block>
-      <Block type="engine_Yadd" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="Y 增加 0 或接入变量/运算 …">
+      <Block type="engine_Yadd" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="Y 增加 0 或接入变量/运算 …">
+        <Input name="OBJECT" kind="value" check="String" />
         <Input name="VALUE" kind="value" check="Number" />
         <Field name="DY" kind="number" defaultJson="0" inputOwner="VALUE" />
       </Block>
-      <Block type="engine_Zadd" category="运动" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="Z 增加 0 或接入变量/运算 …">
+      <Block type="engine_Zadd" category="运动" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="Z 增加 0 或接入变量/运算 …">
+        <Input name="OBJECT" kind="value" check="String" />
         <Input name="VALUE" kind="value" check="Number" />
         <Field name="DZ" kind="number" defaultJson="0" inputOwner="VALUE" />
       </Block>
-      <Block type="engine_X" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="X" />
-      <Block type="engine_Y" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="Y" />
-      <Block type="engine_Z" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="Z" />
-      <Block type="engine_rotationX" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="旋转 X" />
-      <Block type="engine_rotationY" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="旋转 Y" />
-      <Block type="engine_rotationZ" category="运动" shape="output" projectUsage="actor-context" recommended="false" outputCheck="Number" dynamic="false" label="旋转 Z" />
+      <Block type="engine_X" category="运动" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象的 X 坐标">
+        <Input name="OBJECT" kind="value" check="String" />
+      </Block>
+      <Block type="engine_Y" category="运动" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象的 Y 坐标">
+        <Input name="OBJECT" kind="value" check="String" />
+      </Block>
+      <Block type="engine_Z" category="运动" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象的 Z 坐标">
+        <Input name="OBJECT" kind="value" check="String" />
+      </Block>
+      <Block type="engine_rotationX" category="运动" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象的旋转 X">
+        <Input name="OBJECT" kind="value" check="String" />
+      </Block>
+      <Block type="engine_rotationY" category="运动" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象的旋转 Y">
+        <Input name="OBJECT" kind="value" check="String" />
+      </Block>
+      <Block type="engine_rotationZ" category="运动" shape="output" projectUsage="project-safe" recommended="false" outputCheck="Number" dynamic="false" label="对象的旋转 Z">
+        <Input name="OBJECT" kind="value" check="String" />
+      </Block>
       <Block type="object_set_position" category="运动" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="设置对象  … 位置 X 0 … Y 0 … Z 0 …">
         <Input name="NAME" kind="value" check="String" />
         <Input name="X" kind="value" check="Number" />
@@ -850,8 +876,8 @@
       <Block type="appearance_set_alpha" category="外观" shape="statement" projectUsage="actor-context" recommended="false" outputCheck="" dynamic="false" label="透明度设为 1">
         <Field name="ALPHA" kind="number" defaultJson="1" inputOwner="" />
       </Block>
-      <Block type="object_reference" category="对象" shape="output" projectUsage="project-safe" recommended="false" outputCheck="String" dynamic="false" label="场景对象 当前物体 或输入">
-        <Field name="OBJECT" kind="dropdown" defaultJson="&quot;&quot;" inputOwner="" optionValues="|__manual__" optionLabels="当前物体|手动输入" />
+      <Block type="object_reference" category="对象" shape="output" projectUsage="project-safe" recommended="true" outputCheck="String" dynamic="true" label="对象 [指定物体]">
+        <Field name="OBJECT" kind="dropdown" defaultJson="&quot;__none__&quot;" inputOwner="" />
         <Field name="MANUAL" kind="string" defaultJson="&quot;&quot;" inputOwner="" />
       </Block>
       <Block type="object_hide" category="对象" shape="statement" projectUsage="project-safe" recommended="false" outputCheck="" dynamic="false" label="隐藏对象  …">

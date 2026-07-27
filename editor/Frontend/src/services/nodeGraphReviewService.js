@@ -1,4 +1,4 @@
-﻿import { aiService } from '@/utils/bridge.js';
+import { aiService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 
 const CHANNEL_NAME = 'corona-node-graph-review-v1';
@@ -33,19 +33,27 @@ function hashText(text) {
   return (hash >>> 0).toString(16).padStart(8, '0');
 }
 
+export function normalizeReviewScope(scope) {
+  return String(scope || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/\/+$/, '')
+    .toLocaleLowerCase('en-US');
+}
+
 export function reviewScopeId(scope) {
-  return hashText(String(scope || '').trim().toLocaleLowerCase('en-US'));
+  return hashText(normalizeReviewScope(scope));
 }
 
 export function graphRevision(workspace, scope = '') {
   const snapshot = createReviewSnapshot(workspace);
-  return hashText(`${String(scope || '').trim()}\n${JSON.stringify(snapshot)}`);
+  return hashText(`${normalizeReviewScope(scope)}\n${JSON.stringify(snapshot)}`);
 }
 
 function snapshotWithRevision(workspace, scope = '') {
   const snapshot = createReviewSnapshot(workspace);
   if (!Array.isArray(snapshot?.nodes) || !Array.isArray(snapshot?.edges)) return null;
-  const normalizedScope = String(scope || '').trim().toLocaleLowerCase('en-US');
+  const normalizedScope = normalizeReviewScope(scope);
   return {
     workspace: snapshot,
     revision: hashText(`${normalizedScope}\n${JSON.stringify(snapshot)}`),
@@ -86,19 +94,24 @@ export function startNodeGraphReview({
   let requestSequence = 0;
   let activeTask = null;
   let pendingReview = null;
-  let lastSuccessfulRevision = '';
+  let lastSuccessfulReviewKey = '';
   let lastErrorKey = '';
 
-  const canReview = () => (
-    !stopped
-    && enabled()
-    && (typeof document === 'undefined' || document.visibilityState !== 'hidden')
-  );
+  // Floating CEF panels may report document.visibilityState === 'hidden' even while
+  // they are open in the main editor. Review availability must follow the panel lifecycle,
+  // not browser visibility, otherwise background node checks silently stop.
+  const canReview = () => !stopped && enabled();
 
-  const currentCandidate = () => snapshotWithRevision(
-    getWorkspace?.(),
-    getRevisionScope?.()
-  );
+  const currentCandidate = () => {
+    const snapshot = snapshotWithRevision(getWorkspace?.(), getRevisionScope?.());
+    if (!snapshot) return null;
+    const projectContext = clone(getProjectContext?.());
+    return {
+      ...snapshot,
+      projectContext,
+      reviewKey: hashText(`${snapshot.revision}\n${JSON.stringify(projectContext)}`),
+    };
+  };
 
   const publishErrorOnce = (result, requestId, revision, projectScopeId = '') => {
     const errorKey = String(result?.error || result?.message || 'AI_REVIEW_FAILED');
@@ -115,13 +128,15 @@ export function startNodeGraphReview({
 
   const startCandidate = async (candidate) => {
     if (!candidate || stopped || activeTask || !canReview()) return;
-    if (candidate.revision === lastSuccessfulRevision) return;
+    if (candidate.reviewKey === lastSuccessfulReviewKey) return;
 
     const requestId = 'node_review_' + Date.now() + '_' + (++requestSequence);
     const task = {
       requestId,
       revision: candidate.revision,
+      reviewKey: candidate.reviewKey,
       workspace: candidate.workspace,
+      projectContext: candidate.projectContext,
       projectScopeId: candidate.projectScopeId,
       taskId: '',
     };
@@ -134,7 +149,7 @@ export function startNodeGraphReview({
         targetId: 'node_graph:project:global',
         workspace: candidate.workspace,
         projectScopeId: candidate.projectScopeId,
-        projectContext: clone(getProjectContext?.()),
+        projectContext: candidate.projectContext,
       });
       if (stopped || activeTask !== task) return;
       if (response?.success !== true || !response?.taskId) {
@@ -161,7 +176,7 @@ export function startNodeGraphReview({
     if (stopped || activeTask || !pendingReview || !canReview()) return;
     const candidate = pendingReview;
     pendingReview = null;
-    if (candidate.revision !== lastSuccessfulRevision) {
+    if (candidate.reviewKey !== lastSuccessfulReviewKey) {
       window.setTimeout(() => startCandidate(candidate), 0);
     }
   };
@@ -187,20 +202,21 @@ export function startNodeGraphReview({
       activeTask = null;
       const result = response.result || {};
       const latest = currentCandidate();
-      if (!latest || latest.revision !== task.revision) {
+      if (!latest || latest.reviewKey !== task.reviewKey) {
         if (latest) pendingReview = latest;
         continueWithPending();
         return;
       }
 
       if (result?.success === true && result?.status === 'ok') {
-        lastSuccessfulRevision = task.revision;
+        lastSuccessfulReviewKey = task.reviewKey;
         lastErrorKey = '';
         publishNodeGraphReview({
           ...result,
           requestId: task.requestId,
           graphRevision: task.revision,
           projectScopeId: task.projectScopeId,
+          graphExcerpt: task.workspace,
         });
       } else {
         publishErrorOnce(result, task.requestId, task.revision, task.projectScopeId);
@@ -227,10 +243,10 @@ export function startNodeGraphReview({
       const candidate = currentCandidate();
       if (!candidate) return;
       if (activeTask) {
-        if (candidate.revision !== activeTask.revision) pendingReview = candidate;
+        if (candidate.reviewKey !== activeTask.reviewKey) pendingReview = candidate;
         return;
       }
-      if (candidate.revision === lastSuccessfulRevision) return;
+      if (candidate.reviewKey === lastSuccessfulReviewKey) return;
       await startCandidate(candidate);
     } finally {
       scanBusy = false;
@@ -239,9 +255,9 @@ export function startNodeGraphReview({
 
   const period = Math.max(1000, Number(intervalMs) || REVIEW_INTERVAL_MS);
   scanTimer = window.setInterval(scan, period);
-  firstScanTimer = window.setTimeout(scan, period);
+  firstScanTimer = window.setTimeout(scan, Math.min(750, period));
 
-  return () => {
+  const stop = () => {
     stopped = true;
     if (firstScanTimer) window.clearTimeout(firstScanTimer);
     if (scanTimer) window.clearInterval(scanTimer);
@@ -252,4 +268,13 @@ export function startNodeGraphReview({
     activeTask = null;
     pendingReview = null;
   };
+  stop.scanNow = (delay = 0) => {
+    if (stopped) return;
+    if (firstScanTimer) window.clearTimeout(firstScanTimer);
+    firstScanTimer = window.setTimeout(() => {
+      firstScanTimer = null;
+      scan();
+    }, Math.max(0, Number(delay) || 0));
+  };
+  return stop;
 }

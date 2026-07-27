@@ -9,6 +9,8 @@ import LogView from '@/views/sidebar/LogView.vue';
 import FileManager from '@/views/sidebar/FileManager.vue';
 import ProjectSettings from '@/views/sidebar/ProjectSettings.vue';
 import AITalkBar from '@/views/sidebar/AITalkBar.vue';
+import NodeGraphPanel from '@/views/sidebar/NodeGraphPanel.vue';
+import CabbageChatPanel from '@/views/sidebar/CabbageChatPanel.vue';
 import EditorSettings from '@/views/sidebar/EditorSettings.vue';
 import NetworkPanel from '@/views/sidebar/Network.vue';
 import LightFieldCalibrationPanel from '@/components/panels/LightFieldCalibrationPanel.vue';
@@ -29,6 +31,7 @@ export const PLUGIN_MANIFEST = [
     defaultFloatPosition: 'right_top',
     minFloatWidth: 340,
     minFloatHeight: 360,
+    floatingPriority: 10,
     component: SceneBar,
   },
   {
@@ -47,7 +50,7 @@ export const PLUGIN_MANIFEST = [
     id: 'SceneDatas',
     routePath: '/Object',
     displayNameKey: 'plugins.SceneDatas',
-    displayName: '详情',
+    displayName: '对象',
     pageType: 'view',
     defaultDock: 'right',
     defaultWidth: 420,
@@ -57,6 +60,7 @@ export const PLUGIN_MANIFEST = [
     defaultFloatPosition: 'right_bottom',
     minFloatWidth: 320,
     minFloatHeight: 320,
+    floatingPriority: 10,
     component: ObjectPanel,
   },
   {
@@ -122,6 +126,43 @@ export const PLUGIN_MANIFEST = [
     minFloatWidth: 320,
     minFloatHeight: 360,
     component: AITalkBar,
+  },
+  {
+    id: 'NodeGraphPanel',
+    routePath: '/NodeGraph',
+    displayNameKey: 'plugins.NodeGraphPanel',
+    displayName: '节点',
+    pageType: 'view',
+    defaultDock: 'bottom',
+    // Open wide enough for the toolbox, node canvas and inspector to use the
+    // normal three-column layout immediately. Narrower user-resized windows still
+    // fall back to NodeGraphWorkspace's compact responsive layout.
+    defaultWidth: 1440,
+    defaultHeight: 720,
+    autoInit: false,
+    defaultOpenMode: 'external',
+    defaultFloatPosition: 'center',
+    minFloatWidth: 760,
+    minFloatHeight: 440,
+    floatingPriority: 100,
+    component: NodeGraphPanel,
+  },
+  {
+    id: 'CabbageChatPanel',
+    routePath: '/CabbageChat',
+    displayNameKey: 'plugins.CabbageChatPanel',
+    displayName: '包菜答疑',
+    pageType: 'plugin',
+    defaultDock: 'right',
+    defaultWidth: 420,
+    defaultHeight: 600,
+    autoInit: false,
+    defaultOpenMode: 'external',
+    defaultFloatPosition: 'right_top',
+    minFloatWidth: 340,
+    minFloatHeight: 400,
+    floatingPriority: 110,
+    component: CabbageChatPanel,
   },
   {
     id: 'EditorSettings',
