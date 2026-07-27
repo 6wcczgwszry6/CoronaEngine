@@ -3,7 +3,7 @@
     <DockTitleBar
       v-if="!isDocked"
       :title="t('plugins.AITalkBar')"
-      extraClass="bg-[#84A65B]"
+      extraClass="bg-[#D8B86C]"
       routePath="/AITalkBar"
       @close="closeFloat"
     />

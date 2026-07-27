@@ -1,70 +1,57 @@
 <template>
-  <Teleport to="body">
-    <div
-      class="cabbage-review-root"
-      @mousedown.stop
-      @pointerdown.stop
-      @click.stop
-      @wheel.stop
-    >
-      <button
-        type="button"
-        class="cabbage-button"
-        :class="{ active: chatOpen }"
-        :title="chatOpen ? '关闭包菜答疑' : '打开包菜答疑'"
-        :aria-pressed="chatOpen"
-        @click="toggleChat"
-      >
-        <img src="@/assets/cabbage.png" alt="包菜答疑" />
-        <span v-if="tasks.length" class="cabbage-badge">{{ tasks.length > 99 ? '99+' : tasks.length }}</span>
-      </button>
+  <div
+    class="cabbage-review-root"
+    @mousedown.stop
+    @pointerdown.stop
+    @click.stop
+    @wheel.stop
+  >
+    <transition name="task-board">
+      <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
+        <strong>{{ assistant.ephemeralTip.title }}</strong>
+        <p>{{ assistant.ephemeralTip.message }}</p>
+      </section>
+    </transition>
 
-      <transition name="task-board">
-        <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
-          <strong>{{ assistant.ephemeralTip.title }}</strong>
-          <p>{{ assistant.ephemeralTip.message }}</p>
-        </section>
-      </transition>
-
-      <transition name="task-board">
-        <section v-if="tasks.length" class="task-board" aria-label="包菜向你扔的屎">
-          <header class="task-board-header">
-            <span>包菜向你扔的屎</span>
-            <span class="task-count">{{ tasks.length }}</span>
-          </header>
-          <div class="task-list">
-            <article v-for="task in tasks" :key="task.taskKey || task.issueKey" class="task-item">
-              <button
-                type="button"
-                class="task-title"
-                :class="{ selected: assistant.selectedTaskKey === (task.taskKey || task.issueKey) }"
-                @click="toggleTask(task)"
-              >
-                <span class="task-title-text">{{ task.title }}</span>
-                <span class="task-chevron" :class="{ expanded: expandedKeys.has(task.taskKey || task.issueKey) }">⌄</span>
-              </button>
-              <div v-if="expandedKeys.has(task.taskKey || task.issueKey)" class="task-detail">
-                <p v-if="task.message">{{ task.message }}</p>
-                <div v-if="task.suggestion" class="task-suggestion">
-                  <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
-                  <p>{{ task.suggestion }}</p>
-                </div>
-                <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
-              </div>
-            </article>
+    <section class="task-board" aria-label="任务与提示">
+      <header class="task-board-header">
+        <span>任务与提示</span>
+        <span class="task-count" :class="{ empty: tasks.length === 0 }">{{ tasks.length }}</span>
+      </header>
+      <div v-if="tasks.length" class="task-list">
+        <article v-for="task in tasks" :key="task.taskKey || task.issueKey" class="task-item">
+          <button
+            type="button"
+            class="task-title"
+            :class="{ selected: assistant.selectedTaskKey === (task.taskKey || task.issueKey) }"
+            @click="toggleTask(task)"
+          >
+            <span class="task-title-text">{{ task.title }}</span>
+            <span class="task-chevron" :class="{ expanded: expandedKeys.has(task.taskKey || task.issueKey) }">⌄</span>
+          </button>
+          <div v-if="expandedKeys.has(task.taskKey || task.issueKey)" class="task-detail">
+            <p v-if="task.message">{{ task.message }}</p>
+            <div v-if="task.suggestion" class="task-suggestion">
+              <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
+              <p>{{ task.suggestion }}</p>
+            </div>
+            <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
           </div>
-        </section>
-      </transition>
-
-    </div>
-  </Teleport>
+        </article>
+      </div>
+      <div v-else class="task-empty" aria-live="polite">
+        <span class="task-empty-icon">&#10003;</span>
+        <span>当前没有待处理的任务或提示</span>
+      </div>
+    </section>
+  </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, watch } from 'vue';
+import { onBeforeUnmount, reactive, watch } from 'vue';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
-import { openFloatingPanel, toggleFloatingPanel } from '@/utils/panelWindows.js';
+import { closeFloatingPanel } from '@/utils/panelWindows.js';
 import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
 
 const props = defineProps({
@@ -75,7 +62,6 @@ const props = defineProps({
 const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
-const chatOpen = computed(() => Boolean(dockStore.panels.CabbageChatPanel?.open));
 const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
 let optimizationTimer = null;
 
@@ -93,15 +79,33 @@ function toggleTask(task) {
   else expandedKeys.add(key);
 }
 
-async function toggleChat() {
-  publishCabbageAssistantContext(assistant);
-  await toggleFloatingPanel(dockStore, 'CabbageChatPanel');
-}
-
 async function openChat(task) {
   assistant.selectTask(taskKey(task));
   publishCabbageAssistantContext(assistant);
-  await openFloatingPanel(dockStore, 'CabbageChatPanel');
+
+  const panelId = 'CabbageChatPanel';
+  const panel = dockStore.panels[panelId];
+  if (!panel) return;
+
+  // The answer panel now belongs to the right dock. If an older detached instance is
+  // still alive, close it first so the same Vue panel cannot exist twice.
+  if (panel.open && panel.mode === 'external') {
+    await closeFloatingPanel(dockStore, panelId);
+  }
+
+  dockStore.popIn(panelId);
+  dockStore.setDockZone(panelId, 'right');
+  dockStore.openPanel(panelId);
+
+  // Keep it directly below AI Talk when that panel is open. Other optional right-side
+  // panels remain below the two AI panels.
+  const rightIds = dockStore.panelsByZone('right')
+    .map((item) => item.id)
+    .filter((id) => id !== panelId);
+  const aiTalkIndex = rightIds.indexOf('AITalkBar');
+  const beforeId = aiTalkIndex >= 0 ? (rightIds[aiTalkIndex + 1] || null) : null;
+  dockStore.movePanel(panelId, 'right', beforeId);
+  window.dispatchEvent(new Event('resize'));
 }
 
 watch(
@@ -130,17 +134,16 @@ watch(
 
 <style scoped>
 .cabbage-review-root {
-  position: fixed;
-  right: 18px;
-  top: 50%;
-  z-index: 2147483645;
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2147482500;
   display: flex;
-  width: min(310px, calc(100vw - 36px));
-  max-height: calc(100vh - 128px);
+  width: min(290px, calc(100% - 24px));
+  max-height: calc(100% - 92px);
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  transform: translateY(-50%);
+  align-items: stretch;
+  gap: 9px;
   pointer-events: none;
 }
 .cabbage-review-root > * {
@@ -149,31 +152,31 @@ watch(
 .optimization-tip {
   width: 100%;
   box-sizing: border-box;
-  border: 1px solid #607255;
+  border: 1px solid #55431f;
   border-radius: 8px;
-  background: #2b3229;
-  color: #e7eee3;
+  background: #15130d;
+  color: #f2ead5;
   box-shadow: 0 14px 38px rgba(0, 0, 0, .5);
   padding: 11px 12px;
   line-height: 1.55;
 }
-.optimization-tip strong { display: block; color: #c6ddaf; font-size: 13px; }
-.optimization-tip p { margin: 5px 0 0; color: #cbd4c7; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.optimization-tip strong { display: block; color: #e5c77f; font-size: 13px; }
+.optimization-tip p { margin: 5px 0 0; color: #c9bea0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-board {
   position: relative;
   width: 100%;
-  max-height: min(520px, calc(100vh - 222px));
+  max-height: min(330px, calc(100% - 70px));
   box-sizing: border-box;
   display: flex;
   flex: 0 1 auto;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid #4a554b;
-  border-left: 3px solid #789665;
+  border: 1px solid #55431f;
+  border-left: 3px solid #b8924a;
   border-radius: 9px;
-  background: #232824;
-  color: #e5e9e4;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, .62), 0 0 0 1px rgba(120, 150, 101, .08);
+  background: #11100d;
+  color: #f2ead5;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, .62), 0 0 0 1px rgba(216, 184, 108, .08);
 }
 .task-board-header {
   display: flex;
@@ -182,9 +185,9 @@ watch(
   min-height: 42px;
   box-sizing: border-box;
   padding: 10px 12px 10px 13px;
-  border-bottom: 1px solid #465047;
-  background: #303730;
-  color: #dce6d7;
+  border-bottom: 1px solid #3f3018;
+  background: #211d12;
+  color: #f2ead5;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: .02em;
@@ -195,8 +198,33 @@ watch(
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background: #7d5d24;
+  background: #9a7736;
   color: #fff3c8;
+  font-size: 11px;
+}
+.task-count.empty {
+  background: #3f3018;
+  color: #b9ad8f;
+}
+.task-empty {
+  display: flex;
+  min-height: 56px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: #9d9278;
+  font-size: 12px;
+  text-align: center;
+}
+.task-empty-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid #665025;
+  border-radius: 50%;
+  color: #d8b86c;
   font-size: 11px;
 }
 .task-list {
@@ -205,55 +233,40 @@ watch(
   overflow-y: auto;
   padding: 8px;
   scrollbar-width: thin;
-  scrollbar-color: #59655b #252a26;
+  scrollbar-color: #8c6f36 #0b0a08;
 }
 .task-list::-webkit-scrollbar { width: 7px; }
-.task-list::-webkit-scrollbar-track { background: #252a26; }
-.task-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #59655b; }
+.task-list::-webkit-scrollbar-track { background: #0b0a08; }
+.task-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #8c6f36; }
 .task-item + .task-item { margin-top: 5px; }
 .task-title {
   width: 100%;
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid #3e4540;
+  border: 1px solid #3f3018;
   border-radius: 6px;
-  background: #2b302c;
+  background: #15130d;
   color: #e5e7eb;
   padding: 9px 10px;
   text-align: left;
   transition: background .14s ease, border-color .14s ease;
 }
-.task-title:hover, .task-title.selected { border-color: #718663; background: #343c32; }
+.task-title:hover, .task-title.selected { border-color: #d8b86c; background: #2b230f; }
 .task-title-text { min-width:0; flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:13px; font-weight:600; }
 .task-chevron { color:#9ca3af; transform:rotate(0deg); transition:transform .14s ease; }
 .task-chevron.expanded { transform:rotate(180deg); }
-.task-detail { margin:-1px 5px 0; border:1px solid #3e4540; border-top:0; border-radius:0 0 6px 6px; background:#202421; padding:10px; color:#cbd2c9; font-size:12px; line-height:1.65; }
+.task-detail { margin:-1px 5px 0; border:1px solid #3f3018; border-top:0; border-radius:0 0 6px 6px; background:#0f0e0a; padding:10px; color:#c9bea0; font-size:12px; line-height:1.65; }
 .task-detail p { white-space:pre-wrap; overflow-wrap:anywhere; }
-.task-suggestion { margin-top:8px; border-left:2px solid #83a36b; padding-left:8px; }
-.task-suggestion strong { color:#aaca92; font-size:11px; }
-.task-discuss { margin-top:9px; border-radius:5px; background:#526847; color:#eef8e8; padding:5px 9px; font-size:11px; }
-.cabbage-button {
-  position: relative;
-  width: 68px;
-  height: 68px;
-  flex: 0 0 auto;
-  overflow: visible;
-  border: 2px solid rgba(110, 231, 183, .72);
-  border-radius: 50%;
-  background: #b8de93;
-  box-shadow: 0 10px 32px rgba(16, 185, 129, .32);
-  transition: transform .16s ease, border-color .16s ease;
-}
-.cabbage-button:hover, .cabbage-button.active { transform:scale(1.05); border-color:#d1fae5; }
-.cabbage-button img { width:100%; height:100%; border-radius:50%; object-fit:cover; }
-.cabbage-badge { position:absolute; right:-3px; top:-4px; min-width:22px; height:22px; display:grid; place-items:center; border:2px solid #1b211c; border-radius:999px; background:#e89a2e; color:white; padding:0 4px; font-size:10px; font-weight:700; }
+.task-suggestion { margin-top:8px; border-left:2px solid #d8b86c; padding-left:8px; }
+.task-suggestion strong { color:#e5c77f; font-size:11px; }
+.task-discuss { margin-top:9px; border-radius:5px; background:#4b391c; color:#fff7dc; padding:5px 9px; font-size:11px; }
 .task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin:center bottom; }
 .task-board-enter-from, .task-board-leave-to { opacity:0; transform:translateY(8px) scale(.98); }
 
 @media (max-height: 620px) {
-  .cabbage-review-root { max-height: calc(100vh - 88px); }
-  .task-board { max-height: calc(100vh - 180px); }
+  .cabbage-review-root { max-height: calc(100% - 68px); }
+  .task-board { max-height: calc(100% - 54px); }
 }
 </style>
 

@@ -158,7 +158,7 @@
           </div>
           <!-- 应用按钮 -->
           <button
-            class="w-full bg-[#84a65b] hover:bg-[#6b8a48] text-white text-xs py-1.5 rounded transition-colors duration-200"
+            class="w-full bg-[#d8b86c] hover:bg-[#aa8727] text-white text-xs py-1.5 rounded transition-colors duration-200"
             @click="handleApplyPhysics"
           >
             应用物理参数
@@ -376,11 +376,11 @@
       v-if="showLocalModal"
       class="fixed inset-0 bg-black/70 flex items-center justify-center z-[9999]"
     >
-      <div class="bg-[#2a2a2a] rounded-lg p-6 min-w-[300px] border border-[#84a65b]/30 shadow-2xl">
+      <div class="bg-[#2a2a2a] rounded-lg p-6 min-w-[300px] border border-[#d8b86c]/30 shadow-2xl">
         <div class="flex items-center gap-3 mb-4">
           <div class="w-6 h-6 animate-spin">
             <svg
-              class="w-full h-full text-[#84a65b]"
+              class="w-full h-full text-[#d8b86c]"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -398,18 +398,18 @@
         <div class="text-sm text-[#909090] mb-2">{{ localModalMessage }}</div>
         <div v-if="localModalProgress > 0" class="w-full bg-[#1a1a1a] rounded-full h-2 mt-4">
           <div
-            class="bg-[#84a65b] h-full rounded-full transition-all duration-300"
+            class="bg-[#d8b86c] h-full rounded-full transition-all duration-300"
             :style="{ width: localModalProgress + '%' }"
           ></div>
         </div>
-        <div v-if="localModalProgress > 0" class="text-xs text-[#84a65b] text-center mt-2">
+        <div v-if="localModalProgress > 0" class="text-xs text-[#d8b86c] text-center mt-2">
           {{ Math.round(localModalProgress) }}%
         </div>
       </div>
     </div>
 
     <div
-      class="fixed right-5 top-28 z-[80] h-24 w-24 pointer-events-none select-none rounded-md border border-white/10 bg-[#101418]/70 shadow-xl backdrop-blur-sm"
+      class="absolute right-5 top-20 z-[80] h-24 w-24 pointer-events-none select-none rounded-md border border-white/10 bg-[#101418]/70 shadow-xl backdrop-blur-sm"
       aria-hidden="true"
     >
       <svg class="h-full w-full" viewBox="0 0 90 90">
@@ -475,8 +475,6 @@ import {
   closeFloatingPanel,
   consumeExpectedPanelClosed,
   isFloatingPanel,
-  openFloatingPanel,
-  toggleFloatingPanel,
 } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
@@ -492,6 +490,7 @@ import {
   cabbageContextService,
   cancelPendingTransformEvents,
   publishCabbageAssistantContext,
+  readCabbageAssistantContext,
   subscribeCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
@@ -509,11 +508,33 @@ const dockShortcuts = [
   { id: 'NodeGraphPanel', label: '节点', icon: '点' },
 ];
 const isShortcutOpen = (id) => Boolean(dockStore.panels[id]?.open);
+const openDockedPanel = (id, { preserveZone = false } = {}) => {
+  const panel = dockStore.panels[id];
+  const manifest = PLUGIN_MANIFEST.find((item) => item.id === id);
+  if (!panel || !manifest) return;
+  if (!preserveZone || !panel.dockZone) {
+    dockStore.setDockZone(id, manifest.defaultDock);
+  }
+  dockStore.popIn(id);
+  dockStore.openPanel(id);
+  nextTick(() => window.dispatchEvent(new Event('resize')));
+};
 const toggleDockShortcut = async (id) => {
-  await toggleFloatingPanel(dockStore, id);
+  const panel = dockStore.panels[id];
+  if (!panel) return;
+  if (panel.open && panel.mode === 'external') {
+    await closeFloatingPanel(dockStore, id);
+    return;
+  }
+  if (panel.open) {
+    dockStore.closePanel(id);
+    nextTick(() => window.dispatchEvent(new Event('resize')));
+    return;
+  }
+  openDockedPanel(id);
 };
 const handleNodeGraphPanelOpenRequest = () => {
-  dockStore.openPanel('NodeGraphPanel');
+  openDockedPanel('NodeGraphPanel');
 };
 
 const goToHome = () => {
@@ -641,7 +662,7 @@ const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = ''
 
   setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
   if (!dockStore.panels.SceneDatas?.open) {
-    await openFloatingPanel(dockStore, 'SceneDatas');
+    openDockedPanel('SceneDatas');
   }
 };
 
@@ -877,9 +898,14 @@ async function persistCabbageTaskActions(actions = []) {
 
 async function loadCabbageWorldContext({ reset = true } = {}) {
   const generation = ++cabbageWorldLoadGeneration;
+  const scopeId = currentProjectReviewScopeId();
+  // Keep the last snapshot for this same world while the backend context is loading.
+  // Publishing an empty reset here used to overwrite the cached task list, which made
+  // the task board disappear whenever loading was slow or temporarily failed.
+  const cachedSnapshot = readCabbageAssistantContext(scopeId);
   if (reset) {
-    cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
-    publishCabbageAssistantContext(cabbageAssistant);
+    cabbageAssistant.clearForProjectChange(scopeId);
+    if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
   }
   try {
     const snapshot = await cabbageContextService.loadCurrentWorld();
@@ -889,6 +915,7 @@ async function loadCabbageWorldContext({ reset = true } = {}) {
     return snapshot;
   } catch (error) {
     if (generation === cabbageWorldLoadGeneration) {
+      if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
       console.warn('[CabbageContext] failed to load world context', error?.message || error);
     }
     return null;
@@ -2442,9 +2469,29 @@ const onSceneAddedEvent = (payload) => addSceneTab(payload?.name, payload?.route
 
 const onSceneRenamedEvent = (payload) => renameSceneTab(payload?.old_path, payload?.new_path, payload?.name);
 
+const pendingPanelRedocks = new Map();
+const PANEL_REDOCK_TTL_MS = 5000;
+
+const handlePanelRedockRequest = (payload) => {
+  const panelId = payload?.panelId;
+  if (!panelId || !dockStore.panels[panelId]) return;
+  const previousTimer = pendingPanelRedocks.get(panelId);
+  if (previousTimer) window.clearTimeout(previousTimer);
+  const timer = window.setTimeout(() => pendingPanelRedocks.delete(panelId), PANEL_REDOCK_TTL_MS);
+  pendingPanelRedocks.set(panelId, timer);
+  openDockedPanel(panelId, { preserveZone: true });
+};
+
 const handlePanelClosed = (payload) => {
   const panelId = payload?.panelId;
   if (!panelId) return;
+  const redockTimer = pendingPanelRedocks.get(panelId);
+  if (redockTimer) {
+    window.clearTimeout(redockTimer);
+    pendingPanelRedocks.delete(panelId);
+    openDockedPanel(panelId, { preserveZone: true });
+    return;
+  }
   if (isFloatingPanel(panelId)) {
     // Ignore the delayed native event produced by our own close request. The
     // queued shortcut operation may already have opened a replacement tab.
@@ -2519,6 +2566,7 @@ onMounted(async () => {
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
+  coronaEventBus.on('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.on('panel-closed', handlePanelClosed);
   coronaEventBus.on('loading-show', showLoading);
   coronaEventBus.on('loading-update', updateLoading);
@@ -2572,7 +2620,10 @@ onUnmounted(() => {
   void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
+  coronaEventBus.off('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.off('panel-closed', handlePanelClosed);
+  for (const timer of pendingPanelRedocks.values()) window.clearTimeout(timer);
+  pendingPanelRedocks.clear();
   coronaEventBus.off('loading-show', showLoading);
   coronaEventBus.off('loading-update', updateLoading);
   coronaEventBus.off('loading-hide', hideLoading);
@@ -2632,20 +2683,20 @@ onUnmounted(() => {
 }
 
 .dock-shortcut-bar {
-  position: fixed; right: 16px; bottom: 16px; z-index: 2147483000;
+  position: absolute; right: 16px; bottom: 16px; z-index: 2147483000;
   display: flex; align-items: center; gap: 7px; padding: 7px;
-  border: 1px solid rgba(91, 103, 92, .78); border-radius: 9px;
-  background: rgba(31, 35, 32, .94); box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  border: 1px solid rgba(216, 184, 108, .48); border-radius: 9px;
+  background: rgba(13, 12, 8, .96); box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
   backdrop-filter: blur(8px);
 }
 .dock-shortcut-button {
-  display: inline-flex; align-items: center; gap: 6px; border: 1px solid #454c46;
-  border-radius: 6px; background: #2b302c; color: #cbd2c9; padding: 7px 10px;
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid #56491f;
+  border-radius: 6px; background: #18150d; color: #d8cfb7; padding: 7px 10px;
   font-size: 12px; line-height: 1; transition: border-color .15s ease, background .15s ease, color .15s ease;
 }
-.dock-shortcut-button:hover { border-color: #718365; color: #f1f5ef; }
-.dock-shortcut-button.active { border-color: #8fac76; background: #42533b; color: #effbe8; box-shadow: inset 0 0 0 1px rgba(143, 172, 118, .18); }
-.dock-shortcut-icon { display:grid; place-items:center; width:19px; height:19px; border-radius:4px; background:#202421; color:#9fbd88; font-size:10px; font-weight:700; }
+.dock-shortcut-button:hover { border-color: #b79232; color: #fff4cd; }
+.dock-shortcut-button.active { border-color: #d8b86c; background: #332712; color: #fff4cd; box-shadow: inset 0 0 0 1px rgba(216, 184, 108, .18); }
+.dock-shortcut-icon { display:grid; place-items:center; width:19px; height:19px; border-radius:4px; background:#0e0d09; color:#d6b66b; font-size:10px; font-weight:700; }
 @media (max-width: 720px) {
   .dock-shortcut-bar { max-width: calc(100vw - 32px); overflow-x: auto; }
   .dock-shortcut-button { padding: 7px 8px; white-space: nowrap; }

@@ -2,7 +2,7 @@
   <div>
     <div v-for="node in nodes" :key="node.path" class="tree-node">
       <div
-        class="flex items-center gap-1 py-1 px-2 hover:bg-[#84a65b]/20 cursor-pointer group transition-colors rounded"
+        class="flex items-center gap-1 py-1 px-2 hover:bg-[#d8b86c]/20 cursor-pointer group transition-colors rounded"
         :style="{ paddingLeft: level * 16 + 8 + 'px' }"
         @click="handleClick(node)"
         @dblclick="handleDoubleClick(node)"

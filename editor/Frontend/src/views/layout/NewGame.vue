@@ -4,8 +4,8 @@
   >
     <!-- 背景装饰：径向辉光，延续 StartScreen 视觉 -->
     <div class="absolute inset-0 bg-gradient-to-b from-[#1a2a1a]/30 via-transparent to-transparent pointer-events-none"></div>
-    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#84a65b]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
-    <div class="absolute bottom-0 left-1/4 w-[400px] h-[400px] bg-[#84a65b]/[0.025] rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#d8b86c]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute bottom-0 left-1/4 w-[400px] h-[400px] bg-[#d8b86c]/[0.025] rounded-full blur-3xl pointer-events-none"></div>
 
     <!-- 主体三段式 -->
     <div class="relative z-10 flex-1 flex flex-col px-8 py-6 overflow-hidden">
@@ -16,8 +16,8 @@
           v-for="(hint, i) in floatingHints"
           :key="hint.text"
           class="hint-chip absolute px-4 py-2 rounded-full text-sm whitespace-nowrap
-                 bg-[#84a65b]/[0.06] border border-[#84a65b]/25 text-[#b9d39a]
-                 backdrop-blur-sm hover:bg-[#84a65b]/20 hover:border-[#84a65b]/60 hover:text-white
+                 bg-[#d8b86c]/[0.06] border border-[#d8b86c]/25 text-[#b9d39a]
+                 backdrop-blur-sm hover:bg-[#d8b86c]/20 hover:border-[#d8b86c]/60 hover:text-white
                  transition-colors duration-300 cursor-pointer"
           :style="{
             top: hint.top,
@@ -35,7 +35,7 @@
       <div class="flex-1 flex flex-col items-center justify-center min-h-0">
         <h1 class="text-3xl font-light tracking-wide mb-2 text-center">
           你想创造一个怎样的
-          <span class="text-[#84a65b] font-medium">世界</span>？
+          <span class="text-[#d8b86c] font-medium">世界</span>？
         </h1>
         <p class="text-sm text-gray-500 mb-7 text-center">用一句话描述它，AI 会替你把它构建出来</p>
 
@@ -45,7 +45,7 @@
             v-model="worldPrompt"
             rows="5"
             class="w-full bg-[#161616] border border-[#333] rounded-xl p-5 text-lg leading-relaxed
-                   focus:border-[#84a65b] focus:shadow-[0_0_40px_rgba(132,166,91,0.12)]
+                   focus:border-[#d8b86c] focus:shadow-[0_0_40px_rgba(216,184,108,0.12)]
                    outline-none transition-all resize-none placeholder:text-gray-600"
             placeholder="例如：一座漂浮在云海之上的赛博朋克城市，永远是雨夜，霓虹倒映在湿漉漉的街道……"
             @keydown.ctrl.enter="handleCreate"
@@ -62,7 +62,7 @@
             :key="m.id"
             class="px-8 py-2.5 rounded-lg text-base font-medium transition-all duration-300"
             :class="mode === m.id
-              ? 'bg-[#84a65b] text-white shadow-lg'
+              ? 'bg-[#d8b86c] text-white shadow-lg'
               : 'text-gray-400 hover:text-white'"
             @click="mode = m.id"
           >
@@ -82,7 +82,7 @@
 
           <button
             :disabled="creating"
-            class="px-14 py-3 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
+            class="px-14 py-3 bg-[#d8b86c] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                    rounded-lg font-bold text-base transition-all shadow-lg
                    inline-flex items-center gap-2"
             @click="handleCreate"
@@ -195,7 +195,7 @@ const handleCreate = async () => {
 .hint-chip {
   animation: floatDrift var(--dur, 8s) ease-in-out infinite;
   animation-delay: var(--delay, 0s);
-  box-shadow: 0 0 18px rgba(132, 166, 91, 0.08);
+  box-shadow: 0 0 18px rgba(216, 184, 108, 0.08);
 }
 
 ::-webkit-scrollbar {
@@ -209,6 +209,6 @@ const handleCreate = async () => {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

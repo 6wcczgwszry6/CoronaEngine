@@ -5,12 +5,12 @@
     <DockTitleBar
       v-if="!isDocked"
       title="项目设置"
-      extraClass="bg-[#84A65B]"
+      extraClass="bg-[#D8B86C]"
       routePath="/ProjectSettings"
       @close="closeFloat"
     />
 
-    <div v-if="loading" class="flex-1 flex items-center justify-center text-[#84a65b] text-sm">
+    <div v-if="loading" class="flex-1 flex items-center justify-center text-[#d8b86c] text-sm">
       加载中...
     </div>
 
@@ -25,7 +25,7 @@
         <input
           v-model="form.name"
           type="text"
-          class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#84a65b] outline-none"
+          class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#d8b86c] outline-none"
           placeholder="项目名称"
         />
       </div>
@@ -35,7 +35,7 @@
         <label class="text-gray-400">项目模式</label>
         <select
           v-model="form.mode"
-          class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#84a65b] outline-none"
+          class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#d8b86c] outline-none"
         >
           <option value="3d">3D</option>
           <option value="2d">2D</option>
@@ -49,11 +49,11 @@
           <input
             v-model="form.entrance_scene"
             type="text"
-            class="flex-1 bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#84a65b] outline-none"
+            class="flex-1 bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#d8b86c] outline-none"
             placeholder="Scene/main.scene"
           />
           <button
-            class="px-3 py-1.5 bg-[#84a65b] hover:bg-[#6f8d4b] rounded text-white"
+            class="px-3 py-1.5 bg-[#d8b86c] hover:bg-[#6f8d4b] rounded text-white"
             @click="handleBrowseScene"
           >
             浏览...
@@ -67,7 +67,7 @@
         <input
           v-model="form.core_version"
           type="text"
-          class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#84a65b] outline-none"
+          class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#d8b86c] outline-none"
           placeholder="1.0.0"
         />
       </div>
@@ -85,7 +85,7 @@
       </div>
 
       <!-- 提示信息 -->
-      <div v-if="statusMsg" :class="['text-xs', statusOk ? 'text-[#84a65b]' : 'text-red-400']">
+      <div v-if="statusMsg" :class="['text-xs', statusOk ? 'text-[#d8b86c]' : 'text-red-400']">
         {{ statusMsg }}
       </div>
     </div>
@@ -103,7 +103,7 @@
         重置
       </button>
       <button
-        class="px-4 py-1.5 bg-[#84a65b] hover:bg-[#6f8d4b] rounded text-xs text-white disabled:opacity-50"
+        class="px-4 py-1.5 bg-[#d8b86c] hover:bg-[#6f8d4b] rounded text-xs text-white disabled:opacity-50"
         :disabled="saving"
         @click="handleSave"
       >
@@ -215,6 +215,6 @@ onMounted(loadSettings);
   border-radius: 3px;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

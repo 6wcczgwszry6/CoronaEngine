@@ -857,8 +857,8 @@ onUnmounted(() => {
 
 .locale-option.active {
   color: #f4f7ef;
-  background: rgba(132, 166, 91, 0.32);
-  box-shadow: inset 0 0 0 1px rgba(132, 166, 91, 0.35);
+  background: rgba(216, 184, 108, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(216, 184, 108, 0.35);
 }
 
 .button-grid {

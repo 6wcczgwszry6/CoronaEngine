@@ -2,6 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --ce-gold-primary: #d8b86c;
+  --ce-gold-bright: #e5c77f;
+  --ce-gold-muted: #8c6f36;
+  --ce-gold-border: rgba(216, 184, 108, 0.42);
+  --ce-black-0: #080806;
+  --ce-black-1: #11100d;
+  --ce-black-2: #191711;
+  --ce-black-3: #242016;
+  --ce-text-primary: #f2ead5;
+  --ce-text-secondary: #b9ad8f;
+}
+
 html,
 body,
 #app {
@@ -33,6 +46,17 @@ input,
 select,
 textarea {
   font: inherit;
+}
+
+input[type='checkbox'],
+input[type='radio'],
+input[type='range'] {
+  accent-color: var(--ce-gold-primary);
+}
+
+::selection {
+  background: rgba(216, 184, 108, 0.32);
+  color: var(--ce-text-primary);
 }
 
 .i18n-nowrap-safe {

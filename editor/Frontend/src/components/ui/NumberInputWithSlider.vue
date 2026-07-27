@@ -7,13 +7,13 @@
         type="text"
         :value="displayValue"
         :step="step"
-        class="flex-1 min-w-0 bg-[#1a1a1a] text-[#e0e0e0] text-[10px] rounded px-2 py-0.5 outline-none border border-[#3c3c3c] focus:border-[#84a65b]"
+        class="flex-1 min-w-0 bg-[#1a1a1a] text-[#e0e0e0] text-[10px] rounded px-2 py-0.5 outline-none border border-[#3c3c3c] focus:border-[#d8b86c]"
         :style="{ textAlign: 'right' }"
         @input="handleNumberInput"
         @blur="handleBlur"
         @keydown="handleKeydown"
       />
-      <span v-if="!compact" class="number-input-value text-[#84a65b] text-[9px] min-w-[35px] text-right font-mono">
+      <span v-if="!compact" class="number-input-value text-[#d8b86c] text-[9px] min-w-[35px] text-right font-mono">
         {{ formatValue }}
       </span>
     </div>

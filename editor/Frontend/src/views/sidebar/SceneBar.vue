@@ -3,7 +3,7 @@
     <DockTitleBar
       v-if="!isDocked"
       title="场景管理"
-      extraClass="bg-[#84A65B] rounded-t-md"
+      extraClass="bg-[#D8B86C] rounded-t-md"
       routePath="/SceneBar"
       @close="CloseFloat"
     />
@@ -12,10 +12,10 @@
     <div class="flex flex-col flex-1 min-h-0">
       <div class="flex items-center gap-2 p-2 bg-[#1a1a1a]/50 border-b border-[#333]">
         <div class="text-[10px] text-gray-400 truncate flex-1">
-          <span class="text-[#84a65b] font-bold">{{ currentSceneName }}</span>
+          <span class="text-[#d8b86c] font-bold">{{ currentSceneName }}</span>
           <span
             v-if="visionModeLabel"
-            class="ml-2 px-1.5 py-0.5 rounded bg-[#264f78]/70 text-[#9cdcfe] border border-[#3c6f99]/60"
+            class="ml-2 px-1.5 py-0.5 rounded bg-[#4b391c]/70 text-[#e5c77f] border border-[#665025]/60"
             :title="visionStatusTitle"
             data-testid="scene-vision-status"
           >
@@ -112,7 +112,7 @@
             v-model="searchInput"
             type="text"
             placeholder="🔍 搜索资源(名称/中文/拼音,支持模糊)"
-            class="w-full pl-2 pr-7 py-1 text-xs bg-[#1e1e1e] text-[#e0e0e0] border border-[#3a3a3a] rounded focus:border-[#84a65b] focus:outline-none"
+            class="w-full pl-2 pr-7 py-1 text-xs bg-[#1e1e1e] text-[#e0e0e0] border border-[#3a3a3a] rounded focus:border-[#d8b86c] focus:outline-none"
             data-testid="resource-search-input"
             @input="onSearchInput"
             @keydown.enter="onSearchEnter"
@@ -128,7 +128,7 @@
           </button>
           <span
             v-if="searchLoading"
-            class="absolute right-1 top-1/2 -translate-y-1/2 text-[#84a65b] text-[10px] animate-pulse"
+            class="absolute right-1 top-1/2 -translate-y-1/2 text-[#d8b86c] text-[10px] animate-pulse"
           >
             ⌛
           </span>
@@ -177,9 +177,9 @@
         </div>
         <!-- 命中计数 -->
         <div v-else class="px-2 py-1 text-[10px] text-[#909090] border-b border-[#1a1a1a]/30">
-          <span v-if="searchIndexing" class="text-[#84a65b]">正在准备资源索引...</span>
+          <span v-if="searchIndexing" class="text-[#d8b86c]">正在准备资源索引...</span>
           <template v-else>
-            找到 <span class="text-[#84a65b] font-bold">{{ searchResults.length }}</span> 项
+            找到 <span class="text-[#d8b86c] font-bold">{{ searchResults.length }}</span> 项
             <span v-if="searchLastQuery" class="ml-2">query=“{{ searchLastQuery }}”</span>
             <span v-if="searchElapsedMs" class="ml-2 text-[#666]">{{ searchElapsedMs }}ms</span>
           </template>
@@ -188,8 +188,8 @@
         <div
           v-for="item in searchResults"
           :key="item.path"
-          class="group flex items-center px-2 py-1 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#84a65b] text-xs"
-          :class="{ 'bg-[#264f78]/60': selectedItem === 'search:' + item.path }"
+          class="group flex items-center px-2 py-1 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c] text-xs"
+          :class="{ 'bg-[#4b391c]/60': selectedItem === 'search:' + item.path }"
           data-testid="resource-search-item"
           @click="selectedItem = 'search:' + item.path"
           @dblclick="OnLocateSearchItem(item)"
@@ -205,13 +205,13 @@
           </span>
           <span
             v-if="item.score != null"
-            class="text-[10px] text-[#84a65b] mr-1"
+            class="text-[10px] text-[#d8b86c] mr-1"
             :title="'相似度'"
           >
             {{ Math.round(item.score * 100) }}%
           </span>
           <button
-            class="w-5 h-5 flex items-center justify-center text-[#666] hover:text-[#84a65b] rounded opacity-0 group-hover:opacity-100"
+            class="w-5 h-5 flex items-center justify-center text-[#666] hover:text-[#d8b86c] rounded opacity-0 group-hover:opacity-100"
             title="定位到资源"
             @click.stop="OnLocateSearchItem(item)"
           >
@@ -343,7 +343,7 @@
         <button
           v-if="visionAvailable"
           class="p-1.5 hover:bg-[#545454] rounded flex items-center gap-0.5"
-          :class="activeRenderBackend === 'vision' ? 'text-[#34d399]' : 'text-[#e0e0e0]'"
+          :class="activeRenderBackend === 'vision' ? 'text-[#d8b86c]' : 'text-[#e0e0e0]'"
           :title="activeRenderBackend === 'vision' ? '当前: Vision (路径追踪)，点击切换到 Native' : '当前: Native (光栅化)，点击切换到 Vision'"
           @click.stop="ToggleRenderBackend"
         >
@@ -375,14 +375,14 @@
             >
               <path d="M10 6l6 6-6 6z" />
             </svg>
-            <svg class="w-3.5 h-3.5 text-[#90caf9] mr-1" fill="currentColor" viewBox="0 0 24 24">
+            <svg class="w-3.5 h-3.5 text-[#d8b86c] mr-1" fill="currentColor" viewBox="0 0 24 24">
               <path
                 d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
               />
             </svg>
             <span class="text-xs text-[#e0e0e0] font-medium">Cameras</span>
             <button
-              class="ml-auto mr-2 text-sm leading-none text-[#90caf9] hover:text-white"
+              class="ml-auto mr-2 text-sm leading-none text-[#d8b86c] hover:text-white"
               title="Create camera view"
               aria-label="Create camera view"
               @click.stop="ImportCamera"
@@ -393,14 +393,14 @@
             <div v-for="cam in sceneCameras" :key="'cam-' + (cam.camera_id || cam.name)">
               <!-- Camera 行 -->
               <div
-                class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#90caf9]"
-                :class="{ 'bg-[#264f78]/60': selectedItem === 'cam:' + cam.name }"
+                class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c]"
+                :class="{ 'bg-[#4b391c]/60': selectedItem === 'cam:' + cam.name }"
                 @mouseenter="RefreshCameraListOnHover"
                 @click="SelectCamera(cam)"
                 @dblclick="isCameraDeletable(cam) && OpenCameraView(cam)"
               >
                 <span class="w-5 flex-shrink-0">
-                  <svg class="w-4 h-4 text-[#90caf9]" fill="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-[#d8b86c]" fill="currentColor" viewBox="0 0 24 24">
                     <path
                       d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
                     />
@@ -452,8 +452,8 @@
             <div
               v-for="scene in sceneImages"
               :key="scene.name"
-              class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#84a65b]"
-              :class="{ 'bg-[#264f78]/60': selectedItem === scene.name }"
+              class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c]"
+              :class="{ 'bg-[#4b391c]/60': selectedItem === scene.name }"
               @click="onActorRowClick(scene, $event)"
               @dblclick="onActorRowDoubleClick(scene, $event)"
             >
@@ -467,7 +467,7 @@
                   </svg>
                 </template>
                 <template v-else-if="scene.type === 'camera'">
-                  <svg class="w-4 h-4 text-[#90caf9]" fill="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-[#d8b86c]" fill="currentColor" viewBox="0 0 24 24">
                     <path
                       d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
                     />
@@ -501,7 +501,7 @@
               </span>
               <span
                 v-if="scene.vision_proxy"
-                class="text-[10px] text-[#9cdcfe] mr-1 hidden group-hover:inline"
+                class="text-[10px] text-[#e5c77f] mr-1 hidden group-hover:inline"
                 :title="scene.vision_binding?.shape_guid || 'Vision proxy actor'"
                 data-testid="actor-vision-proxy"
               >
@@ -1105,12 +1105,12 @@ const typeIcon = (type) => ({
 })[type] || '📄';
 
 const typeColorClass = (type) => ({
-  model: 'text-[#9cdcfe]',
+  model: 'text-[#e5c77f]',
   actor: 'text-[#ce9178]',
   scene: 'text-[#c586c0]',
   multimedia: 'text-[#dcdcaa]',
-  terrain: 'text-[#4ec9b0]',
-  script: 'text-[#b5cea8]',
+  terrain: 'text-[#c9a958]',
+  script: 'text-[#c9bea0]',
   other: 'text-[#808080]',
 })[type] || 'text-[#808080]';
 
@@ -2251,11 +2251,11 @@ onUnmounted(() => {
   gap: 8px;
   padding: 9px 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.34);
-  background: rgba(37, 41, 37, 0.58);
+  background: rgba(36, 32, 22, 0.68);
 }
 
 .scene-settings-title {
-  color: #c9d8c2;
+  color: #e9dfc5;
   font-size: 12px;
   font-weight: 700;
 }
@@ -2270,7 +2270,7 @@ onUnmounted(() => {
 
 .scene-setting-label,
 .scene-setting-help {
-  color: #aeb7aa;
+  color: #b9ad8f;
   font-size: 11px;
 }
 
@@ -2296,16 +2296,16 @@ onUnmounted(() => {
   grid-template-columns: 12px minmax(0, 1fr);
   align-items: center;
   gap: 3px;
-  color: #929d8f;
+  color: #9d9278;
   font-size: 9px;
 }
 
 .scene-direction-inputs input {
   width: 100%;
   min-width: 0;
-  border: 1px solid #485049;
+  border: 1px solid #55431f;
   border-radius: 4px;
-  background: #191c1a;
+  background: #0f0e0a;
   color: #e5e7eb;
   padding: 4px 5px;
   font-size: 10px;
@@ -2313,25 +2313,25 @@ onUnmounted(() => {
 }
 
 .scene-direction-inputs input:focus {
-  border-color: #83a36b;
+  border-color: #d8b86c;
 }
 
 .scene-preview-button {
   flex: 0 0 auto;
   min-width: 72px;
   padding: 4px 8px;
-  border: 1px solid rgba(132, 166, 91, 0.65);
+  border: 1px solid rgba(216, 184, 108, 0.65);
   border-radius: 5px;
-  background: rgba(73, 96, 49, 0.72);
-  color: #e8f4dc;
+  background: rgba(75, 57, 28, 0.82);
+  color: #fff3c8;
   font-size: 10px;
   line-height: 1.2;
   transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
 }
 
 .scene-preview-button:hover:not(:disabled) {
-  background: rgba(105, 137, 71, 0.9);
-  border-color: #9bc46a;
+  background: rgba(112, 84, 35, 0.92);
+  border-color: #e5c77f;
 }
 
 .scene-preview-button.running {
@@ -2350,7 +2350,7 @@ onUnmounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  color: #b9d79d;
+  color: #c9bea0;
   font-size: 10px;
 }
 
@@ -2359,7 +2359,7 @@ onUnmounted(() => {
 }
 
 .scene-tools-panel {
-  background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
+  background: linear-gradient(180deg, rgba(33, 29, 18, 0.66), rgba(17, 16, 13, 0.58));
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
 }
@@ -2376,8 +2376,8 @@ onUnmounted(() => {
   padding: 8px 10px;
   border-bottom: 1px solid rgba(0, 0, 0, 0.34);
   background:
-    linear-gradient(180deg, rgba(31, 35, 31, 0.58), rgba(24, 27, 24, 0.52)),
-    rgba(27, 31, 27, 0.5);
+    linear-gradient(180deg, rgba(36, 32, 22, 0.64), rgba(21, 19, 13, 0.62)),
+    rgba(17, 16, 13, 0.62);
 }
 
 .viewport-control-group {
@@ -2395,7 +2395,7 @@ onUnmounted(() => {
   padding: 0 8px;
   border: 1px solid transparent;
   border-radius: 4px;
-  color: #b9c5b2;
+  color: #b9ad8f;
   background: transparent;
   font-size: 11px;
   font-weight: 600;
@@ -2414,8 +2414,8 @@ onUnmounted(() => {
 
 .viewport-mode-button.active {
   color: #ffffff;
-  border-color: rgba(138, 166, 106, 0.5);
-  background: rgba(138, 166, 106, 0.24);
+  border-color: rgba(216, 184, 108, 0.5);
+  background: rgba(216, 184, 108, 0.24);
 }
 
 .viewport-mode-button:active {
@@ -2423,7 +2423,7 @@ onUnmounted(() => {
 }
 
 .viewport-mode-button:focus-visible {
-  outline: 2px solid rgba(138, 166, 106, 0.72);
+  outline: 2px solid rgba(216, 184, 108, 0.72);
   outline-offset: 1px;
 }
 
@@ -2433,19 +2433,19 @@ onUnmounted(() => {
   grid-template-columns: auto minmax(72px, 1fr) 34px;
   align-items: center;
   gap: 8px;
-  color: #aeb9aa;
+  color: #b9ad8f;
   font-size: 11px;
 }
 
 .viewport-speed-control input[type='range'] {
   width: 100%;
   height: 3px;
-  accent-color: #8aa66a;
+  accent-color: #d8b86c;
   cursor: pointer;
 }
 
 .viewport-speed-control strong {
-  color: #dfe8da;
+  color: #f2ead5;
   font-variant-numeric: tabular-nums;
   font-size: 11px;
   font-weight: 600;

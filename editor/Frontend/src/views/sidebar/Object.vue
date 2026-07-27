@@ -3,7 +3,7 @@
     <DockTitleBar
       v-if="!isDocked"
       title="对象"
-      extraClass="bg-[#84A65B] rounded-t-md text-sm"
+      extraClass="bg-[#D8B86C] rounded-t-md text-sm"
       routePath="/Object"
       @close="closeFloat"
     />
@@ -49,21 +49,31 @@
         </div>
       </section>
 
-      <section class="property-section" data-assistant-title="对象变换" data-assistant-description="修改模型在场景中的位置、旋转和大小。">
-        <div class="section-title">变换</div>
-        <div v-for="group in transformGroups" :key="group.key" class="vector-group">
-          <span>{{ group.label }}</span>
-          <label v-for="axis in axes" :key="axis" :class="`axis-${axis}`">
-            <b>{{ axis.toUpperCase() }}</b>
-            <input
-              v-model.number="actor.transform[group.key][axis]"
-              type="number"
-              :step="group.step"
-              :data-assistant-title="`${group.label} ${axis.toUpperCase()}`"
-              @input="scheduleTransform(group.operation)"
-              @change="applyTransform(group.operation)"
-            />
-          </label>
+      <section class="property-section property-section-collapsible" data-assistant-title="对象变换" data-assistant-description="修改模型在场景中的位置、旋转和大小。">
+        <button
+          type="button"
+          class="section-toggle"
+          :aria-expanded="!collapsedSections.transform"
+          @click="togglePropertySection('transform')"
+        >
+          <span>变换</span>
+          <span class="section-chevron" :class="{ expanded: !collapsedSections.transform }">&#8964;</span>
+        </button>
+        <div v-show="!collapsedSections.transform" class="section-collapsible-body">
+          <div v-for="group in transformGroups" :key="group.key" class="vector-group">
+            <span>{{ group.label }}</span>
+            <label v-for="axis in axes" :key="axis" :class="`axis-${axis}`">
+              <b>{{ axis.toUpperCase() }}</b>
+              <input
+                v-model.number="actor.transform[group.key][axis]"
+                type="number"
+                :step="group.step"
+                :data-assistant-title="`${group.label} ${axis.toUpperCase()}`"
+                @input="scheduleTransform(group.operation)"
+                @change="applyTransform(group.operation)"
+              />
+            </label>
+          </div>
         </div>
       </section>
 
@@ -104,25 +114,37 @@
         </div>
       </section>
 
-      <section class="property-section" data-assistant-title="物理设置" data-assistant-description="控制模型是否参与物理模拟，以及质量、弹性、阻尼和轴向锁定。">
-        <div class="section-title section-title-row">
+      <section class="property-section property-section-collapsible" data-assistant-title="物理设置" data-assistant-description="控制模型是否参与物理模拟，以及质量、弹性、阻尼和轴向锁定。">
+        <button
+          type="button"
+          class="section-toggle"
+          :aria-expanded="!collapsedSections.physics"
+          @click="togglePropertySection('physics')"
+        >
           <span>物理</span>
-          <label class="switch-label"><input v-model="actor.mechanics.physicsEnabled" type="checkbox" @change="updateMechanic('SetPhysicsEnabled', actor.mechanics.physicsEnabled)" />启用</label>
-        </div>
-        <div class="physics-grid" :class="{ disabled: !actor.mechanics.physicsEnabled }">
-          <label>质量<input v-model.number="actor.mechanics.mass" type="number" min="0" step="0.1" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetMass', actor.mechanics.mass)" /></label>
-          <label>弹性<input v-model.number="actor.mechanics.restitution" type="number" min="0" max="1" step="0.05" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetRestitution', actor.mechanics.restitution)" /></label>
-          <label>阻尼<input v-model.number="actor.mechanics.damping" type="number" min="0" max="1" step="0.01" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetDamping', actor.mechanics.damping)" /></label>
-        </div>
-        <div class="lock-row">
-          <span>锁定移动</span>
-          <label v-for="(axis, index) in axes" :key="axis"><input v-model="actor.mechanics.linearLock[index]" type="checkbox" @change="updateLocks('SetLinearLock', actor.mechanics.linearLock)" />{{ axis.toUpperCase() }}</label>
-        </div>
-        <div class="lock-row">
-          <span>锁定旋转</span>
-          <label v-for="(axis, index) in axes" :key="axis"><input v-model="actor.mechanics.angularLock[index]" type="checkbox" @change="updateLocks('SetAngularLock', actor.mechanics.angularLock)" />{{ axis.toUpperCase() }}</label>
+          <span class="section-chevron" :class="{ expanded: !collapsedSections.physics }">&#8964;</span>
+        </button>
+        <div v-show="!collapsedSections.physics" class="section-collapsible-body">
+          <div class="physics-enable-row">
+            <span>物理模拟</span>
+            <label class="switch-label"><input v-model="actor.mechanics.physicsEnabled" type="checkbox" @change="updateMechanic('SetPhysicsEnabled', actor.mechanics.physicsEnabled)" />启用</label>
+          </div>
+          <div class="physics-grid" :class="{ disabled: !actor.mechanics.physicsEnabled }">
+            <label>质量<input v-model.number="actor.mechanics.mass" type="number" min="0" step="0.1" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetMass', actor.mechanics.mass)" /></label>
+            <label>弹性<input v-model.number="actor.mechanics.restitution" type="number" min="0" max="1" step="0.05" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetRestitution', actor.mechanics.restitution)" /></label>
+            <label>阻尼<input v-model.number="actor.mechanics.damping" type="number" min="0" max="1" step="0.01" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetDamping', actor.mechanics.damping)" /></label>
+          </div>
+          <div class="lock-row">
+            <span>锁定移动</span>
+            <label v-for="(axis, index) in axes" :key="axis"><input v-model="actor.mechanics.linearLock[index]" type="checkbox" @change="updateLocks('SetLinearLock', actor.mechanics.linearLock)" />{{ axis.toUpperCase() }}</label>
+          </div>
+          <div class="lock-row">
+            <span>锁定旋转</span>
+            <label v-for="(axis, index) in axes" :key="axis"><input v-model="actor.mechanics.angularLock[index]" type="checkbox" @change="updateLocks('SetAngularLock', actor.mechanics.angularLock)" />{{ axis.toUpperCase() }}</label>
+          </div>
         </div>
       </section>
+
     </div>
   </div>
 </template>
@@ -140,6 +162,16 @@ import { cabbageContextService } from '@/services/cabbageAssistantContextService
 const { closePanel, isDocked } = useDockPanel();
 const { error: logError } = useErrorHandler('Object');
 const axes = ['x', 'y', 'z'];
+const collapsedSections = reactive({
+  transform: true,
+  physics: true,
+});
+
+function togglePropertySection(section) {
+  if (Object.prototype.hasOwnProperty.call(collapsedSections, section)) {
+    collapsedSections[section] = !collapsedSections[section];
+  }
+}
 const collisionOptions = [
   { value: 'none', label: '无' },
   { value: 'box', label: '包围盒' },
@@ -577,47 +609,55 @@ onUnmounted(() => {
   text-align: center;
   font-size: 12px;
   line-height: 1.65;
-  background: rgba(40, 40, 40, 0.24);
+  background: rgba(8, 8, 6, 0.42);
 }
-.object-empty strong { color: #e5e7eb; font-size: 14px; }
-.object-scroll { min-height: 0; flex: 1; overflow-y: auto; padding: 10px; background: rgba(40, 40, 40, 0.24); }
-.object-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; padding:10px 11px; border:1px solid #3a3a3a; border-radius:7px; background:#282828; }
-.object-heading h2 { margin:2px 0 0; color:#f3f4f6; font-size:15px; overflow-wrap:anywhere; }
-.object-type { color:#9fbd88; font-size:10px; text-transform:uppercase; }
-.save-button,.inline-button { border:1px solid #4a4a4a; border-radius:5px; background:#343434; color:#e5e7eb; padding:5px 9px; font-size:11px; transition:background .15s ease,border-color .15s ease; }
-.save-button:hover:not(:disabled),.inline-button:hover:not(:disabled) { border-color:#84A65B; background:#3d4938; color:#fff; }
-.save-button { border-color:#789663; background:#6f8e55; color:#fff; }
-.save-button:hover:not(:disabled) { background:#7c9d60; }
+.object-empty strong { color: #f2ead5; font-size: 14px; }
+.object-scroll { min-height: 0; flex: 1; overflow-y: auto; padding: 10px; background: rgba(8, 8, 6, 0.42); scrollbar-color:#8c6f36 #11100d; }
+.object-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; padding:10px 11px; border:1px solid rgba(216,184,108,.28); border-radius:7px; background:#15130d; }
+.object-heading h2 { margin:2px 0 0; color:#f2ead5; font-size:15px; overflow-wrap:anywhere; }
+.object-type { color:#d6b66b; font-size:10px; text-transform:uppercase; }
+.save-button,.inline-button { border:1px solid rgba(216,184,108,.28); border-radius:5px; background:#211d12; color:#e9dfc5; padding:5px 9px; font-size:11px; transition:background .15s ease,border-color .15s ease; }
+.save-button:hover:not(:disabled),.inline-button:hover:not(:disabled) { border-color:#D8B86C; background:#2b230f; color:#fff7dc; }
+.save-button { border-color:#b8924a; background:#4b391c; color:#fff7dc; }
+.save-button:hover:not(:disabled) { background:#8c6f36; }
 .save-button:disabled,.inline-button:disabled { opacity:.45; cursor:not-allowed; }
-.property-section { margin-bottom:8px; padding:10px; border:1px solid #3a3a3a; border-radius:7px; background:#282828; }
-.section-title { margin-bottom:8px; color:#d1d5db; font-size:12px; font-weight:700; }
+.property-section { margin-bottom:8px; padding:10px; border:1px solid rgba(216,184,108,.24); border-radius:7px; background:#15130d; }
+.section-title { margin-bottom:8px; color:#f2ead5; font-size:12px; font-weight:700; }
 .section-title-row { display:flex; align-items:center; justify-content:space-between; }
+.property-section-collapsible { padding:0; overflow:hidden; }
+.section-toggle { width:100%; min-height:38px; display:flex; align-items:center; justify-content:space-between; padding:9px 10px; border:0; background:#191711; color:#f2ead5; font-size:12px; font-weight:700; text-align:left; cursor:pointer; transition:background .15s ease,color .15s ease; }
+.section-toggle:hover { background:#242016; color:#e5c77f; }
+.section-toggle:focus-visible { outline:1px solid #d8b86c; outline-offset:-2px; }
+.section-chevron { color:#b9ad8f; transform:rotate(0deg); transition:transform .15s ease,color .15s ease; }
+.section-chevron.expanded { color:#e5c77f; transform:rotate(180deg); }
+.section-collapsible-body { padding:0 10px 10px; border-top:1px solid rgba(216,184,108,.18); background:#11100d; }
+.physics-enable-row { display:flex; align-items:center; justify-content:space-between; padding:9px 0 7px; color:#b9ad8f; font-size:11px; }
 .property-row { display:grid; grid-template-columns:72px minmax(0,1fr) auto; align-items:center; gap:7px; margin-top:7px; }
 .property-row-wide { grid-template-columns:72px minmax(0,1fr) auto; }
-.property-row>label { color:#aeb4ad; font-size:11px; }
+.property-row>label { color:#b9ad8f; font-size:11px; }
 .collision-options { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:5px; }
-.collision-options label { display:flex; align-items:center; justify-content:center; min-width:0; padding:5px 4px; border:1px solid #444; border-radius:4px; background:#1f1f1f; color:#aeb4ad; font-size:10px; cursor:pointer; transition:border-color .15s,background .15s,color .15s; }
-.collision-options label:hover { border-color:#666; color:#f3f4f6; }
-.collision-options label.active { border-color:#84A65B; background:#526846; color:#fff; }
+.collision-options label { display:flex; align-items:center; justify-content:center; min-width:0; padding:5px 4px; border:1px solid rgba(216,184,108,.2); border-radius:4px; background:#0f0e0a; color:#b9ad8f; font-size:10px; cursor:pointer; transition:border-color .15s,background .15s,color .15s; }
+.collision-options label:hover { border-color:#8c6f36; color:#f2ead5; }
+.collision-options label.active { border-color:#D8B86C; background:#4b391c; color:#fff; }
 .collision-options input { position:absolute; width:1px; height:1px; opacity:0; pointer-events:none; }
-input[type='text'],input[type='number'],select { min-width:0; width:100%; border:1px solid #444; border-radius:4px; background:#1f1f1f; color:#e5e7eb; padding:5px 6px; font-size:11px; outline:none; }
-input:focus,select:focus { border-color:#84A65B; box-shadow:0 0 0 1px rgba(132,166,91,.18); }
+input[type='text'],input[type='number'],select { min-width:0; width:100%; border:1px solid rgba(216,184,108,.22); border-radius:4px; background:#0f0e0a; color:#f2ead5; padding:5px 6px; font-size:11px; outline:none; }
+input:focus,select:focus { border-color:#D8B86C; box-shadow:0 0 0 1px rgba(216,184,108,.18); }
 .property-error { margin:5px 0 0 79px; color:#ff9e91; font-size:10px; }
-.segmented { display:flex; width:max-content; padding:2px; border:1px solid #3a3a3a; border-radius:5px; background:#1f1f1f; }
+.segmented { display:flex; width:max-content; padding:2px; border:1px solid rgba(216,184,108,.24); border-radius:5px; background:#0f0e0a; }
 .segmented button { border-radius:4px; color:#9ca3af; padding:4px 8px; font-size:10px; }
 .segmented button:hover { color:#f3f4f6; }
-.segmented button.active { background:#526846; color:#fff; }
+.segmented button.active { background:#4b391c; color:#fff; }
 .vector-group { display:grid; grid-template-columns:58px repeat(3,minmax(0,1fr)); align-items:center; gap:5px; margin-top:7px; }
-.vector-group>span { color:#aeb4ad; font-size:11px; }
+.vector-group>span { color:#b9ad8f; font-size:11px; }
 .vector-group label { display:grid; grid-template-columns:12px minmax(0,1fr); align-items:center; gap:3px; }
 .vector-group b { font-size:9px; }
 .axis-x b { color:#f28b82; }.axis-y b { color:#8ab4f8; }.axis-z b { color:#81c995; }
-.switch-label { display:flex; align-items:center; gap:5px; color:#c0c5bf; font-size:10px; }
+.switch-label { display:flex; align-items:center; gap:5px; color:#d2c6a7; font-size:10px; }
 .physics-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:6px; }
-.physics-grid label { color:#aeb4ad; font-size:10px; }
+.physics-grid label { color:#b9ad8f; font-size:10px; }
 .physics-grid input { margin-top:3px; }
 .physics-grid.disabled { opacity:.56; }
-.lock-row { display:flex; align-items:center; gap:10px; margin-top:9px; color:#adb3ac; font-size:10px; }
+.lock-row { display:flex; align-items:center; gap:10px; margin-top:9px; color:#b9ad8f; font-size:10px; }
 .lock-row>span { min-width:64px; }
 .lock-row label { display:flex; align-items:center; gap:3px; }
 </style>

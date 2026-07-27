@@ -1,10 +1,10 @@
 <template>
   <div
-    class="relative min-h-screen border-2 border-[#84a65b] bg-[#282828]/95 text-white overflow-hidden flex flex-col font-sans"
+    class="relative min-h-screen border-2 border-[#d8b86c] bg-[#282828]/95 text-white overflow-hidden flex flex-col font-sans"
   >
     <DockTitleBar
       title="Corona Project Launcher"
-      extraClass="bg-[#84A65B]"
+      extraClass="bg-[#D8B86C]"
       routePath="/ProjectLauncher"
       @close="closeFloat"
     />
@@ -12,7 +12,7 @@
     <div class="flex-1 flex overflow-hidden">
       <div class="w-72 bg-[#1e1e1e] border-r border-[#333] flex flex-col p-4">
         <div class="mb-8">
-          <h2 class="text-xl font-bold text-[#84a65b] mb-1">Corona Editor</h2>
+          <h2 class="text-xl font-bold text-[#d8b86c] mb-1">Corona Editor</h2>
           <p class="text-xs text-gray-500">版本: {{ appVersion }}</p>
         </div>
 
@@ -67,7 +67,7 @@
             <input
               v-model="projectName"
               type="text"
-              class="w-full bg-[#1a1a1a] border border-[#333] rounded p-3 focus:border-[#84a65b] outline-none transition-all"
+              class="w-full bg-[#1a1a1a] border border-[#333] rounded p-3 focus:border-[#d8b86c] outline-none transition-all"
               placeholder="请输入项目名称..."
             />
           </div>
@@ -99,7 +99,7 @@
                 :class="[
                   'p-4 border rounded-lg cursor-pointer transition-all flex flex-col items-center gap-2',
                   selectedMode === mode.id
-                    ? 'border-[#84a65b] bg-[#84a65b]/10'
+                    ? 'border-[#d8b86c] bg-[#d8b86c]/10'
                     : 'border-[#333] hover:border-[#666]',
                 ]"
                 @click="selectedMode = mode.id"
@@ -120,7 +120,7 @@
           </button>
           <button
             :disabled="!projectName || !projectPath"
-            class="px-10 py-2 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-bold transition-all shadow-lg"
+            class="px-10 py-2 bg-[#d8b86c] hover:bg-[#95b86c] disabled:bg-gray-600 disabled:cursor-not-allowed rounded font-bold transition-all shadow-lg"
             @click="handleCreateProject"
           >
             创建项目
@@ -264,6 +264,6 @@ watch(selectedMode, (newMode) => {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

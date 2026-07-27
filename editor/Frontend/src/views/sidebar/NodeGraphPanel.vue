@@ -88,8 +88,8 @@ async function closeFloat() {
 .node-graph-panel {
   position: relative;
   z-index: 2147483100;
-  background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: linear-gradient(180deg, rgba(33, 29, 18, 0.72), rgba(17, 16, 13, 0.7));
+  border: 1px solid rgba(216, 184, 108, 0.18);
   border-radius: 8px;
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
 }

@@ -8,7 +8,7 @@
             v-for="mode in workspaceModes"
             :key="mode.key"
             class="rounded border px-2 py-2 text-left transition-colors"
-            :class="selectedWorkspaceMode === mode.key ? 'border-[#84A65B] bg-[#2f3b2b]' : 'border-gray-700 bg-[#2a2a2a] hover:border-gray-500'"
+            :class="selectedWorkspaceMode === mode.key ? 'border-[#D8B86C] bg-[#2b230f]' : 'border-gray-700 bg-[#2a2a2a] hover:border-gray-500'"
             @click="selectWorkspaceMode(mode.key)"
           >
             <div class="text-sm font-medium text-gray-100">{{ mode.label }}</div>
@@ -20,14 +20,14 @@
         <div v-if="selectedWorkspaceMode === 'multiplayer_multi_agent'" class="flex gap-2">
             <button
               class="flex-1 py-2 rounded text-sm"
-            :class="lobbyTab === 'create' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
+            :class="lobbyTab === 'create' ? 'bg-[#D8B86C] text-white' : 'bg-[#3a3a3a]/60'"
             @click="lobbyTab = 'create'"
           >
             创建房间
           </button>
           <button
             class="flex-1 py-2 rounded text-sm"
-            :class="lobbyTab === 'join' ? 'bg-[#84A65B] text-white' : 'bg-[#3a3a3a]/60'"
+            :class="lobbyTab === 'join' ? 'bg-[#D8B86C] text-white' : 'bg-[#3a3a3a]/60'"
             @click="lobbyTab = 'join'"
           >
             加入房间
@@ -41,7 +41,7 @@
             <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" />
           </template>
           <button
-            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+            class="w-full py-2 rounded bg-[#D8B86C] text-white text-sm disabled:opacity-50"
             @click="onCreate"
           >
             {{ createButtonText }}
@@ -56,13 +56,13 @@
           <input v-model="form.password" placeholder="密码（可选）" :class="inputCls" :disabled="isJoining" />
           <input v-model="form.nickname" placeholder="你的昵称" :class="inputCls" :disabled="isJoining" />
           <button
-            class="w-full py-2 rounded bg-[#84A65B] text-white text-sm disabled:opacity-50"
+            class="w-full py-2 rounded bg-[#D8B86C] text-white text-sm disabled:opacity-50"
             :disabled="isJoining"
             @click="onJoin"
           >
             {{ isJoining ? joinStatusText : '加入' }}
           </button>
-          <div v-if="isJoining" class="text-[#B8D58D] text-xs">{{ joinStatusText }}</div>
+          <div v-if="isJoining" class="text-[#d8b86c] text-xs">{{ joinStatusText }}</div>
         </div>
 
         <div v-if="s.error" class="text-red-400 text-xs">{{ errorText }}</div>
@@ -81,7 +81,7 @@
             </button>
             <button
               v-if="hasMoreHistoryRooms"
-              class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-[#B8D58D] hover:bg-[#46553d]"
+              class="px-2 py-1 rounded bg-[#3a3a3a] text-xs text-[#d8b86c] hover:bg-[#4b391c]"
               @click="showAllHistory = true"
             >
               更多
@@ -99,8 +99,8 @@
           <button
             v-for="room in visibleHistoryRooms"
             :key="room.room_id"
-            class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
-            :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
+            class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#D8B86C] transition-colors"
+            :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#D8B86C]' : ''"
             @click="loadHistoryRoom(room)"
             @dblclick="continueHistoryFromList(room)"
           >
@@ -115,7 +115,7 @@
         </div>
         <button
           v-if="s.selectedHistoryRoom"
-          class="w-full py-1.5 rounded bg-[#3a3a3a] text-xs text-[#B8D58D] hover:bg-[#46553d]"
+          class="w-full py-1.5 rounded bg-[#3a3a3a] text-xs text-[#d8b86c] hover:bg-[#4b391c]"
           @click="continueHistoryAsSingle(s.selectedHistoryRoom)"
         >
           作为单人聊天室继续
@@ -153,8 +153,8 @@
           <button
             v-for="room in s.historyRooms"
             :key="room.room_id"
-            class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#84A65B] transition-colors"
-            :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#84A65B]' : ''"
+            class="w-full text-left px-3 py-2 rounded bg-[#2a2a2a] border border-gray-700 hover:border-[#D8B86C] transition-colors"
+            :class="s.selectedHistoryRoom?.room_id === room.room_id ? 'border-[#D8B86C]' : ''"
             @click="loadHistoryRoom(room)"
             @dblclick="continueHistoryFromList(room)"
           >
@@ -181,7 +181,7 @@
         <div v-else class="mt-2 text-sm text-red-400">{{ errorText }}</div>
         <button
           v-if="s.error"
-          class="mt-4 rounded bg-[#84A65B] px-4 py-2 text-sm text-white hover:bg-[#95B86C]"
+          class="mt-4 rounded bg-[#D8B86C] px-4 py-2 text-sm text-white hover:bg-[#e5c77f]"
           @click="ensureInWorldRoom"
         >
           重新连接
@@ -210,7 +210,7 @@
           <span
             v-if="s.mode === 'multi'"
             class="rounded-full px-2 py-1 text-[12px]"
-            :class="s.connection === 'connected' ? 'bg-[#84A65B]/20 text-[#B8D58D]' : 'bg-yellow-500/20 text-yellow-300'"
+            :class="s.connection === 'connected' ? 'bg-[#D8B86C]/20 text-[#d8b86c]' : 'bg-yellow-500/20 text-yellow-300'"
           >
             {{ roomStatusLabel }}
           </span>
@@ -231,16 +231,16 @@
 
       <div
         v-if="currentDisclosure"
-        class="px-3 py-3 border-b border-gray-700 bg-[#222722]/60 text-sm"
+        class="px-3 py-3 border-b border-gray-700 bg-[#191711]/60 text-sm"
       >
         <div class="flex items-center justify-between gap-2">
           <div class="min-w-0">
             <div class="flex items-center gap-2">
               <span
                 v-if="isWaitingDisclosure"
-                class="inline-block h-2.5 w-2.5 rounded-full bg-[#B8D58D] animate-pulse"
+                class="inline-block h-2.5 w-2.5 rounded-full bg-[#d8b86c] animate-pulse"
               ></span>
-              <span class="text-[#B8D58D] font-semibold truncate">{{ currentDisclosure.stage || '协作状态' }}</span>
+              <span class="text-[#d8b86c] font-semibold truncate">{{ currentDisclosure.stage || '协作状态' }}</span>
               <span v-if="disclosureAgeText" class="shrink-0 text-[12px] text-gray-500">{{ disclosureAgeText }}</span>
             </div>
             <div class="text-[15px] text-gray-200 leading-relaxed mt-1">{{ currentDisclosure.public_message }}</div>
@@ -258,7 +258,7 @@
         </div>
         <div class="mt-2.5 h-2 rounded bg-[#3a3a3a] overflow-hidden">
           <div
-            class="h-full bg-[#84A65B] transition-all duration-300"
+            class="h-full bg-[#D8B86C] transition-all duration-300"
             :style="{ width: `${currentDisclosure.progress}%` }"
           ></div>
         </div>
@@ -267,7 +267,7 @@
             v-for="step in waitSteps"
             :key="step.key"
             class="h-1.5 rounded-full"
-            :class="step.active ? 'bg-[#84A65B]' : (step.done ? 'bg-[#84A65B]/45' : 'bg-[#3a3a3a]')"
+            :class="step.active ? 'bg-[#D8B86C]' : (step.done ? 'bg-[#D8B86C]/45' : 'bg-[#3a3a3a]')"
             :title="step.label"
           ></div>
         </div>
@@ -278,7 +278,7 @@
           >
             <button
               v-if="isDisclosureActionSendable(action)"
-              class="px-2.5 py-1 rounded bg-[#3a3a3a] text-gray-200 hover:bg-[#84A65B]/70"
+              class="px-2.5 py-1 rounded bg-[#3a3a3a] text-gray-200 hover:bg-[#D8B86C]/70"
               @click="sendDisclosureAction(action)"
             >
               {{ disclosureActionLabel(action) }}
@@ -296,7 +296,7 @@
           class="mt-2.5 flex gap-2"
         >
           <button
-            class="px-3 py-1.5 rounded bg-[#84A65B] text-white text-sm"
+            class="px-3 py-1.5 rounded bg-[#D8B86C] text-white text-sm"
             @click="sendGmDecision(currentDisclosure.proposal_id, 'confirm')"
           >
             确认
@@ -321,8 +321,8 @@
               :class="m.self ? 'items-end' : 'items-start'"
             >
               <template v-if="m.kind === 'room_entry_guide'">
-                <div class="max-w-[88%] rounded border border-[#84A65B]/35 bg-[#222722]/65 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-300 shadow-sm">
-                  <div class="mb-1 font-medium text-[#B8D58D]">{{ m.displayFrom }}</div>
+                <div class="max-w-[88%] rounded border border-[#D8B86C]/35 bg-[#191711]/65 px-3.5 py-2.5 text-[13px] leading-relaxed text-gray-300 shadow-sm">
+                  <div class="mb-1 font-medium text-[#d8b86c]">{{ m.displayFrom }}</div>
                   <div>{{ m.displayText }}</div>
                 </div>
               </template>
@@ -330,7 +330,7 @@
                 <span class="max-w-[88%] truncate text-base leading-relaxed text-gray-400 mb-1">{{ m.targetLabel }}</span>
                 <div class="lanchat-message-bubble rounded-lg bg-[#E8E8E8]/90 px-3.5 py-2.5 text-gray-800 shadow-sm">
                   <div class="flex items-center gap-2 text-[15px] leading-relaxed">
-                    <span class="inline-block h-4 w-4 rounded-full border-2 border-gray-400 border-t-[#84A65B] animate-spin"></span>
+                    <span class="inline-block h-4 w-4 rounded-full border-2 border-gray-400 border-t-[#D8B86C] animate-spin"></span>
                     <span>{{ pendingReplyText }}</span>
                     <span class="typing-dots text-gray-500"><span>.</span><span>.</span><span>.</span></span>
                   </div>
@@ -343,7 +343,7 @@
                 <span class="max-w-[88%] truncate text-base leading-relaxed text-gray-400 mb-1">{{ m.displayFrom || m.from }}</span>
                 <div
                   class="lanchat-message-bubble px-3.5 py-2.5 rounded-lg text-base leading-relaxed"
-                  :class="m.self ? 'bg-[#84A65B] text-white' : 'bg-[#E8E8E8]/90 text-gray-800'"
+                  :class="m.self ? 'bg-[#D8B86C] text-white' : 'bg-[#E8E8E8]/90 text-gray-800'"
                 >
                   {{ m.displayText || m.text }}
                 </div>
@@ -352,7 +352,7 @@
                   class="mt-1 flex gap-1"
                 >
                   <button
-                    class="px-2 py-0.5 rounded bg-[#84A65B] text-white text-[11px]"
+                    class="px-2 py-0.5 rounded bg-[#D8B86C] text-white text-[11px]"
                     @click="sendGmDecision(gmProposalId(m), 'confirm')"
                   >
                     确认
@@ -390,7 +390,7 @@
                 ></textarea>
                 <button
                   type="button"
-                  class="absolute bottom-2 left-2 inline-flex h-6 w-6 items-center justify-center rounded bg-[#3a3a3a] text-base leading-none text-[#B8D58D] hover:bg-[#46553d] hover:text-white"
+                  class="absolute bottom-2 left-2 inline-flex h-6 w-6 items-center justify-center rounded bg-[#3a3a3a] text-base leading-none text-[#d8b86c] hover:bg-[#4b391c] hover:text-white"
                   title="指定 AI 助手"
                   @click="toggleMentionPicker"
                 >
@@ -404,7 +404,7 @@
                     v-for="(c, i) in mentionCandidates"
                     :key="`${c.name}-${i}`"
                     class="px-2 py-1.5 text-sm text-gray-200 cursor-pointer"
-                    :class="i === mentionActiveIndex ? 'bg-[#84A65B]/60 text-white' : 'hover:bg-[#84A65B]/40'"
+                    :class="i === mentionActiveIndex ? 'bg-[#D8B86C]/60 text-white' : 'hover:bg-[#D8B86C]/40'"
                     @mousedown.prevent
                     @click="pickMention(c)"
                   >
@@ -423,7 +423,7 @@
                 >
                   <input
                     type="checkbox"
-                    class="accent-[#84A65B]"
+                    class="accent-[#D8B86C]"
                     :checked="s.generationOptions.vlmEnabled"
                     @change="onVlmToggle"
                   />
@@ -432,7 +432,7 @@
               </div>
             </div>
             <button
-              class="self-stretch px-4 rounded bg-[#84A65B] text-white text-base disabled:opacity-50"
+              class="self-stretch px-4 rounded bg-[#D8B86C] text-white text-base disabled:opacity-50"
               :disabled="sendDisabled"
               @click="onSend"
             >
@@ -470,7 +470,7 @@
             <button
               v-for="bundle in roleTemplateBundles"
               :key="bundle.key"
-              class="flex-1 px-2 py-1 rounded bg-[#42543b] text-xs text-gray-100 hover:bg-[#84A65B]/80"
+              class="flex-1 px-2 py-1 rounded bg-[#4b391c] text-xs text-gray-100 hover:bg-[#D8B86C]/80"
               :title="bundle.hint"
               @click="addRoleTemplateBundle(bundle)"
             >
@@ -486,7 +486,7 @@
           ></textarea>
           <div class="flex gap-2">
             <button class="flex-1 py-1.5 rounded bg-[#3a3a3a] text-gray-200 text-sm" @click="showAddAgent = false">取消</button>
-            <button class="flex-1 py-1.5 rounded bg-[#84A65B] text-white text-sm" @click="onAddAgent">添加</button>
+            <button class="flex-1 py-1.5 rounded bg-[#D8B86C] text-white text-sm" @click="onAddAgent">添加</button>
           </div>
         </div>
       </div>
@@ -633,9 +633,9 @@ const form = reactive({
 });
 
 const inputCls =
-  'w-full px-3 py-2 rounded bg-[#2a2a2a] border border-gray-600 text-[15px] text-gray-100 outline-none focus:border-[#84A65B]';
+  'w-full px-3 py-2 rounded bg-[#2a2a2a] border border-gray-600 text-[15px] text-gray-100 outline-none focus:border-[#D8B86C]';
 const draftInputCls =
-  'lanchat-scrollbar w-full resize-none rounded border border-gray-600 bg-[#2a2a2a] px-3 py-2 text-[15px] leading-relaxed text-gray-100 outline-none focus:border-[#84A65B] disabled:opacity-60';
+  'lanchat-scrollbar w-full resize-none rounded border border-gray-600 bg-[#2a2a2a] px-3 py-2 text-[15px] leading-relaxed text-gray-100 outline-none focus:border-[#D8B86C] disabled:opacity-60';
 
 const ERROR_TEXT = {
   WRONG_PASSWORD: '密码错误',
@@ -2070,7 +2070,7 @@ watch(
 }
 
 .lanchat-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 
 .lanchat-message-bubble {
