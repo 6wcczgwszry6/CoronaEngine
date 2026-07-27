@@ -736,6 +736,33 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("request.get('module'", editor_source)
         self.assertIn("request.get('function'", editor_source)
 
+    def test_script_system_registers_python_dispatcher_before_ui_initialization(self):
+        repo_root = self._repo_root()
+        script_source = (
+            repo_root / "src" / "systems" / "script" / "script_system.cpp"
+        ).read_text(encoding="utf-8")
+        python_api_header = (
+            repo_root
+            / "src"
+            / "systems"
+            / "script"
+            / "include"
+            / "corona"
+            / "systems"
+            / "script"
+            / "python_api.h"
+        ).read_text(encoding="utf-8")
+        initialize_body = script_source[
+            script_source.index("bool ScriptSystem::initialize("):
+            script_source.index("void ScriptSystem::stop()")
+        ]
+        public_api = python_api_header[:python_api_header.index("private:")]
+
+        self.assertIn("bool initializeBackend();", public_api)
+        self.assertIn("python_api_->initializeBackend()", initialize_body)
+        self.assertNotIn("python_api_->ensureInitialized()", initialize_body)
+        self.assertNotIn("python_api_->initializeInterpreter()", initialize_body)
+
     def test_editor_api_spec_defines_real_schema_and_events(self):
         header = self._editor_api_header()
         source = self._editor_api_source()

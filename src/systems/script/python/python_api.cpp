@@ -159,6 +159,10 @@ bool PythonAPI::initializeInterpreter() {
     return initializeInterpreterLocked();
 }
 
+bool PythonAPI::initializeBackend() {
+    return ensureInitialized();
+}
+
 bool PythonAPI::ensureInitialized() {
     if (backend_initialized_.load()) {
         return true;

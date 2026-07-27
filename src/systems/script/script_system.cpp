@@ -26,8 +26,8 @@ bool ScriptSystem::initialize(Kernel::ISystemContext* ctx) {
     }
 
 #ifdef CORONA_ENABLE_PYTHON_API
-    if (!python_api_->initializeInterpreter()) {
-        CFW_LOG_ERROR("ScriptSystem: Python interpreter initialization failed");
+    if (!python_api_->initializeBackend()) {
+        CFW_LOG_ERROR("ScriptSystem: Python backend initialization failed");
         return false;
     }
 #endif

@@ -29,6 +29,7 @@ struct PythonAPI {
     void begin_shutdown();
 
     bool initializeInterpreter();
+    bool initializeBackend();
     void runPythonScript();
     static void checkPythonScriptChange();
     void checkReleaseScriptChange();
