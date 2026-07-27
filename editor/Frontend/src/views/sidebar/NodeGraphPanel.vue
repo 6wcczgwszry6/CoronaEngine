@@ -7,6 +7,7 @@
       @close="closeFloat"
     />
     <NodeGraphWorkspace
+      ref="workspaceRef"
       class="min-h-0 flex-1"
       actor-name=""
       :scene-name="sceneName"
@@ -29,6 +30,7 @@ const { closePanel, isDocked } = useDockPanel();
 // DEFAULT_SCENE_NAME into listActorTree can make the native scene router reload a
 // different scene, which resets the main viewport camera when this panel opens.
 const sceneName = ref('');
+const workspaceRef = ref(null);
 
 function applyViewportState(state = {}) {
   const nextSceneName = String(state?.sceneId || '').trim();
@@ -50,19 +52,35 @@ function requestViewportState() {
   appService.crossTabBroadcast('viewport-controls-request', { action: 'getState' }).catch(() => {});
 }
 
+async function stopNodeRunForClose() {
+  await workspaceRef.value?.stopForPanelClose?.();
+}
+function handleWindowClosing() {
+  stopNodeRunForClose().catch(() => {});
+}
+
 onMounted(() => {
   // Read the scene initialized by MainPage. Calling MainView.on_init here would reset
   // the scene and camera every time the node panel is opened.
   coronaEventBus.on('viewport-controls-state', applyViewportState);
+  window.addEventListener('pagehide', handleWindowClosing);
+  window.addEventListener('beforeunload', handleWindowClosing);
   requestViewportState();
 });
 
 onBeforeUnmount(() => {
   coronaEventBus.off('viewport-controls-state', applyViewportState);
+  window.removeEventListener('pagehide', handleWindowClosing);
+  window.removeEventListener('beforeunload', handleWindowClosing);
+  stopNodeRunForClose().catch(() => {});
 });
 
-function closeFloat() {
-  closePanel();
+async function closeFloat() {
+  try {
+    await stopNodeRunForClose();
+  } finally {
+    closePanel();
+  }
 }
 </script>
 

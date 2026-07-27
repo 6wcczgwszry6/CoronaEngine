@@ -310,8 +310,8 @@ import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
-import { registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
-import { startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { generatedNodeGraphRevision, registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
+import { reviewScopeId, startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
 import {
   cabbageContextService,
   readCabbageAssistantContext,
@@ -489,6 +489,8 @@ let isLoading = false,
   runPollTimer = null,
   gamePreviewGuardTimer = null,
   startedRunForTarget = false,
+  panelClosing = false,
+  panelCloseStopPromise = null,
   unregisterAiNodeGraphConsumer = null,
   stopNodeGraphReview = null,
   unregisterProjectNodeGraphSaveHandler = null,
@@ -1828,7 +1830,19 @@ async function handleGeneratedNodeGraph(result) {
     return { success: false, errors: ['\u5185\u90e8 AI \u7ed3\u679c\u53ea\u80fd\u5e94\u7528\u5230\u9879\u76ee\u5e38\u9a7b\u8282\u70b9\u56fe'], warnings: [] };
   }
 
+  const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
   const previous = graphSnapshot();
+  const currentProjectScopeId = reviewScopeId(scope);
+  const currentRevision = generatedNodeGraphRevision({
+    workspace: previous,
+    projectContext: generatedProjectContext(),
+  }, scope);
+  if (String(result?.projectScopeId || '') !== currentProjectScopeId) {
+    return { success: false, errors: ['AI \u7ed3\u679c\u5c5e\u4e8e\u53e6\u4e00\u4e2a\u4e16\u754c\uff0c\u5df2\u62d2\u7edd\u5e94\u7528'], warnings: [] };
+  }
+  if (String(result?.baseGraphRevision || '') !== currentRevision) {
+    return { success: false, errors: ['\u751f\u6210\u671f\u95f4\u8282\u70b9\u903b\u8f91\u5df2\u6539\u53d8\uff0c\u8fdf\u5230\u7684 AI \u7ed3\u679c\u672a\u8986\u76d6\u5f53\u524d\u7f16\u8f91'], warnings: [] };
+  }
   const storageKey = storageKeyForTarget(currentTarget());
   let previousLocal = null;
   try {
@@ -1875,11 +1889,39 @@ async function handleGeneratedNodeGraph(result) {
   }
 }
 
+function generatedProjectContext() {
+  return {
+    sceneName: props.sceneName || 'default',
+    actors: (window.__coronaBlocklyActorOptions || []).map(([name]) => ({
+      name: String(name || ''),
+      type: 'actor',
+      tags: [],
+    })).filter((actor) => actor.name),
+  };
+}
+
+function generatedNodeGraphSnapshot() {
+  const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+  const workspace = graphSnapshot();
+  const projectContext = generatedProjectContext();
+  return {
+    targetId: 'node_graph:project:global',
+    projectScopeId: reviewScopeId(scope),
+    graphRevision: generatedNodeGraphRevision({ workspace, projectContext }, scope),
+    workspace,
+    projectContext,
+  };
+}
+
 function syncGeneratedNodeGraphConsumer() {
   unregisterAiNodeGraphConsumer?.();
   unregisterAiNodeGraphConsumer = null;
   if (componentMounted && isProjectTarget.value) {
-    unregisterAiNodeGraphConsumer = registerGeneratedNodeGraphConsumer(handleGeneratedNodeGraph);
+    unregisterAiNodeGraphConsumer = registerGeneratedNodeGraphConsumer({
+      handler: handleGeneratedNodeGraph,
+      getSnapshot: generatedNodeGraphSnapshot,
+      instanceId: `project-node-graph:${projectStorageScope.value}`,
+    });
   }
 }
 
@@ -1956,26 +1998,47 @@ function startRunPoll() {
     }
   }, 300);
 }
-async function stopNodeGraphRun(statusText = '已停止', restoreState = false) {
+function scriptStatusBelongsToCurrentTarget(status = {}) {
+  const backendTargetType = String(status?.targetType || '').trim().toLowerCase();
+  return !backendTargetType || backendTargetType === normalizedTargetType.value;
+}
+function scriptStatusNeedsStop(status = {}) {
+  const state = String(status?.status || '').trim().toLowerCase();
+  return ['starting', 'running', 'stopping'].includes(state)
+    || Boolean(status?.threadAlive)
+    || Boolean(status?.inputLocked)
+    || Boolean(status?.snapshotCaptured ?? status?.hasSnapshot ?? status?.has_snapshot);
+}
+async function stopNodeGraphRun(statusText = '已停止', restoreState = false, verifyBackend = false) {
   clearRunPoll();
-  if (!startedRunForTarget && !codeRunning.value) {
-    setNodeGraphInputLocked(false);
-    return;
+  let shouldStop = startedRunForTarget || codeRunning.value || runBusy.value;
+  if (verifyBackend && !shouldStop) {
+    try {
+      const status = bridgeResult(await scriptingService.getScriptStatus()) || {};
+      shouldStop = scriptStatusBelongsToCurrentTarget(status) && scriptStatusNeedsStop(status);
+    } catch (error) {
+      // This endpoint only controls the standalone node/script executor, not game preview.
+      // If status lookup fails while closing, stopping is the safer fallback.
+      shouldStop = true;
+      logError('关闭节点窗口前查询运行状态失败', error);
+    }
   }
   try {
-    const response = bridgeResult(await scriptingService.stopScriptExecution(Boolean(restoreState)));
-    if (restoreState) {
-      if (response?.restored) {
-        runStatus.value = '已停止并恢复运行前状态';
-        runDetail.value = '';
-      } else if (response?.restoreError) {
-        runStatus.value = `已停止，但场景恢复失败：${response.restoreError}`;
-        runDetail.value = response.restoreError;
+    if (shouldStop) {
+      const response = bridgeResult(await scriptingService.stopScriptExecution(Boolean(restoreState)));
+      if (restoreState) {
+        if (response?.restored) {
+          runStatus.value = '已停止并恢复运行前状态';
+          runDetail.value = '';
+        } else if (response?.restoreError) {
+          runStatus.value = `已停止，但场景恢复失败：${response.restoreError}`;
+          runDetail.value = response.restoreError;
+        } else {
+          runStatus.value = statusText;
+        }
       } else {
         runStatus.value = statusText;
       }
-    } else {
-      runStatus.value = statusText;
     }
   } catch (error) {
     runStatus.value = `停止节点图失败：${error?.message || error}`;
@@ -1983,11 +2046,24 @@ async function stopNodeGraphRun(statusText = '已停止', restoreState = false) 
   } finally {
     startedRunForTarget = false;
     codeRunning.value = false;
+    runBusy.value = false;
     currentRunNodeId.value = '';
     setNodeGraphInputLocked(false);
     resetNodeRunLifecycle();
   }
 }
+async function stopForPanelClose() {
+  panelClosing = true;
+  if (!panelCloseStopPromise) {
+    panelCloseStopPromise = stopNodeGraphRun('节点窗口已关闭，运行已停止', false, true)
+      .finally(() => {
+        panelCloseStopPromise = null;
+      });
+  }
+  return panelCloseStopPromise;
+}
+
+defineExpose({ stopForPanelClose });
 
 function normalizeGamePreviewStatus(payload = {}) {
   const status = payload?.data ?? payload ?? {};
@@ -2045,7 +2121,7 @@ async function refreshGamePreviewGuard() {
 }
 
 async function handleToggleRun() {
-  if (runBusy.value) return;
+  if (panelClosing || runBusy.value) return;
   runBusy.value = true;
   try {
     if (codeRunning.value) {
@@ -2059,6 +2135,7 @@ async function handleToggleRun() {
       return;
     }
     const preview = await refreshGamePreviewGuard();
+    if (panelClosing || !componentMounted) return;
     if (preview.active) {
       runStatus.value = globalPreviewRunLabel.value;
       resetNodeRunLifecycle();
@@ -2076,6 +2153,7 @@ async function handleToggleRun() {
     setNodeGraphInputLocked(false);
     refreshEmbeddedWorkspaceStates();
     await saveNow();
+    if (panelClosing || !componentMounted) return;
     let code;
     try {
       const snapshot = graphSnapshot();
@@ -2098,6 +2176,11 @@ async function handleToggleRun() {
         normalizedTargetType.value
       )
     );
+    if (panelClosing || !componentMounted) {
+      await scriptingService.stopScriptExecution(false).catch(() => {});
+      setNodeGraphInputLocked(false);
+      return;
+    }
     if (response?.outcome === 'preview_running') {
       // A global preview owns this target. Treat the race as an ownership handoff
       // instead of leaving a misleading node-graph execution error.
@@ -2312,7 +2395,7 @@ onBeforeUnmount(() => {
   clearExternalDrag();
   cancelMacroPointerDrag();
   endCanvasPan();
-  if (startedRunForTarget || codeRunning.value) scriptingService.stopScriptExecution(false).catch(() => {});
+  stopForPanelClose().catch(() => {});
   setNodeGraphInputLocked(false);
   window.removeEventListener('mousemove', onDragMove);
   window.removeEventListener('mouseup', stopNodeDrag);

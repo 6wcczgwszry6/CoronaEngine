@@ -917,6 +917,27 @@ export const aiService = {
     });
     return response?.data ?? response;
   },
+  startNodeGraphGeneration: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.generate.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphGenerationStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.generate.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  cancelNodeGraphGeneration: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.generate.cancel',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
   loadCabbageContext: async () => {
     const response = await editorApi.ai.submitRequest({ operation: 'cabbage.context.load' });
     return response?.data ?? response;

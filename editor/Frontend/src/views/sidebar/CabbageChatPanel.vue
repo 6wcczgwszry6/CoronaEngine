@@ -49,7 +49,7 @@
         v-model="input"
         rows="3"
         maxlength="2000"
-        placeholder="继续询问当前任务或引擎操作…"
+        placeholder="可以答疑，也可以让包菜生成、制作或编辑游戏节点逻辑…"
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="composer-actions">
@@ -71,6 +71,11 @@ import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { aiService } from '@/utils/bridge.js';
 import { reviewScopeId } from '@/services/nodeGraphReviewService.js';
 import {
+  cancelActiveNodeGraphGeneration,
+  generateNodeGraphFromInstruction,
+  nodeGraphGenerationIntent,
+} from '@/services/nodeGraphGenerationService.js';
+import {
   cabbageContextService,
   publishCabbageAssistantContext,
   subscribeCabbageAssistantContext,
@@ -82,6 +87,7 @@ const input = ref('');
 const historyRef = ref(null);
 const streamingContent = ref('');
 const activeTaskId = ref('');
+const activeRequestKind = ref('');
 let requestSequence = 0;
 let pollTimer = null;
 let unsubscribeAssistantContext = null;
@@ -137,6 +143,7 @@ function finishRequest(requestId, { error = '', keepPartial = false } = {}) {
   }
   streamingContent.value = '';
   activeTaskId.value = '';
+  activeRequestKind.value = '';
   assistant.activeRequestId = '';
   assistant.chatBusy = false;
   assistant.chatError = error;
@@ -206,6 +213,27 @@ async function sendMessage() {
   assistant.activeRequestId = requestId;
   scrollToBottom();
 
+  const generationIntent = nodeGraphGenerationIntent(content);
+  if (generationIntent.matched) {
+    activeRequestKind.value = 'generation';
+    // The progress sentence is UI-only and is never persisted as chat history.
+    streamingContent.value = '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026';
+    try {
+      const generated = await generateNodeGraphFromInstruction(content, generationIntent.operation);
+      if (assistant.activeRequestId !== requestId || activeRequestKind.value !== 'generation') return;
+      streamingContent.value = String(generated.summary || '\u8282\u70b9\u903b\u8f91\u5df2\u7ecf\u751f\u6210\u5e76\u4fdd\u5b58\u3002');
+      finishRequest(requestId, { keepPartial: true });
+    } catch (error) {
+      if (assistant.activeRequestId === requestId) {
+        finishRequest(requestId, {
+          error: `${String(error?.message || '\u8282\u70b9\u903b\u8f91\u751f\u6210\u5931\u8d25\u3002')} \u5f53\u524d\u8282\u70b9\u56fe\u6ca1\u6709\u88ab\u4fee\u6539\u3002`,
+        });
+      }
+    }
+    return;
+  }
+
+  activeRequestKind.value = 'chat';
   try {
     const response = await aiService.startNodeGraphReviewChat({
       requestId,
@@ -220,14 +248,14 @@ async function sendMessage() {
     });
     if (assistant.activeRequestId !== requestId) return;
     if (response?.success !== true || !String(response?.taskId || '').trim()) {
-      finishRequest(requestId, { error: String(response?.message || '包菜答疑暂时不可用，请稍后再试。') });
+      finishRequest(requestId, { error: String(response?.message || '\u5305\u83dc\u7b54\u7591\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002') });
       return;
     }
     activeTaskId.value = String(response.taskId);
     scheduleStatusPoll(requestId, activeTaskId.value, 0);
   } catch (error) {
     if (assistant.activeRequestId === requestId) {
-      finishRequest(requestId, { error: String(error?.message || '包菜答疑暂时不可用，请稍后再试。') });
+      finishRequest(requestId, { error: String(error?.message || '\u5305\u83dc\u7b54\u7591\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002') });
     }
   }
 }
@@ -235,20 +263,24 @@ async function sendMessage() {
 async function stopWaiting() {
   const requestId = assistant.activeRequestId;
   const taskId = activeTaskId.value;
+  const requestKind = activeRequestKind.value;
   if (!requestId) return;
-  const partial = cleanAssistantText(streamingContent.value);
+  const partial = requestKind === 'chat' ? cleanAssistantText(streamingContent.value) : '';
   clearPollTimer();
   assistant.activeRequestId = '';
   activeTaskId.value = '';
+  activeRequestKind.value = '';
   streamingContent.value = '';
   assistant.chatBusy = false;
-  assistant.chatError = '已停止等待本次回答。';
+  assistant.chatError = '\u5df2\u505c\u6b62\u7b49\u5f85\u672c\u6b21\u56de\u7b54\u3002';
   if (partial) {
     const message = assistant.appendMessage({ role: 'assistant', content: partial, ...(activeMessageContext || {}) });
     if (message) void cabbageContextService.appendMessage(message);
   }
   activeMessageContext = null;
-  if (taskId) {
+  if (requestKind === 'generation') {
+    await cancelActiveNodeGraphGeneration();
+  } else if (taskId) {
     try { await aiService.cancelNodeGraphReviewChat(taskId); } catch (_) {}
   }
   scrollToBottom();
@@ -276,11 +308,14 @@ onBeforeUnmount(() => {
   unsubscribeAssistantContext = null;
   clearPollTimer();
   const taskId = activeTaskId.value;
+  const requestKind = activeRequestKind.value;
   assistant.activeRequestId = '';
   activeTaskId.value = '';
+  activeRequestKind.value = '';
   streamingContent.value = '';
   assistant.chatBusy = false;
-  if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
+  if (requestKind === 'generation') cancelActiveNodeGraphGeneration().catch(() => {});
+  else if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
 });
 </script>
 

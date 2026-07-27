@@ -512,6 +512,9 @@ const isShortcutOpen = (id) => Boolean(dockStore.panels[id]?.open);
 const toggleDockShortcut = async (id) => {
   await toggleFloatingPanel(dockStore, id);
 };
+const handleNodeGraphPanelOpenRequest = () => {
+  dockStore.openPanel('NodeGraphPanel');
+};
 
 const goToHome = () => {
   router.push('/');
@@ -2522,6 +2525,7 @@ onMounted(async () => {
   coronaEventBus.on('loading-hide', hideLoading);
   coronaEventBus.on('camera-pose-request', applyCameraPose);
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
+  coronaEventBus.on('node-graph-panel-open-request', handleNodeGraphPanelOpenRequest);
   sceneAddedCallbackToken = await editorApi.events.onSceneAdded(onSceneAddedEvent);
   sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
   actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
@@ -2574,6 +2578,7 @@ onUnmounted(() => {
   coronaEventBus.off('loading-hide', hideLoading);
   coronaEventBus.off('camera-pose-request', applyCameraPose);
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
+  coronaEventBus.off('node-graph-panel-open-request', handleNodeGraphPanelOpenRequest);
   if (actorPickResultCallbackToken) {
     editorApi.off(actorPickResultCallbackToken).catch((error) => {
       logError('Failed to unregister actor pick result callback', error);
