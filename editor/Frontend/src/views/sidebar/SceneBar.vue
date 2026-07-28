@@ -83,7 +83,7 @@
       </div>
 
       <!-- 场景基础设置 -->
-      <section class="scene-settings" data-assistant-title="场景基础设置" data-assistant-description="调整当前场景的主光照方向与编辑网格显示。">
+      <section class="scene-settings" data-guidance="scene-lighting" data-assistant-title="场景基础设置" data-assistant-description="调整当前场景的主光照方向与编辑网格显示。">
         <div class="scene-settings-title">场景设置</div>
         <div class="scene-setting-row">
           <label class="scene-setting-label" for="scene-light-enabled">光照</label>
@@ -233,7 +233,7 @@
       <!-- 工具栏 -->
       <div class="flex items-center gap-1 px-2 py-1.5 bg-[#3c3c3c]/60 border-b border-[#1a1a1a]/30">
         <!-- 导入下拉 -->
-        <div class="relative">
+        <div class="relative" data-guidance="scene-import-model">
           <button
             class="p-1.5 hover:bg-[#545454] rounded text-[#e0e0e0] text-xs flex items-center gap-1"
             title="导入"

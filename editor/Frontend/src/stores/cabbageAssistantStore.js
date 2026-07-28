@@ -11,6 +11,19 @@ const DEFAULT_PROFILE = Object.freeze({
 const OPTIMIZATION_TIP_DURATION_MS = 10000;
 const OPTIMIZATION_TIP_COOLDOWN_MS = 60000;
 const MAX_SHOWN_OPTIMIZATION_REVISIONS = 80;
+const PRE_WARNING_DURATION_MS = 10000;
+const MAX_SHOWN_PRE_WARNING_KEYS = 160;
+const PRE_WARNING_CODES = new Set([
+  'missing_actor_target',
+  'actor_target_not_found',
+  'start_node_count',
+  'invalid_edge_endpoint',
+  'invalid_visible_condition_count',
+  'non_boolean_condition',
+  'unknown_block_type',
+  'missing_required_input',
+]);
+const PATTERN_FIELDS = ['blockType', 'workspaceRole', 'relationType', 'missingInput', 'objectRequirement', 'edgeId'];
 
 function clone(value, fallback = {}) {
   try { return JSON.parse(JSON.stringify(value)); } catch (_) { return fallback; }
@@ -34,6 +47,93 @@ function normalizeProfile(raw = {}) {
   };
 }
 
+function normalizeIssuePattern(raw = {}) {
+  if (!raw || typeof raw !== 'object') return {};
+  return Object.fromEntries(PATTERN_FIELDS
+    .map((key) => [key, String(raw[key] || '').trim().slice(0, 160)])
+    .filter(([, value]) => value));
+}
+
+function normalizeSteps(raw) {
+  return (Array.isArray(raw) ? raw : [])
+    .map((item) => String(item || '').trim().slice(0, 500))
+    .filter(Boolean)
+    .slice(0, 8);
+}
+
+function walkBlocks(value, result = []) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => walkBlocks(item, result));
+  } else if (value && typeof value === 'object') {
+    if (typeof value.type === 'string') result.push(value);
+    Object.values(value).forEach((item) => walkBlocks(item, result));
+  }
+  return result;
+}
+
+function blockHasInput(block, inputName) {
+  if (!inputName) return true;
+  const input = block?.inputs?.[inputName];
+  return Boolean(input && (input.block || input.shadow));
+}
+
+const ACTOR_PLACEHOLDERS = new Set([
+  '', 'none', 'null', 'undefined', '__none__', '__manual__',
+  '未选择', '请选择', '请选择对象', '任意物体',
+]);
+
+function normalizedActorName(value) {
+  return String(value ?? '').trim();
+}
+
+function isMissingActorName(value) {
+  return ACTOR_PLACEHOLDERS.has(normalizedActorName(value).toLocaleLowerCase('en-US'));
+}
+
+function connectedBlock(block, inputName) {
+  const input = block?.inputs?.[inputName];
+  if (!input || typeof input !== 'object') return null;
+  const child = input.block && typeof input.block === 'object' ? input.block : input.shadow;
+  return child && typeof child === 'object' ? child : null;
+}
+
+function actorReference(block, inputName) {
+  if (!inputName) return { state: 'absent', name: '' };
+  const child = connectedBlock(block, inputName);
+  if (child) {
+    const fields = child.fields && typeof child.fields === 'object' ? child.fields : {};
+    if (child.type === 'text') {
+      const name = normalizedActorName(fields.TEXT);
+      return isMissingActorName(name) ? { state: 'missing', name: '' } : { state: 'resolved', name };
+    }
+    if (child.type === 'object_reference') {
+      const selected = normalizedActorName(fields.OBJECT);
+      const name = selected === '__manual__' ? normalizedActorName(fields.MANUAL) : selected;
+      return isMissingActorName(name) ? { state: 'missing', name: '' } : { state: 'resolved', name };
+    }
+    return { state: 'dynamic', name: '' };
+  }
+
+  const fields = block?.fields && typeof block.fields === 'object' ? block.fields : {};
+  const aliases = [inputName, `${inputName}_TEXT`];
+  const present = aliases.some((key) => Object.prototype.hasOwnProperty.call(fields, key));
+  for (const key of aliases) {
+    const name = normalizedActorName(fields[key]);
+    if (!isMissingActorName(name)) return { state: 'resolved', name };
+  }
+  return present ? { state: 'missing', name: '' } : { state: 'absent', name: '' };
+}
+
+function actorFieldMissing(block, inputName) {
+  const state = actorReference(block, inputName).state;
+  return state === 'missing' || state === 'absent';
+}
+
+function topLevelBlocks(workspace) {
+  const blocks = workspace?.blocks?.blocks;
+  return Array.isArray(blocks) ? blocks.filter((block) => block && typeof block === 'object') : [];
+}
+
 function normalizeTask(raw, graphRevision = '', now = Date.now()) {
   if (!raw || typeof raw !== 'object') return null;
   const taskKey = String(raw.taskKey || raw.issueKey || raw.code || '').trim();
@@ -53,6 +153,8 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
     confidence: Number(raw.confidence ?? 0),
     nodeId: String(raw.nodeId || ''),
     blockId: String(raw.blockId || ''),
+    edgeId: String(raw.edgeId || ''),
+    pattern: normalizeIssuePattern(raw.pattern || {}),
     title: String(raw.title || defaultTitle).trim().slice(0, 160) || defaultTitle,
     message: String(raw.message || '').trim().slice(0, 1600),
     suggestion: String(raw.suggestion || '').trim().slice(0, 1600),
@@ -67,10 +169,9 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
 }
 
 function issueKey(issue = {}) {
-  return String(
-    issue.issueKey
-      || `${issue.code || 'logic_issue'}|${issue.nodeId || ''}|${issue.blockId || ''}`
-  ).trim();
+  if (issue.issueKey) return String(issue.issueKey).trim();
+  const base = `${issue.code || 'logic_issue'}|${issue.nodeId || ''}|${issue.blockId || ''}`;
+  return String(issue.edgeId ? `${base}|${issue.edgeId}` : base).trim();
 }
 
 export function assistanceDelay(profile = {}) {
@@ -103,6 +204,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     ephemeralTip: null,
     lastOptimizationTipAt: 0,
     shownOptimizationRevisions: [],
+    contextUpdatedAt: 0,
+    preWarning: null,
+    shownPreWarningKeys: [],
   }),
 
   getters: {
@@ -151,6 +255,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.ephemeralTip = null;
       this.lastOptimizationTipAt = 0;
       this.shownOptimizationRevisions = [];
+      this.contextUpdatedAt = 0;
+      this.preWarning = null;
+      this.shownPreWarningKeys = [];
     },
 
     clearForProjectChange(projectScopeId = '') {
@@ -161,6 +268,10 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       const context = snapshot.context && typeof snapshot.context === 'object' ? snapshot.context : snapshot;
       const scope = String(snapshot.projectScopeId || context.projectScopeId || this.projectScopeId || '');
       const worldId = String(context.worldId || '');
+      const incomingUpdatedAt = Math.max(0, Number(context.updatedAt || snapshot.updatedAt) || 0);
+      const sameContext = (!worldId || !this.worldId || worldId === this.worldId)
+        && (!scope || !this.projectScopeId || scope === this.projectScopeId);
+      if (sameContext && incomingUpdatedAt && this.contextUpdatedAt && incomingUpdatedAt < this.contextUpdatedAt) return false;
       if ((this.worldId && worldId && this.worldId !== worldId)
         || (this.projectScopeId && scope && this.projectScopeId !== scope)) {
         this.resetWorld(scope);
@@ -191,12 +302,17 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
           issueCode: String(message?.issueCode || ''),
           nodeId: String(message?.nodeId || ''),
           blockId: String(message?.blockId || ''),
+          needsShowcase: message?.needsShowcase === true,
+          guidanceIntent: String(message?.guidanceIntent || ''),
+          steps: normalizeSteps(message?.steps),
         }))
         .filter((message) => message.content);
       this.recentOperationEvents = clone(context.recentOperationEvents || [], []);
       if (this.selectedTaskKey && !this.tasks.some((task) => task.taskKey === this.selectedTaskKey)) {
         this.selectedTaskKey = '';
       }
+      this.contextUpdatedAt = Math.max(this.contextUpdatedAt, incomingUpdatedAt);
+      return true;
     },
 
     applyReview(result = {}, { runtimeFailed = false } = {}) {
@@ -316,6 +432,125 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.ephemeralTip = null;
     },
 
+    showPreWarning(warning = {}) {
+      const code = String(warning.code || '').trim();
+      const revision = String(warning.graphRevision || this.graphRevision || '').trim();
+      const patternKey = JSON.stringify(normalizeIssuePattern(warning.pattern || {}));
+      const warningKey = `${revision}|${code}|${patternKey}`;
+      if (!revision || !PRE_WARNING_CODES.has(code) || this.shownPreWarningKeys.includes(warningKey)) return false;
+      const now = Date.now();
+      this.preWarning = {
+        warningKey,
+        code,
+        title: String(warning.title || '编辑提醒').trim().slice(0, 80),
+        message: String(warning.message || '').trim().slice(0, 360),
+        nodeId: String(warning.nodeId || ''),
+        blockId: String(warning.blockId || ''),
+        edgeId: String(warning.edgeId || ''),
+        pattern: normalizeIssuePattern(warning.pattern || {}),
+        graphRevision: revision,
+        createdAt: now,
+        expiresAt: now + PRE_WARNING_DURATION_MS,
+      };
+      this.shownPreWarningKeys = [...this.shownPreWarningKeys, warningKey].slice(-MAX_SHOWN_PRE_WARNING_KEYS);
+      this.attentionToken += 1;
+      return true;
+    },
+
+    clearPreWarning() {
+      this.preWarning = null;
+    },
+
+    evaluateRememberedIssuePatterns(workspace = {}, graphRevision = '', projectContext = {}) {
+      const revision = String(graphRevision || '').trim();
+      if (!revision || !workspace || typeof workspace !== 'object') return null;
+      const nodes = Array.isArray(workspace.nodes) ? workspace.nodes.filter(Boolean) : [];
+      const edges = Array.isArray(workspace.edges) ? workspace.edges.filter(Boolean) : [];
+      const nodeIds = new Set(nodes.map((node) => String(node?.id || '')).filter(Boolean));
+      const actorContextAvailable = Array.isArray(projectContext?.actors);
+      const knownActors = new Set((projectContext?.actors || [])
+        .map((actor) => normalizedActorName(actor?.name).toLocaleLowerCase('en-US'))
+        .filter(Boolean));
+      const scopedBlocks = [];
+      nodes.forEach((node) => walkBlocks(node?.workspace || {}).forEach((block) => scopedBlocks.push({ nodeId: String(node?.id || ''), block })));
+      edges.forEach((edge) => walkBlocks(edge?.conditionWorkspace || {}).forEach((block) => scopedBlocks.push({ edgeId: String(edge?.id || ''), block })));
+      walkBlocks(workspace.globalVariablesWorkspace || {}).forEach((block) => scopedBlocks.push({ block }));
+
+      const enabled = Object.entries(this.issueMemory || {})
+        .filter(([code, memory]) => {
+          const occurrences = Number(memory?.occurrences || 0);
+          const discussions = Number(memory?.chatDiscussionCount || 0);
+          return PRE_WARNING_CODES.has(code) && occurrences >= 1 && occurrences + discussions >= 2;
+        })
+        .sort((a, b) => Number(b[1]?.lastSeenAt || 0) - Number(a[1]?.lastSeenAt || 0));
+      for (const [code, memory] of enabled) {
+        const pattern = normalizeIssuePattern(memory?.pattern || {});
+        let match = null;
+        if (code === 'start_node_count') {
+          const count = nodes.filter((node) => node?.nodeType === 'start').length;
+          if (count !== 1) match = { message: '开始节点似乎又不是唯一的，继续编辑前先保留一个开始节点会更稳妥。' };
+        } else if (code === 'invalid_edge_endpoint') {
+          const edge = edges.find((item) => !nodeIds.has(String(item?.source?.nodeId || '')) || !nodeIds.has(String(item?.target?.nodeId || '')));
+          if (edge) match = { edgeId: String(edge.id || ''), message: '这条连线可能又指向了无效节点，继续编辑前先重新连接两个真实节点。' };
+        } else if (code === 'invalid_visible_condition_count') {
+          const edge = edges.find((item) => topLevelBlocks(item?.conditionWorkspace || {}).length !== 1);
+          if (edge) {
+            match = {
+              edgeId: String(edge.id || ''),
+              message: '跳转条件可能又没有保持唯一可见返回值，先整理条件积木再连线。',
+            };
+          }
+        } else if (code === 'non_boolean_condition') {
+          if (pattern.blockType) {
+            const edge = edges.find((item) => {
+              const topBlocks = topLevelBlocks(item?.conditionWorkspace || {});
+              return topBlocks.length === 1 && String(topBlocks[0]?.type || '') === pattern.blockType;
+            });
+            if (edge) {
+              const block = topLevelBlocks(edge.conditionWorkspace || {})[0];
+              match = {
+                edgeId: String(edge.id || ''),
+                blockId: String(block?.id || ''),
+                message: '这条跳转条件可能又不是 Boolean 值，先接上比较或逻辑积木。',
+              };
+            }
+          }
+        } else {
+          const scoped = scopedBlocks.find(({ block }) => {
+            if (pattern.blockType && String(block?.type || '') !== pattern.blockType) return false;
+            const actorInput = pattern.missingInput || (pattern.objectRequirement ? 'OBJECT' : '');
+            if (code === 'missing_actor_target') return actorFieldMissing(block, actorInput);
+            if (code === 'actor_target_not_found') {
+              if (!actorContextAvailable || !actorInput) return false;
+              const reference = actorReference(block, actorInput);
+              return reference.state === 'resolved'
+                && !knownActors.has(reference.name.toLocaleLowerCase('en-US'));
+            }
+            if (code === 'missing_required_input') return !blockHasInput(block, pattern.missingInput);
+            if (code === 'unknown_block_type') return Boolean(pattern.blockType && String(block?.type || '') === pattern.blockType);
+            return false;
+          });
+          if (scoped) {
+            const messages = {
+              missing_actor_target: '这里可能又缺少具体对象，继续连接操作逻辑前，可以先给对象输入口接上“对象[]”积木。',
+              actor_target_not_found: '这里可能又引用了当前场景不存在的对象，继续编辑前先把“对象[]”改成场景中已有的物体。',
+              missing_required_input: '这个积木可能又缺少必要输入，先补齐输入再继续连接会更安全。',
+              unknown_block_type: '这里可能又使用了当前引擎不支持的积木，可以先换成工具箱中的可用积木。',
+            };
+            match = {
+              nodeId: String(scoped.nodeId || ''), edgeId: String(scoped.edgeId || ''),
+              blockId: String(scoped.block?.id || ''), message: messages[code] || '这里可能又出现了之前的逻辑问题。',
+            };
+          }
+        }
+        if (match) {
+          const warning = { code, pattern, graphRevision: revision, title: '可能重复的逻辑问题', ...match };
+          return this.showPreWarning(warning) ? this.preWarning : null;
+        }
+      }
+      return null;
+    },
+
     selectTask(taskKey = '') {
       const key = String(taskKey || '');
       this.selectedTaskKey = this.tasks.some((task) => task.taskKey === key) ? key : '';
@@ -333,6 +568,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         issueCode: String(message?.issueCode || ''),
         nodeId: String(message?.nodeId || ''),
         blockId: String(message?.blockId || ''),
+        needsShowcase: message?.needsShowcase === true,
+        guidanceIntent: String(message?.guidanceIntent || ''),
+        steps: normalizeSteps(message?.steps),
       };
       if (!this.messages.some((item) => item.id === normalized.id)) this.messages.push(normalized);
       return normalized;

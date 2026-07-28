@@ -62,14 +62,75 @@ class NodeGraphReviewChatServiceTests(unittest.TestCase):
         self.assertIn("不要给用户贴美术、程序、入门、熟悉或熟练标签", prompt)
 
     def test_chat_requests_clean_plain_text_without_markdown_decoration(self):
-        request = NodeGraphReviewChatService._normalize_payload(self.payload({
-            "score": 50,
-            "updatedAt": 1,
-        }))
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["messages"] = [{"role": "user", "content": "Please review the current issue."}]
+        request = NodeGraphReviewChatService._normalize_payload(payload)
         prompt = NodeGraphReviewChatService._build_messages(request)[0]["content"]
         self.assertIn("干净的中文纯文本", prompt)
         self.assertIn("不要使用 Markdown 标题", prompt)
         self.assertIn("只使用‘1. 2. 3.’编号", prompt)
+
+
+    def test_detail_request_for_object_reference_returns_safe_showcase(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["messages"] = [{"role": "user", "content": "\u4e0d\u7406\u89e3\u600e\u4e48\u7ed9\u79fb\u52a8\u79ef\u6728\u6307\u5b9a\u5bf9\u8c61"}]
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        metadata = NodeGraphReviewChatService._guidance_metadata(request)
+        self.assertTrue(request["detailGuidanceRequested"])
+        self.assertTrue(metadata["needsShowcase"])
+        self.assertEqual("connect_object_reference", metadata["guidanceIntent"])
+        self.assertGreaterEqual(len(metadata["steps"]), 3)
+
+    def test_selected_tutorial_task_maps_to_whitelisted_guidance(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload.update({
+            "detailGuidanceRequested": True,
+            "selectedTaskKey": "tutorial.adjust_physics",
+            "tasks": [{
+                "taskKey": "tutorial.adjust_physics",
+                "type": "tutorial",
+                "title": "adjust physics",
+            }],
+        })
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        metadata = NodeGraphReviewChatService._guidance_metadata(request)
+        self.assertEqual("adjust_physics", metadata["guidanceIntent"])
+        self.assertTrue(metadata["needsShowcase"])
+
+    def test_explicit_physics_request_overrides_selected_transform_task(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload.update({
+            "detailGuidanceRequested": True,
+            "selectedTaskKey": "tutorial.transform_model",
+            "tasks": [{
+                "taskKey": "tutorial.transform_model",
+                "type": "tutorial",
+                "title": "adjust transform",
+            }],
+            "messages": [{"role": "user", "content": "\u5c55\u793a\u8c03\u6574\u7269\u4f53\u7269\u7406\u6027\u8d28"}],
+        })
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        metadata = NodeGraphReviewChatService._guidance_metadata(request)
+        self.assertEqual("adjust_physics", metadata["guidanceIntent"])
+        self.assertTrue(metadata["needsShowcase"])
+        self.assertTrue(any("\u7269\u7406" in step for step in metadata["steps"]))
+
+    def test_unknown_detail_question_keeps_steps_without_showcase(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["messages"] = [{"role": "user", "content": "\u6211\u4e0d\u7406\u89e3\u8fd9\u4e2a\u62bd\u8c61\u6982\u5ff5"}]
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        metadata = NodeGraphReviewChatService._guidance_metadata(request)
+        self.assertFalse(metadata["needsShowcase"])
+        self.assertEqual("", metadata["guidanceIntent"])
+        self.assertGreaterEqual(len(metadata["steps"]), 3)
+
+    def test_normal_question_does_not_add_steps_or_showcase(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["messages"] = [{"role": "user", "content": "Please review the current issue."}]
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        metadata = NodeGraphReviewChatService._guidance_metadata(request)
+        self.assertFalse(metadata["needsShowcase"])
+        self.assertEqual([], metadata["steps"])
 
 
 if __name__ == "__main__":

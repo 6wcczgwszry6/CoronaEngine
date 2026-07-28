@@ -459,6 +459,7 @@
       :tasks="cabbageAssistant.tasks"
       :attention-token="cabbageAssistant.attentionToken"
     />
+    <CabbageGuidanceOverlay />
   </div>
 </template>
 
@@ -484,6 +485,7 @@ import {
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
+import CabbageGuidanceOverlay from '@/components/ui/CabbageGuidanceOverlay.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
@@ -564,7 +566,10 @@ const cameraBindingState = ref({
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
 let actorSelectionCallbackToken = null;
+let actorTransformCallbackToken = null;
 let sceneAddedCallbackToken = null;
+const actorTransformBaselines = new Map();
+const ACTOR_TRANSFORM_EPSILON = 1e-5;
 let sceneRenamedCallbackToken = null;
 const viewportPickSurfaceRef = ref(null);
 const viewportLayoutVersion = ref(0);
@@ -648,6 +653,71 @@ const currentViewportUiDescriptor = () => ({
   cameraHandle: cameraBindingState.value.cameraHandle || '',
 });
 
+const normalizeTransformVector = (value, fallback = { x: 0, y: 0, z: 0 }) => ({
+  x: Number(value?.x ?? value?.[0] ?? fallback.x) || 0,
+  y: Number(value?.y ?? value?.[1] ?? fallback.y) || 0,
+  z: Number(value?.z ?? value?.[2] ?? fallback.z) || 0,
+});
+
+const actorTransformKey = (sceneId, actorName) => `${String(sceneId || '')}::${String(actorName || '')}`;
+
+const normalizeActorTransform = (source = {}, fallback = {}) => ({
+  position: normalizeTransformVector(source.position, fallback.position || { x: 0, y: 0, z: 0 }),
+  rotation: normalizeTransformVector(source.rotation, fallback.rotation || { x: 0, y: 0, z: 0 }),
+  scale: normalizeTransformVector(source.scale, fallback.scale || { x: 1, y: 1, z: 1 }),
+});
+
+const transformVectorChanged = (previous, next) => ['x', 'y', 'z'].some((axis) => (
+  Math.abs(Number(previous?.[axis] || 0) - Number(next?.[axis] || 0)) > ACTOR_TRANSFORM_EPSILON
+));
+
+const seedActorTransformBaseline = async (sceneId, actorName) => {
+  const scene = String(sceneId || '').trim();
+  const actor = String(actorName || '').trim();
+  if (!scene || !actor) return;
+  try {
+    const result = await sceneService.getActor(scene, actor);
+    const data = result?.data ?? result ?? {};
+    if (!data || data.status === 'error') return;
+    actorTransformBaselines.set(
+      actorTransformKey(scene, actor),
+      normalizeActorTransform(data.geometry || {}),
+    );
+  } catch (_) {
+    // Selection should still open the Object Dock when a baseline cannot be read.
+  }
+};
+
+const handleActorTransformForCabbage = (payload = {}) => {
+  const sceneId = String(payload?.scene || payload?.scene_id || '').trim();
+  const actorName = String(payload?.actor || payload?.actor_name || '').trim();
+  if (!sceneId || !actorName) return;
+  const key = actorTransformKey(sceneId, actorName);
+  const previous = actorTransformBaselines.get(key);
+  const next = normalizeActorTransform(payload, previous || {});
+  actorTransformBaselines.set(key, next);
+  // The first callback may be an initial state echo. Only compare after a baseline exists.
+  if (!previous) return;
+
+  for (const transformKey of ['position', 'rotation', 'scale']) {
+    if (!transformVectorChanged(previous[transformKey], next[transformKey])) continue;
+    void cabbageContextService.recordEvent({
+      type: transformKey === 'position'
+        ? 'transform_position'
+        : transformKey === 'rotation'
+          ? 'transform_rotation'
+          : 'transform_scale',
+      category: 'scene',
+      success: true,
+      details: {
+        sceneName: sceneId,
+        actorName,
+        source: 'viewport',
+      },
+    });
+  }
+};
+
 const emitActorChangeFast = (type, sceneId, actorName) => {
   editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
     logError('Failed to publish actor selection', error);
@@ -660,7 +730,9 @@ const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = ''
   const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
   if (!actorName || actorType === 'scene') return;
 
-  setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
+  const resolvedSceneId = sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  setActorContext(resolvedSceneId, actorName);
+  void seedActorTransformBaseline(resolvedSceneId, actorName);
   if (!dockStore.panels.SceneDatas?.open) {
     openDockedPanel('SceneDatas');
   }
@@ -923,6 +995,7 @@ async function loadCabbageWorldContext({ reset = true } = {}) {
 }
 
 function clearNodeReviewForProjectChange() {
+  actorTransformBaselines.clear();
   cancelPendingTransformEvents();
   void loadCabbageWorldContext({ reset: true });
 }
@@ -2577,6 +2650,7 @@ onMounted(async () => {
   sceneAddedCallbackToken = await editorApi.events.onSceneAdded(onSceneAddedEvent);
   sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
   actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
+  actorTransformCallbackToken = await editorApi.events.onActorTransformUpdated(handleActorTransformForCabbage);
   actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
@@ -2642,6 +2716,13 @@ onUnmounted(() => {
     });
     actorSelectionCallbackToken = null;
   }
+  if (actorTransformCallbackToken) {
+    editorApi.off(actorTransformCallbackToken).catch((error) => {
+      logError('Failed to unregister actor transform callback', error);
+    });
+    actorTransformCallbackToken = null;
+  }
+  actorTransformBaselines.clear();
   if (sceneAddedCallbackToken) {
     editorApi.off(sceneAddedCallbackToken).catch((error) => {
       logError('Failed to unregister scene added callback', error);

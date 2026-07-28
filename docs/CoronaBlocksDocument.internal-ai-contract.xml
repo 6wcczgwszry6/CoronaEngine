@@ -1,5 +1,5 @@
 <?xml version='1.0' encoding='utf-8'?>
-<CoronaBlocksDocument schemaVersion="1" documentPurpose="internal-ai-node-graph-contract" contractVersion="3" updatedAt="2026-07-27">
+<CoronaBlocksDocument schemaVersion="1" documentPurpose="internal-ai-node-graph-contract" contractVersion="4" updatedAt="2026-07-28">
   <InternalAiContract catalogLocked="true" visualGraphIsSourceOfTruth="true" pythonProducedByEngine="true">
     <Purpose lang="zh-CN">这是 CoronaEngine 包菜答疑使用的项目级节点积木能力与生成合同。宿主会提供用户指令、当前世界上下文、完整现有节点图和本文档；AI 只能返回完整、可见、可校验的 JSON 节点图。</Purpose>
     <Purpose lang="en-US">Project-global node graph capability and generation contract used by Cabbage Q&amp;A. The host sends the user instruction, current world context, complete current graph, and this file; the model may return only a complete visible JSON node graph.</Purpose>
@@ -63,6 +63,9 @@
     <BlocklyRule index="7">Each serialized block includes type and id. Top-level blocks include x and y for readable internal layout.</BlocklyRule>
     <BlocklyRule index="8">Use lifecycle hat blocks such as node_when_enter, node_while_active, and node_when_exit inside state nodes so execution timing is visible.</BlocklyRule>
     <BlocklyRule index="9">Use globalVariablesWorkspace only for Catalog GlobalWorkspaceRootTypes. Connect initializer and assignment values through the exact Catalog input names.</BlocklyRule>
+    <BlocklyRule index="10">Fields and inputs are different serialization namespaces. A Catalog Field is written only under block.fields. A Catalog Input is written only under block.inputs and must contain block or shadow. Never copy an input name into fields.</BlocklyRule>
+    <BlocklyRule index="11">control_if and control_else do not own a BOOL field. Serialize BOOL only on a nested logic_boolean block connected through inputs.CONDITION.block.</BlocklyRule>
+    <BlocklyRule index="12">engine_rotateX, engine_rotateY, and engine_rotateZ own only the ANGLE field. Their target is inputs.OBJECT.block containing object_reference; OBJECT must never be written in the rotation block fields.</BlocklyRule>
     <EdgeConditionRule index="1">Every edge has conditionWorkspace with exactly one visible top-level block whose output type is Boolean.</EdgeConditionRule>
     <EdgeConditionRule index="2">An unconditional transition uses logic_boolean with field BOOL equal to TRUE. Never represent unconditional flow with an empty conditionWorkspace.</EdgeConditionRule>
     <EdgeConditionRule index="3">Conditional flow uses logic_compare, logic_operation, logic_negate, input detection, collision, raycast, region, distance, variable, score, lives, or countdown Boolean combinations.</EdgeConditionRule>
@@ -70,6 +73,7 @@
     <ObjectTargetRule index="1">Project-global object actions must identify a real scene object or tag. Prefer the Catalog object_reference output connected to OBJECT value inputs when available.</ObjectTargetRule>
     <ObjectTargetRule index="2">Do not leave movement, rotation, physics, collision, camera-follow, damage, spawn ownership, or deletion actions without a concrete target.</ObjectTargetRule>
     <ObjectTargetRule index="3">Do not serialize placeholder actor names such as object, actor, target, TODO, unknown, empty string, or arbitrary names absent from RuntimeContext.</ObjectTargetRule>
+    <ObjectTargetRule index="4">Every statically resolvable object_reference must resolve to an exact RuntimeContext actor name. If the referenced object does not exist, the result is invalid and must be corrected before return.</ObjectTargetRule>
     <GameplaySafetyRule index="1">Repeated shooting, spawning, damage, audio, or expensive raycast logic inside active loops requires a cooldown, wait, edge-trigger, or equivalent rate limit.</GameplaySafetyRule>
     <GameplaySafetyRule index="2">Variables used by win, loss, lives, score, layer, checkpoint, wave, or objective conditions must be initialized and updated on reachable paths.</GameplaySafetyRule>
     <GameplaySafetyRule index="3">Movement and camera logic must target real RuntimeContext objects and use compatible first-person, third-person, orbit, follow, or free-camera behavior.</GameplaySafetyRule>

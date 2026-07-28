@@ -7,9 +7,22 @@
     @wheel.stop
   >
     <transition name="task-board">
-      <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
-        <strong>{{ assistant.ephemeralTip.title }}</strong>
-        <p>{{ assistant.ephemeralTip.message }}</p>
+      <section v-if="assistant.preWarning" class="assistant-notice pre-warning" aria-live="polite">
+        <div class="notice-copy">
+          <strong>{{ assistant.preWarning.title }}</strong>
+          <p>{{ assistant.preWarning.message }}</p>
+        </div>
+        <button type="button" class="showcase-button" @click="showcase({ ...assistant.preWarning, sourceType: 'node-issue' })">展示</button>
+      </section>
+    </transition>
+
+    <transition name="task-board">
+      <section v-if="assistant.ephemeralTip" class="assistant-notice optimization-tip" aria-live="polite">
+        <div class="notice-copy">
+          <strong>{{ assistant.ephemeralTip.title }}</strong>
+          <p>{{ assistant.ephemeralTip.message }}</p>
+        </div>
+        <button type="button" class="showcase-button" @click="showcase({ ...assistant.ephemeralTip, sourceType: 'optimization-tip' })">展示</button>
       </section>
     </transition>
 
@@ -35,7 +48,10 @@
               <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
               <p>{{ task.suggestion }}</p>
             </div>
-            <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
+            <div class="task-actions">
+              <button type="button" class="showcase-button" @click="showcase({ ...task, sourceType: task.type })">展示</button>
+              <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
+            </div>
           </div>
         </article>
       </div>
@@ -53,6 +69,7 @@ import { useDockStore } from '@/stores/dockStore.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { closeFloatingPanel } from '@/utils/panelWindows.js';
 import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
+import { guidanceService } from '@/services/cabbageGuidanceService.js';
 
 const props = defineProps({
   tasks: { type: Array, default: () => [] },
@@ -64,10 +81,20 @@ const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
 const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
 let optimizationTimer = null;
+let preWarningTimer = null;
 
 function clearOptimizationTimer() {
   if (optimizationTimer) window.clearTimeout(optimizationTimer);
   optimizationTimer = null;
+}
+
+function clearPreWarningTimer() {
+  if (preWarningTimer) window.clearTimeout(preWarningTimer);
+  preWarningTimer = null;
+}
+
+function showcase(source) {
+  void guidanceService.start(source);
 }
 
 function toggleTask(task) {
@@ -119,7 +146,22 @@ watch(
   { immediate: true }
 );
 
-onBeforeUnmount(clearOptimizationTimer);
+watch(
+  () => assistant.preWarning?.expiresAt || 0,
+  (expiresAt) => {
+    clearPreWarningTimer();
+    if (!expiresAt) return;
+    const remaining = Math.max(0, Number(expiresAt) - Date.now());
+    preWarningTimer = window.setTimeout(() => assistant.clearPreWarning(), remaining);
+  },
+  { immediate: true }
+);
+
+onBeforeUnmount(() => {
+  clearOptimizationTimer();
+  clearPreWarningTimer();
+  void guidanceService.stop();
+});
 
 watch(
   () => props.tasks.map((task) => taskKey(task)),
@@ -149,9 +191,12 @@ watch(
 .cabbage-review-root > * {
   pointer-events: auto;
 }
-.optimization-tip {
+.assistant-notice {
   width: 100%;
   box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
   border: 1px solid #55431f;
   border-radius: 8px;
   background: #15130d;
@@ -160,8 +205,10 @@ watch(
   padding: 11px 12px;
   line-height: 1.55;
 }
-.optimization-tip strong { display: block; color: #e5c77f; font-size: 13px; }
-.optimization-tip p { margin: 5px 0 0; color: #c9bea0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.assistant-notice.pre-warning { border-color: #9b6b2f; background: #1c160c; }
+.notice-copy { min-width: 0; flex: 1; }
+.assistant-notice strong { display: block; color: #e5c77f; font-size: 13px; }
+.assistant-notice p { margin: 5px 0 0; color: #c9bea0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-board {
   position: relative;
   width: 100%;
@@ -260,7 +307,12 @@ watch(
 .task-detail p { white-space:pre-wrap; overflow-wrap:anywhere; }
 .task-suggestion { margin-top:8px; border-left:2px solid #d8b86c; padding-left:8px; }
 .task-suggestion strong { color:#e5c77f; font-size:11px; }
-.task-discuss { margin-top:9px; border-radius:5px; background:#4b391c; color:#fff7dc; padding:5px 9px; font-size:11px; }
+.task-actions { margin-top:9px; display:flex; justify-content:flex-end; gap:7px; }
+.showcase-button, .task-discuss { border:1px solid #665025; border-radius:5px; color:#fff7dc; padding:5px 9px; font-size:11px; transition:background .14s ease,border-color .14s ease; }
+.showcase-button { flex:0 0 auto; background:#6d5226; }
+.showcase-button:hover { border-color:#d8b86c; background:#8c6f36; }
+.task-discuss { background:#4b391c; }
+.task-discuss:hover { border-color:#b8924a; background:#624b25; }
 .task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin:center bottom; }
 .task-board-enter-from, .task-board-leave-to { opacity:0; transform:translateY(8px) scale(.98); }
 

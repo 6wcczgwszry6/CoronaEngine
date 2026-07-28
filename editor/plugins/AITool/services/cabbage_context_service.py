@@ -29,6 +29,16 @@ class CabbageContextService:
     MAX_ISSUE_MEMORY = 200
     MAX_SCORE_TASKS = 24
     SCORE_MIN_INTERVAL_SECONDS = 300
+    ISSUE_PATTERN_FIELDS = (
+        "blockType", "workspaceRole", "relationType",
+        "missingInput", "objectRequirement", "edgeId",
+    )
+    CHAT_GUIDANCE_INTENTS = {
+        "connect_object_reference", "select_existing_object", "create_node",
+        "move_node", "connect_nodes", "drag_block", "edit_block_parameter",
+        "set_transition_condition", "run_node_graph", "import_model",
+        "transform_model", "adjust_lighting", "adjust_physics",
+    }
     IMPORTANT_EVENT_TYPES = {
         "model_imported",
         "actor_created",
@@ -411,6 +421,18 @@ class CabbageContextService:
             self._write_locked(project_path, context)
             return context
 
+
+    @classmethod
+    def _normalize_issue_pattern(cls, raw: Any) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for field in cls.ISSUE_PATTERN_FIELDS:
+            value = str(raw.get(field) or "").strip()[:180]
+            if value:
+                normalized[field] = value
+        return normalized
+
     @classmethod
     def _normalize_issue_memory_locked(cls, context: dict[str, Any]) -> None:
         raw_memory = context.get("issueMemory")
@@ -427,6 +449,7 @@ class CabbageContextService:
                     "firstSeenAt": max(0, int(raw_entry.get("firstSeenAt") or 0)),
                     "lastSeenAt": max(0, int(raw_entry.get("lastSeenAt") or 0)),
                     "lastDiscussedAt": max(0, int(raw_entry.get("lastDiscussedAt") or 0)),
+                    "pattern": cls._normalize_issue_pattern(raw_entry.get("pattern")),
                 }
 
         if not normalized:
@@ -438,9 +461,10 @@ class CabbageContextService:
                     continue
                 entry = normalized.setdefault(code, {
                     "occurrences": 0, "resolvedCount": 0, "chatDiscussionCount": 0,
-                    "firstSeenAt": 0, "lastSeenAt": 0, "lastDiscussedAt": 0,
+                    "firstSeenAt": 0, "lastSeenAt": 0, "lastDiscussedAt": 0, "pattern": {},
                 })
                 entry["occurrences"] += 1
+                entry["pattern"].update(cls._normalize_issue_pattern(task.get("pattern")))
                 seen_at = int(task.get("firstDetectedAt") or task.get("createdAt") or 0)
                 entry["firstSeenAt"] = min(filter(None, (entry["firstSeenAt"], seen_at)), default=0)
                 entry["lastSeenAt"] = max(entry["lastSeenAt"], seen_at)
@@ -454,7 +478,7 @@ class CabbageContextService:
                     continue
                 entry = normalized.setdefault(code, {
                     "occurrences": 0, "resolvedCount": 0, "chatDiscussionCount": 0,
-                    "firstSeenAt": 0, "lastSeenAt": 0, "lastDiscussedAt": 0,
+                    "firstSeenAt": 0, "lastSeenAt": 0, "lastDiscussedAt": 0, "pattern": {},
                 })
                 entry["chatDiscussionCount"] += 1
                 entry["lastDiscussedAt"] = max(entry["lastDiscussedAt"], int(message.get("createdAt") or 0))
@@ -473,6 +497,7 @@ class CabbageContextService:
             "firstSeenAt": 0,
             "lastSeenAt": 0,
             "lastDiscussedAt": 0,
+            "pattern": {},
         })
 
     def _write_locked(self, project_path: Path, context: dict[str, Any]) -> None:
@@ -641,6 +666,8 @@ class CabbageContextService:
             "confidence": float(raw.get("confidence") or 0),
             "nodeId": str(raw.get("nodeId") or "")[:180],
             "blockId": str(raw.get("blockId") or "")[:180],
+            "edgeId": str(raw.get("edgeId") or "")[:180],
+            "pattern": cls._normalize_issue_pattern(raw.get("pattern")),
             "title": str(raw.get("title") or "节点逻辑需要调整").strip()[:160],
             "message": str(raw.get("message") or "").strip()[:1600],
             "suggestion": str(raw.get("suggestion") or "").strip()[:1600],
@@ -720,6 +747,9 @@ class CabbageContextService:
                     existing.update(incoming)
                     existing["createdAt"] = created_at
                     existing["firstDetectedAt"] = first_detected
+                    if incoming["type"] == "node-issue":
+                        memory = self._issue_memory_entry_locked(context, incoming.get("code") or incoming["taskKey"])
+                        memory["pattern"].update(incoming.get("pattern") or {})
                 else:
                     if incoming["type"] == "node-issue":
                         # Update memory before inserting the task. When an older context has
@@ -730,6 +760,7 @@ class CabbageContextService:
                         memory["occurrences"] = int(memory.get("occurrences") or 0) + 1
                         memory["firstSeenAt"] = int(memory.get("firstSeenAt") or now)
                         memory["lastSeenAt"] = now
+                        memory["pattern"].update(incoming.get("pattern") or {})
                         self._append_internal_event_locked(
                             context,
                             "node_issue_found",
@@ -761,7 +792,19 @@ class CabbageContextService:
                 "issueCode": str(payload.get("issueCode") or "").strip()[:180],
                 "nodeId": str(payload.get("nodeId") or "").strip()[:180],
                 "blockId": str(payload.get("blockId") or "").strip()[:180],
+                "needsShowcase": payload.get("needsShowcase") is True,
+                "guidanceIntent": str(payload.get("guidanceIntent") or "").strip()[:80],
+                "steps": [
+                    str(step or "").strip()[:500]
+                    for step in (payload.get("steps") if isinstance(payload.get("steps"), list) else [])[:8]
+                    if str(step or "").strip()
+                ],
             }
+            if message["guidanceIntent"] not in self.CHAT_GUIDANCE_INTENTS:
+                message["guidanceIntent"] = ""
+                message["needsShowcase"] = False
+            if not message["guidanceIntent"]:
+                message["needsShowcase"] = False
             project_path = self._active_project_path()
             self._validate_payload_world(project_path, payload)
             with self._lock:

@@ -596,6 +596,55 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         self.assertEqual("把命中分支连接到正确的加分积木。", issue["suggestion"])
 
 
+    def test_issue_normalization_keeps_verified_edge_pattern_and_edge_issue_key(self):
+        workspace = graph(
+            nodes=[
+                {"id": "start", "nodeType": "start", "workspace": {}},
+                {"id": "play", "nodeType": "custom", "workspace": {}},
+            ],
+            edges=[{
+                "id": "edge_1",
+                "source": {"nodeId": "start"},
+                "target": {"nodeId": "missing"},
+                "conditionWorkspace": {},
+            }],
+        )
+        result = {
+            "hasProblems": True,
+            "summary": "The edge endpoint is invalid.",
+            "issues": [{
+                "severity": "warning",
+                "confidence": 0.95,
+                "edgeId": "edge_1",
+                "code": "dangling_edge",
+                "pattern": {"relationType": "transition", "edgeId": "invented"},
+            }],
+        }
+        NodeGraphReviewService._validate_model_result(result, {"workspace": workspace})
+        issue = result["issues"][0]
+        self.assertEqual("invalid_edge_endpoint|||edge_1", issue["issueKey"])
+        self.assertEqual("edge_1", issue["edgeId"])
+        self.assertEqual("edge_1", issue["pattern"]["edgeId"])
+        self.assertEqual("transition", issue["pattern"]["relationType"])
+
+    def test_issue_normalization_discards_invented_edge_id(self):
+        workspace = graph(nodes=[{"id": "start", "nodeType": "start", "workspace": {}}])
+        result = {
+            "hasProblems": True,
+            "summary": "Invalid graph.",
+            "issues": [{
+                "severity": "warning",
+                "confidence": 0.95,
+                "nodeId": "start",
+                "edgeId": "invented_edge",
+                "code": "invalid_edge_endpoint",
+            }],
+        }
+        NodeGraphReviewService._validate_model_result(result, {"workspace": workspace})
+        self.assertFalse(result["hasProblems"])
+        self.assertEqual([], result["issues"])
+
+
     def test_prompt_uses_high_score_professional_style(self):
         prompt = NodeGraphReviewService._build_prompt({
             "workspace": graph(),

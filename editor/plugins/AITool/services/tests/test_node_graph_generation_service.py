@@ -137,6 +137,47 @@ def tag_velocity_workspace():
     return workspace
 
 
+def legacy_field_input_workspace(actor="bunny2"):
+    start = minimal_workspace()["nodes"][0]
+    start["workspace"] = {
+        "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+                {
+                    "type": "node_while_active",
+                    "id": "active-root",
+                    "x": 24,
+                    "y": 24,
+                    "inputs": {
+                        "DO": {
+                            "block": {
+                                "type": "control_if",
+                                "id": "legacy-if",
+                                "fields": {"BOOL": "TRUE"},
+                                "inputs": {
+                                    "DO": {
+                                        "block": {
+                                            "type": "engine_rotateZ",
+                                            "id": "legacy-rotate",
+                                            "fields": {"ANGLE": 15, "OBJECT": actor},
+                                        }
+                                    }
+                                },
+                            }
+                        }
+                    },
+                }
+            ],
+        }
+    }
+    return {
+        "version": 1,
+        "nodes": [start],
+        "edges": [],
+        "globalVariablesWorkspace": {},
+    }
+
+
 def request_payload(**overrides):
     value = {
         "schemaVersion": 1,
@@ -188,6 +229,10 @@ class NodeGraphGenerationServiceTests(unittest.TestCase):
         self.assertIn('"nodes":[{"id":"start"', prompt)
         self.assertIn('"name":"Player"', prompt)
         self.assertIn("FULL_CORONA_BLOCKS_CONTRACT_XML", prompt)
+        self.assertIn("control_if has no BOOL field", prompt)
+        self.assertIn("inputs.OBJECT.block using object_reference", prompt)
+        self.assertIn("choose an exact actor name from PROJECT_CONTEXT", prompt)
+        self.assertNotIn("{...}", prompt)
 
 
     def test_chinese_instruction_sets_chinese_response_language(self):
@@ -325,6 +370,172 @@ class NodeGraphGenerationServiceTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "ui_set_score"):
             self.service._validate_result(result, request, contract_path)
+
+    def test_legacy_bool_and_object_fields_are_safely_normalized(self):
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="extend",
+                instruction="\u7ed9\u5154\u5b50\u6dfb\u52a0\u65cb\u8f6c\u529f\u80fd",
+                responseLanguage="zh-CN",
+                projectContext={"actors": [{"name": "bunny2", "type": "model", "tags": []}]},
+            )
+        )
+        contract_path, _contract = self.service._load_contract()
+        normalized = self.service._validate_result(
+            generated_result(
+                request,
+                summary="\u5df2\u4e3a\u5154\u5b50\u6dfb\u52a0\u65cb\u8f6c\u529f\u80fd\u3002",
+                workspace=legacy_field_input_workspace(),
+            ),
+            request,
+            contract_path,
+        )
+        root = normalized["workspace"]["nodes"][0]["workspace"]["blocks"]["blocks"][0]
+        control_if = root["inputs"]["DO"]["block"]
+        rotate = control_if["inputs"]["DO"]["block"]
+        self.assertNotIn("BOOL", control_if.get("fields", {}))
+        self.assertEqual(
+            "logic_boolean", control_if["inputs"]["CONDITION"]["block"]["type"]
+        )
+        self.assertNotIn("OBJECT", rotate.get("fields", {}))
+        self.assertEqual(
+            "bunny2", rotate["inputs"]["OBJECT"]["block"]["fields"]["OBJECT"]
+        )
+        self.assertTrue(any("moved BOOL" in item for item in normalized["warnings"]))
+        self.assertTrue(any("moved OBJECT" in item for item in normalized["warnings"]))
+
+    def test_object_reference_must_exist_in_current_scene(self):
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="extend",
+                instruction="\u7ed9\u5154\u5b50\u6dfb\u52a0\u65cb\u8f6c\u529f\u80fd",
+                responseLanguage="zh-CN",
+                projectContext={"actors": [{"name": "bunny2", "type": "model", "tags": []}]},
+            )
+        )
+        contract_path, _contract = self.service._load_contract()
+        result = generated_result(
+            request,
+            summary="\u5df2\u6dfb\u52a0\u65cb\u8f6c\u529f\u80fd\u3002",
+            workspace=legacy_field_input_workspace(actor="missing-rabbit"),
+        )
+        with self.assertRaisesRegex(ValueError, "\u4e0d\u5b58\u5728\u4e8e\u5f53\u524d\u573a\u666f"):
+            self.service._validate_result(result, request, contract_path)
+
+    def test_unknown_fields_are_still_rejected_after_safe_normalization(self):
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="extend",
+                instruction="\u7ed9\u5154\u5b50\u6dfb\u52a0\u65cb\u8f6c\u529f\u80fd",
+                responseLanguage="zh-CN",
+                projectContext={"actors": [{"name": "bunny2", "type": "model", "tags": []}]},
+            )
+        )
+        contract_path, _contract = self.service._load_contract()
+        workspace = legacy_field_input_workspace()
+        rotate = workspace["nodes"][0]["workspace"]["blocks"]["blocks"][0]["inputs"]["DO"]["block"]["inputs"]["DO"]["block"]
+        rotate["fields"]["BROKEN"] = 1
+        result = generated_result(
+            request,
+            summary="\u5df2\u6dfb\u52a0\u65cb\u8f6c\u529f\u80fd\u3002",
+            workspace=workspace,
+        )
+        with self.assertRaisesRegex(ValueError, "unknown field BROKEN"):
+            self.service._validate_result(result, request, contract_path)
+
+    def test_replacement_instruction_extracts_source_and_target(self):
+        requirements = self.service._instruction_requirements(
+            "\u8bf7\u5c06\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u6539\u4e3a bunny2\uff0c"
+        )
+        self.assertEqual(
+            {"source": "\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61", "target": "bunny2"},
+            requirements["replacementDirective"],
+        )
+
+    def test_edit_prompt_requires_in_place_change(self):
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="edit",
+                instruction="\u5c06\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u6539\u4e3a bunny2",
+                responseLanguage="zh-CN",
+            )
+        )
+        _path, contract = self.service._load_contract()
+        prompt = self.service._build_prompt(request, contract)
+        self.assertIn("Edit the current workspace in place", prompt)
+        self.assertIn("Do not clear or rebuild the graph", prompt)
+        self.assertIn('"target":"bunny2"', prompt)
+
+    def test_edit_cannot_remove_existing_node_or_edge(self):
+        before = control_workspace(actor="bunny1", include_jump=False)
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="edit",
+                instruction="\u5c06\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u6539\u4e3a bunny2",
+                responseLanguage="zh-CN",
+                workspace=before,
+            )
+        )
+        without_node = {**before, "nodes": before["nodes"][:1]}
+        with self.assertRaisesRegex(ValueError, "removed existing structures"):
+            self.service._validate_operation_scope({"workspace": without_node}, request)
+        without_edge = {**before, "edges": []}
+        with self.assertRaisesRegex(ValueError, "removed existing structures"):
+            self.service._validate_operation_scope({"workspace": without_edge}, request)
+
+    def test_edit_must_change_existing_logic(self):
+        before = control_workspace(actor="bunny1", include_jump=False)
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="edit",
+                instruction="\u5c06\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u6539\u4e3a bunny2",
+                responseLanguage="zh-CN",
+                workspace=before,
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "did not change any node logic"):
+            self.service._validate_operation_scope({"workspace": before}, request)
+
+    def test_edit_can_replace_only_an_existing_object_reference(self):
+        before = control_workspace(actor="bunny1", include_jump=False)
+        after = control_workspace(actor="bunny2", include_jump=False)
+        request = self.service._normalize_payload(
+            request_payload(
+                operation="edit",
+                instruction="\u5c06\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u6539\u4e3a bunny2",
+                responseLanguage="zh-CN",
+                workspace=before,
+                projectContext={
+                    "actors": [
+                        {"name": "bunny1", "type": "model", "tags": []},
+                        {"name": "bunny2", "type": "model", "tags": []},
+                    ]
+                },
+            )
+        )
+        contract_path, _contract = self.service._load_contract()
+        normalized = self.service._validate_result(
+            generated_result(
+                request,
+                summary="\u5df2\u5c06\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u6539\u4e3a bunny2\u3002",
+                workspace=after,
+            ),
+            request,
+            contract_path,
+        )
+        self.assertEqual(
+            "bunny2",
+            normalized["workspace"]["nodes"][1]["workspace"]["blocks"]["blocks"][0]
+            ["inputs"]["DO"]["block"]["fields"]["NAME"],
+        )
+        self.assertEqual(
+            [node["id"] for node in before["nodes"]],
+            [node["id"] for node in normalized["workspace"]["nodes"]],
+        )
+        self.assertEqual(
+            [edge["id"] for edge in before["edges"]],
+            [edge["id"] for edge in normalized["workspace"]["edges"]],
+        )
 
     def test_wrong_request_identity_is_rejected(self):
         request = self.service._normalize_payload(request_payload())

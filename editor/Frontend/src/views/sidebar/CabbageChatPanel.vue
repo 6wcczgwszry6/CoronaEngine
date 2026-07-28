@@ -31,7 +31,20 @@
         :class="message.role"
       >
         <div class="chat-role">{{ message.role === 'assistant' ? '包菜' : '你' }}</div>
-        <div class="chat-content">{{ message.role === 'assistant' ? cleanAssistantText(message.content) : message.content }}</div>
+        <div class="chat-content">
+          <div>{{ message.role === 'assistant' ? cleanAssistantText(message.content) : message.content }}</div>
+          <ol v-if="message.role === 'assistant' && message.steps?.length" class="guidance-steps">
+            <li v-for="(item, index) in message.steps" :key="`${message.id}_step_${index}`">{{ item }}</li>
+          </ol>
+          <button
+            v-if="message.role === 'assistant' && message.needsShowcase && message.guidanceIntent"
+            type="button"
+            class="message-showcase"
+            @click="showcaseMessage(message)"
+          >
+            展示
+          </button>
+        </div>
       </article>
       <article v-if="streamingContent" class="chat-message assistant streaming">
         <div class="chat-role">包菜</div>
@@ -70,6 +83,7 @@ import { useDockPanel } from '@/composables/useDockPanel.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { aiService } from '@/utils/bridge.js';
 import { reviewScopeId } from '@/services/nodeGraphReviewService.js';
+import { guidanceService } from '@/services/cabbageGuidanceService.js';
 import {
   cancelActiveNodeGraphGeneration,
   generateNodeGraphFromInstruction,
@@ -118,6 +132,33 @@ function cleanAssistantText(value = '') {
 
 const cleanedStreamingContent = computed(() => cleanAssistantText(streamingContent.value));
 
+const NODE_GRAPH_OPERATION_COPY = Object.freeze({
+  create: {
+    progress: '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026',
+    success: '\u8282\u70b9\u903b\u8f91\u5df2\u7ecf\u751f\u6210\u5e76\u4fdd\u5b58\u3002',
+    failure: '\u8282\u70b9\u903b\u8f91\u751f\u6210\u5931\u8d25\u3002',
+  },
+  extend: {
+    progress: '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8865\u5145\u903b\u8f91\u2026',
+    success: '\u5df2\u5728\u73b0\u6709\u8282\u70b9\u56fe\u4e2d\u8865\u5145\u5e76\u4fdd\u5b58\u6240\u9700\u903b\u8f91\u3002',
+    failure: '\u8282\u70b9\u903b\u8f91\u8865\u5145\u5931\u8d25\u3002',
+  },
+  edit: {
+    progress: '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8fdb\u884c\u5c40\u90e8\u4fee\u6539\u2026',
+    success: '\u5df2\u4fdd\u7559\u65e0\u5173\u903b\u8f91\u5e76\u5b8c\u6210\u5c40\u90e8\u4fee\u6539\u3002',
+    failure: '\u8282\u70b9\u903b\u8f91\u4fee\u6539\u5931\u8d25\u3002',
+  },
+  delete: {
+    progress: '\u5305\u83dc\u6b63\u5728\u5b9a\u4f4d\u5e76\u5220\u9664\u6307\u5b9a\u8282\u70b9\u903b\u8f91\u2026',
+    success: '\u5df2\u5220\u9664\u6307\u5b9a\u903b\u8f91\u5e76\u4fdd\u5b58\u8282\u70b9\u56fe\u3002',
+    failure: '\u8282\u70b9\u903b\u8f91\u5220\u9664\u5931\u8d25\u3002',
+  },
+});
+
+function nodeGraphOperationCopy(operation) {
+  return NODE_GRAPH_OPERATION_COPY[operation] || NODE_GRAPH_OPERATION_COPY.create;
+}
+
 function scrollToBottom() {
   nextTick(() => {
     if (historyRef.value) historyRef.value.scrollTop = historyRef.value.scrollHeight;
@@ -129,7 +170,13 @@ function clearPollTimer() {
   pollTimer = null;
 }
 
-function finishRequest(requestId, { error = '', keepPartial = false } = {}) {
+function finishRequest(requestId, {
+  error = '',
+  keepPartial = false,
+  needsShowcase = false,
+  guidanceIntent = '',
+  steps = [],
+} = {}) {
   if (assistant.activeRequestId !== requestId) return;
   clearPollTimer();
   const completedContent = cleanAssistantText(streamingContent.value);
@@ -138,6 +185,9 @@ function finishRequest(requestId, { error = '', keepPartial = false } = {}) {
       role: 'assistant',
       content: completedContent,
       ...(activeMessageContext || {}),
+      needsShowcase: needsShowcase === true,
+      guidanceIntent: String(guidanceIntent || ''),
+      steps: Array.isArray(steps) ? steps : [],
     });
     if (message) void cabbageContextService.appendMessage(message);
   }
@@ -173,7 +223,12 @@ async function pollStatus(requestId, taskId) {
         finishRequest(requestId, { error: 'DeepSeek 没有返回可显示的内容。' });
         return;
       }
-      finishRequest(requestId, { keepPartial: true });
+      finishRequest(requestId, {
+        keepPartial: true,
+        needsShowcase: response?.needsShowcase === true,
+        guidanceIntent: String(response?.guidanceIntent || ''),
+        steps: Array.isArray(response?.steps) ? response.steps : [],
+      });
       return;
     }
     if (response.status === 'cancelled') {
@@ -190,6 +245,21 @@ async function pollStatus(requestId, taskId) {
       finishRequest(requestId, { error: String(error?.message || '包菜答疑暂时不可用，请稍后再试。') });
     }
   }
+}
+
+const DETAIL_GUIDANCE_PATTERN = /(不理解|看不懂|不会|怎么做|怎么连接|放在哪里|为什么还是不行|一步一步|具体步骤|展示|演示)/i;
+
+function requestsDetailedGuidance(content = '') {
+  return DETAIL_GUIDANCE_PATTERN.test(String(content || ''));
+}
+
+function showcaseMessage(message) {
+  if (!message?.needsShowcase || !message?.guidanceIntent) return;
+  void guidanceService.start({
+    sourceType: 'chat',
+    title: '操作展示',
+    guidanceIntent: message.guidanceIntent,
+  });
 }
 
 async function sendMessage() {
@@ -216,18 +286,21 @@ async function sendMessage() {
   const generationIntent = nodeGraphGenerationIntent(content);
   if (generationIntent.matched) {
     activeRequestKind.value = 'generation';
+    const operationCopy = nodeGraphOperationCopy(generationIntent.operation);
     // The progress sentence is UI-only and is never persisted as chat history.
-    streamingContent.value = '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026';
+    streamingContent.value = operationCopy.progress;
     try {
       const generated = await generateNodeGraphFromInstruction(content, generationIntent.operation);
       if (assistant.activeRequestId !== requestId || activeRequestKind.value !== 'generation') return;
-      streamingContent.value = String(generated.summary || '\u8282\u70b9\u903b\u8f91\u5df2\u7ecf\u751f\u6210\u5e76\u4fdd\u5b58\u3002');
+      streamingContent.value = String(generated.summary || operationCopy.success);
       finishRequest(requestId, { keepPartial: true });
     } catch (error) {
       if (assistant.activeRequestId === requestId) {
-        finishRequest(requestId, {
-          error: `${String(error?.message || '\u8282\u70b9\u903b\u8f91\u751f\u6210\u5931\u8d25\u3002')} \u5f53\u524d\u8282\u70b9\u56fe\u6ca1\u6709\u88ab\u4fee\u6539\u3002`,
-        });
+        const reason = String(error?.message || operationCopy.failure);
+        const unchanged = reason.includes('\u6ca1\u6709\u88ab\u4fee\u6539')
+          ? reason
+          : `${reason} \u5f53\u524d\u8282\u70b9\u56fe\u6ca1\u6709\u88ab\u4fee\u6539\u3002`;
+        finishRequest(requestId, { error: unchanged });
       }
     }
     return;
@@ -245,6 +318,7 @@ async function sendMessage() {
       tasks: assistant.tasks,
       graphExcerpt: assistant.graphExcerpt,
       messages: assistant.messages.map(({ role, content: text }) => ({ role, content: text })),
+      detailGuidanceRequested: requestsDetailedGuidance(content),
     });
     if (assistant.activeRequestId !== requestId) return;
     if (response?.success !== true || !String(response?.taskId || '').trim()) {
@@ -486,6 +560,33 @@ onBeforeUnmount(() => {
 
 .chat-message.streaming .chat-content {
   border-color: rgba(216, 184, 108, 0.38);
+}
+
+.guidance-steps {
+  margin: 9px 0 0;
+  padding-left: 21px;
+  color: #e9dfc5;
+}
+
+.guidance-steps li + li {
+  margin-top: 5px;
+}
+
+.message-showcase {
+  display: block;
+  margin: 10px 0 0 auto;
+  border: 1px solid rgba(216, 184, 108, 0.48);
+  border-radius: 5px;
+  background: #6d5226;
+  color: #fff7dc;
+  padding: 5px 11px;
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.message-showcase:hover {
+  border-color: #d8b86c;
+  background: #8c6f36;
 }
 
 .chat-pending {

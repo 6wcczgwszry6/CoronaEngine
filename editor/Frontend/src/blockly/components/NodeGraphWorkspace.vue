@@ -16,6 +16,7 @@
         <button
           type="button"
           class="ng-run"
+          data-guidance="node-run"
           :class="{ running: codeRunning }"
           :disabled="runBusy || (globalPreviewActive && !codeRunning)"
           :title="globalPreviewActive && !codeRunning ? globalPreviewRunLabel : ''"
@@ -48,7 +49,7 @@
     </div>
     <div v-if="!targetReady" class="ng-empty">请先选中一个物体</div>
     <div v-else class="ng-body">
-      <aside class="ng-panel ng-toolbox">
+      <aside class="ng-panel ng-toolbox" data-guidance="node-toolbox">
         <div class="ng-section-title">
           宏观节点
           <small>拖入中间</small>
@@ -83,6 +84,7 @@
       <main
         ref="canvasRef"
         class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive, panning: isCanvasPanning }"
+        data-guidance="node-canvas"
         @dragover.prevent
         @drop.prevent="handleCanvasDrop"
         @wheel.prevent="handleCanvasWheel"
@@ -123,7 +125,7 @@
             class="ng-edge-preview"
             :d="pendingEdgePath"
           />
-          <g v-for="edge in edges" :key="edge.id">
+          <g v-for="edge in edges" :key="edge.id" :data-edge-id="edge.id">
             <path
               class="ng-edge-hit"
               :d="edgePath(edge)"
@@ -145,6 +147,8 @@
           v-for="edge in edges"
           :key="`${edge.id}-condition`"
           class="ng-condition-block"
+          :data-edge-id="edge.id"
+          data-guidance="node-transition-condition"
           :class="{ selected: selectedKind === 'edge' && selectedId === edge.id }"
           :style="conditionStyle(edge)"
           @click.stop="selectEdge(edge)"
@@ -156,6 +160,7 @@
           v-for="node in nodes"
           :key="node.id"
           class="ng-node"
+          :data-node-id="node.id"
           :class="[
             `type-${node.nodeType}`,
             {
@@ -178,6 +183,9 @@
               v-if="shouldShowPort(node, port)"
               type="button"
               class="ng-port"
+              :data-node-id="node.id"
+              :data-port-side="port.side"
+              :data-port-index="port.index"
               :class="[
                 port.side,
                 {
@@ -218,7 +226,7 @@
           />
         </section>
         <div class="ng-splitter horizontal" title="拖动调整全局变量池高度" @pointerdown="beginLayoutResize($event, 'variables')"></div>
-        <section class="ng-editor">
+        <section class="ng-editor" data-guidance="node-blockly-editor">
           <div class="ng-section-title">
             {{ activeEditorTitle }}
             <small>{{ activeEditorSubtitle }}</small>
@@ -307,11 +315,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
+import { editorApi, appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 import { generatedNodeGraphRevision, registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
-import { reviewScopeId, startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { graphRevision as reviewGraphRevision, reviewScopeId, startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
   cabbageContextService,
   readCabbageAssistantContext,
@@ -325,6 +334,7 @@ const props = defineProps({
   reviewActive: { type: Boolean, default: true },
 });
 const { error: logError } = useErrorHandler('NodeGraphWorkspace');
+const cabbageAssistant = useCabbageAssistantStore();
 const NODE_WIDTH = 170,
   NODE_BASE_HEIGHT = 98,
   NODE_PORT_GAP = 20,
@@ -479,6 +489,7 @@ const worldStyle = computed(() => ({
 }));
 let isLoading = false,
   saveTimer = null,
+  preWarningTimer = null,
   resizeObserver = null,
   resizeFrame = 0,
   dragState = null,
@@ -493,6 +504,9 @@ let isLoading = false,
   panelCloseStopPromise = null,
   unregisterAiNodeGraphConsumer = null,
   stopNodeGraphReview = null,
+  sceneTreeChangedCallbackToken = null,
+  actorOptionsRefreshTimer = null,
+  actorOptionsRefreshSequence = 0,
   unregisterProjectNodeGraphSaveHandler = null,
   loadedProjectPath = '',
   componentMounted = false,
@@ -504,6 +518,21 @@ const targetEnabledByKey = new Map();
 const nodeRunLifecycle = { active: false, terminalReported: false };
 function requestNodeGraphReview(delay = 250) {
   stopNodeGraphReview?.scanNow?.(delay);
+}
+function scheduleRememberedIssueCheck(delay = 140) {
+  if (!componentMounted || isLoading || !initialLoadComplete || !isProjectTarget.value) return;
+  if (preWarningTimer) window.clearTimeout(preWarningTimer);
+  preWarningTimer = window.setTimeout(() => {
+    preWarningTimer = null;
+    if (!componentMounted || isLoading || !initialLoadComplete || !isProjectTarget.value) return;
+    const snapshot = graphSnapshot();
+    const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+    cabbageAssistant.evaluateRememberedIssuePatterns(
+      snapshot,
+      reviewGraphRevision(snapshot, scope),
+      generatedProjectContext(),
+    );
+  }, Math.max(0, Number(delay) || 0));
 }
 function currentAssistanceProfile() {
   const profile = readCabbageAssistantContext()?.profile || {};
@@ -716,6 +745,7 @@ function addMacroNodeAt(macroType, clientX, clientY) {
     details: { nodeId: String(node.id || ''), nodeType: String(node.nodeType || '') },
   });
   scheduleSave();
+  scheduleRememberedIssueCheck();
   return true;
 }
 function clearMacroPointerListeners() {
@@ -1104,8 +1134,8 @@ function selectNode(node) {
   }
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
-function selectEdge(edge) {
-  if (mode.value === 'delete') {
+function selectEdge(edge, { allowDelete = true } = {}) {
+  if (allowDelete && mode.value === 'delete') {
     deleteEdge(edge.id);
     return;
   }
@@ -1123,6 +1153,108 @@ function handleEdgeClick(edge) {
   }
   selectEdge(edge);
 }
+
+function serializedWorkspaceContainsBlock(value, blockId, seen = new Set()) {
+  if (!value || !blockId || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (String(value.id || '') === blockId) return true;
+  if (Array.isArray(value)) {
+    return value.some((item) => serializedWorkspaceContainsBlock(item, blockId, seen));
+  }
+  return Object.values(value).some((item) => serializedWorkspaceContainsBlock(item, blockId, seen));
+}
+
+function guidanceBlockOwner(blockId) {
+  if (!blockId) return null;
+  refreshEmbeddedWorkspaceStates();
+  if (serializedWorkspaceContainsBlock(graph.globalVariablesWorkspace, blockId)) {
+    return { kind: 'global' };
+  }
+  const node = graph.nodes.find((item) => serializedWorkspaceContainsBlock(item.workspace, blockId));
+  if (node) return { kind: 'node', node };
+  const edge = graph.edges.find((item) => serializedWorkspaceContainsBlock(item.conditionWorkspace, blockId));
+  if (edge) return { kind: 'edge', edge };
+  if (activeBlocklyRef.value?.hasBlock?.(blockId)) {
+    return selectedNode.value
+      ? { kind: 'node', node: selectedNode.value }
+      : selectedEdge.value
+        ? { kind: 'edge', edge: selectedEdge.value }
+        : null;
+  }
+  if (variablesBlocklyRef.value?.hasBlock?.(blockId)) return { kind: 'global' };
+  return null;
+}
+
+function focusWorldPointIfNeeded(worldX, worldY) {
+  const rect = canvasRef.value?.getBoundingClientRect?.();
+  if (!rect || !Number.isFinite(worldX) || !Number.isFinite(worldY)) return;
+  const localX = viewport.offsetX + worldX * viewport.scale;
+  const localY = viewport.offsetY + worldY * viewport.scale;
+  const marginX = Math.min(140, Math.max(64, rect.width * 0.18));
+  const marginY = Math.min(110, Math.max(60, rect.height * 0.18));
+  const visible = localX >= marginX
+    && localX <= rect.width - marginX
+    && localY >= marginY
+    && localY <= rect.height - marginY;
+  if (visible) return;
+  viewport.offsetX = rect.width / 2 - worldX * viewport.scale;
+  viewport.offsetY = rect.height / 2 - worldY * viewport.scale;
+  clampViewport();
+}
+
+function focusGuidanceNode(node) {
+  if (!node) return false;
+  selectNode(node);
+  focusWorldPointIfNeeded(
+    (Number(node.x) || 0) + NODE_WIDTH / 2,
+    (Number(node.y) || 0) + nodeHeight(node) / 2
+  );
+  return true;
+}
+
+function focusGuidanceEdge(edge) {
+  if (!edge) return false;
+  selectEdge(edge, { allowDelete: false });
+  const source = graph.nodes.find((node) => node.id === edge.source?.nodeId);
+  const target = graph.nodes.find((node) => node.id === edge.target?.nodeId);
+  if (source && target) {
+    focusWorldPointIfNeeded(
+      ((Number(source.x) || 0) + (Number(target.x) || 0) + NODE_WIDTH) / 2,
+      ((Number(source.y) || 0) + (Number(target.y) || 0) + (nodeHeight(source) + nodeHeight(target)) / 2) / 2
+    );
+  }
+  return true;
+}
+
+async function focusGuidanceBlock(blockId) {
+  const owner = guidanceBlockOwner(blockId);
+  if (!owner) return false;
+  if (owner.kind === 'node') focusGuidanceNode(owner.node);
+  if (owner.kind === 'edge') focusGuidanceEdge(owner.edge);
+  await nextTick();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  const targetWorkspace = owner.kind === 'global' ? variablesBlocklyRef.value : activeBlocklyRef.value;
+  targetWorkspace?.resizeBlockly?.();
+  return Boolean(targetWorkspace?.focusBlock?.(blockId));
+}
+
+function handleGuidancePrepare(event) {
+  const detail = event?.detail || {};
+  if (detail.panelId !== 'NodeGraphPanel') return;
+  const blockId = String(detail.blockId || '');
+  if (blockId) {
+    void focusGuidanceBlock(blockId);
+    return;
+  }
+  const edgeId = String(detail.edgeId || '');
+  if (edgeId) {
+    focusGuidanceEdge(graph.edges.find((edge) => String(edge.id) === edgeId));
+    return;
+  }
+  const nodeId = String(detail.nodeId || '');
+  if (nodeId) focusGuidanceNode(graph.nodes.find((node) => String(node.id) === nodeId));
+}
 function deleteNode(id) {
   const i = graph.nodes.findIndex((n) => n.id === id);
   if (i < 0) return;
@@ -1134,6 +1266,7 @@ function deleteNode(id) {
   }
   pendingPort.value = null;
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function deleteEdge(id) {
   const i = graph.edges.findIndex((e) => e.id === id);
@@ -1145,6 +1278,7 @@ function deleteEdge(id) {
   }
   pendingPort.value = null;
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function renameEdge(edge) {
   if (mode.value === 'delete') return;
@@ -1173,6 +1307,7 @@ function setSelectedNodeType(nextType) {
   else if (nextType === 'end') node.name = '结束';
   else node.name = String(node.customName || '').trim() || '自定义节点';
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function updateSelectedNodeName(value) {
   const node = selectedNode.value;
@@ -1349,6 +1484,7 @@ function handlePortClick(node, p) {
   pendingPort.value = null;
   connectionPointer.active = false;
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function getNode(id) {
   return graph.nodes.find((n) => n.id === id);
@@ -1437,6 +1573,7 @@ function conditionStyle(e) {
   return { left: `${p.x - 56}px`, top: `${p.y - 17}px` };
 }
 function onBlockAdded(payload = {}) {
+  scheduleRememberedIssueCheck();
   void cabbageContextService.recordEvent({
     type: 'block_added',
     category: 'node',
@@ -1453,6 +1590,7 @@ function onBlockAdded(payload = {}) {
 }
 
 function onBlockChanged(payload = {}) {
+  scheduleRememberedIssueCheck();
   void cabbageContextService.recordEvent({
     type: 'block_parameter_changed',
     category: 'node',
@@ -1472,12 +1610,14 @@ function onGlobalWorkspaceChange(s) {
   if (isLoading) return;
   graph.globalVariablesWorkspace = s || {};
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function onActiveWorkspaceChange(s) {
   if (isLoading) return;
   if (selectedNode.value) selectedNode.value.workspace = s || {};
   if (selectedEdge.value) selectedEdge.value.conditionWorkspace = s || {};
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function refreshEmbeddedWorkspaceStates() {
   const g = variablesBlocklyRef.value?.getState?.();
@@ -1502,6 +1642,141 @@ function graphSnapshot() {
   } catch {
     return { version: 1, nodes: [], edges: [], globalVariablesWorkspace: {} };
   }
+}
+
+function canonicalJson(value) {
+  const normalize = (item) => {
+    if (Array.isArray(item)) return item.map(normalize);
+    if (!item || typeof item !== 'object') return item;
+    return Object.keys(item).sort().reduce((result, key) => {
+      const normalized = normalize(item[key]);
+      if (normalized !== undefined) result[key] = normalized;
+      return result;
+    }, {});
+  };
+  try { return JSON.stringify(normalize(value)); } catch (_) { return ''; }
+}
+
+function serializedBlocksById(workspace = {}) {
+  const blocks = new Map();
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    if (typeof value.type === 'string' && value.id) blocks.set(String(value.id), value);
+    Object.values(value).forEach(visit);
+  };
+  visit(workspace);
+  return blocks;
+}
+
+function changedSerializedBlockIds(previousWorkspace = {}, nextWorkspace = {}) {
+  const previousBlocks = serializedBlocksById(previousWorkspace);
+  const nextBlocks = serializedBlocksById(nextWorkspace);
+  const changed = [];
+  for (const [blockId, block] of nextBlocks) {
+    const previousBlock = previousBlocks.get(blockId);
+    if (!previousBlock || canonicalJson(previousBlock) !== canonicalJson(block)) changed.push(blockId);
+  }
+  return { changed, visibleBlockCount: nextBlocks.size };
+}
+
+function findGeneratedGraphFocus(previous = {}, candidate = {}, selection = {}) {
+  const previousNodes = new Map((previous.nodes || []).map((node) => [String(node.id || ''), node]));
+  const nodeChoices = [];
+  for (const node of candidate.nodes || []) {
+    const nodeId = String(node.id || '');
+    const oldNode = previousNodes.get(nodeId);
+    const blockChange = changedSerializedBlockIds(oldNode?.workspace || {}, node.workspace || {});
+    const workspaceChanged = !oldNode || canonicalJson(oldNode.workspace || {}) !== canonicalJson(node.workspace || {});
+    const metadataChanged = !oldNode
+      || oldNode.nodeType !== node.nodeType
+      || String(oldNode.name || '') !== String(node.name || '')
+      || String(oldNode.customName || '') !== String(node.customName || '');
+    if (!workspaceChanged && !metadataChanged) continue;
+    let score = workspaceChanged ? 500 : 200;
+    if (!oldNode) score += 120;
+    if (selection.kind === 'node' && selection.id === nodeId) score += 80;
+    score += Math.min(60, blockChange.changed.length * 12 + blockChange.visibleBlockCount);
+    nodeChoices.push({
+      kind: 'node',
+      id: nodeId,
+      blockId: blockChange.changed[0] || '',
+      visibleBlockCount: blockChange.visibleBlockCount,
+      nodeName: displayNodeName(node),
+      score,
+    });
+  }
+  if (nodeChoices.length) return nodeChoices.sort((a, b) => b.score - a.score)[0];
+
+  const previousEdges = new Map((previous.edges || []).map((edge) => [String(edge.id || ''), edge]));
+  const edgeChoices = [];
+  for (const edge of candidate.edges || []) {
+    const edgeId = String(edge.id || '');
+    const oldEdge = previousEdges.get(edgeId);
+    const blockChange = changedSerializedBlockIds(oldEdge?.conditionWorkspace || {}, edge.conditionWorkspace || {});
+    const changed = !oldEdge || canonicalJson(oldEdge) !== canonicalJson(edge);
+    if (!changed) continue;
+    let score = 420 + Math.min(50, blockChange.changed.length * 12 + blockChange.visibleBlockCount);
+    if (selection.kind === 'edge' && selection.id === edgeId) score += 80;
+    edgeChoices.push({
+      kind: 'edge',
+      id: edgeId,
+      blockId: blockChange.changed[0] || '',
+      visibleBlockCount: blockChange.visibleBlockCount,
+      edgeName: String(edge.name || '\u6761\u4ef6'),
+      score,
+    });
+  }
+  if (edgeChoices.length) return edgeChoices.sort((a, b) => b.score - a.score)[0];
+
+  if (selection.kind === 'node' && (candidate.nodes || []).some((node) => node.id === selection.id)) {
+    const node = candidate.nodes.find((item) => item.id === selection.id);
+    return {
+      kind: 'node', id: selection.id, blockId: '',
+      visibleBlockCount: serializedBlocksById(node?.workspace || {}).size,
+      nodeName: displayNodeName(node), score: 0,
+    };
+  }
+  if (selection.kind === 'edge' && (candidate.edges || []).some((edge) => edge.id === selection.id)) {
+    const edge = candidate.edges.find((item) => item.id === selection.id);
+    return {
+      kind: 'edge', id: selection.id, blockId: '',
+      visibleBlockCount: serializedBlocksById(edge?.conditionWorkspace || {}).size,
+      edgeName: String(edge?.name || '\u6761\u4ef6'), score: 0,
+    };
+  }
+
+  const fallbackNode = [...(candidate.nodes || [])]
+    .sort((a, b) => serializedBlocksById(b.workspace || {}).size - serializedBlocksById(a.workspace || {}).size)[0];
+  return fallbackNode ? {
+    kind: 'node', id: String(fallbackNode.id || ''), blockId: '',
+    visibleBlockCount: serializedBlocksById(fallbackNode.workspace || {}).size,
+    nodeName: displayNodeName(fallbackNode), score: 0,
+  } : null;
+}
+
+async function revealGeneratedGraphFocus(focus) {
+  if (!focus) return;
+  if (focus.kind === 'node') {
+    const node = graph.nodes.find((item) => String(item.id) === focus.id);
+    if (node) {
+      focusWorldPointIfNeeded(
+        (Number(node.x) || 0) + NODE_WIDTH / 2,
+        (Number(node.y) || 0) + nodeHeight(node) / 2
+      );
+    }
+  } else if (focus.kind === 'edge') {
+    const edge = graph.edges.find((item) => String(item.id) === focus.id);
+    if (edge) focusGuidanceEdge(edge);
+  }
+  if (!focus.blockId) return;
+  await nextTick();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  activeBlocklyRef.value?.resizeBlockly?.();
+  activeBlocklyRef.value?.focusBlock?.(focus.blockId);
 }
 const PORT_SIDES = ['left', 'right', 'bottom'];
 function normalizeEndpoint(e) {
@@ -1832,6 +2107,7 @@ async function handleGeneratedNodeGraph(result) {
 
   const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
   const previous = graphSnapshot();
+  const previousSelection = { kind: selectedKind.value, id: selectedId.value };
   const currentProjectScopeId = reviewScopeId(scope);
   const currentRevision = generatedNodeGraphRevision({
     workspace: previous,
@@ -1855,14 +2131,24 @@ async function handleGeneratedNodeGraph(result) {
     const candidate = normalizeGraph(result.workspace);
     const analysis = validateNodeGraph(candidate);
     nodeGraphToCode(candidate); // Deserializes every visible block and validates conditions/generators.
+    const focus = findGeneratedGraphFocus(previous, candidate, previousSelection);
 
     isLoading = true;
     applyGraph(candidate);
+    if (focus?.kind === 'node' && graph.nodes.some((node) => String(node.id) === focus.id)) {
+      selectedKind.value = 'node';
+      selectedId.value = focus.id;
+    } else if (focus?.kind === 'edge' && graph.edges.some((edge) => String(edge.id) === focus.id)) {
+      selectedKind.value = 'edge';
+      selectedId.value = focus.id;
+    }
     await loadEmbeddedWorkspaceStates();
+    await revealGeneratedGraphFocus(focus);
     isLoading = false;
     graphDirty = true;
 
     if (!(await saveNow())) throw new Error('\u5185\u90e8 AI \u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25');
+    requestNodeGraphReview(0);
     saveLabel.value = '\u5185\u90e8 AI \u8282\u70b9\u56fe\u5df2\u5e94\u7528';
     return {
       success: true,
@@ -1871,11 +2157,23 @@ async function handleGeneratedNodeGraph(result) {
       summary: {
         nodeCount: candidate.nodes.length,
         edgeCount: candidate.edges.length,
+        focusedKind: focus?.kind || '',
+        focusedId: focus?.id || '',
+        focusedNodeName: focus?.nodeName || '',
+        focusedEdgeName: focus?.edgeName || '',
+        visibleBlockCount: Number(focus?.visibleBlockCount || 0),
       },
     };
   } catch (error) {
     isLoading = true;
     applyGraph(normalizeGraph(previous));
+    if (previousSelection.kind === 'node' && graph.nodes.some((node) => node.id === previousSelection.id)) {
+      selectedKind.value = 'node';
+      selectedId.value = previousSelection.id;
+    } else if (previousSelection.kind === 'edge' && graph.edges.some((edge) => edge.id === previousSelection.id)) {
+      selectedKind.value = 'edge';
+      selectedId.value = previousSelection.id;
+    }
     await loadEmbeddedWorkspaceStates();
     isLoading = false;
     try {
@@ -2229,7 +2527,8 @@ function collectActorNames(value, output = new Set()) {
   });
   return output;
 }
-async function refreshSceneActorOptions() {
+async function refreshSceneActorOptions({ rescan = false } = {}) {
+  const refreshSequence = ++actorOptionsRefreshSequence;
   const options = new Set();
   if (props.actorName) options.add(String(props.actorName));
   try {
@@ -2237,9 +2536,54 @@ async function refreshSceneActorOptions() {
     const payload = response?.data ?? response?.result ?? response;
     collectActorNames(payload, options);
   } catch (error) {
-    logError('刷新当前场景对象列表失败', error);
+    logError('Failed to refresh scene actor options', error);
+    return false;
   }
-  window.__coronaBlocklyActorOptions = Array.from(options).sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => [name, name]);
+  if (!componentMounted || refreshSequence !== actorOptionsRefreshSequence) return false;
+  const previousNames = (window.__coronaBlocklyActorOptions || [])
+    .map(([name]) => String(name || ''))
+    .filter(Boolean);
+  const nextNames = Array.from(options).sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  const changed = previousNames.length !== nextNames.length
+    || previousNames.some((name, index) => name !== nextNames[index]);
+  window.__coronaBlocklyActorOptions = nextNames.map((name) => [name, name]);
+  if (changed) {
+    scheduleRememberedIssueCheck(80);
+    if (rescan) requestNodeGraphReview(120);
+  }
+  return changed;
+}
+function scheduleSceneActorOptionsRefresh(delay = 120) {
+  if (!componentMounted) return;
+  if (actorOptionsRefreshTimer) window.clearTimeout(actorOptionsRefreshTimer);
+  actorOptionsRefreshTimer = window.setTimeout(async () => {
+    actorOptionsRefreshTimer = null;
+    await refreshSceneActorOptions({ rescan: true });
+  }, Math.max(0, Number(delay) || 0));
+}
+function normalizeSceneReference(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+/g, '/')
+    .toLocaleLowerCase('en-US');
+}
+function sceneReferencesMatch(left, right) {
+  const normalizedLeft = normalizeSceneReference(left);
+  const normalizedRight = normalizeSceneReference(right);
+  if (!normalizedLeft || !normalizedRight) return true;
+  if (normalizedLeft === normalizedRight) return true;
+  const leftFile = normalizedLeft.split('/').pop();
+  const rightFile = normalizedRight.split('/').pop();
+  return Boolean(leftFile && rightFile && leftFile === rightFile);
+}
+function onNodeGraphSceneTreeChanged(payload) {
+  const changedScene = typeof payload === 'string'
+    ? payload
+    : payload?.scene ?? payload?.sceneName ?? '';
+  if (!sceneReferencesMatch(changedScene, props.sceneName)) return;
+  scheduleSceneActorOptionsRefresh();
 }
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
@@ -2255,6 +2599,11 @@ async function onActiveProjectChanged(event) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  if (preWarningTimer) {
+    clearTimeout(preWarningTimer);
+    preWarningTimer = null;
+  }
+  cabbageAssistant.clearPreWarning();
   activeProjectPath.value = nextProjectPath;
   loadedProjectPath = '';
   targetEnabledByKey.clear();
@@ -2316,11 +2665,18 @@ function unregisterNodeGraphFlusher() {
     delete window.__coronaNodeGraphFlushers;
   }
 }
-onMounted(() => {
+onMounted(async () => {
   componentMounted = true;
   activeProjectPath.value = readActiveProjectPath() || activeProjectPath.value;
   window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.addEventListener('storage', onProjectStorageChanged);
+  window.addEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
+  try {
+    sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onNodeGraphSceneTreeChanged);
+  } catch (error) {
+    logError('Failed to subscribe to scene tree changes', error);
+  }
+  await refreshSceneActorOptions();
   syncGeneratedNodeGraphConsumer();
   if (isProjectTarget.value) {
     stopNodeGraphReview = startNodeGraphReview({
@@ -2367,6 +2723,16 @@ onBeforeUnmount(() => {
   componentMounted = false;
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onProjectStorageChanged);
+  window.removeEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
+  actorOptionsRefreshSequence += 1;
+  if (actorOptionsRefreshTimer) window.clearTimeout(actorOptionsRefreshTimer);
+  actorOptionsRefreshTimer = null;
+  if (sceneTreeChangedCallbackToken) {
+    editorApi.off(sceneTreeChangedCallbackToken).catch((error) => {
+      logError('Failed to unsubscribe from scene tree changes', error);
+    });
+    sceneTreeChangedCallbackToken = null;
+  }
   stopNodeGraphReview?.();
   stopNodeGraphReview = null;
   unregisterProjectNodeGraphSaveHandler?.();
@@ -2387,6 +2753,8 @@ onBeforeUnmount(() => {
   unregisterNodeGraphFlusher();
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = null;
+  if (preWarningTimer) window.clearTimeout(preWarningTimer);
+  preWarningTimer = null;
   if (initialLoadComplete && graphDirty) saveNow(null, { force: true });
   resizeObserver?.disconnect?.();
   if (resizeFrame) window.cancelAnimationFrame(resizeFrame);

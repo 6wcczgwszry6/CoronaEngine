@@ -38,6 +38,11 @@ class NodeGraphReviewService:
     CONTRACT_FILENAME = "CoronaBlocksDocument.internal-ai-contract.xml"
     MAX_TASKS = 32
     MAX_CACHE_ENTRIES = 32
+    ISSUE_PATTERN_FIELDS = (
+        "blockType", "workspaceRole", "relationType",
+        "missingInput", "objectRequirement", "edgeId",
+    )
+    ISSUE_CODE_ALIASES = {"dangling_edge": "invalid_edge_endpoint"}
 
     # Only these fields identify an existing scene actor. TAG, variable names,
     # cooldown names and spawn names are intentionally excluded.
@@ -510,9 +515,9 @@ class NodeGraphReviewService:
             raise ValueError("DeepSeek 审查结果必须是 JSON 对象")
         return value
 
-    @staticmethod
+    @classmethod
     def _validate_model_result(
-        result: dict[str, Any], request: dict[str, Any]
+        cls, result: dict[str, Any], request: dict[str, Any]
     ) -> None:
         if not isinstance(result.get("hasProblems"), bool):
             raise ValueError("DeepSeek 审查结果缺少 hasProblems")
@@ -550,20 +555,30 @@ class NodeGraphReviewService:
             for node in request["workspace"]["nodes"]
             if isinstance(node, dict)
         }
-        block_ids = {
-            str(block.get("id"))
-            for block in NodeGraphReviewService._walk_blocks(request["workspace"])
+        blocks_by_id = {
+            str(block.get("id")): block
+            for block in cls._walk_blocks(request["workspace"])
             if block.get("id")
         }
+        block_ids = set(blocks_by_id)
+        edge_ids = {
+            str(edge.get("id"))
+            for edge in request["workspace"].get("edges", [])
+            if isinstance(edge, dict) and edge.get("id")
+        }
+        facts = cls._collect_local_facts(request["workspace"], project_context)
         normalized: list[dict[str, Any]] = []
         for item in issues[:6]:
             if not isinstance(item, dict):
                 continue
             node_id = str(item.get("nodeId") or "")
             block_id = str(item.get("blockId") or "")
+            edge_id = str(item.get("edgeId") or "")
             if node_id and node_id not in node_ids:
                 continue
             if block_id and block_id not in block_ids:
+                continue
+            if edge_id and edge_id not in edge_ids:
                 continue
             try:
                 confidence = max(
@@ -574,17 +589,49 @@ class NodeGraphReviewService:
             if confidence < 0.8:
                 continue
             code = str(item.get("code") or "logic_issue")[:80]
+            code = cls.ISSUE_CODE_ALIASES.get(code, code)
+            matching_fact = next((fact for fact in facts if (
+                cls.ISSUE_CODE_ALIASES.get(str(fact.get("code") or ""), str(fact.get("code") or "")) == code
+                and (not node_id or not fact.get("nodeId") or str(fact.get("nodeId")) == node_id)
+                and (not block_id or not fact.get("blockId") or str(fact.get("blockId")) == block_id)
+                and (not edge_id or not fact.get("edgeId") or str(fact.get("edgeId")) == edge_id)
+            )), None)
+            if not edge_id and matching_fact and str(matching_fact.get("edgeId") or "") in edge_ids:
+                edge_id = str(matching_fact.get("edgeId") or "")
+            raw_pattern = item.get("pattern") if isinstance(item.get("pattern"), dict) else {}
+            pattern = cls._normalize_issue_pattern(raw_pattern)
+            actual_block = blocks_by_id.get(block_id) or {}
+            if actual_block.get("type"):
+                pattern["blockType"] = str(actual_block.get("type"))[:180]
+            if matching_fact:
+                if matching_fact.get("blockType"):
+                    pattern["blockType"] = str(matching_fact.get("blockType"))[:180]
+                if matching_fact.get("field"):
+                    pattern["missingInput"] = str(matching_fact.get("field"))[:180]
+            if code in {"missing_actor_target", "actor_target_not_found"}:
+                pattern["objectRequirement"] = "scene_actor"
+            if code in {"invalid_visible_condition_count", "non_boolean_condition"}:
+                pattern["workspaceRole"] = "condition"
+                pattern["relationType"] = "transition"
+            elif code == "invalid_edge_endpoint":
+                pattern["relationType"] = "transition"
+            elif code == "start_node_count":
+                pattern["workspaceRole"] = "node_graph"
+            if edge_id:
+                pattern["edgeId"] = edge_id
             title = str(item.get("title") or "节点逻辑需要调整").strip()[:80]
             message = str(item.get("message") or result["summary"]).strip()[:500]
             suggestion = str(item.get("suggestion") or result["summary"]).strip()[:500]
             normalized.append(
                 {
-                    "issueKey": f"{code}|{node_id}|{block_id}",
+                    "issueKey": f"{code}|{node_id}|{block_id}" + (f"|{edge_id}" if edge_id else ""),
                     "severity": str(item.get("severity") or "warning")[:16],
                     "confidence": confidence,
                     "nodeId": node_id,
                     "blockId": block_id,
+                    "edgeId": edge_id,
                     "code": code,
+                    "pattern": pattern,
                     "title": title,
                     "message": message,
                     "suggestion": suggestion,
@@ -597,6 +644,17 @@ class NodeGraphReviewService:
             result["optimizationTip"] = normalized_tip
             return
         result["issues"] = normalized
+
+    @classmethod
+    def _normalize_issue_pattern(cls, raw: Any) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for field in cls.ISSUE_PATTERN_FIELDS:
+            value = str(raw.get(field) or "").strip()[:180]
+            if value:
+                normalized[field] = value
+        return normalized
 
     @staticmethod
     def _walk_blocks(value: Any) -> Iterable[dict[str, Any]]:

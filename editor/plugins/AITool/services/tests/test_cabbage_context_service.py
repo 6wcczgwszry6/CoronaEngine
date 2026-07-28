@@ -335,5 +335,57 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertIn("其他世界", response["message"])
 
 
+    def test_node_issue_persists_edge_pattern_without_double_counting_active_upsert(self):
+        payload = {
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "invalid_edge_endpoint|start||edge_1",
+                "type": "node-issue",
+                "code": "invalid_edge_endpoint",
+                "nodeId": "start",
+                "edgeId": "edge_1",
+                "pattern": {
+                    "relationType": "transition",
+                    "edgeId": "edge_1",
+                },
+                "title": "repair edge",
+            },
+        }
+        first = self.service.update_task(payload)
+        second = self.service.update_task(payload)
+        task = next(item for item in second["context"]["activeTasks"] if item["taskKey"] == payload["task"]["taskKey"])
+        memory = second["context"]["issueMemory"]["invalid_edge_endpoint"]
+        self.assertEqual("edge_1", task["edgeId"])
+        self.assertEqual("transition", task["pattern"]["relationType"])
+        self.assertEqual("edge_1", task["pattern"]["edgeId"])
+        self.assertEqual(1, memory["occurrences"])
+        self.assertEqual(1, first["context"]["issueMemory"]["invalid_edge_endpoint"]["occurrences"])
+
+    def test_assistant_showcase_metadata_is_persisted_and_invalid_intent_is_rejected(self):
+        valid = self.service.append_message({
+            "worldId": self.world.name,
+            "role": "assistant",
+            "content": "Follow these steps.",
+            "needsShowcase": True,
+            "guidanceIntent": "connect_object_reference",
+            "steps": ["Open Node Dock", "repair edge"],
+        })
+        self.assertTrue(valid["message"]["needsShowcase"])
+        self.assertEqual("connect_object_reference", valid["message"]["guidanceIntent"])
+        self.assertEqual(["Open Node Dock", "repair edge"], valid["message"]["steps"])
+
+        invalid = self.service.append_message({
+            "worldId": self.world.name,
+            "role": "assistant",
+            "content": "Reject unknown guidance.",
+            "needsShowcase": True,
+            "guidanceIntent": "querySelector:anything",
+            "steps": ["Unknown action"],
+        })
+        self.assertFalse(invalid["message"]["needsShowcase"])
+        self.assertEqual("", invalid["message"]["guidanceIntent"])
+
+
 if __name__ == "__main__":
     unittest.main()

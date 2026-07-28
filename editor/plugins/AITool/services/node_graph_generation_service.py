@@ -1,4 +1,4 @@
-﻿"""DeepSeek-powered project node-graph generation for Cabbage Q&A.
+"""DeepSeek-powered project node-graph generation for Cabbage Q&A.
 
 The service consumes the trusted CoronaBlocks XML contract and returns a complete JSON
 workspace.  It never writes project files and never generates Python; the mounted
@@ -25,9 +25,15 @@ from typing import Any
 from .node_graph_review_service import NodeGraphReviewService
 
 try:
-    from editor.backend.blockly.ai_node_graph_contract import validate_generated_node_graph
+    from editor.backend.blockly.ai_node_graph_contract import (
+        load_contract_catalog,
+        validate_generated_node_graph,
+    )
 except ImportError:  # Packaged editor layout places ``backend`` directly on sys.path.
-    from backend.blockly.ai_node_graph_contract import validate_generated_node_graph
+    from backend.blockly.ai_node_graph_contract import (
+        load_contract_catalog,
+        validate_generated_node_graph,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -160,10 +166,34 @@ class NodeGraphGenerationService:
             capabilities.append("wasd-object-movement")
         if requires_space_jump:
             capabilities.append("space-object-jump")
+        replacement_match = re.search(
+            r"(?:(?:\u5c06|\u628a)\s*)?(.{1,80}?)\s*"
+            r"(?:\u4fee\u6539(?:\u6210|\u4e3a)|\u6539(?:\u6210|\u4e3a)|"
+            r"\u66ff\u6362(?:\u6210|\u4e3a)|\u6362(?:\u6210|\u4e3a)|"
+            r"\u8c03\u6574(?:\u6210|\u4e3a)|\u8bbe\u7f6e(?:\u6210|\u4e3a)|"
+            r"\u8bbe(?:\u6210|\u4e3a)|\u53d8(?:\u6210|\u4e3a))\s*"
+            r"([^\u3002\uff01\uff1f!?\n]{1,80})",
+            text,
+            re.IGNORECASE,
+        )
+        replacement_directive = None
+        if replacement_match:
+            source = replacement_match.group(1).strip(" \t\uFF0C,\uFF1A:")
+            source = re.sub(
+                r"^(?:\u8bf7(?:\u4f60)?|\u9ebb\u70e6|\u5e2e\u6211|\u5e2e\u5fd9|\u7ed9\u6211|\u66ff\u6211|\u4e3a\u6211)\s*",
+                "",
+                source,
+            )
+            source = re.sub(r"^(?:\u5c06|\u628a)\s*", "", source)
+            replacement_directive = {
+                "source": source,
+                "target": replacement_match.group(2).strip(" \t\uFF0C,\uFF1A:"),
+            }
         return {
             "requiredCapabilities": capabilities,
             "narrowObjectControl": narrow_object_control,
             "firstPersonRequested": first_person_requested,
+            "replacementDirective": replacement_directive,
         }
 
     @staticmethod
@@ -200,17 +230,59 @@ class NodeGraphGenerationService:
                 "Its NAME must exactly equal the movement block NAME."
             )
         scoped_text = "\n".join(f"- {item}" for item in scoped_rules) or "- Follow only the explicit user request."
+        operation_rules = {
+            "create": (
+                "Create the requested logic as a complete valid final workspace. Reuse useful existing logic "
+                "when it already satisfies part of the request."
+            ),
+            "extend": (
+                "Extend the current workspace in place. Keep every existing unrelated node, edge, block, "
+                "condition, global variable, ID, and canvas position; add or connect only the minimum requested logic."
+            ),
+            "edit": (
+                "Edit the current workspace in place as a targeted transformation. Locate the existing nodes, "
+                "blocks, fields, object references, edges, or conditions described by the instruction and change "
+                "only those matches. Preserve unrelated logic and preserve existing IDs, node positions, edge "
+                "connections, and block order whenever they are not the requested target. Do not clear or rebuild "
+                "the graph. For phrases such as modify-to/change-to/replace-with, treat the right-hand value as "
+                "the replacement and update the matching existing value rather than generating a second parallel feature."
+            ),
+            "delete": (
+                "Delete only the explicitly requested nodes, blocks, edges, or conditions. Preserve all unrelated "
+                "logic and repair only connections made invalid by that deletion."
+            ),
+        }
+        operation_rule = operation_rules[request["operation"]]
         language = request["responseLanguage"]
         return (
             "You are editing CoronaEngine's visible project node graph. Follow the complete trusted XML contract below.\n"
             "Return exactly one JSON object containing the complete final workspace. Never return a patch, Python, XML, "
             "Markdown, file path, or prose outside the JSON. Use only catalog blocks. Preserve unrelated existing logic "
             "for extend/edit/delete. Never invent an actor: object names must exactly match projectContext.actors.\n\n"
-            "TASK SCOPING RULES:\n"
+            "OPERATION MODE:\n"
+            + f"- {operation_rule}\n\n"
+            + "TASK SCOPING RULES:\n"
             "- Implement only capabilities explicitly requested by the user. Do not expand a small feature into a full game.\n"
             "- XML examples are structural illustrations only and must never be copied as gameplay templates.\n"
             "- Prefer the smallest valid graph change and reuse an existing reachable gameplay node when practical.\n"
             + scoped_text
+            + "\n\nBLOCKLY SERIALIZATION GUARDRAILS:\n"
+            "- fields contains only real Catalog <Field> names. inputs contains only real Catalog <Input> names. "
+            "Never serialize an input socket as a field.\n"
+            "- control_if has no BOOL field. Put a Boolean output block under inputs.CONDITION.block. "
+            "Example: {\"type\":\"control_if\",\"id\":\"if_1\",\"inputs\":{"
+            "\"CONDITION\":{\"block\":{\"type\":\"logic_boolean\",\"id\":\"bool_1\","
+            "\"fields\":{\"BOOL\":\"TRUE\"}}},\"DO\":{\"block\":{\"type\":\"engine_rotateZ\","
+            "\"id\":\"rotate_1\",\"fields\":{\"ANGLE\":15},\"inputs\":{\"OBJECT\":{\"block\":{"
+            "\"type\":\"object_reference\",\"id\":\"object_1\",\"fields\":{\"OBJECT\":\"RealActorName\","
+            "\"MANUAL\":\"\"}}}}}}}}.\n"
+            "- engine_rotateX/engine_rotateY/engine_rotateZ have only the ANGLE field. Bind the target through "
+            "inputs.OBJECT.block using object_reference, and choose an exact actor name from PROJECT_CONTEXT. "
+            "Never invent an actor name or leave an object placeholder.\n"
+            "- inputs.DO is a statement connection. Put the first action in inputs.DO.block and continue that branch "
+            "with next.block. Never put branch actions beside DO or inside fields.\n"
+            "- Before returning JSON, check every block against its Catalog entry: every field name, input name, "
+            "connection kind, output type, and dropdown value must match exactly.\n"
             + "\n\nLANGUAGE RULES:\n"
             + f"- responseLanguage is {language}. The summary and every newly added or renamed custom node/edge label must use that language.\n"
             "- Do not mix Chinese and English UI labels. Technical block types, field names, IDs, WASD, API names, "
@@ -315,6 +387,138 @@ class NodeGraphGenerationService:
         for root in cls._workspace_roots(workspace):
             yield from cls._walk_block(root)
 
+    @staticmethod
+    def _all_graph_workspaces(workspace: Any):
+        if not isinstance(workspace, dict):
+            return
+        nodes = workspace.get("nodes")
+        if isinstance(nodes, list):
+            for node in nodes:
+                if isinstance(node, dict):
+                    yield node.get("workspace")
+        edges = workspace.get("edges")
+        if isinstance(edges, list):
+            for edge in edges:
+                if isinstance(edge, dict):
+                    yield edge.get("conditionWorkspace")
+        yield workspace.get("globalVariablesWorkspace")
+
+    @classmethod
+    def _normalize_model_block_serialization(
+        cls, result: dict[str, Any], contract_path: Path
+    ) -> tuple[dict[str, Any], list[str]]:
+        """Repair deterministic field/input confusions, then require strict validation."""
+        normalized = json.loads(json.dumps(result, ensure_ascii=False))
+        workspace = normalized.get("workspace")
+        if not isinstance(workspace, dict):
+            return normalized, []
+
+        catalog = load_contract_catalog(contract_path)
+        block_specs = catalog.get("blocks", {})
+        used_ids: set[str] = set()
+        for graph_workspace in cls._all_graph_workspaces(workspace):
+            for block in cls._workspace_blocks(graph_workspace):
+                block_id = str(block.get("id") or "").strip()
+                if block_id:
+                    used_ids.add(block_id)
+
+        repair_sequence = 0
+
+        def repair_id(prefix: str) -> str:
+            nonlocal repair_sequence
+            while True:
+                repair_sequence += 1
+                candidate = f"ai_repair_{prefix}_{repair_sequence}"
+                if candidate not in used_ids:
+                    used_ids.add(candidate)
+                    return candidate
+
+        repairs: list[str] = []
+
+        def normalize_block(block: Any, trail: str) -> None:
+            if not isinstance(block, dict):
+                return
+            block_type = str(block.get("type") or "").strip()
+            spec = block_specs.get(block_type)
+            fields = block.get("fields")
+            inputs = block.get("inputs")
+            if not isinstance(fields, dict):
+                fields = None
+            if inputs is None:
+                inputs = {}
+                block["inputs"] = inputs
+            elif not isinstance(inputs, dict):
+                inputs = None
+
+            # BOOL belongs to logic_boolean, never directly to control_if/control_else.
+            if (
+                block_type in {"control_if", "control_else"}
+                and fields is not None
+                and "BOOL" in fields
+                and inputs is not None
+            ):
+                bool_value = fields.pop("BOOL")
+                if "CONDITION" not in inputs:
+                    inputs["CONDITION"] = {
+                        "block": {
+                            "type": "logic_boolean",
+                            "id": repair_id("condition"),
+                            "fields": {"BOOL": bool_value},
+                        }
+                    }
+                    repairs.append(f"{trail}: moved BOOL into inputs.CONDITION.logic_boolean")
+                else:
+                    repairs.append(f"{trail}: removed redundant BOOL field from {block_type}")
+
+            # Generic transforms expose OBJECT as a String value input, not a field.
+            if fields is not None and inputs is not None and spec is not None and "OBJECT" in fields:
+                object_input = spec.inputs.get("OBJECT")
+                object_is_not_field = "OBJECT" not in spec.fields
+                object_is_string_input = bool(
+                    object_input
+                    and object_input.get("kind") == "value"
+                    and "String" in tuple(object_input.get("check") or ())
+                )
+                object_name = fields.get("OBJECT")
+                if object_is_not_field and object_is_string_input and isinstance(object_name, str):
+                    fields.pop("OBJECT")
+                    if "OBJECT" not in inputs and object_name.strip():
+                        inputs["OBJECT"] = {
+                            "block": {
+                                "type": "object_reference",
+                                "id": repair_id("object"),
+                                "fields": {"OBJECT": object_name.strip(), "MANUAL": ""},
+                            }
+                        }
+                        repairs.append(f"{trail}: moved OBJECT into inputs.OBJECT.object_reference")
+                    else:
+                        repairs.append(f"{trail}: removed redundant OBJECT field from {block_type}")
+
+            if fields == {}:
+                block.pop("fields", None)
+            if inputs == {}:
+                block.pop("inputs", None)
+                inputs = None
+
+            if isinstance(inputs, dict):
+                for input_name, connection in inputs.items():
+                    if not isinstance(connection, dict):
+                        continue
+                    for connection_key in ("block", "shadow"):
+                        child = connection.get(connection_key)
+                        if isinstance(child, dict):
+                            normalize_block(child, f"{trail}.inputs.{input_name}.{connection_key}")
+            next_connection = block.get("next")
+            if isinstance(next_connection, dict):
+                child = next_connection.get("block")
+                if isinstance(child, dict):
+                    normalize_block(child, f"{trail}.next.block")
+
+        for graph_index, graph_workspace in enumerate(cls._all_graph_workspaces(workspace)):
+            for root_index, root in enumerate(cls._workspace_roots(graph_workspace)):
+                normalize_block(root, f"workspace[{graph_index}].blocks[{root_index}]")
+        return normalized, repairs
+
     @classmethod
     def _graph_block_types(cls, workspace: dict[str, Any]) -> Counter:
         block_types: Counter = Counter()
@@ -356,6 +560,41 @@ class NodeGraphGenerationService:
     @staticmethod
     def _contains_chinese(value: Any) -> bool:
         return bool(re.search(r"[\u3400-\u9fff]", str(value or "")))
+
+    @classmethod
+    def _validate_actor_references(
+        cls, result: dict[str, Any], request: dict[str, Any]
+    ) -> None:
+        workspace = result.get("workspace") if isinstance(result.get("workspace"), dict) else {}
+        project_context = request.get("projectContext")
+        actors = project_context.get("actors") if isinstance(project_context, dict) else None
+        actor_context_available = isinstance(actors, list)
+        known_actors = cls._actor_names(project_context if isinstance(project_context, dict) else {})
+        errors: list[str] = []
+
+        for graph_workspace in cls._all_graph_workspaces(workspace):
+            for block in cls._workspace_blocks(graph_workspace):
+                block_type = str(block.get("type") or "").strip()
+                block_id = str(block.get("id") or "").strip() or "<missing-id>"
+                for input_name in NodeGraphReviewService.ACTOR_REFERENCE_FIELDS.get(block_type, ()):
+                    state, actor_name = NodeGraphReviewService._actor_reference(block, input_name)
+                    if state == "missing":
+                        errors.append(
+                            f"积木 {block_id} ({block_type}) 没有指定对象输入 {input_name}"
+                        )
+                    elif state == "resolved" and actor_context_available and actor_name not in known_actors:
+                        errors.append(
+                            f"积木 {block_id} ({block_type}) 引用的对象 {actor_name!r} 不存在于当前场景"
+                        )
+                    if len(errors) >= 6:
+                        break
+                if len(errors) >= 6:
+                    break
+            if len(errors) >= 6:
+                break
+
+        if errors:
+            raise ValueError("对象引用校验失败：" + "；".join(errors))
 
     @classmethod
     def _validate_response_language(
@@ -481,6 +720,38 @@ class NodeGraphGenerationService:
                 raise ValueError("局部对象控制请求新增了过多节点，请只修改最小必要逻辑")
 
     @classmethod
+    def _validate_operation_scope(
+        cls, result: dict[str, Any], request: dict[str, Any]
+    ) -> None:
+        operation = request.get("operation")
+        if operation not in {"extend", "edit"}:
+            return
+        before = request.get("workspace") if isinstance(request.get("workspace"), dict) else {}
+        after = result.get("workspace") if isinstance(result.get("workspace"), dict) else {}
+
+        def ids(workspace: dict[str, Any], key: str) -> set[str]:
+            return {
+                str(item.get("id") or "").strip()
+                for item in (workspace.get(key) or [])
+                if isinstance(item, dict) and str(item.get("id") or "").strip()
+            }
+
+        missing_nodes = sorted(ids(before, "nodes") - ids(after, "nodes"))
+        missing_edges = sorted(ids(before, "edges") - ids(after, "edges"))
+        if missing_nodes or missing_edges:
+            details = []
+            if missing_nodes:
+                details.append("nodes=" + ",".join(missing_nodes[:6]))
+            if missing_edges:
+                details.append("edges=" + ",".join(missing_edges[:6]))
+            raise ValueError(
+                "Incremental edit removed existing structures without an explicit delete request: "
+                + "; ".join(details)
+            )
+        if operation == "edit" and before == after:
+            raise ValueError("The edit request did not change any node logic")
+
+    @classmethod
     def _validate_result(
         cls, result: dict[str, Any], request: dict[str, Any], contract_path: Path
     ) -> dict[str, Any]:
@@ -498,13 +769,18 @@ class NodeGraphGenerationService:
         if forbidden:
             raise ValueError(f"DeepSeek 返回了禁止字段：{forbidden}")
 
-        validated = validate_generated_node_graph(result, catalog_path=contract_path)
+        normalized_result, normalization_warnings = cls._normalize_model_block_serialization(
+            result, contract_path
+        )
+        validated = validate_generated_node_graph(normalized_result, catalog_path=contract_path)
         if validated.get("success") is not True:
             errors = validated.get("errors") or []
             detail = "；".join(str(item) for item in errors[:6])
             raise ValueError("生成的节点图未通过积木合同校验" + (f"：{detail}" if detail else ""))
-        cls._validate_response_language(result, request)
-        cls._validate_requested_semantics(result, request)
+        cls._validate_response_language(normalized_result, request)
+        cls._validate_actor_references(normalized_result, request)
+        cls._validate_operation_scope(normalized_result, request)
+        cls._validate_requested_semantics(normalized_result, request)
         return {
             "schemaVersion": 1,
             "requestId": request["requestId"],
@@ -513,8 +789,8 @@ class NodeGraphGenerationService:
             "baseGraphRevision": request["baseGraphRevision"],
             "operation": request["operation"],
             "summary": summary[:600],
-            "workspace": result["workspace"],
-            "warnings": list(validated.get("warnings") or []),
+            "workspace": normalized_result["workspace"],
+            "warnings": normalization_warnings + list(validated.get("warnings") or []),
         }
 
     def generate(self, payload: Any, cancel_event: threading.Event | None = None) -> dict[str, Any]:

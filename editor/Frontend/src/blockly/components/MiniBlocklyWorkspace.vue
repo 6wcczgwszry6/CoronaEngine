@@ -168,6 +168,7 @@ function loadState(state) {
       BlocklyLib.serialization.workspaces.load(nextState, workspace);
     }
     applyWorkspaceRoleVisualStyles();
+    window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
   } catch (e) {
     logError('加载子工作区状态失败', e);
   } finally {
@@ -231,6 +232,31 @@ function resizeBlockly() {
   } catch {}
 }
 
+function syncGuidanceBlockMetadata() {
+  if (!workspace) return;
+  for (const block of workspace.getAllBlocks?.(false) || []) {
+    const root = block.getSvgRoot?.();
+    if (!root) continue;
+    root.setAttribute('data-block-id', String(block.id || ''));
+    root.setAttribute('data-block-type', String(block.type || ''));
+  }
+}
+
+function focusBlock(blockId) {
+  if (!workspace || !blockId) return false;
+  const block = workspace.getBlockById?.(String(blockId));
+  if (!block) return false;
+  syncGuidanceBlockMetadata();
+  try {
+    workspace.centerOnBlock?.(block.id);
+  } catch {}
+  window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
+  return true;
+}
+
+function hasBlock(blockId) {
+  return Boolean(workspace?.getBlockById?.(String(blockId || '')));
+}
 
 function hitTest(clientX, clientY) {
   const rect = blockdiv.value?.getBoundingClientRect?.();
@@ -395,6 +421,7 @@ async function initBlockly() {
         }
       }
       if (props.workspaceRole === 'condition') applyWorkspaceRoleVisualStyles();
+      window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
       emitChange();
       validateWorkspace();
     };
@@ -405,6 +432,7 @@ async function initBlockly() {
     resizeObserver.observe(container);
     await nextTick();
     resizeBlockly();
+    syncGuidanceBlockMetadata();
     emit('ready');
   } catch (e) {
     logError('初始化子 Blockly 工作区失败', e);
@@ -451,6 +479,8 @@ defineExpose({
   validateWorkspace,
   deleteBlockById,
   resizeBlockly,
+  focusBlock,
+  hasBlock,
 });
 </script>
 

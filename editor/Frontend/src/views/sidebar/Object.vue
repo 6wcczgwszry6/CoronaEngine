@@ -49,7 +49,7 @@
         </div>
       </section>
 
-      <section class="property-section property-section-collapsible" data-assistant-title="对象变换" data-assistant-description="修改模型在场景中的位置、旋转和大小。">
+      <section class="property-section property-section-collapsible" data-guidance="object-transform" data-assistant-title="对象变换" data-assistant-description="修改模型在场景中的位置、旋转和大小。">
         <button
           type="button"
           class="section-toggle"
@@ -114,7 +114,7 @@
         </div>
       </section>
 
-      <section class="property-section property-section-collapsible" data-assistant-title="物理设置" data-assistant-description="控制模型是否参与物理模拟，以及质量、弹性、阻尼和轴向锁定。">
+      <section class="property-section property-section-collapsible" data-guidance="object-physics" data-assistant-title="物理设置" data-assistant-description="控制模型是否参与物理模拟，以及质量、弹性、阻尼和轴向锁定。">
         <button
           type="button"
           class="section-toggle"
@@ -201,6 +201,13 @@ const pendingTransformUpdates = new Map();
 let transformFrameId = null;
 let transformBridgeWarningShown = false;
 let lastSavedCollision = 'none';
+const TRANSFORM_EPSILON = 1e-5;
+const viewportTransformBaseline = {
+  actorKey: '',
+  position: null,
+  rotation: null,
+  scale: null,
+};
 
 const actor = reactive({
   name: '',
@@ -245,9 +252,36 @@ const normalizeCollisionType = (value) => {
 const readFollowCamera = (data) => data?.render_space === 'ui' || data?.follow_camera === true || data?.follow_camera === 1 || data?.follow_camera === 'true' || data?.follow_camera === '1';
 
 function assignVector(target, value, fallback) {
-  target.x = numberAt(value, 0, fallback.x);
-  target.y = numberAt(value, 1, fallback.y);
-  target.z = numberAt(value, 2, fallback.z);
+  target.x = Number(value?.x ?? value?.[0] ?? fallback.x);
+  target.y = Number(value?.y ?? value?.[1] ?? fallback.y);
+  target.z = Number(value?.z ?? value?.[2] ?? fallback.z);
+}
+
+function cloneVector(value) {
+  return { x: Number(value?.x) || 0, y: Number(value?.y) || 0, z: Number(value?.z) || 0 };
+}
+
+function currentActorKey() {
+  return `${selectedSceneName.value}::${selectedActorName.value}`;
+}
+
+function syncViewportTransformBaseline() {
+  viewportTransformBaseline.actorKey = currentActorKey();
+  viewportTransformBaseline.position = cloneVector(actor.transform.position);
+  viewportTransformBaseline.rotation = cloneVector(actor.transform.rotation);
+  viewportTransformBaseline.scale = cloneVector(actor.transform.scale);
+}
+
+function clearViewportTransformBaseline() {
+  viewportTransformBaseline.actorKey = '';
+  viewportTransformBaseline.position = null;
+  viewportTransformBaseline.rotation = null;
+  viewportTransformBaseline.scale = null;
+}
+
+function vectorChanged(previous, next) {
+  if (!previous || !next) return false;
+  return ['x', 'y', 'z'].some((axis) => Math.abs(Number(previous[axis] || 0) - Number(next[axis] || 0)) > TRANSFORM_EPSILON);
 }
 
 async function loadActor(sceneName, actorName) {
@@ -288,6 +322,7 @@ async function loadActor(sceneName, actorName) {
     assignVector(actor.cameraLock.position, cameraLock.position_offset, { x: 0, y: 0, z: 2 });
     aliasDraft.value = actor.name;
     aliasError.value = '';
+    syncViewportTransformBaseline();
   } catch (error) {
     if (sequence === loadSequence) logError('加载对象数据失败', error);
   } finally {
@@ -377,6 +412,8 @@ function scheduleTransform(operation) {
 
 async function applyTransform(operation) {
   if (!selectedActorName.value) return;
+  // The native transform update emitted by this Dock is an echo, not a second viewport edit.
+  syncViewportTransformBaseline();
   scheduleTransform(operation);
   clearTimeout(updateTimers.get(`save:${operation}`));
   updateTimers.delete(`save:${operation}`);
@@ -548,6 +585,7 @@ function handleSelection(payload = {}) {
     selectedActorName.value = '';
     actor.name = '';
     aliasDraft.value = '';
+    clearViewportTransformBaseline();
     return;
   }
   loadActor(sceneName, actorName);
@@ -555,9 +593,50 @@ function handleSelection(payload = {}) {
 
 function handleTransform(payload = {}) {
   if (!selectedActorName.value || payload.actor !== selectedActorName.value || payload.scene !== selectedSceneName.value) return;
-  assignVector(actor.transform.position, payload.position, actor.transform.position);
-  assignVector(actor.transform.rotation, payload.rotation, actor.transform.rotation);
-  assignVector(actor.transform.scale, payload.scale, actor.transform.scale);
+  const actorKey = currentActorKey();
+  if (viewportTransformBaseline.actorKey !== actorKey) {
+    syncViewportTransformBaseline();
+    return;
+  }
+
+  const next = {
+    position: cloneVector(actor.transform.position),
+    rotation: cloneVector(actor.transform.rotation),
+    scale: cloneVector(actor.transform.scale),
+  };
+  assignVector(next.position, payload.position, next.position);
+  assignVector(next.rotation, payload.rotation, next.rotation);
+  assignVector(next.scale, payload.scale, next.scale);
+
+  const changedKeys = ['position', 'rotation', 'scale'].filter((key) => (
+    vectorChanged(viewportTransformBaseline[key], next[key])
+  ));
+  assignVector(actor.transform.position, next.position, actor.transform.position);
+  assignVector(actor.transform.rotation, next.rotation, actor.transform.rotation);
+  assignVector(actor.transform.scale, next.scale, actor.transform.scale);
+  syncViewportTransformBaseline();
+
+  for (const key of changedKeys) {
+    const eventType = key === 'position' ? 'transform_position' : key === 'rotation' ? 'transform_rotation' : 'transform_scale';
+    void cabbageContextService.recordEvent({
+      type: eventType,
+      category: 'scene',
+      success: true,
+      details: {
+        sceneName: selectedSceneName.value,
+        actorName: selectedActorName.value,
+        actorType: actor.type || 'model',
+        source: 'viewport',
+      },
+    });
+  }
+}
+
+function handleGuidancePrepare(event) {
+  if (event?.detail?.panelId !== 'SceneDatas') return;
+  const selectorKey = String(event.detail.selectorKey || '');
+  if (selectorKey === 'object-transform') collapsedSections.transform = false;
+  if (selectorKey === 'object-physics') collapsedSections.physics = false;
 }
 
 function closeFloat() {
@@ -574,6 +653,7 @@ onMounted(async () => {
   }
   selectionToken = await editorApi.events.onActorSelectionChanged(handleSelection);
   transformToken = await editorApi.events.onActorTransformUpdated(handleTransform);
+  window.addEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
 });
 
 onUnmounted(() => {
@@ -587,6 +667,8 @@ onUnmounted(() => {
   if (transformToken) editorApi.off(transformToken).catch(() => {});
   selectionToken = null;
   transformToken = null;
+  clearViewportTransformBaseline();
+  window.removeEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
 });
 </script>
 

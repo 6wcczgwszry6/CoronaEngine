@@ -11,6 +11,7 @@ let latestSnapshot = null;
 let writeChain = Promise.resolve();
 let activeScoreUpdateTaskId = '';
 const pendingTransforms = new Map();
+const localSubscribers = new Set();
 
 function getChannel() {
   if (typeof BroadcastChannel === 'undefined') return null;
@@ -70,6 +71,14 @@ function publishSnapshot(snapshot) {
   if (!normalized) return null;
   latestSnapshot = normalized;
   try { window.localStorage?.setItem(STORAGE_KEY, JSON.stringify(normalized)); } catch (_) {}
+  // BroadcastChannel and the storage event do not notify the document that performed
+  // the write. Notify in-page subscribers explicitly so completed tutorial tasks are
+  // removed and their replacements appear without reopening the world or Dock.
+  for (const subscriber of Array.from(localSubscribers)) {
+    try { subscriber(normalized); } catch (error) {
+      console.warn('[CabbageContext] local subscriber failed', error?.message || error);
+    }
+  }
   try { getChannel()?.postMessage({ type: CONTEXT_MESSAGE_TYPE, payload: normalized }); } catch (_) {}
   return normalized;
 }
@@ -254,6 +263,7 @@ export function subscribeCabbageAssistantContext(listener, { projectScopeId = ''
     try { accept(JSON.parse(event.newValue)); } catch (_) {}
   };
   const currentChannel = getChannel();
+  localSubscribers.add(accept);
   currentChannel?.addEventListener('message', onBroadcast);
   window.addEventListener('storage', onStorage);
   if (emitCurrent) {
@@ -261,6 +271,7 @@ export function subscribeCabbageAssistantContext(listener, { projectScopeId = ''
     if (current) accept(current);
   }
   return () => {
+    localSubscribers.delete(accept);
     currentChannel?.removeEventListener('message', onBroadcast);
     window.removeEventListener('storage', onStorage);
   };
