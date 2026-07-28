@@ -491,7 +491,6 @@ import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
   cabbageContextService,
   cancelPendingTransformEvents,
-  initializeWorldTasks,
   publishCabbageAssistantContext,
   readCabbageAssistantContext,
   subscribeCabbageAssistantContext,
@@ -985,19 +984,6 @@ async function loadCabbageWorldContext({ reset = true } = {}) {
     if (generation !== cabbageWorldLoadGeneration) return null;
     cabbageAssistant.hydrateContext(snapshot);
     void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
-    const goal = snapshot?.worldGoal || {};
-    if (goal.source === 'ai' && goal.status === 'generating' && String(goal.prompt || '').trim()) {
-      // A backend restart can interrupt an in-memory DeepSeek job while leaving the
-      // world context in `generating`. Restart that same plan when the world opens.
-      // The context service deduplicates polling when the original job is still alive.
-      void initializeWorldTasks({
-        prompt: String(goal.prompt || '').trim(),
-        mode: String(goal.mode || 'story'),
-        waitForCompletion: false,
-      }).catch((error) => {
-        console.warn('[CabbageContext] failed to resume world task generation', error?.message || error);
-      });
-    }
     return snapshot;
   } catch (error) {
     if (generation === cabbageWorldLoadGeneration) {

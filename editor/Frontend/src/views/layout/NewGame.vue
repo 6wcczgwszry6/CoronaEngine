@@ -37,7 +37,7 @@
           你想创造一个怎样的
           <span class="text-[#d8b86c] font-medium">世界</span>？
         </h1>
-        <p class="text-sm text-gray-500 mb-7 text-center">用一句话描述它，AI 会生成一步一步的专属搭建任务</p>
+        <p class="text-sm text-gray-500 mb-7 text-center">用一句话描述它，AI 会替你把它构建出来</p>
 
         <div class="w-full max-w-3xl">
           <textarea
@@ -174,7 +174,7 @@ const handleCreate = async () => {
           console.warn('Default AI conversation room initialization failed:', roomError);
         }
         try {
-          await initializeWorldTasks({ prompt, mode: mode.value, waitForCompletion: false });
+          await initializeWorldTasks({ prompt, mode: mode.value });
         } catch (taskError) {
           console.warn('世界任务初始化失败，继续进入世界：', taskError?.message || taskError);
         }

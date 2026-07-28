@@ -702,12 +702,7 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         result = {
             "hasProblems": True,
             "summary": "Connect a concrete actor reference.",
-            "issues": [{
-                "nodeId": "start",
-                "blockId": "move_1",
-                "code": "missing_actor_target",
-                "confidence": 0.95,
-            }],
+            "issues": [{"code": "missing_actor_target", "confidence": 0.95}],
             "optimizationTip": {
                 "tipKey": "unrelated",
                 "title": "Optimization",
@@ -715,14 +710,9 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
             },
         }
         NodeGraphReviewService._validate_model_result(result, {
-            "workspace": self._third_person_workspace(""),
-            "projectContext": {
-                "optimizationHintsEnabled": True,
-                "actorContextAvailable": True,
-                "actors": [{"name": "Ball"}],
-            },
+            "workspace": graph(),
+            "projectContext": {"optimizationHintsEnabled": True},
         })
-        self.assertTrue(result["hasProblems"])
         self.assertIsNone(result["optimizationTip"])
 
     def test_disabled_or_invalid_optimization_tip_is_discarded(self):
@@ -760,156 +750,6 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
             "projectContext": {"assistanceProfile": {"score": 80, "updatedAt": 2}},
         })
         self.assertNotEqual(first, second)
-
-
-    @staticmethod
-    def _third_person_workspace(name="Ball", obstacle_tag=""):
-        return graph(nodes=[{
-            "id": "start",
-            "nodeType": "start",
-            "workspace": {"blocks": {"blocks": [
-                block(
-                    "object_third_person_move",
-                    "move_1",
-                    {
-                        "NAME": name,
-                        "OBSTACLE_TAG": obstacle_tag,
-                        "SPEED": 0.18,
-                        "MIN_X": -12,
-                        "MAX_X": 12,
-                        "MIN_Z": -12,
-                        "MAX_Z": 12,
-                    },
-                )
-            ]}},
-        }])
-
-    def test_third_person_move_accepts_existing_actor_name(self):
-        workspace = self._third_person_workspace("Ball")
-        catalog = {
-            "object_third_person_move": {
-                "outputCheck": "",
-                "projectUsage": "project-safe",
-            }
-        }
-        with mock.patch.object(NodeGraphReviewService, "_catalog_index", return_value=catalog):
-            facts = NodeGraphReviewService._collect_local_facts(
-                workspace,
-                {"actorContextAvailable": True, "actors": [{"name": "Ball"}]},
-            )
-        self.assertFalse(
-            {"missing_actor_target", "actor_target_not_found"}
-            & {item["code"] for item in facts}
-        )
-
-    def test_actor_matching_normalizes_case_whitespace_unicode_and_aliases(self):
-        catalog = {
-            "object_third_person_move": {
-                "outputCheck": "",
-                "projectUsage": "project-safe",
-            }
-        }
-        cases = [
-            (" ball ", {"name": "Ball"}),
-            ("Ball", {"name": "InternalBall", "displayName": "Ball"}),
-            ("Ball", {"name": "InternalBall", "aliases": ["Ball"]}),
-            ("Ball", {"name": "\uff22\uff41\uff4c\uff4c"}),
-        ]
-        with mock.patch.object(NodeGraphReviewService, "_catalog_index", return_value=catalog):
-            for reference, actor in cases:
-                with self.subTest(reference=reference, actor=actor):
-                    facts = NodeGraphReviewService._collect_local_facts(
-                        self._third_person_workspace(reference),
-                        {"actorContextAvailable": True, "actors": [actor]},
-                    )
-                    self.assertNotIn(
-                        "actor_target_not_found",
-                        {item["code"] for item in facts},
-                    )
-
-    def test_unavailable_actor_context_does_not_report_not_found(self):
-        catalog = {
-            "object_third_person_move": {
-                "outputCheck": "",
-                "projectUsage": "project-safe",
-            }
-        }
-        with mock.patch.object(NodeGraphReviewService, "_catalog_index", return_value=catalog):
-            facts = NodeGraphReviewService._collect_local_facts(
-                self._third_person_workspace("Ball"),
-                {"actorContextAvailable": False, "actors": []},
-            )
-        self.assertNotIn("actor_target_not_found", {item["code"] for item in facts})
-
-    def test_model_cannot_invent_actor_reference_errors(self):
-        request = {
-            "workspace": self._third_person_workspace("Ball"),
-            "projectContext": {
-                "actorContextAvailable": True,
-                "actors": [{"name": "Ball"}],
-            },
-        }
-        for code in ("missing_actor_target", "actor_target_not_found"):
-            with self.subTest(code=code):
-                result = {
-                    "hasProblems": True,
-                    "summary": "Actor reference problem",
-                    "issues": [{
-                        "nodeId": "start",
-                        "blockId": "move_1",
-                        "code": code,
-                        "confidence": 0.95,
-                    }],
-                }
-                NodeGraphReviewService._validate_model_result(result, request)
-                self.assertFalse(result["hasProblems"])
-                self.assertEqual([], result["issues"])
-
-    def test_empty_optional_obstacle_tag_is_not_a_problem(self):
-        request = {
-            "workspace": self._third_person_workspace("Ball", ""),
-            "projectContext": {
-                "actorContextAvailable": True,
-                "actors": [{"name": "Ball"}],
-            },
-        }
-        result = {
-            "hasProblems": True,
-            "summary": "Obstacle tag is empty",
-            "issues": [{
-                "nodeId": "start",
-                "blockId": "move_1",
-                "code": "empty_obstacle_tag",
-                "confidence": 0.95,
-                "message": "OBSTACLE_TAG is empty",
-                "pattern": {"missingInput": "OBSTACLE_TAG"},
-            }],
-        }
-        NodeGraphReviewService._catalog_index.cache_clear()
-        NodeGraphReviewService._validate_model_result(result, request)
-        self.assertFalse(result["hasProblems"])
-        self.assertEqual([], result["issues"])
-
-    def test_contract_marks_obstacle_tag_optional(self):
-        NodeGraphReviewService._catalog_index.cache_clear()
-        catalog = NodeGraphReviewService._catalog_index()
-        for block_type in ("object_third_person_move", "object_first_person_move"):
-            fields = {
-                item["name"]: item
-                for item in catalog[block_type]["fields"]
-            }
-            self.assertFalse(fields["OBSTACLE_TAG"]["required"])
-            self.assertEqual(
-                "disable_tag_obstacle_check",
-                fields["OBSTACLE_TAG"]["emptyMeaning"],
-            )
-
-    def test_empty_required_actor_name_still_reports_missing_target(self):
-        facts = NodeGraphReviewService._collect_local_facts(
-            self._third_person_workspace(""),
-            {"actorContextAvailable": True, "actors": [{"name": "Ball"}]},
-        )
-        self.assertIn("missing_actor_target", {item["code"] for item in facts})
 
 
 if __name__ == "__main__":

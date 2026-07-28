@@ -188,7 +188,7 @@ export const DOM_TEXT_TRANSLATIONS = {
   '刷新': 'Refresh',
   '物理': 'Physics',
   '玩家名': 'Player name',
-  '用一句话描述它，AI 会生成一步一步的专属搭建任务': 'Describe it in one sentence and AI will generate a step-by-step personalized task plan',
+  '用一句话描述它，AI 会替你把它构建出来': 'Describe it in one sentence and AI will build it for you',
   '生成方案': 'Generate Plan',
   '留空则公开': 'Leave empty for public',
   '确定': 'OK',

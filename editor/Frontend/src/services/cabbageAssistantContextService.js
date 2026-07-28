@@ -12,7 +12,6 @@ let channel = null;
 let latestSnapshot = null;
 let writeChain = Promise.resolve();
 let activeScoreUpdateTaskId = '';
-const activeGoalPlanPolls = new Map();
 const pendingTransforms = new Map();
 const localSubscribers = new Set();
 
@@ -176,57 +175,33 @@ function goalPlanError(response, fallback) {
   );
 }
 
-async function pollGoalPlan(taskId, expectedScopeId = '') {
+async function pollGoalPlan(taskId) {
   const deadline = Date.now() + GOAL_PLAN_TIMEOUT_MS;
   while (Date.now() < deadline) {
     const response = await aiService.getCabbageGoalPlanStatus(taskId);
     if (response?.success !== true) throw goalPlanError(response);
     if (response.status === 'completed') {
       const result = response.result || {};
-      const stillCurrent = !expectedScopeId || currentScopeId() === expectedScopeId;
-      if (result?.context && stillCurrent) publishBackendContext(result.context);
-      // The backend writes the result to the world that started the request. If the
-      // user changed worlds while it was running, do not publish that old context
-      // under the new world's front-end scope.
-      if (!stillCurrent) return null;
       if (result?.success !== true || !result?.context) throw goalPlanError(response);
-      return readCabbageAssistantContext(expectedScopeId);
+      return publishBackendContext(result.context);
     }
     await new Promise((resolve) => window.setTimeout(resolve, GOAL_PLAN_POLL_MS));
   }
   throw new Error('生成当前世界的专属任务超时，请进入世界后稍后重试');
 }
 
-function trackGoalPlan(taskId, expectedScopeId = '') {
-  const key = `${String(taskId || '')}:${String(expectedScopeId || '')}`;
-  const existing = activeGoalPlanPolls.get(key);
-  if (existing) return existing;
-  const pending = pollGoalPlan(taskId, expectedScopeId).finally(() => {
-    if (activeGoalPlanPolls.get(key) === pending) activeGoalPlanPolls.delete(key);
-  });
-  activeGoalPlanPolls.set(key, pending);
-  return pending;
-}
-
-export async function initializeWorldTasks({ prompt = '', mode = 'story', waitForCompletion = true } = {}) {
-  const expectedScopeId = currentScopeId();
+export async function initializeWorldTasks({ prompt = '', mode = 'story' } = {}) {
   const response = await aiService.startCabbageGoalPlan({
     prompt: String(prompt || '').trim(),
     mode: String(mode || 'story'),
   });
   if (response?.success !== true) throw goalPlanError(response);
   if (response.status === 'completed' && response.context) {
-    return currentScopeId() === expectedScopeId ? publishBackendContext(response.context) : null;
+    return publishBackendContext(response.context);
   }
   const taskId = String(response.taskId || '');
   if (!taskId) throw new Error('世界任务生成请求没有返回任务编号');
-  if (!waitForCompletion) {
-    void trackGoalPlan(taskId, expectedScopeId).catch((error) => {
-      console.warn('[CabbageContext] 世界专属任务后台生成失败：', error?.message || error);
-    });
-    return { success: true, status: 'pending', taskId };
-  }
-  return trackGoalPlan(taskId, expectedScopeId);
+  return pollGoalPlan(taskId);
 }
 
 export function recordEvent(event = {}) {

@@ -323,7 +323,6 @@ import { graphRevision as reviewGraphRevision, reviewScopeId, startNodeGraphRevi
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
   cabbageContextService,
-  publishCabbageAssistantContext,
   readCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
 import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
@@ -505,7 +504,6 @@ let isLoading = false,
   panelCloseStopPromise = null,
   unregisterAiNodeGraphConsumer = null,
   stopNodeGraphReview = null,
-  actorChangedCallbackToken = null,
   sceneTreeChangedCallbackToken = null,
   actorOptionsRefreshTimer = null,
   actorOptionsRefreshSequence = 0,
@@ -518,12 +516,6 @@ let isLoading = false,
   saveQueued = false;
 const targetEnabledByKey = new Map();
 const nodeRunLifecycle = { active: false, terminalReported: false };
-const sceneActorContext = reactive({
-  sceneName: '',
-  available: false,
-  revision: '',
-  actors: [],
-});
 function requestNodeGraphReview(delay = 250) {
   stopNodeGraphReview?.scanNow?.(delay);
 }
@@ -2089,7 +2081,6 @@ async function loadGraphForCurrentTarget() {
     variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
     activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
     updateCanvasSize();
-    reconcileSceneActorReferenceIssues();
     requestNodeGraphReview();
   }
   if (shouldMigrateLocal) {
@@ -2198,10 +2189,12 @@ async function handleGeneratedNodeGraph(result) {
 
 function generatedProjectContext() {
   return {
-    sceneName: sceneActorContext.sceneName || props.sceneName || 'default',
-    actorContextAvailable: sceneActorContext.available === true,
-    actorContextRevision: sceneActorContext.revision,
-    actors: sceneActorContext.actors.map((actor) => ({ ...actor })),
+    sceneName: props.sceneName || 'default',
+    actors: (window.__coronaBlocklyActorOptions || []).map(([name]) => ({
+      name: String(name || ''),
+      type: 'actor',
+      tags: [],
+    })).filter((actor) => actor.name),
   };
 }
 
@@ -2520,126 +2513,45 @@ async function handleToggleRun() {
   }
 }
 
-function normalizeActorContextName(value) {
-  const text = String(value ?? '').trim();
-  try { return text.normalize('NFKC'); } catch (_) { return text; }
-}
-function actorContextNameKey(value) {
-  return normalizeActorContextName(value).toLocaleLowerCase('en-US');
-}
-function actorAliasesFromSceneItem(item = {}) {
-  const aliases = [];
-  ['alias', 'displayName', 'display_name', 'nativeName', 'native_name', 'label'].forEach((field) => {
-    const value = normalizeActorContextName(item?.[field]);
-    if (value) aliases.push(value);
-  });
-  ['aliases', 'displayNames', 'display_names', 'names'].forEach((field) => {
-    let values = item?.[field];
-    if (values && typeof values === 'object' && !Array.isArray(values)) values = Object.values(values);
-    if (!Array.isArray(values)) values = [values];
-    values.forEach((value) => {
-      const alias = normalizeActorContextName(value);
-      if (alias) aliases.push(alias);
-    });
-  });
-  return [...new Set(aliases)];
-}
-function actorRecordFromSceneItem(item = {}) {
-  if (!item || typeof item !== 'object') return null;
-  const name = normalizeActorContextName(item.name ?? item.actor_name ?? item.actorName);
-  if (!name) return null;
-  const type = String(item.type ?? item.actor_type ?? item.actorType ?? 'actor').trim() || 'actor';
-  if (['scene', 'folder', 'root'].includes(type.toLocaleLowerCase('en-US'))) return null;
-  const aliases = actorAliasesFromSceneItem(item).filter((alias) => actorContextNameKey(alias) !== actorContextNameKey(name));
-  const tags = Array.isArray(item.tags)
-    ? item.tags.map(normalizeActorContextName).filter(Boolean)
-    : [];
-  return { name, type, tags, aliases };
-}
-function actorContextRevision(sceneName, actors) {
-  return JSON.stringify({
-    sceneName: normalizeSceneReference(sceneName),
-    actors: actors.map((actor) => ({
-      name: actorContextNameKey(actor.name),
-      type: String(actor.type || '').toLocaleLowerCase('en-US'),
-      aliases: (actor.aliases || []).map(actorContextNameKey).sort(),
-    })),
-  });
-}
-async function persistResolvedActorIssues(actions = []) {
-  if (!actions.length) return;
-  publishCabbageAssistantContext(cabbageAssistant);
-  for (const action of actions) {
-    try {
-      await cabbageContextService.updateTask(action);
-    } catch (error) {
-      logError('Failed to resolve stale actor issue', error);
-    }
+function collectActorNames(value, output = new Set()) {
+  if (Array.isArray(value)) {
+    value.forEach((item) => collectActorNames(item, output));
+    return output;
   }
-}
-function reconcileSceneActorReferenceIssues() {
-  if (!sceneActorContext.available || !initialLoadComplete || !isProjectTarget.value) return [];
-  const snapshot = graphSnapshot();
-  const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
-  const actions = cabbageAssistant.reconcileActorReferenceIssues(
-    snapshot,
-    generatedProjectContext(),
-    reviewGraphRevision(snapshot, scope),
-  );
-  if (actions.length) void persistResolvedActorIssues(actions);
-  return actions;
+  if (!value || typeof value !== 'object') return output;
+  const candidate = value.actor_name ?? value.actorName ?? value.name ?? value.label;
+  const typeHint = String(value.actor_type ?? value.actorType ?? value.type ?? '').toLowerCase();
+  if (candidate && !['scene', 'folder', 'root'].includes(typeHint)) output.add(String(candidate));
+  Object.values(value).forEach((child) => {
+    if (child && typeof child === 'object') collectActorNames(child, output);
+  });
+  return output;
 }
 async function refreshSceneActorOptions({ rescan = false } = {}) {
   const refreshSequence = ++actorOptionsRefreshSequence;
-  const requestedSceneName = String(props.sceneName || '').trim();
+  const options = new Set();
+  if (props.actorName) options.add(String(props.actorName));
   try {
-    const response = await sceneService.listSceneTree(requestedSceneName);
-    if (response?.success === false || response?.status === 'error') {
-      throw new Error(response?.message || 'Scene tree query failed');
-    }
+    const response = await sceneService.listActorTree(props.sceneName || '');
     const payload = response?.data ?? response?.result ?? response;
-    if (!Array.isArray(payload?.actors)) throw new Error('Scene tree response has no actor list');
-    const actorsByName = new Map();
-    payload.actors.forEach((item) => {
-      const actor = actorRecordFromSceneItem(item);
-      if (actor) actorsByName.set(actorContextNameKey(actor.name), actor);
-    });
-    if (props.actorName) {
-      const name = normalizeActorContextName(props.actorName);
-      const key = actorContextNameKey(name);
-      if (name && !actorsByName.has(key)) actorsByName.set(key, { name, type: 'actor', tags: [], aliases: [] });
-    }
-    const actors = Array.from(actorsByName.values())
-      .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
-    if (!componentMounted || refreshSequence !== actorOptionsRefreshSequence) return false;
-
-    const revision = actorContextRevision(requestedSceneName, actors);
-    const changed = sceneActorContext.available !== true
-      || sceneActorContext.sceneName !== requestedSceneName
-      || sceneActorContext.revision !== revision;
-    sceneActorContext.sceneName = requestedSceneName;
-    sceneActorContext.available = true;
-    sceneActorContext.revision = revision;
-    sceneActorContext.actors = actors;
-    window.__coronaBlocklyActorOptions = actors.map((actor) => [actor.name, actor.name]);
-
-    reconcileSceneActorReferenceIssues();
-    if (changed) {
-      scheduleRememberedIssueCheck(80);
-      if (rescan) requestNodeGraphReview(0);
-    }
-    return changed;
+    collectActorNames(payload, options);
   } catch (error) {
-    if (componentMounted && refreshSequence === actorOptionsRefreshSequence) {
-      sceneActorContext.sceneName = requestedSceneName;
-      sceneActorContext.available = false;
-      sceneActorContext.revision = '';
-      sceneActorContext.actors = [];
-      window.__coronaBlocklyActorOptions = [];
-    }
     logError('Failed to refresh scene actor options', error);
     return false;
   }
+  if (!componentMounted || refreshSequence !== actorOptionsRefreshSequence) return false;
+  const previousNames = (window.__coronaBlocklyActorOptions || [])
+    .map(([name]) => String(name || ''))
+    .filter(Boolean);
+  const nextNames = Array.from(options).sort((left, right) => left.localeCompare(right, 'zh-CN'));
+  const changed = previousNames.length !== nextNames.length
+    || previousNames.some((name, index) => name !== nextNames[index]);
+  window.__coronaBlocklyActorOptions = nextNames.map((name) => [name, name]);
+  if (changed) {
+    scheduleRememberedIssueCheck(80);
+    if (rescan) requestNodeGraphReview(120);
+  }
+  return changed;
 }
 function scheduleSceneActorOptionsRefresh(delay = 120) {
   if (!componentMounted) return;
@@ -2666,19 +2578,12 @@ function sceneReferencesMatch(left, right) {
   const rightFile = normalizedRight.split('/').pop();
   return Boolean(leftFile && rightFile && leftFile === rightFile);
 }
-function onNodeGraphActorChanged(payload, maybeSceneId) {
-  const changedScene = typeof payload === 'object'
-    ? payload?.scene ?? payload?.sceneName ?? maybeSceneId ?? ''
-    : maybeSceneId ?? '';
-  if (!sceneReferencesMatch(changedScene, props.sceneName)) return;
-  scheduleSceneActorOptionsRefresh(80);
-}
 function onNodeGraphSceneTreeChanged(payload) {
   const changedScene = typeof payload === 'string'
     ? payload
     : payload?.scene ?? payload?.sceneName ?? '';
   if (!sceneReferencesMatch(changedScene, props.sceneName)) return;
-  scheduleSceneActorOptionsRefresh(80);
+  scheduleSceneActorOptionsRefresh();
 }
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
@@ -2767,11 +2672,6 @@ onMounted(async () => {
   window.addEventListener('storage', onProjectStorageChanged);
   window.addEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
   try {
-    actorChangedCallbackToken = await editorApi.events.onActorChanged(onNodeGraphActorChanged);
-  } catch (error) {
-    logError('Failed to subscribe to actor changes', error);
-  }
-  try {
     sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onNodeGraphSceneTreeChanged);
   } catch (error) {
     logError('Failed to subscribe to scene tree changes', error);
@@ -2788,7 +2688,12 @@ onMounted(async () => {
       }),
       getRevisionScope: () => normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
       getProjectContext: () => ({
-        ...generatedProjectContext(),
+        sceneName: props.sceneName || 'default',
+        actors: (window.__coronaBlocklyActorOptions || []).map(([name]) => ({
+          name: String(name || ''),
+          type: 'actor',
+          tags: [],
+        })).filter((actor) => actor.name),
         assistanceProfile: currentAssistanceProfile(),
         optimizationHintsEnabled: optimizationHintsEnabled(),
       }),
@@ -2822,12 +2727,6 @@ onBeforeUnmount(() => {
   actorOptionsRefreshSequence += 1;
   if (actorOptionsRefreshTimer) window.clearTimeout(actorOptionsRefreshTimer);
   actorOptionsRefreshTimer = null;
-  if (actorChangedCallbackToken) {
-    editorApi.off(actorChangedCallbackToken).catch((error) => {
-      logError('Failed to unsubscribe from actor changes', error);
-    });
-    actorChangedCallbackToken = null;
-  }
   if (sceneTreeChangedCallbackToken) {
     editorApi.off(sceneTreeChangedCallbackToken).catch((error) => {
       logError('Failed to unsubscribe from scene tree changes', error);
