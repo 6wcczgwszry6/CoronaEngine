@@ -109,6 +109,7 @@ class CabbageContextService:
         "physics_changed": "physicsEdits",
         "node_edited": "nodeEdits",
         "node_created": "nodeEdits",
+        "node_moved": "nodeEdits",
         "node_connected": "nodeEdits",
         "block_added": "nodeEdits",
         "block_parameter_changed": "nodeEdits",
@@ -282,7 +283,14 @@ class CabbageContextService:
     @staticmethod
     def _custom_goal_enabled(context: dict[str, Any]) -> bool:
         goal = context.get("worldGoal") if isinstance(context.get("worldGoal"), dict) else {}
-        return bool(str(goal.get("prompt") or "").strip()) and goal.get("source") == "ai"
+        if (not str(goal.get("prompt") or "").strip()
+                or goal.get("source") != "ai"
+                or goal.get("status") != "ready"):
+            return False
+        return any(
+            isinstance(task, dict) and task.get("type") == "goal"
+            for task in [*(context.get("activeTasks") or []), *(context.get("taskHistory") or [])]
+        )
 
     @classmethod
     def _ensure_goal_slots_locked(cls, context: dict[str, Any], now: int) -> None:
@@ -456,6 +464,7 @@ class CabbageContextService:
                 "status": "ready",
                 "generatedAt": 0,
                 "generationError": "",
+                "generationId": "",
             },
             "goalTaskPlan": {
                 "schemaVersion": 2,
@@ -1150,6 +1159,8 @@ class CabbageContextService:
             "最终产物只能是一套与该世界描述强相关的个性化搭建任务，由任务一步一步引导用户亲自完成世界。"
             "再生成 6 到 10 个循序渐进的任务。目标是先让当前世界的节点玩法逻辑成立，再完成必要的场景内容和表现，而不是替用户生成一套节点积木。"
             "至少 5 个任务必须是 phase=node-logic，并且所有 node-logic 任务必须排在 scene-polish 前。"
+            "每个任务只能对应一个可由 completionSignal 验证的操作目标；不要把光照和物理、导入和变换等不同完成信号合并在同一个任务中。"
+            "如果一个玩法效果需要多个积木，可以在同一个积木任务的 requiredBlockTypes 中列出，但标题、说明和完成条件必须与该单一任务目标一致。"
             "节点任务要围绕用户真正想实现的效果，例如初始化、输入、移动/跳跃、角色行为、机关碰撞、流程条件和运行验证；"
             "禁止使用‘随便创建节点’‘任意拖入积木’这类脱离世界目标的通用教程。"
             "最后一个 node-logic 任务必须使用 run_succeeded，确认前面的玩法节点能够成功运行。"
@@ -1418,6 +1429,7 @@ class CabbageContextService:
                         "status": "ready",
                         "generatedAt": 0,
                         "generationError": "",
+                        "generationId": "",
                     }
                     context["goalTaskPlan"] = {
                         "schemaVersion": 2,
@@ -1436,13 +1448,27 @@ class CabbageContextService:
                     return {"success": True, "status": "completed", "context": self._clone(context)}
 
                 goal = context.get("worldGoal") if isinstance(context.get("worldGoal"), dict) else {}
-                ready_tasks = [task for task in context.get("activeTasks") or [] if isinstance(task, dict) and task.get("type") == "goal"]
-                if goal.get("status") == "ready" and str(goal.get("prompt") or "") == prompt and str(goal.get("mode") or "story") == mode and ready_tasks:
+                has_goal_plan = any(
+                    isinstance(task, dict) and task.get("type") == "goal"
+                    for task in [*(context.get("activeTasks") or []), *(context.get("taskHistory") or [])]
+                )
+                if (goal.get("status") == "ready"
+                        and str(goal.get("prompt") or "") == prompt
+                        and str(goal.get("mode") or "story") == mode
+                        and has_goal_plan):
                     return {"success": True, "status": "completed", "context": self._clone(context)}
-                for state in self._goal_plan_tasks.values():
-                    if state.get("status") == "running" and state.get("projectPath") == str(project_path) and state.get("prompt") == prompt and state.get("mode") == mode:
-                        return {"success": True, "status": "pending", "taskId": state["taskId"]}
+                current_generation_id = str(goal.get("generationId") or "")
+                current_state = self._goal_plan_tasks.get(current_generation_id)
+                if (goal.get("status") == "generating"
+                        and goal.get("source") == "ai"
+                        and str(goal.get("prompt") or "") == prompt
+                        and str(goal.get("mode") or "story") == mode
+                        and current_state
+                        and current_state.get("status") == "running"
+                        and current_state.get("projectPath") == str(project_path)):
+                    return {"success": True, "status": "pending", "taskId": current_generation_id}
 
+                task_id = f"cabbage_goal_plan_{uuid.uuid4().hex}"
                 context["worldGoal"] = {
                     "prompt": prompt,
                     "mode": mode,
@@ -1450,6 +1476,7 @@ class CabbageContextService:
                     "status": "generating",
                     "generatedAt": 0,
                     "generationError": "",
+                    "generationId": task_id,
                 }
                 context["goalTaskPlan"] = {
                     "schemaVersion": 2,
@@ -1461,10 +1488,13 @@ class CabbageContextService:
                 }
                 context["activeTasks"] = [
                     task for task in context.get("activeTasks") or []
-                    if not isinstance(task, dict) or task.get("type") not in {"tutorial", "goal"}
+                    if not isinstance(task, dict) or task.get("type") != "goal"
                 ]
+                # Keep the deterministic tutorials visible while DeepSeek is planning.
+                # The successful result replaces them atomically; a timeout, crash or
+                # invalid AI response therefore never leaves the task board empty.
+                self._ensure_task_slots_locked(context, now)
                 self._write_locked(project_path, context)
-                task_id = f"cabbage_goal_plan_{uuid.uuid4().hex}"
                 self._goal_plan_tasks[task_id] = {
                     "taskId": task_id,
                     "status": "running",
@@ -1475,14 +1505,16 @@ class CabbageContextService:
                     "result": None,
                 }
                 self._prune_goal_plan_tasks_locked()
-                future = self._executor.submit(self._generate_goal_plan, project_path, prompt, mode)
+                future = self._executor.submit(self._generate_goal_plan, project_path, prompt, mode, task_id)
                 future.add_done_callback(lambda completed, current_task_id=task_id: self._complete_goal_plan(current_task_id, completed))
                 return {"success": True, "status": "pending", "taskId": task_id}
         except Exception as exc:
             logger.warning("Unable to start Cabbage world task generation: %s", type(exc).__name__)
             return self._error("GOAL_PLAN_START_FAILED", str(exc))
 
-    def _generate_goal_plan(self, project_path: Path, prompt: str, mode: str) -> dict[str, Any]:
+    def _generate_goal_plan(
+        self, project_path: Path, prompt: str, mode: str, generation_id: str,
+    ) -> dict[str, Any]:
         try:
             result = self._call_deepseek_for_goal_plan(prompt, mode)
             now = self._now_ms()
@@ -1491,7 +1523,8 @@ class CabbageContextService:
                 current_goal = context.get("worldGoal") if isinstance(context.get("worldGoal"), dict) else {}
                 if (str(current_goal.get("prompt") or "") != prompt
                         or str(current_goal.get("mode") or "story") != mode
-                        or current_goal.get("source") != "ai"):
+                        or current_goal.get("source") != "ai"
+                        or str(current_goal.get("generationId") or "") != generation_id):
                     return self._error("GOAL_PLAN_STALE", "世界目标已经变化，已忽略迟到的任务结果。")
                 logic_blueprint = self._normalize_logic_blueprint(result)
                 tasks = self._normalize_goal_plan_tasks(result, context, now)
@@ -1506,6 +1539,7 @@ class CabbageContextService:
                     "status": "ready",
                     "generatedAt": now,
                     "generationError": "",
+                    "generationId": generation_id,
                 }
                 context["goalTaskPlan"] = {
                     "schemaVersion": 2,
@@ -1526,14 +1560,23 @@ class CabbageContextService:
         except Exception as exc:
             logger.warning("Cabbage world task generation failed: %s", type(exc).__name__)
             message = str(exc) or "世界任务生成失败。"
+        failure_context = None
         with self._lock:
             context = self._read_locked(project_path)
             goal = context.get("worldGoal") if isinstance(context.get("worldGoal"), dict) else {}
-            if str(goal.get("prompt") or "") == prompt:
+            if (str(goal.get("prompt") or "") == prompt
+                    and str(goal.get("mode") or "story") == mode
+                    and goal.get("source") == "ai"
+                    and str(goal.get("generationId") or "") == generation_id):
                 goal.update({"status": "error", "generationError": message, "generatedAt": 0})
                 context["worldGoal"] = goal
+                self._ensure_task_slots_locked(context, self._now_ms())
                 self._write_locked(project_path, context)
-        return self._error("GOAL_PLAN_GENERATION_FAILED", message)
+                failure_context = self._clone(context)
+        failure = self._error("GOAL_PLAN_GENERATION_FAILED", message)
+        if failure_context is not None:
+            failure["context"] = failure_context
+        return failure
 
     def _complete_goal_plan(self, task_id: str, future: Any) -> None:
         try:

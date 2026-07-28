@@ -1260,7 +1260,7 @@
       <Block type="object_third_person_move" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="让对象 CoinHero 按 WASD 相对摄像机移动 速度 0.18 障碍标签 obstacle 范围 X -12 到 12 Z -12 到 12">
         <Field name="NAME" kind="string" defaultJson="&quot;CoinHero&quot;" inputOwner="" />
         <Field name="SPEED" kind="number" defaultJson="0.18" inputOwner="" />
-        <Field name="OBSTACLE_TAG" kind="string" defaultJson="&quot;obstacle&quot;" inputOwner="" />
+        <Field name="OBSTACLE_TAG" kind="string" defaultJson="&quot;obstacle&quot;" inputOwner="" required="false" emptyMeaning="disable_tag_obstacle_check" />
         <Field name="MIN_X" kind="number" defaultJson="-12" inputOwner="" />
         <Field name="MAX_X" kind="number" defaultJson="12" inputOwner="" />
         <Field name="MIN_Z" kind="number" defaultJson="-12" inputOwner="" />
@@ -1307,7 +1307,7 @@
       <Block type="object_first_person_move" category="玩法模板" shape="statement" projectUsage="project-safe" recommended="true" outputCheck="" dynamic="false" label="第一人称移动 FighterPlayer 速度 0.2 障碍标签 obstacle 范围 X -5 到 5 Z -1 到 48">
         <Field name="NAME" kind="string" defaultJson="&quot;FighterPlayer&quot;" inputOwner="" />
         <Field name="SPEED" kind="number" defaultJson="0.2" inputOwner="" />
-        <Field name="OBSTACLE_TAG" kind="string" defaultJson="&quot;obstacle&quot;" inputOwner="" />
+        <Field name="OBSTACLE_TAG" kind="string" defaultJson="&quot;obstacle&quot;" inputOwner="" required="false" emptyMeaning="disable_tag_obstacle_check" />
         <Field name="MIN_X" kind="number" defaultJson="-5" inputOwner="" />
         <Field name="MAX_X" kind="number" defaultJson="5" inputOwner="" />
         <Field name="MIN_Z" kind="number" defaultJson="-1" inputOwner="" />

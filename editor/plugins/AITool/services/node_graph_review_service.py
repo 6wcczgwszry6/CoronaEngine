@@ -8,6 +8,7 @@ import os
 import socket
 import threading
 import time
+import unicodedata
 import uuid
 import urllib.error
 import urllib.request
@@ -43,6 +44,19 @@ class NodeGraphReviewService:
         "missingInput", "objectRequirement", "edgeId",
     )
     ISSUE_CODE_ALIASES = {"dangling_edge": "invalid_edge_endpoint"}
+    FACT_REQUIRED_ISSUE_CODES = {
+        "missing_actor_target",
+        "actor_target_not_found",
+        "missing_required_input",
+    }
+    ACTOR_NAME_FIELDS = (
+        "name", "actor_name", "actorName", "alias", "displayName",
+        "display_name", "nativeName", "native_name",
+    )
+    ACTOR_ALIAS_FIELDS = ("aliases", "displayNames", "display_names", "names")
+    OPTIONAL_FIELD_ALIASES = {
+        "OBSTACLE_TAG": ("obstacle_tag", "obstacletag", "obstacle tag", "障碍标签"),
+    }
 
     # Only these fields identify an existing scene actor. TAG, variable names,
     # cooldown names and spawn names are intentionally excluded.
@@ -596,11 +610,17 @@ class NodeGraphReviewService:
                 and (not block_id or not fact.get("blockId") or str(fact.get("blockId")) == block_id)
                 and (not edge_id or not fact.get("edgeId") or str(fact.get("edgeId")) == edge_id)
             )), None)
+            # Object existence and required-input errors are deterministic. DeepSeek
+            # may explain them, but it cannot create them without a matching local fact.
+            if code in cls.FACT_REQUIRED_ISSUE_CODES and not matching_fact:
+                continue
+            actual_block = blocks_by_id.get(block_id) or {}
+            if cls._issue_reports_legal_optional_empty_field(item, actual_block):
+                continue
             if not edge_id and matching_fact and str(matching_fact.get("edgeId") or "") in edge_ids:
                 edge_id = str(matching_fact.get("edgeId") or "")
             raw_pattern = item.get("pattern") if isinstance(item.get("pattern"), dict) else {}
             pattern = cls._normalize_issue_pattern(raw_pattern)
-            actual_block = blocks_by_id.get(block_id) or {}
             if actual_block.get("type"):
                 pattern["blockType"] = str(actual_block.get("type"))[:180]
             if matching_fact:
@@ -646,6 +666,35 @@ class NodeGraphReviewService:
         result["issues"] = normalized
 
     @classmethod
+    def _issue_reports_legal_optional_empty_field(
+        cls, item: dict[str, Any], block: dict[str, Any]
+    ) -> bool:
+        block_type = str(block.get("type") or "")
+        contract = cls._catalog_index().get(block_type) or {}
+        fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
+        searchable = " ".join(
+            str(item.get(key) or "")
+            for key in ("code", "title", "message", "suggestion")
+        ).casefold()
+        pattern = item.get("pattern") if isinstance(item.get("pattern"), dict) else {}
+        missing_input = str(pattern.get("missingInput") or "").strip()
+        for field_contract in contract.get("fields") or []:
+            field_name = str(field_contract.get("name") or "").strip()
+            if not field_name or field_contract.get("required") is not False:
+                continue
+            value = fields.get(field_name)
+            if value not in (None, ""):
+                continue
+            aliases = {field_name.casefold(), field_name.replace("_", "").casefold()}
+            aliases.update(cls.OPTIONAL_FIELD_ALIASES.get(field_name, ()))
+            mentioned = missing_input.casefold() == field_name.casefold() or any(
+                str(alias).casefold() in searchable for alias in aliases if alias
+            )
+            if mentioned:
+                return True
+        return False
+
+    @classmethod
     def _normalize_issue_pattern(cls, raw: Any) -> dict[str, str]:
         if not isinstance(raw, dict):
             return {}
@@ -673,12 +722,38 @@ class NodeGraphReviewService:
             value = value.get("name") or value.get("value") or value.get("id") or ""
         if value is None:
             return ""
-        return str(value).strip()
+        return unicodedata.normalize("NFKC", str(value)).strip()
+
+    @classmethod
+    def _actor_name_key(cls, value: Any) -> str:
+        return cls._normalize_actor_name(value).casefold()
+
+    @classmethod
+    def _actor_names_from_context(cls, actor: Any) -> set[str]:
+        if not isinstance(actor, dict):
+            name = cls._normalize_actor_name(actor)
+            return {name} if name else set()
+        names: set[str] = set()
+        for field in cls.ACTOR_NAME_FIELDS:
+            name = cls._normalize_actor_name(actor.get(field))
+            if name:
+                names.add(name)
+        for field in cls.ACTOR_ALIAS_FIELDS:
+            aliases = actor.get(field)
+            if isinstance(aliases, dict):
+                aliases = list(aliases.values())
+            if not isinstance(aliases, (list, tuple, set)):
+                aliases = [aliases]
+            for alias in aliases:
+                name = cls._normalize_actor_name(alias)
+                if name:
+                    names.add(name)
+        return names
 
     @classmethod
     def _is_missing_actor_name(cls, value: Any) -> bool:
-        name = cls._normalize_actor_name(value)
-        return name.casefold() in {item.casefold() for item in cls.ACTOR_PLACEHOLDERS}
+        name = cls._actor_name_key(value)
+        return name in {cls._actor_name_key(item) for item in cls.ACTOR_PLACEHOLDERS}
 
     @classmethod
     def _connected_actor_reference(
@@ -878,12 +953,18 @@ class NodeGraphReviewService:
                     }
                 )
 
-        actors_value = (project_context or {}).get("actors")
-        actor_context_available = isinstance(actors_value, list)
+        context = project_context or {}
+        actors_value = context.get("actors")
+        availability_flag = context.get("actorContextAvailable")
+        actor_context_available = (
+            availability_flag is True
+            or (availability_flag is None and isinstance(actors_value, list))
+        )
         known_actors = {
-            str(actor.get("name") or "").strip()
+            cls._actor_name_key(name)
             for actor in (actors_value or [])
-            if isinstance(actor, dict) and str(actor.get("name") or "").strip()
+            for name in cls._actor_names_from_context(actor)
+            if cls._actor_name_key(name)
         }
 
         scoped_blocks: list[tuple[str, dict[str, Any]]] = []
@@ -933,7 +1014,11 @@ class NodeGraphReviewService:
                             "suggestion": "在该对象参数中选择当前场景里的目标物体",
                         }
                     )
-                elif state == "resolved" and actor_context_available and actor_name not in known_actors:
+                elif (
+                    state == "resolved"
+                    and actor_context_available
+                    and cls._actor_name_key(actor_name) not in known_actors
+                ):
                     facts.append(
                         {
                             "code": "actor_target_not_found",
@@ -988,8 +1073,19 @@ class NodeGraphReviewService:
                         "name": str(item.get("name") or ""),
                         "kind": str(item.get("kind") or ""),
                         "check": str(item.get("check") or ""),
+                        "required": str(item.get("required") or "true").strip().casefold() != "false",
+                        "emptyMeaning": str(item.get("emptyMeaning") or ""),
                     }
                     for item in element.findall("Input")
+                ],
+                "fields": [
+                    {
+                        "name": str(item.get("name") or ""),
+                        "kind": str(item.get("kind") or ""),
+                        "required": str(item.get("required") or "true").strip().casefold() != "false",
+                        "emptyMeaning": str(item.get("emptyMeaning") or ""),
+                    }
+                    for item in element.findall("Field")
                 ],
             }
         return index
@@ -1088,8 +1184,12 @@ class NodeGraphReviewService:
             "不要因为 Demo 简单就建议增加功能。\n"
             "本地事实是确定性线索，必须优先核对。发现真实问题时 hasProblems=true；"
             "没有真实问题时 hasProblems=false。不要把布局位置、节点数量少或缺少额外玩法当成错误。"
-            "若需要操作具体物体，但对象字段为空、仍是占位值或引用不存在，必须指出缺少对象目标，"
-            "并使用 missing_actor_target 或 actor_target_not_found 等稳定 code。"
+            "对象相关错误只能在本地确定性事实明确给出时返回：对象字段为空或占位时使用 "
+            "missing_actor_target，引用的名称在可靠场景对象列表中不存在时使用 actor_target_not_found；"
+            "不得只凭模型猜测对象不存在。"
+            "积木合同中 required=false 的字段允许为空，不能作为 missing_required_input；"
+            "其中 object_third_person_move 和 object_first_person_move 的 OBSTACLE_TAG 为空表示关闭标签障碍检测，"
+            "不得要求用户虚构或补填障碍标签。"
             "issues 中的 nodeId 和 blockId 必须引用输入中真实存在的 ID；无法定位时可留空，不能编造。\n"
             + score_instruction
             + "\n"
