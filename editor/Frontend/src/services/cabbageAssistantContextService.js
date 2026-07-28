@@ -56,6 +56,7 @@ function normalizeSnapshot(value) {
     projectScopeId: String(value.projectScopeId || context.projectScopeId || currentScopeId()),
     graphRevision: String(value.graphRevision || context.graphRevision || ''),
     graphExcerpt: clone(value.graphExcerpt || context.graphExcerpt || {}, {}),
+    projectContext: clone(value.projectContext || context.projectContext || {}, {}),
     profile: clone(context.profile || {}, {}),
     profileHistory: clone(context.profileHistory || [], []),
     issueMemory: clone(context.issueMemory || {}, {}),
@@ -111,6 +112,7 @@ function publishBackendContext(context) {
     projectScopeId: scope,
     graphRevision: current?.graphRevision || '',
     graphExcerpt: current?.graphExcerpt || {},
+    projectContext: current?.projectContext || {},
     selectedTaskKey: current?.selectedTaskKey || '',
   });
 }

@@ -317,6 +317,7 @@ async function sendMessage() {
       selectedTaskKey: messageContext.taskKey,
       tasks: assistant.tasks,
       graphExcerpt: assistant.graphExcerpt,
+      projectContext: assistant.projectContext,
       messages: assistant.messages.map(({ role, content: text }) => ({ role, content: text })),
       detailGuidanceRequested: requestsDetailedGuidance(content),
     });

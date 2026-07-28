@@ -133,5 +133,47 @@ class NodeGraphReviewChatServiceTests(unittest.TestCase):
         self.assertEqual([], metadata["steps"])
 
 
+    def test_project_context_keeps_real_scene_actors(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["projectContext"] = {
+            "sceneName": "Scene/default.scene",
+            "actorContextAvailable": True,
+            "actors": [
+                {
+                    "name": "modern chair 11 obj",
+                    "type": "model",
+                    "tags": ["prop"],
+                    "aliases": ["chair", "modern chair 11 obj"],
+                    "ignored": "not forwarded",
+                },
+                {"name": "modern chair 11 obj", "type": "duplicate"},
+            ],
+            "ignored": {"project": "data"},
+        }
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        self.assertEqual("Scene/default.scene", request["projectContext"]["sceneName"])
+        self.assertTrue(request["projectContext"]["actorContextAvailable"])
+        self.assertEqual(1, len(request["projectContext"]["actors"]))
+        self.assertEqual("modern chair 11 obj", request["projectContext"]["actors"][0]["name"])
+        self.assertNotIn("ignored", request["projectContext"]["actors"][0])
+
+    def test_project_graph_prompt_forbids_fake_binding_workflow(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["projectContext"] = {
+            "sceneName": "Scene/default.scene",
+            "actorContextAvailable": True,
+            "actors": [{"name": "modern chair 11 obj", "type": "model"}],
+        }
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        messages = NodeGraphReviewChatService._build_messages(request)
+        prompt = messages[0]["content"]
+        context = messages[1]["content"]
+        self.assertIn("node_graph:project:global", prompt)
+        self.assertIn("actorName", prompt)
+        self.assertIn("projectContext.actors", prompt)
+        self.assertIn("modern chair 11 obj", context)
+        self.assertIn("Scene/default.scene", context)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -260,6 +260,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     projectScopeId: '',
     graphRevision: '',
     graphExcerpt: {},
+    projectContext: {},
     profile: clone(DEFAULT_PROFILE),
     profileHistory: [],
     issueMemory: {},
@@ -315,6 +316,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.projectScopeId = String(projectScopeId || '');
       this.graphRevision = '';
       this.graphExcerpt = {};
+      this.projectContext = {};
       this.profile = clone(DEFAULT_PROFILE);
       this.profileHistory = [];
       this.issueMemory = {};
@@ -360,6 +362,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       if (snapshot.graphExcerpt && typeof snapshot.graphExcerpt === 'object') {
         this.graphExcerpt = clone(snapshot.graphExcerpt, {});
       }
+      if (snapshot.projectContext && typeof snapshot.projectContext === 'object') {
+        this.projectContext = clone(snapshot.projectContext, {});
+      }
       this.profile = normalizeProfile(context.profile || {});
       this.profileHistory = clone(context.profileHistory || [], []);
       this.issueMemory = clone(context.issueMemory || {}, {});
@@ -396,6 +401,14 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       return true;
     },
 
+
+    updateProjectContext(projectContext = {}) {
+      this.projectContext = projectContext && typeof projectContext === 'object'
+        ? clone(projectContext, {})
+        : {};
+      return this.projectContext;
+    },
+
     applyReview(result = {}, { runtimeFailed = false } = {}) {
       const scope = String(result.projectScopeId || '');
       if (this.projectScopeId && scope && scope !== this.projectScopeId) return [];
@@ -404,6 +417,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.graphExcerpt = result.graphExcerpt && typeof result.graphExcerpt === 'object'
         ? clone(result.graphExcerpt, {})
         : {};
+      if (result.projectContext && typeof result.projectContext === 'object') {
+        this.projectContext = clone(result.projectContext, {});
+      }
 
       const existingNodeTasks = this.activeTasks.filter((task) => task.type === 'node-issue');
       const existingByKey = new Map(existingNodeTasks.map((task) => [task.taskKey, task]));

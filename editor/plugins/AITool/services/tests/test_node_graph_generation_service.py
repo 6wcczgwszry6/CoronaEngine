@@ -641,5 +641,22 @@ class NodeGraphGenerationServiceTests(unittest.TestCase):
         self.assertEqual("cancelled", status["status"])
 
 
+    def test_generation_prompt_uses_current_scene_actors_without_binding_workflow(self):
+        payload = request_payload(
+            projectContext={
+                "sceneName": "Scene/default.scene",
+                "actorContextAvailable": True,
+                "actors": [{"name": "modern chair 11 obj", "type": "model"}],
+            },
+        )
+        request = self.service._normalize_payload(payload)
+        _contract_path, contract = self.service._load_contract()
+        prompt = self.service._build_prompt(request, contract)
+        self.assertIn("already scoped to the current Native Editor scene", prompt)
+        self.assertIn("must never trigger a scene-binding workflow", prompt)
+        self.assertIn("Never ask the user to bind a scene or actor", prompt)
+        self.assertIn("modern chair 11 obj", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

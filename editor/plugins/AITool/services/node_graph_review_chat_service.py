@@ -22,6 +22,9 @@ class NodeGraphReviewChatService:
     MAX_TASKS = 20
     MAX_GRAPH_CHARS = 18000
     MAX_ACTIVE_TASKS = 40
+    MAX_PROJECT_ACTORS = 80
+    MAX_ACTOR_ALIASES = 12
+    MAX_ACTOR_TAGS = 12
     DETAIL_GUIDANCE_TERMS = (
         "不理解", "看不懂", "不会", "怎么做", "怎么连接", "放在哪里", "怎么放",
         "为什么还是不行", "展示", "演示", "给我看看", "一步一步", "具体步骤",
@@ -166,6 +169,40 @@ class NodeGraphReviewChatService:
         if len(graph_text) > cls.MAX_GRAPH_CHARS:
             graph_text = graph_text[: cls.MAX_GRAPH_CHARS] + "…"
 
+        raw_project_context = payload.get("projectContext")
+        raw_project_context = raw_project_context if isinstance(raw_project_context, dict) else {}
+        actors = []
+        seen_actor_names = set()
+        for item in (raw_project_context.get("actors") or [])[: cls.MAX_PROJECT_ACTORS]:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name") or "").strip()[:240]
+            name_key = name.casefold()
+            if not name or name_key in seen_actor_names:
+                continue
+            seen_actor_names.add(name_key)
+            aliases = []
+            for alias in (item.get("aliases") or [])[: cls.MAX_ACTOR_ALIASES]:
+                value = str(alias or "").strip()[:240]
+                if value and value.casefold() != name_key and value not in aliases:
+                    aliases.append(value)
+            tags = []
+            for tag in (item.get("tags") or [])[: cls.MAX_ACTOR_TAGS]:
+                value = str(tag or "").strip()[:120]
+                if value and value not in tags:
+                    tags.append(value)
+            actors.append({
+                "name": name,
+                "type": str(item.get("type") or "actor").strip()[:120] or "actor",
+                "tags": tags,
+                "aliases": aliases,
+            })
+        project_context = {
+            "sceneName": str(raw_project_context.get("sceneName") or "").strip()[:320],
+            "actorContextAvailable": raw_project_context.get("actorContextAvailable") is True,
+            "actors": actors,
+        }
+
         raw_profile = payload.get("assistanceProfile")
         raw_profile = raw_profile if isinstance(raw_profile, dict) else {}
         try:
@@ -191,6 +228,7 @@ class NodeGraphReviewChatService:
             "detailGuidanceRequested": detail_requested,
             "tasks": tasks,
             "graphText": graph_text,
+            "projectContext": project_context,
             "messages": messages,
         }
 
@@ -275,6 +313,7 @@ class NodeGraphReviewChatService:
             "selectedTask": selected,
             "activeTasks": request["tasks"],
             "graphExcerpt": request["graphText"],
+            "projectContext": request["projectContext"],
         }
         profile = request.get("assistanceProfile") or {}
         score = max(0, min(int(profile.get("score") or 0), 100))
@@ -311,6 +350,12 @@ class NodeGraphReviewChatService:
                     "你是 CoronaEngine 的包菜答疑助手。请围绕当前世界、待处理任务和节点图回答。"
                     "对基础引导任务和世界制作任务，说明如何在引擎内完成；对节点问题，说明原因、修改位置和验证方法。"
                     "不得编造不存在的节点、积木、对象或 API。信息不足时应使用条件式建议。"
+                    "node_graph:project:global 是当前 Native Editor 场景的项目级节点图，默认已经作用于当前场景。"
+                    "项目节点图的 actorName 为空表示它不固定绑定单个物体，不表示场景没有绑定。"
+                    "不得要求用户选择原生场景、绑定模式、确认绑定或点击应用。"
+                    "projectContext.actors 是场景管理中已经导入的可用物体；涉及移动、跳跃、旋转、碰撞等对象操作时，"
+                    "必须优先使用其中的精确对象名，并说明在对应积木的对象参数中选择该物体。"
+                    "如果 actorContextAvailable 为 false，只能说明暂时无法读取对象列表，不能编造场景绑定面板。"
                     "不要向用户显示内部评分，不要给用户贴美术、程序、入门、熟悉或熟练标签。"
                     "不要输出 JSON，不要为用户生成或覆盖 Python 脚本。"
 

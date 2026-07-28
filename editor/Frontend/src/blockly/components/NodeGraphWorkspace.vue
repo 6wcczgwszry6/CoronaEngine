@@ -2263,12 +2263,28 @@ function formatRunDetail(status) {
   if (!status || typeof status !== 'object') return '';
   const lines = [];
   if (status.error) lines.push(`错误：${status.error}`);
-  if (status.requestedScene || status.requestedActor) lines.push(`请求目标：${status.requestedScene || '(空场景)'} / ${status.requestedActor || '(空物体)'}`);
-  if (status.resolvedSceneName || status.resolvedActorName) lines.push(`绑定目标：${status.resolvedSceneName || '(空场景)'} / ${status.resolvedActorName || '(空物体)'}`);
-  if (status.bindingMode) lines.push(`绑定模式：${status.bindingMode === 'native_editor' ? 'Native Editor' : 'Python Scene'}`);
-  if (Array.isArray(status.pythonScenes)) lines.push(`Python 场景：${status.pythonScenes.join(', ') || '(空)'}`);
-  if (status.nativeScene) lines.push(`原生场景：${status.nativeScene}`);
-  if (Array.isArray(status.actorCandidates) && status.actorCandidates.length) lines.push(`物体候选：${status.actorCandidates.join(', ')}`);
+  if (isProjectTarget.value) {
+    const sceneName = status.resolvedSceneName
+      || status.nativeScene
+      || sceneActorContext.sceneName
+      || props.sceneName
+      || '当前场景';
+    const actorNames = sceneActorContext.actors
+      .map((actor) => String(actor?.name || '').trim())
+      .filter(Boolean);
+    lines.push('运行作用域：当前场景（项目节点图）');
+    lines.push(`运行场景：${sceneName}`);
+    lines.push('对象来源：场景管理中已导入的物体，由各积木的对象参数指定');
+    if (actorNames.length) lines.push(`可用物体：${actorNames.join(', ')}`);
+    else if (!sceneActorContext.available) lines.push('可用物体：暂时无法读取场景对象列表');
+  } else {
+    if (status.requestedScene || status.requestedActor) lines.push(`请求目标：${status.requestedScene || '(空场景)'} / ${status.requestedActor || '(空物体)'}`);
+    if (status.resolvedSceneName || status.resolvedActorName) lines.push(`绑定目标：${status.resolvedSceneName || '(空场景)'} / ${status.resolvedActorName || '(空物体)'}`);
+    if (status.bindingMode) lines.push(`绑定模式：${status.bindingMode === 'native_editor' ? 'Native Editor' : 'Python Scene'}`);
+    if (Array.isArray(status.pythonScenes)) lines.push(`Python 场景：${status.pythonScenes.join(', ') || '(空)'}`);
+    if (status.nativeScene) lines.push(`原生场景：${status.nativeScene}`);
+    if (Array.isArray(status.actorCandidates) && status.actorCandidates.length) lines.push(`物体候选：${status.actorCandidates.join(', ')}`);
+  }
   return lines.join('\n');
 }
 function startRunPoll() {
@@ -2625,6 +2641,8 @@ async function refreshSceneActorOptions({ rescan = false } = {}) {
 
     reconcileSceneActorReferenceIssues();
     if (changed) {
+      cabbageAssistant.updateProjectContext(generatedProjectContext());
+      publishCabbageAssistantContext(cabbageAssistant);
       scheduleRememberedIssueCheck(80);
       if (rescan) requestNodeGraphReview(0);
     }
@@ -2636,6 +2654,8 @@ async function refreshSceneActorOptions({ rescan = false } = {}) {
       sceneActorContext.revision = '';
       sceneActorContext.actors = [];
       window.__coronaBlocklyActorOptions = [];
+      cabbageAssistant.updateProjectContext(generatedProjectContext());
+      publishCabbageAssistantContext(cabbageAssistant);
     }
     logError('Failed to refresh scene actor options', error);
     return false;

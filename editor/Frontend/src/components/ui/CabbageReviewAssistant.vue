@@ -6,18 +6,37 @@
     @click.stop
     @wheel.stop
   >
+    <transition name="task-board">
+      <section v-if="assistant.preWarning" class="assistant-notice pre-warning" aria-live="polite">
+        <div class="notice-copy">
+          <strong>{{ assistant.preWarning.title }}</strong>
+          <p>{{ assistant.preWarning.message }}</p>
+        </div>
+        <button type="button" class="showcase-button" @click="showcase({ ...assistant.preWarning, sourceType: 'node-issue' })">展示</button>
+      </section>
+    </transition>
+
+    <transition name="task-board">
+      <section v-if="assistant.ephemeralTip" class="assistant-notice optimization-tip" aria-live="polite">
+        <div class="notice-copy">
+          <strong>{{ assistant.ephemeralTip.title }}</strong>
+          <p>{{ assistant.ephemeralTip.message }}</p>
+        </div>
+        <button type="button" class="showcase-button" @click="showcase({ ...assistant.ephemeralTip, sourceType: 'optimization-tip' })">展示</button>
+      </section>
+    </transition>
 
     <section class="task-board" aria-label="任务与提示">
       <header class="task-board-header">
         <span>任务与提示</span>
-        <span class="task-count" :class="{ empty: displayItems.length === 0 }">{{ displayItems.length }}</span>
+        <span class="task-count" :class="{ empty: tasks.length === 0 }">{{ tasks.length }}</span>
       </header>
-      <div v-if="displayItems.length" class="task-list" aria-live="polite">
-        <article v-for="task in displayItems" :key="task.taskKey || task.issueKey" class="task-item">
+      <div v-if="tasks.length" class="task-list">
+        <article v-for="task in tasks" :key="task.taskKey || task.issueKey" class="task-item">
           <button
             type="button"
             class="task-title"
-            :class="{ selected: isSelected(task) }"
+            :class="{ selected: assistant.selectedTaskKey === (task.taskKey || task.issueKey) }"
             @click="toggleTask(task)"
           >
             <span class="task-title-text">{{ task.title }}</span>
@@ -26,12 +45,12 @@
           <div v-if="expandedKeys.has(task.taskKey || task.issueKey)" class="task-detail">
             <p v-if="task.message">{{ task.message }}</p>
             <div v-if="task.suggestion" class="task-suggestion">
-              <strong>{{ suggestionLabel(task) }}</strong>
+              <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
               <p>{{ task.suggestion }}</p>
             </div>
             <div class="task-actions">
-              <button type="button" class="showcase-button" @click="showcase({ ...task, sourceType: task.sourceType || task.type })">展示</button>
-              <button v-if="!task.transient" type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
+              <button type="button" class="showcase-button" @click="showcase({ ...task, sourceType: task.type })">展示</button>
+              <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
             </div>
           </div>
         </article>
@@ -45,7 +64,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, watch } from 'vue';
+import { onBeforeUnmount, reactive, watch } from 'vue';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { closeFloatingPanel } from '@/utils/panelWindows.js';
@@ -61,32 +80,6 @@ const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
 const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
-const displayItems = computed(() => {
-  const items = [];
-  if (assistant.preWarning) {
-    const warning = assistant.preWarning;
-    items.push({
-      ...warning,
-      taskKey: `pre-warning:${warning.warningKey || warning.graphRevision || warning.createdAt || 'current'}`,
-      issueKey: `pre-warning:${warning.warningKey || warning.graphRevision || warning.createdAt || 'current'}`,
-      type: 'pre-warning',
-      sourceType: 'node-issue',
-      transient: true,
-    });
-  }
-  if (assistant.ephemeralTip) {
-    const tip = assistant.ephemeralTip;
-    items.push({
-      ...tip,
-      taskKey: `optimization-tip:${tip.tipKey || tip.graphRevision || tip.createdAt || 'current'}`,
-      issueKey: `optimization-tip:${tip.tipKey || tip.graphRevision || tip.createdAt || 'current'}`,
-      type: 'optimization-tip',
-      sourceType: 'optimization-tip',
-      transient: true,
-    });
-  }
-  return [...items, ...props.tasks];
-});
 let optimizationTimer = null;
 let preWarningTimer = null;
 
@@ -104,24 +97,11 @@ function showcase(source) {
   void guidanceService.start(source);
 }
 
-function isSelected(task) {
-  const key = taskKey(task);
-  return task?.transient ? expandedKeys.has(key) : assistant.selectedTaskKey === key;
-}
-
-function suggestionLabel(task) {
-  if (task?.type === 'node-issue' || task?.type === 'pre-warning') return '这样修改';
-  if (task?.type === 'optimization-tip') return '优化建议';
-  return '这样完成';
-}
-
 function toggleTask(task) {
   const key = taskKey(task);
   if (!key) return;
-  if (!task?.transient) {
-    assistant.selectTask(key);
-    publishCabbageAssistantContext(assistant);
-  }
+  assistant.selectTask(key);
+  publishCabbageAssistantContext(assistant);
   if (expandedKeys.has(key)) expandedKeys.delete(key);
   else expandedKeys.add(key);
 }
@@ -184,7 +164,7 @@ onBeforeUnmount(() => {
 });
 
 watch(
-  () => displayItems.value.map((task) => taskKey(task)),
+  () => props.tasks.map((task) => taskKey(task)),
   (keys) => {
     const alive = new Set(keys);
     for (const key of Array.from(expandedKeys)) {
@@ -211,6 +191,24 @@ watch(
 .cabbage-review-root > * {
   pointer-events: auto;
 }
+.assistant-notice {
+  width: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid #55431f;
+  border-radius: 8px;
+  background: #15130d;
+  color: #f2ead5;
+  box-shadow: 0 14px 38px rgba(0, 0, 0, .5);
+  padding: 11px 12px;
+  line-height: 1.55;
+}
+.assistant-notice.pre-warning { border-color: #9b6b2f; background: #1c160c; }
+.notice-copy { min-width: 0; flex: 1; }
+.assistant-notice strong { display: block; color: #e5c77f; font-size: 13px; }
+.assistant-notice p { margin: 5px 0 0; color: #c9bea0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-board {
   position: relative;
   width: 100%;
