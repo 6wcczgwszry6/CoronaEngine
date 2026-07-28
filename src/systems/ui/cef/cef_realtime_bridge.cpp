@@ -400,47 +400,12 @@ bool handle_camera_viewport_fast(const CefRefPtr<CefProcessMessage>& message) {
     return true;
 }
 
-void append_geometry_handle(std::vector<std::uintptr_t>& handles, std::uintptr_t geometry_handle) {
-    if (geometry_handle == 0) {
-        return;
-    }
-    if (std::find(handles.begin(), handles.end(), geometry_handle) == handles.end()) {
-        handles.push_back(geometry_handle);
-    }
-}
-
 std::vector<std::uintptr_t> resolve_profile_handles(std::uintptr_t actor_handle) {
     std::vector<std::uintptr_t> profile_handles;
     if (auto actor = Corona::SharedDataHub::instance().actor_storage().try_acquire_read(actor_handle)) {
         profile_handles = actor->profile_handles;
     }
     return profile_handles;
-}
-
-std::vector<std::uintptr_t> resolve_actor_geometry_handles(std::uintptr_t actor_handle) {
-    std::vector<std::uintptr_t> profile_handles;
-    if (auto actor = Corona::SharedDataHub::instance().actor_storage().try_acquire_read(actor_handle)) {
-        profile_handles = actor->profile_handles;
-    }
-
-    std::vector<std::uintptr_t> geometry_handles;
-    auto& hub = Corona::SharedDataHub::instance();
-    for (const auto profile_handle : profile_handles) {
-        if (auto profile = hub.profile_storage().try_acquire_read(profile_handle)) {
-            append_geometry_handle(geometry_handles, profile->geometry_handle);
-            if (auto mechanics = hub.mechanics_storage().try_acquire_read(profile->mechanics_handle)) {
-                append_geometry_handle(geometry_handles, mechanics->geometry_handle);
-            }
-            if (auto optics = hub.optics_storage().try_acquire_read(profile->optics_handle)) {
-                append_geometry_handle(geometry_handles, optics->geometry_handle);
-            }
-            if (auto acoustics = hub.acoustics_storage().try_acquire_read(profile->acoustics_handle)) {
-                append_geometry_handle(geometry_handles, acoustics->geometry_handle);
-            }
-        }
-    }
-
-    return geometry_handles;
 }
 
 struct FocusBounds {
@@ -733,7 +698,8 @@ bool handle_actor_transform_fast(const CefRefPtr<CefProcessMessage>& message) {
 
     const auto operation = args->GetInt(1);
     auto& hub = Corona::SharedDataHub::instance();
-    for (const auto geometry_handle : resolve_actor_geometry_handles(actor_handle)) {
+    for (const auto geometry_handle :
+         hub.resolve_actor_geometry_handles(actor_handle)) {
         auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
         if (!geometry || geometry->transform_handle == 0) {
             continue;
@@ -924,7 +890,8 @@ ktm::fvec3 viewport_gizmo_axis_vector(Corona::ViewportGizmoAxis axis) {
 
 std::optional<ktm::fvec3> actor_gizmo_position(std::uintptr_t actor_handle) {
     auto& hub = Corona::SharedDataHub::instance();
-    for (const auto geometry_handle : resolve_actor_geometry_handles(actor_handle)) {
+    for (const auto geometry_handle :
+         hub.resolve_actor_geometry_handles(actor_handle)) {
         auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
         if (!geometry || geometry->transform_handle == 0) {
             continue;
@@ -941,7 +908,8 @@ bool write_actor_gizmo_position(std::uintptr_t actor_handle,
                                 const ktm::fvec3& position) {
     bool wrote = false;
     auto& hub = Corona::SharedDataHub::instance();
-    for (const auto geometry_handle : resolve_actor_geometry_handles(actor_handle)) {
+    for (const auto geometry_handle :
+         hub.resolve_actor_geometry_handles(actor_handle)) {
         auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
         if (!geometry || geometry->transform_handle == 0) {
             continue;

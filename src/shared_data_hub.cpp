@@ -48,6 +48,59 @@ const SharedDataHub::ProfileStorage& SharedDataHub::profile_storage() const { re
 SharedDataHub::ActorStorage& SharedDataHub::actor_storage() { return actor_storage_; }
 const SharedDataHub::ActorStorage& SharedDataHub::actor_storage() const { return actor_storage_; }
 
+std::vector<std::uintptr_t> SharedDataHub::resolve_actor_geometry_handles(
+    std::uintptr_t actor_handle) {
+    std::vector<std::uintptr_t> geometry_handles;
+    const auto append_geometry = [&geometry_handles](std::uintptr_t geometry_handle) {
+        if (geometry_handle != 0 &&
+            std::find(geometry_handles.begin(), geometry_handles.end(),
+                      geometry_handle) == geometry_handles.end()) {
+            geometry_handles.push_back(geometry_handle);
+        }
+    };
+
+    const auto actor = actor_storage_.try_acquire_read(actor_handle);
+    if (!actor) {
+        return geometry_handles;
+    }
+    for (const auto profile_handle : actor->profile_handles) {
+        const auto profile = profile_storage_.try_acquire_read(profile_handle);
+        if (!profile) {
+            continue;
+        }
+        append_geometry(profile->geometry_handle);
+        if (const auto mechanics =
+                mechanics_storage_.try_acquire_read(profile->mechanics_handle)) {
+            append_geometry(mechanics->geometry_handle);
+        }
+        if (const auto optics =
+                optics_storage_.try_acquire_read(profile->optics_handle)) {
+            append_geometry(optics->geometry_handle);
+        }
+        if (const auto acoustics =
+                acoustics_storage_.try_acquire_read(profile->acoustics_handle)) {
+            append_geometry(acoustics->geometry_handle);
+        }
+    }
+    return geometry_handles;
+}
+
+std::optional<std::uintptr_t>
+SharedDataHub::resolve_actor_primary_transform_handle(
+    std::uintptr_t actor_handle) {
+    for (const auto geometry_handle :
+         resolve_actor_geometry_handles(actor_handle)) {
+        const auto geometry = geometry_storage_.try_acquire_read(geometry_handle);
+        if (geometry && geometry->transform_handle != 0) {
+            if (model_transform_storage_.try_acquire_read(
+                    geometry->transform_handle)) {
+                return geometry->transform_handle;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 void SharedDataHub::set_actor_guid(std::uintptr_t actor_handle, std::string actor_guid) {
     if (actor_handle == 0) {
         return;

@@ -560,6 +560,10 @@ class SharedDataHub {
 
     ActorStorage& actor_storage();
     const ActorStorage& actor_storage() const;
+    [[nodiscard]] std::vector<std::uintptr_t> resolve_actor_geometry_handles(
+        std::uintptr_t actor_handle);
+    [[nodiscard]] std::optional<std::uintptr_t>
+    resolve_actor_primary_transform_handle(std::uintptr_t actor_handle);
 
     // Runtime-only editor metadata keyed by native actor handle. Persisted state
     // remains in .scene; this cache only bridges Python proxy actors to native

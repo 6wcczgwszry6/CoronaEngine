@@ -4742,26 +4742,13 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     bool gizmo_visible = false;
     if (gizmo_state.target.actor_handle != 0 && ensure_gizmo_axis_textures()) {
         auto& hub = SharedDataHub::instance();
-        auto actor =
-            hub.actor_storage().try_acquire_read(gizmo_state.target.actor_handle);
-        std::uintptr_t transform_handle = 0;
-        if (actor) {
-            for (const auto profile_handle : actor->profile_handles) {
-                auto profile = hub.profile_storage().try_acquire_read(profile_handle);
-                if (!profile || profile->geometry_handle == 0) {
-                    continue;
-                }
-                auto geometry =
-                    hub.geometry_storage().try_acquire_read(profile->geometry_handle);
-                if (geometry && geometry->transform_handle != 0) {
-                    transform_handle = geometry->transform_handle;
-                    break;
-                }
-            }
-        }
-        if (transform_handle != 0) {
+        const auto transform_handle =
+            hub.resolve_actor_primary_transform_handle(
+                gizmo_state.target.actor_handle);
+        if (transform_handle) {
             if (auto transform =
-                    hub.model_transform_storage().try_acquire_read(transform_handle)) {
+                    hub.model_transform_storage().try_acquire_read(
+                        *transform_handle)) {
                 gizmo_layout = OpticsDetail::make_viewport_gizmo_layout(
                     camera.compute_view_proj_matrix(),
                     transform->position,
