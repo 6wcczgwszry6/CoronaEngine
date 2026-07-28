@@ -140,6 +140,35 @@ class ProjectCopyTests(unittest.TestCase):
             self.assertEqual(recent[0]["name"], "Portable Name")
             self.assertTrue(recent[0]["if_exists"])
 
+    def test_failed_automatic_project_hydration_is_not_retried_on_every_access(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            scene = root / "BrokenPortable"
+            scene.mkdir()
+            (scene / "scene.ini").write_text(
+                "[format]\ntype = corona_scene_folder\nversion = 1\n"
+                "[actors]\nBall.runtime.actor_version = 1\n"
+                "Ball.runtime.actor_version = 1\n",
+                encoding="utf-8",
+            )
+            config_path = root / "CoronaEditor.ini"
+            config_path.write_text(
+                f"[General]\nlast_project = {scene}\n"
+                "[History]\nrecent_projects = []\n",
+                encoding="utf-8",
+            )
+            settings = CoronaSettings(str(config_path))
+
+            with self.assertLogs("utils.settings", level="ERROR") as captured:
+                self.assertIsNone(settings.active_project_path)
+                self.assertIsNone(settings.active_project_path)
+
+            hydration_errors = [
+                message for message in captured.output
+                if "Failed to hydrate active project from last_project" in message
+            ]
+            self.assertEqual(len(hydration_errors), 1)
+
     def test_recent_projects_marks_project_ini_saves_as_legacy(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
