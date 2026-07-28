@@ -40,22 +40,86 @@ class LazyPythonScriptService:
         self._module_path = module_path
         self._class_name = class_name
         self._target = None
-        self._load_lock = threading.Lock()
+        self._state = "cold"
+        self._initialization_error = None
+        self._state_lock = threading.Lock()
+        self._initialization_finished = threading.Event()
+
+    @property
+    def state(self):
+        with self._state_lock:
+            return self._state
+
+    def start_background_load(self):
+        with self._state_lock:
+            if self._state != "cold":
+                return
+            self._state = "initializing"
+            worker = threading.Thread(
+                target=self._load_target,
+                name=f"{self.module_name}Initializer",
+                daemon=True,
+            )
+        worker.start()
+
+    def wait_for_initialization(self, timeout=None):
+        self.start_background_load()
+        return self._initialization_finished.wait(timeout)
 
     def _load_target(self):
-        if self._target is not None:
-            return self._target
-        with self._load_lock:
-            if self._target is None:
-                module = import_module(self._module_path)
-                initializer = getattr(module, "initialize_script_service", None)
-                if callable(initializer):
-                    initializer()
-                self._target = getattr(module, self._class_name)
-        return self._target
+        try:
+            module = import_module(self._module_path)
+            initializer = getattr(module, "initialize_script_service", None)
+            if callable(initializer):
+                initializer()
+            target = getattr(module, self._class_name)
+            with self._state_lock:
+                self._target = target
+                self._state = "ready"
+            logger.info(
+                "Python script service %s initialized in background",
+                self.module_name,
+            )
+        except Exception as error:
+            with self._state_lock:
+                self._initialization_error = error
+                self._state = "degraded"
+            logger.exception(
+                "Failed to initialize Python script service %s from %s.%s",
+                self.module_name,
+                self._module_path,
+                self._class_name,
+            )
+        finally:
+            self._initialization_finished.set()
+
+    def _unavailable_result(self, state, error):
+        if state == "degraded":
+            return {
+                "success": False,
+                "status": "degraded",
+                "message": (
+                    f"{self.module_name} initialization failed: {error}"
+                ),
+            }
+        return {
+            "success": False,
+            "status": "initializing",
+            "message": f"{self.module_name} is initializing",
+        }
 
     def __getattr__(self, name):
-        return getattr(self._load_target(), name)
+        def invoke(*args, **kwargs):
+            self.start_background_load()
+            with self._state_lock:
+                target = self._target
+                state = self._state
+                error = self._initialization_error
+            if target is not None:
+                return getattr(target, name)(*args, **kwargs)
+            return self._unavailable_result(state, error)
+
+        return invoke
 
 
 def _register_python_script_services(service_names):
@@ -80,6 +144,8 @@ def _register_python_script_services(service_names):
                 service,
             )
             registered.append(service_name)
+            if isinstance(service, LazyPythonScriptService):
+                service.start_background_load()
         except Exception:
             logger.exception(
                 "Failed to register Python script service %s from %s.%s",

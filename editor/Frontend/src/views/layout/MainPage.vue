@@ -520,6 +520,7 @@ import {
   createViewportUiPointerController,
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
+import { createServiceInitializationRetry } from '@/utils/serviceInitialization.js';
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
@@ -931,6 +932,7 @@ let unsubscribeNodeGraphReview = null;
 let unsubscribeCabbageContext = null;
 let cabbageCandidateTimer = null;
 let cabbageWorldLoadGeneration = 0;
+const cabbageWorldInitializationRetry = createServiceInitializationRetry();
 const ACTIVE_PROJECT_PATH_KEY = 'corona.activeProjectPath';
 
 function normalizeActiveProjectPath(value) {
@@ -968,18 +970,27 @@ async function persistCabbageTaskActions(actions = []) {
 async function loadCabbageWorldContext({ reset = true } = {}) {
   const generation = ++cabbageWorldLoadGeneration;
   if (reset) {
+    cabbageWorldInitializationRetry.cancel();
     cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
     publishCabbageAssistantContext(cabbageAssistant);
   }
   try {
     const snapshot = await cabbageContextService.loadCurrentWorld();
     if (generation !== cabbageWorldLoadGeneration) return null;
+    cabbageWorldInitializationRetry.cancel();
     cabbageAssistant.hydrateContext(snapshot);
     void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
     return snapshot;
   } catch (error) {
     if (generation === cabbageWorldLoadGeneration) {
-      console.warn('[CabbageContext] failed to load world context', error?.message || error);
+      if (error?.retryable) {
+        cabbageWorldInitializationRetry.schedule(() => {
+          if (generation !== cabbageWorldLoadGeneration) return;
+          void loadCabbageWorldContext({ reset: false });
+        });
+      } else {
+        console.warn('[CabbageContext] failed to load world context', error?.message || error);
+      }
     }
     return null;
   }
@@ -2762,6 +2773,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  cabbageWorldInitializationRetry.cancel();
   stopProjectResourceLoadPolling();
   clearPreviewPoll();
   clearKnownEditorCameraInputLocks();
