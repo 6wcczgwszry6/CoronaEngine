@@ -82,12 +82,69 @@ const ACTOR_PLACEHOLDERS = new Set([
   '未选择', '请选择', '请选择对象', '任意物体',
 ]);
 
+const ACTOR_CONTEXT_NAME_FIELDS = [
+  'name', 'actor_name', 'actorName', 'alias', 'displayName',
+  'display_name', 'nativeName', 'native_name', 'label',
+];
+const ACTOR_CONTEXT_ALIAS_FIELDS = ['aliases', 'displayNames', 'display_names', 'names'];
+const ACTOR_INPUT_CANDIDATES = ['OBJECT', 'NAME', 'PLAYER', 'BALL', 'PADDLE'];
+
 function normalizedActorName(value) {
-  return String(value ?? '').trim();
+  const text = String(value ?? '').trim();
+  try { return text.normalize('NFKC'); } catch (_) { return text; }
+}
+
+function actorNameKey(value) {
+  return normalizedActorName(value).toLocaleLowerCase('en-US');
+}
+
+function actorNamesFromContext(actor) {
+  if (!actor || typeof actor !== 'object') {
+    const name = normalizedActorName(actor);
+    return name ? [name] : [];
+  }
+  const names = [];
+  ACTOR_CONTEXT_NAME_FIELDS.forEach((field) => {
+    const name = normalizedActorName(actor[field]);
+    if (name) names.push(name);
+  });
+  ACTOR_CONTEXT_ALIAS_FIELDS.forEach((field) => {
+    let aliases = actor[field];
+    if (aliases && typeof aliases === 'object' && !Array.isArray(aliases)) aliases = Object.values(aliases);
+    if (!Array.isArray(aliases)) aliases = [aliases];
+    aliases.forEach((alias) => {
+      const name = normalizedActorName(alias);
+      if (name) names.push(name);
+    });
+  });
+  return names;
+}
+
+function actorContextIsAvailable(projectContext = {}) {
+  return projectContext?.actorContextAvailable === true
+    || (projectContext?.actorContextAvailable == null && Array.isArray(projectContext?.actors));
+}
+
+function knownActorNameKeys(projectContext = {}) {
+  return new Set((Array.isArray(projectContext?.actors) ? projectContext.actors : [])
+    .flatMap((actor) => actorNamesFromContext(actor))
+    .map(actorNameKey)
+    .filter(Boolean));
+}
+
+function inferActorInput(block, pattern = {}) {
+  const explicit = String(pattern?.missingInput || '').trim();
+  if (explicit) return explicit;
+  const fields = block?.fields && typeof block.fields === 'object' ? block.fields : {};
+  const inputs = block?.inputs && typeof block.inputs === 'object' ? block.inputs : {};
+  return ACTOR_INPUT_CANDIDATES.find((name) => (
+    Object.prototype.hasOwnProperty.call(fields, name)
+      || Object.prototype.hasOwnProperty.call(inputs, name)
+  )) || (pattern?.objectRequirement ? 'OBJECT' : '');
 }
 
 function isMissingActorName(value) {
-  return ACTOR_PLACEHOLDERS.has(normalizedActorName(value).toLocaleLowerCase('en-US'));
+  return ACTOR_PLACEHOLDERS.has(actorNameKey(value));
 }
 
 function connectedBlock(block, inputName) {
@@ -411,6 +468,45 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       return actions;
     },
 
+    reconcileActorReferenceIssues(workspace = {}, projectContext = {}, graphRevision = '') {
+      const actorContextAvailable = actorContextIsAvailable(projectContext);
+      const knownActors = knownActorNameKeys(projectContext);
+      const blocksById = new Map(walkBlocks(workspace)
+        .map((block) => [String(block?.id || ''), block])
+        .filter(([blockId]) => blockId));
+      const resolvedKeys = new Set();
+      const actions = [];
+      const revision = String(graphRevision || this.graphRevision || '');
+
+      for (const task of this.activeTasks) {
+        if (task?.type !== 'node-issue') continue;
+        const code = String(task.code || '');
+        if (!['missing_actor_target', 'actor_target_not_found'].includes(code)) continue;
+        const block = blocksById.get(String(task.blockId || ''));
+        let resolved = !block;
+        if (block) {
+          const pattern = normalizeIssuePattern(task.pattern || {});
+          const actorInput = inferActorInput(block, pattern);
+          if (!actorInput) continue;
+          const reference = actorReference(block, actorInput);
+          if (code === 'missing_actor_target') {
+            resolved = !['missing', 'absent'].includes(reference.state);
+          } else if (actorContextAvailable) {
+            resolved = reference.state !== 'resolved' || knownActors.has(actorNameKey(reference.name));
+          }
+        }
+        if (!resolved) continue;
+        resolvedKeys.add(task.taskKey);
+        actions.push({ action: 'resolve', task: { ...clone(task), graphRevision: revision } });
+      }
+
+      if (!resolvedKeys.size) return actions;
+      this.activeTasks = this.activeTasks.filter((task) => !resolvedKeys.has(task.taskKey));
+      if (this.selectedTaskKey && resolvedKeys.has(this.selectedTaskKey)) this.selectedTaskKey = '';
+      if (revision) this.graphRevision = revision;
+      return actions;
+    },
+
     promoteDueCandidates({ runtimeFailed = false, now = Date.now() } = {}) {
       const delay = assistanceDelay(this.profile);
       const promoted = [];
@@ -491,10 +587,8 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       const nodes = Array.isArray(workspace.nodes) ? workspace.nodes.filter(Boolean) : [];
       const edges = Array.isArray(workspace.edges) ? workspace.edges.filter(Boolean) : [];
       const nodeIds = new Set(nodes.map((node) => String(node?.id || '')).filter(Boolean));
-      const actorContextAvailable = Array.isArray(projectContext?.actors);
-      const knownActors = new Set((projectContext?.actors || [])
-        .map((actor) => normalizedActorName(actor?.name).toLocaleLowerCase('en-US'))
-        .filter(Boolean));
+      const actorContextAvailable = actorContextIsAvailable(projectContext);
+      const knownActors = knownActorNameKeys(projectContext);
       const scopedBlocks = [];
       nodes.forEach((node) => walkBlocks(node?.workspace || {}).forEach((block) => scopedBlocks.push({ nodeId: String(node?.id || ''), block })));
       edges.forEach((edge) => walkBlocks(edge?.conditionWorkspace || {}).forEach((block) => scopedBlocks.push({ edgeId: String(edge?.id || ''), block })));
@@ -542,13 +636,13 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         } else {
           const scoped = scopedBlocks.find(({ block }) => {
             if (pattern.blockType && String(block?.type || '') !== pattern.blockType) return false;
-            const actorInput = pattern.missingInput || (pattern.objectRequirement ? 'OBJECT' : '');
+            const actorInput = inferActorInput(block, pattern);
             if (code === 'missing_actor_target') return actorFieldMissing(block, actorInput);
             if (code === 'actor_target_not_found') {
               if (!actorContextAvailable || !actorInput) return false;
               const reference = actorReference(block, actorInput);
               return reference.state === 'resolved'
-                && !knownActors.has(reference.name.toLocaleLowerCase('en-US'));
+                && !knownActors.has(actorNameKey(reference.name));
             }
             if (code === 'missing_required_input') return !blockHasInput(block, pattern.missingInput);
             if (code === 'unknown_block_type') return Boolean(pattern.blockType && String(block?.type || '') === pattern.blockType);
