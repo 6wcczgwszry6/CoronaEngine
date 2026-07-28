@@ -3437,6 +3437,29 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             transform_body.group(0),
         )
 
+    def test_native_actor_serializer_does_not_reappend_owned_runtime_fields(self):
+        source = self._handler_source()
+        normalized_fields = re.search(
+            r"static const std::set<std::string> normalized_fields\{(.*?)\};",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(normalized_fields)
+
+        for field in (
+            "runtime.entity_id",
+            "runtime.asset_id",
+            "runtime.model_ref",
+            "runtime.entity_type",
+            "runtime.semantic_role",
+            "runtime.source_plan_id",
+            "runtime.source_batch_id",
+            "runtime.source_scene_version",
+            "runtime.actor_version",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', normalized_fields.group(1))
+
     def test_actor_file_transfer_uses_runtime_asset_identity_without_wire_changes(self):
         source = self._network_system_source()
 

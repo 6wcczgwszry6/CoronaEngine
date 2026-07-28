@@ -869,7 +869,10 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
             "geometry.position", "geometry.rotation", "geometry.scale",
             "material.texture", "mechanics.collision_enabled", "mechanics.collision_type",
             "mechanics.physics_enabled", "optics.diffuse", "optics.emission", "optics.metallic",
-            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible"};
+            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible",
+            "runtime.entity_id", "runtime.asset_id", "runtime.model_ref", "runtime.entity_type",
+            "runtime.semantic_role", "runtime.source_plan_id", "runtime.source_batch_id",
+            "runtime.source_scene_version", "runtime.actor_version"};
         if (persisted_fields.is_object()) {
             for (const auto& field : persisted_fields.items()) {
                 const auto dot = field.key().find('.');
