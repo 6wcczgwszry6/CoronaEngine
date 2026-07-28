@@ -181,6 +181,17 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     add_test(NAME VisionActorTransformBridgeTests
              COMMAND corona_vision_actor_transform_bridge_tests)
 
+    add_executable(corona_viewport_gizmo_state_tests
+        tests/test_viewport_gizmo_state.cpp
+        ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
+    )
+    target_include_directories(corona_viewport_gizmo_state_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    target_link_libraries(corona_viewport_gizmo_state_tests PRIVATE Horizon)
+    add_test(NAME ViewportGizmoStateTests
+             COMMAND corona_viewport_gizmo_state_tests)
+
     add_executable(corona_ui_multisurface_smoke
         tests/ui_multisurface_smoke.cpp
         ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
