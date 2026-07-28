@@ -110,11 +110,12 @@
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
+      @pointercancel="handleViewportPointerCancel"
       @pointerleave="handleViewportPointerLeave"
       @mousedown="beginLook"
       @mousemove="updateLook"
       @mouseup="endLook"
-      @click="handleScratchClick"
+      @click="handleViewportClick"
       @wheel="forwardScratchMouse('wheel', $event)"
       @contextmenu.prevent="forwardScratchMouse('contextmenu', $event)"
     />
@@ -148,6 +149,8 @@ import { appService, editorApi, projectService, sceneService, scriptingService }
 import { buildDragRegions, dragRegionsSignature } from '@/utils/cameraDragRegions.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
+import { createViewportGizmoController } from '@/utils/viewportGizmo.js';
+import { getActorContext } from '@/blockly/composables/useActorContext.js';
 import {
   createViewportUiCalibrationStore,
   createViewportUiModeStore,
@@ -187,7 +190,12 @@ let scratchMouseMoveFrame = 0;
 let pendingScratchMouseMove = null;
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
+let actorSelectionCallbackToken = null;
+let gizmoPointerResultCallbackToken = null;
 let pendingScratchClick = null;
+let gizmoDownRequestId = '';
+let gizmoDownConsumed = false;
+let gizmoClickTimer = 0;
 
 const outputModes = [
   { value: 'final_color', label: 'Final' },
@@ -387,6 +395,22 @@ const cameraViewPickController = createViewportPickController({
   getHitRect: getCameraViewHitRect,
   getRenderRect: getCameraRenderRect,
   getActorIndex: () => actorPickIndex,
+  emitActorChange: (type, scene, actorName) =>
+    editorApi.sceneTools.selectActor(scene, type, actorName),
+});
+
+const viewportGizmoController = createViewportGizmoController({
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => ({
+    sceneId,
+    cameraHandle: camera.value?.handle,
+  }),
+  getHitRect: getCameraViewHitRect,
+  getRenderRect: getCameraRenderRect,
+  onDragEnd: (payload) => {
+    const actorName = String(payload?.actor || '');
+    if (actorName) sceneService.saveActor(sceneId, actorName).catch(() => {});
+  },
 });
 
 const refreshCameraViewActorPickIndex = async () => {
@@ -395,6 +419,33 @@ const refreshCameraViewActorPickIndex = async () => {
   const snapshot = unwrap(result);
   actorPickIndex = indexActorsByHandle(Array.isArray(snapshot?.actors) ? snapshot.actors : []);
   return actorPickIndex.size > 0;
+};
+
+const findActorPickEntryByName = (actorName) => {
+  for (const [handle, actorEntry] of actorPickIndex.entries()) {
+    if (actorEntry?.name === actorName) return { handle, ...actorEntry };
+  }
+  return null;
+};
+
+const syncViewportGizmoSelection = async (payload = {}) => {
+  const actorName = String(payload.actor || '');
+  const actorType = String(payload.actor_type || payload.type || '');
+  const selectedScene = String(payload.scene || sceneId);
+  if (!actorName || actorType === 'scene' || selectedScene !== sceneId) {
+    viewportGizmoController.clearTarget();
+    return;
+  }
+  let entry = findActorPickEntryByName(actorName);
+  if (!entry) {
+    await refreshCameraViewActorPickIndex().catch(() => false);
+    entry = findActorPickEntryByName(actorName);
+  }
+  if (entry?.handle) {
+    viewportGizmoController.setTarget({ handle: entry.handle, name: actorName });
+  } else {
+    viewportGizmoController.clearTarget();
+  }
 };
 
 const applyViewportUiCalibration = (calibration) => {
@@ -693,6 +744,11 @@ const onKeyDown = (event) => {
     }
     return;
   }
+  if ((event.key === 'Escape' || event.code === 'Escape') && viewportGizmoController.isDragging()) {
+    event.preventDefault();
+    cancelViewportGizmoDrag('escape');
+    return;
+  }
   if (isTextInputEvent(event)) return;
   if (!event.__coronaScratchKeyForwarded) {
     event.__coronaScratchKeyForwarded = true;
@@ -808,6 +864,19 @@ const handleScratchClick = (event) => {
   pendingScratchClick.timer = window.setTimeout(() => finishPendingScratchClick(''), 220);
 };
 
+const handleViewportClick = (event) => {
+  if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
+  const snapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  gizmoClickTimer = window.setTimeout(() => {
+    gizmoClickTimer = 0;
+    if (!gizmoDownConsumed) handleScratchClick(snapshot);
+  }, 45);
+};
+
 const finishCameraViewClickFromPick = (payload, result) => {
   if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
   if (result?.status === 'pending' || result?.status === 'stale') return;
@@ -822,6 +891,10 @@ const finishCameraViewClickFromPick = (payload, result) => {
 
 const handleCameraViewActorPickResult = (payload) => {
   const result = cameraViewPickController.handlePickResult(payload);
+  if (result.status === 'miss') {
+    editorApi.sceneTools.selectActor(sceneId, 'scene', '').catch(() => {});
+    viewportGizmoController.clearTarget();
+  }
   if (result.status !== 'unknown' || !payload?.sceneId) {
     finishCameraViewClickFromPick(payload, result);
     return;
@@ -829,6 +902,16 @@ const handleCameraViewActorPickResult = (payload) => {
   refreshCameraViewActorPickIndex()
     .then(() => finishCameraViewClickFromPick(payload, cameraViewPickController.handlePickResult(payload)))
     .catch(() => finishCameraViewClickFromPick(payload, result));
+};
+
+const handleViewportGizmoPointerResult = (payload = {}) => {
+  const result = viewportGizmoController.handleResult(payload);
+  if (payload.requestId === gizmoDownRequestId && payload.consumed) {
+    gizmoDownConsumed = true;
+  }
+  if (result.status === 'ended' || result.status === 'cancelled') {
+    gizmoDownRequestId = '';
+  }
 };
 
 const forwardScratchMouse = (eventType, event) => {
@@ -905,10 +988,25 @@ const endLook = (event) => {
 const viewportCursorShape = () => (looking ? 'grabbing' : 'arrow');
 
 const handleViewportPointer = (event) => {
+  viewportGizmoController.pointer(event, event.type);
+  if (event.type === 'pointerup') {
+    try {
+      inputLayerRef.value?.releasePointerCapture?.(event.pointerId);
+    } catch (_) {
+      // Pointer capture may already have been released by the browser.
+    }
+  }
   viewportUiPointerController.send(event, event.type, viewportCursorShape());
 };
 
 const handleViewportPointerDown = (event) => {
+  gizmoDownConsumed = false;
+  gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
+  try {
+    inputLayerRef.value?.setPointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture is best effort on embedded browser surfaces.
+  }
   viewportUiPointerController.send(
     event,
     event.type,
@@ -916,9 +1014,23 @@ const handleViewportPointerDown = (event) => {
   );
 };
 
+const handleViewportPointerCancel = (event) => {
+  try {
+    inputLayerRef.value?.releasePointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture may already have been released by the browser.
+  }
+  cancelViewportGizmoDrag('pointercancel');
+};
+
 const handleViewportPointerLeave = () => {
   viewportUiPointerController.hide();
 };
+
+const cancelViewportGizmoDrag = (reason = 'cancel') => {
+  viewportGizmoController.cancel(reason);
+};
+const handleCameraViewBlur = () => cancelViewportGizmoDrag('blur');
 
 const updateLook = (event) => {
   forwardScratchMouse('move', event);
@@ -1014,6 +1126,17 @@ onMounted(async () => {
     await loadCamera();
     await refreshCameraViewActorPickIndex().catch(() => false);
     actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleCameraViewActorPickResult);
+    actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(syncViewportGizmoSelection);
+    gizmoPointerResultCallbackToken =
+      await editorApi.events.onViewportGizmoPointerResult(handleViewportGizmoPointerResult);
+    const selected = getActorContext();
+    if (selected?.actor) {
+      await syncViewportGizmoSelection({
+        scene: selected.scene || sceneId,
+        actor: selected.actor,
+        actor_type: 'actor',
+      });
+    }
     syncViewportUiMode();
     await syncWindowSize(true);
   } catch (error) {
@@ -1024,6 +1147,7 @@ onMounted(async () => {
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
   window.addEventListener('storage', handleViewportUiCalibrationStorage);
+  window.addEventListener('blur', handleCameraViewBlur);
   coronaEventBus.on('viewport-ui-calibration-changed', handleViewportUiCalibrationChanged);
   animationFrame = requestAnimationFrame(movementFrame);
   await pollPreviewHud();
@@ -1037,11 +1161,23 @@ onBeforeUnmount(() => {
   scratchMouseMoveFrame = 0;
   pendingScratchMouseMove = null;
   if (pendingScratchClick?.timer != null) window.clearTimeout(pendingScratchClick.timer);
+  if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
+  gizmoClickTimer = 0;
   pendingScratchClick = null;
+  viewportGizmoController.cancel('cancel');
+  viewportGizmoController.clearTarget();
   cameraViewPickController.dispose();
   if (actorPickResultCallbackToken) {
     editorApi.off(actorPickResultCallbackToken).catch(() => {});
     actorPickResultCallbackToken = null;
+  }
+  if (actorSelectionCallbackToken) {
+    editorApi.off(actorSelectionCallbackToken).catch(() => {});
+    actorSelectionCallbackToken = null;
+  }
+  if (gizmoPointerResultCallbackToken) {
+    editorApi.off(gizmoPointerResultCallbackToken).catch(() => {});
+    gizmoPointerResultCallbackToken = null;
   }
   window.clearTimeout(resizeTimer);
   window.clearInterval(previewHudTimer);
@@ -1050,6 +1186,7 @@ onBeforeUnmount(() => {
   window.removeEventListener('keydown', onKeyDown);
   window.removeEventListener('keyup', onKeyUp);
   window.removeEventListener('storage', handleViewportUiCalibrationStorage);
+  window.removeEventListener('blur', handleCameraViewBlur);
   coronaEventBus.off('viewport-ui-calibration-changed', handleViewportUiCalibrationChanged);
   viewportUiPointerController.dispose();
 });

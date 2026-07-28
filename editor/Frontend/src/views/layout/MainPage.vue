@@ -325,8 +325,9 @@
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
+      @pointercancel="handleViewportPointerCancel"
       @pointerleave="handleViewportPointerLeave"
-      @click="handleViewportScratchClick"
+      @click="handleViewportClick"
       @wheel.prevent="handleWheel"
     ></div>
 
@@ -510,6 +511,10 @@ import {
 } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
+  createViewportGizmoController,
+  resolveViewportGizmoTarget,
+} from '@/utils/viewportGizmo.js';
+import {
   createViewportUiModeStore,
   createViewportUiCalibrationStore,
   createViewportUiPointerController,
@@ -572,8 +577,12 @@ const cameraBindingState = ref({
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
 let actorSelectionCallbackToken = null;
+let gizmoPointerResultCallbackToken = null;
 let sceneAddedCallbackToken = null;
 let sceneRenamedCallbackToken = null;
+let gizmoDownRequestId = '';
+let gizmoDownConsumed = false;
+let gizmoClickTimer = 0;
 const viewportPickSurfaceRef = ref(null);
 const viewportLayoutVersion = ref(0);
 const viewportUiMode = ref('flat2d');
@@ -666,9 +675,18 @@ const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = ''
   const actorType = String(payload?.actor_type || payload?.type || '').trim().toLowerCase();
   const sceneId = String(payload?.scene || payload?.scene_id || maybeSceneId || '').trim();
   const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
-  if (!actorName || actorType === 'scene') return;
+  if (!actorName || actorType === 'scene') {
+    viewportGizmoController.clearTarget();
+    return;
+  }
 
   setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
+  await syncMainViewportGizmoSelection({
+    ...payload,
+    scene: sceneId,
+    actor: actorName,
+    actor_type: actorType,
+  });
   if (!dockStore.panels.SceneDatas?.open) {
     await openFloatingPanel(dockStore, 'SceneDatas');
   }
@@ -683,6 +701,49 @@ const viewportPickController = createViewportPickController({
   getActorIndex: () => actorPickIndex,
   emitActorChange: (type, sceneId, actorName) => emitActorChangeFast(type, sceneId, actorName),
 });
+
+const viewportGizmoController = createViewportGizmoController({
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => cameraBindingState.value,
+  getHitRect: getViewportHitRect,
+  getRenderRect: getViewportRenderRect,
+  onDragEnd: (payload) => {
+    const sceneId =
+      String(payload?.sceneId || cameraBindingState.value.sceneId || '').trim();
+    const actorName = String(payload?.actor || '').trim();
+    if (sceneId && actorName) {
+      sceneService.saveActor(sceneId, actorName).catch((error) => {
+        logError('Failed to save gizmo actor transform', error);
+      });
+    }
+  },
+});
+
+const syncMainViewportGizmoSelection = async (selection = {}, pickResult = null) => {
+  const sceneId =
+    String(cameraBindingState.value.sceneId || tabs.value[activeTab.value]?.id || '').trim();
+  let target = resolveViewportGizmoTarget({
+    sceneId,
+    selection,
+    pickResult,
+    actorIndex: actorPickIndex,
+  });
+  if (!target && selection?.actor && String(selection.actor_type || selection.type) !== 'scene') {
+    await refreshActorPickIndex(sceneId).catch(() => false);
+    target = resolveViewportGizmoTarget({
+      sceneId,
+      selection,
+      pickResult,
+      actorIndex: actorPickIndex,
+    });
+  }
+  if (target) {
+    viewportGizmoController.setTarget(target);
+  } else {
+    viewportGizmoController.clearTarget();
+  }
+  return target;
+};
 
 const viewportUiPointerController = createViewportUiPointerController({
   getBridge: () => window.coronaBridge,
@@ -1269,6 +1330,14 @@ const handleKeyDown = (event) => {
   }
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (
+    (event.key === 'Escape' || event.code === 'Escape')
+    && viewportGizmoController.isDragging()
+  ) {
+    event.preventDefault();
+    viewportGizmoController.cancel('escape');
+    return;
+  }
   const modifiers = [
     event.ctrlKey ? 'Ctrl' : '',
     event.altKey ? 'Alt' : '',
@@ -1645,6 +1714,14 @@ const handleMouseRotate = (dx, dy) => {
 const viewportCursorShape = () => (mouseRotate.active ? 'grabbing' : 'arrow');
 
 const handleViewportPointer = (event) => {
+  viewportGizmoController.pointer(event, event.type);
+  if (event.type === 'pointerup') {
+    try {
+      viewportPickSurfaceRef.value?.releasePointerCapture?.(event.pointerId);
+    } catch (_) {
+      // Pointer capture may already have been released.
+    }
+  }
   sendScratchPointerEvent(event.type === 'pointerup' ? 'mouseup' : 'move', event);
   viewportUiPointerController.send(event, event.type, viewportCursorShape());
 };
@@ -1654,6 +1731,13 @@ const handleViewportPointerDown = (event) => {
   // Detached docks and project initialization may reload the native scene after
   // MainPage's first snapshot. Rebind before the user starts interacting.
   void refreshSceneCameraBinding({ preservePose: true });
+  gizmoDownConsumed = false;
+  gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
+  try {
+    viewportPickSurfaceRef.value?.setPointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture is best effort on embedded browser surfaces.
+  }
   sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
@@ -1662,9 +1746,30 @@ const handleViewportPointerDown = (event) => {
   );
 };
 
+const handleViewportPointerCancel = (event) => {
+  try {
+    viewportPickSurfaceRef.value?.releasePointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture may already have been released.
+  }
+  viewportGizmoController.cancel('pointercancel');
+};
+
 const handleViewportPointerLeave = () => {
   viewportUiPointerController.hide();
 };
+
+const handleViewportGizmoPointerResult = (payload = {}) => {
+  const result = viewportGizmoController.handleResult(payload);
+  if (payload.requestId === gizmoDownRequestId && payload.consumed) {
+    gizmoDownConsumed = true;
+  }
+  if (result.status === 'ended' || result.status === 'cancelled') {
+    gizmoDownRequestId = '';
+  }
+};
+
+const handleMainViewportBlur = () => viewportGizmoController.cancel('blur');
 
 let pendingScratchClick = null;
 
@@ -1698,6 +1803,19 @@ const handleViewportScratchClick = (event) => {
     event: eventSnapshot,
     timer: window.setTimeout(() => finishPendingScratchClick(''), 220),
   };
+};
+
+const handleViewportClick = (event) => {
+  if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
+  const eventSnapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  gizmoClickTimer = window.setTimeout(() => {
+    gizmoClickTimer = 0;
+    if (!gizmoDownConsumed) handleViewportScratchClick(eventSnapshot);
+  }, 45);
 };
 
 const finishScratchClickFromPick = (payload, result) => {
@@ -1795,10 +1913,34 @@ const applyActorPickResult = (result, payload = result?.payload) => {
   // 此处无需额外处理。
 };
 
+const applyViewportGizmoPickResult = (result, payload = result?.payload) => {
+  if (result.status === 'selected' && result.actor?.name) {
+    void syncMainViewportGizmoSelection(
+      {
+        scene:
+          payload?.sceneId
+          || cameraBindingState.value.sceneId
+          || DEFAULT_SCENE_NAME,
+        actor: result.actor.name,
+        actor_type: result.actor.type || 'actor',
+      },
+      result,
+    );
+  } else if (result.status === 'miss') {
+    viewportGizmoController.clearTarget();
+    emitActorChangeFast(
+      'scene',
+      payload?.sceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME,
+      '',
+    );
+  }
+};
+
 const handleActorPickResult = (payload) => {
   const result = viewportPickController.handlePickResult(payload);
   if (result.status !== 'unknown' || !payload?.sceneId) {
     applyActorPickResult(result, payload);
+    applyViewportGizmoPickResult(result, payload);
     finishScratchClickFromPick(payload, result);
     return;
   }
@@ -1807,6 +1949,7 @@ const handleActorPickResult = (payload) => {
     .then(() => {
       const refreshedResult = viewportPickController.handlePickResult(payload);
       applyActorPickResult(refreshedResult, payload);
+      applyViewportGizmoPickResult(refreshedResult, payload);
       finishScratchClickFromPick(payload, refreshedResult);
     })
     .catch((error) => {
@@ -2574,6 +2717,7 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
+  window.addEventListener('blur', handleMainViewportBlur);
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
@@ -2587,6 +2731,8 @@ onMounted(async () => {
   sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
   actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
   actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
+  gizmoPointerResultCallbackToken =
+    await editorApi.events.onViewportGizmoPointerResult(handleViewportGizmoPointerResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   // Primary work docks start hidden. If this main CEF page is reused, close any native
@@ -2636,6 +2782,10 @@ onUnmounted(() => {
   coronaEventBus.off('loading-hide', hideLoading);
   coronaEventBus.off('camera-pose-request', applyCameraPose);
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
+  if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
+  gizmoClickTimer = 0;
+  viewportGizmoController.cancel('cancel');
+  viewportGizmoController.clearTarget();
   if (actorPickResultCallbackToken) {
     editorApi.off(actorPickResultCallbackToken).catch((error) => {
       logError('Failed to unregister actor pick result callback', error);
@@ -2647,6 +2797,12 @@ onUnmounted(() => {
       logError('Failed to unregister actor selection callback', error);
     });
     actorSelectionCallbackToken = null;
+  }
+  if (gizmoPointerResultCallbackToken) {
+    editorApi.off(gizmoPointerResultCallbackToken).catch((error) => {
+      logError('Failed to unregister viewport gizmo callback', error);
+    });
+    gizmoPointerResultCallbackToken = null;
   }
   if (sceneAddedCallbackToken) {
     editorApi.off(sceneAddedCallbackToken).catch((error) => {
@@ -2661,6 +2817,7 @@ onUnmounted(() => {
     sceneRenamedCallbackToken = null;
   }
   window.removeEventListener('resize', handleViewportLayoutChange);
+  window.removeEventListener('blur', handleMainViewportBlur);
   sceneCameraBindingRequestRevision += 1;
   sceneCameraBindingRefreshPromise = null;
   stopMoveLoop();
