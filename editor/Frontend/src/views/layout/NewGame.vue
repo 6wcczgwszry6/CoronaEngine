@@ -101,6 +101,7 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService } from '@/utils/bridge';
+import { initializeWorldTasks } from '@/services/cabbageAssistantContextService.js';
 import lanchat from '@/stores/lanchat.js';
 
 const router = useRouter();
@@ -171,6 +172,11 @@ const handleCreate = async () => {
           });
         } catch (roomError) {
           console.warn('Default AI conversation room initialization failed:', roomError);
+        }
+        try {
+          await initializeWorldTasks({ prompt, mode: mode.value });
+        } catch (taskError) {
+          console.warn('世界任务初始化失败，继续进入世界：', taskError?.message || taskError);
         }
         router.push('/');
         return;

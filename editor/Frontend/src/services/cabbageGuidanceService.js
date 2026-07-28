@@ -291,6 +291,17 @@ const CHAT_GUIDANCE = Object.freeze({
 });
 
 function guidanceForTask(source = {}) {
+  if (source.type === 'goal') {
+    const intent = String(source.guidanceIntent || '');
+    const template = CHAT_GUIDANCE[intent];
+    if (!template) return null;
+    const panelId = ['import_model', 'adjust_lighting'].includes(intent)
+      ? 'SceneTools'
+      : ['transform_model', 'adjust_physics'].includes(intent)
+        ? 'SceneDatas'
+        : 'NodeGraphPanel';
+    return { panelId, steps: [{ ...template }] };
+  }
   const taskKey = String(source.taskKey || source.issueKey || '');
   const tutorial = TUTORIAL_GUIDANCE[taskKey];
   if (tutorial) return { ...tutorial, steps: tutorial.steps.map((step) => ({ ...step })) };

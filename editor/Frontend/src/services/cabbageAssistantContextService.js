@@ -5,6 +5,8 @@ const STORAGE_KEY = 'corona.cabbageAssistantContext.v2';
 const CONTEXT_MESSAGE_TYPE = 'cabbage-assistant-context';
 const TRANSFORM_DEBOUNCE_MS = 650;
 const PROFILE_POLL_MS = 1200;
+const GOAL_PLAN_POLL_MS = 1000;
+const GOAL_PLAN_TIMEOUT_MS = 60000;
 
 let channel = null;
 let latestSnapshot = null;
@@ -57,6 +59,9 @@ function normalizeSnapshot(value) {
     profileHistory: clone(context.profileHistory || [], []),
     issueMemory: clone(context.issueMemory || {}, {}),
     metrics: clone(context.metrics || {}, {}),
+    worldGoal: clone(context.worldGoal || {}, {}),
+    goalTaskPlan: clone(context.goalTaskPlan || {}, {}),
+    goalSignalCounts: clone(context.goalSignalCounts || {}, {}),
     activeTasks,
     taskHistory,
     chatMessages: clone(context.chatMessages || [], []),
@@ -161,6 +166,42 @@ export async function loadCurrentWorld() {
     throw new Error(response?.message || '加载当前世界的包菜上下文失败');
   }
   return publishSnapshot({ context: response.context, projectScopeId: currentScopeId() });
+}
+
+function goalPlanError(response, fallback) {
+  const result = response?.result;
+  return new Error(
+    result?.message || response?.message || fallback || '生成当前世界的专属任务失败',
+  );
+}
+
+async function pollGoalPlan(taskId) {
+  const deadline = Date.now() + GOAL_PLAN_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    const response = await aiService.getCabbageGoalPlanStatus(taskId);
+    if (response?.success !== true) throw goalPlanError(response);
+    if (response.status === 'completed') {
+      const result = response.result || {};
+      if (result?.success !== true || !result?.context) throw goalPlanError(response);
+      return publishBackendContext(result.context);
+    }
+    await new Promise((resolve) => window.setTimeout(resolve, GOAL_PLAN_POLL_MS));
+  }
+  throw new Error('生成当前世界的专属任务超时，请进入世界后稍后重试');
+}
+
+export async function initializeWorldTasks({ prompt = '', mode = 'story' } = {}) {
+  const response = await aiService.startCabbageGoalPlan({
+    prompt: String(prompt || '').trim(),
+    mode: String(mode || 'story'),
+  });
+  if (response?.success !== true) throw goalPlanError(response);
+  if (response.status === 'completed' && response.context) {
+    return publishBackendContext(response.context);
+  }
+  const taskId = String(response.taskId || '');
+  if (!taskId) throw new Error('世界任务生成请求没有返回任务编号');
+  return pollGoalPlan(taskId);
 }
 
 export function recordEvent(event = {}) {
@@ -296,6 +337,7 @@ export async function flush() {
 
 export const cabbageContextService = {
   loadCurrentWorld,
+  initializeWorldTasks,
   recordEvent,
   updateTask,
   appendMessage,

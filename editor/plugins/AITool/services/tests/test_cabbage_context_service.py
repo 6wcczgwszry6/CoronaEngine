@@ -2,6 +2,7 @@ import json
 import pathlib
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -385,6 +386,232 @@ class CabbageContextServiceTests(unittest.TestCase):
         })
         self.assertFalse(invalid["message"]["needsShowcase"])
         self.assertEqual("", invalid["message"]["guidanceIntent"])
+
+
+    @staticmethod
+    def goal_plan_payload():
+        effects = [
+            {
+                "effectId": "player_move_jump",
+                "title": "player movement and jump",
+                "description": "the player moves with WASD and jumps between platforms",
+                "trigger": "keyboard input",
+                "outcome": "the player changes position and can leave the ground",
+                "recommendedBlockTypes": ["object_third_person_move", "object_arcade_jump"],
+                "verification": "the player can move and jump after running the graph",
+            },
+            {
+                "effectId": "rabbit_behavior",
+                "title": "rabbit behavior",
+                "description": "the rabbit changes its position inside the play area",
+                "trigger": "gameplay update",
+                "outcome": "the rabbit appears to roam",
+                "recommendedBlockTypes": ["object_set_random_position"],
+                "verification": "the rabbit changes position in the allowed area",
+            },
+            {
+                "effectId": "mechanism_collision",
+                "title": "mechanism collision",
+                "description": "the mechanism participates in logical collision",
+                "trigger": "player contact",
+                "outcome": "the mechanism can be used by collision gameplay",
+                "recommendedBlockTypes": ["object_set_logical_collision"],
+                "verification": "the node graph runs with collision behavior enabled",
+            },
+        ]
+        task_specs = [
+            ("player_move_jump", "node_created", []),
+            ("player_move_jump", "block_added", ["object_third_person_move"]),
+            ("player_move_jump", "block_added", ["object_arcade_jump"]),
+            ("rabbit_behavior", "block_added", ["object_set_random_position"]),
+            ("mechanism_collision", "block_added", ["object_set_logical_collision"]),
+            ("mechanism_collision", "run_succeeded", []),
+        ]
+        return {
+            "logicBlueprint": {
+                "worldSummary": "an ink-style fantasy exploration world",
+                "coreLoop": "move and jump across platforms, observe the rabbit, and avoid mechanisms",
+                "requiredActors": ["player", "rabbit", "mechanism", "platform"],
+                "nodeEffects": effects,
+                "flow": ["initialize", "move and jump", "rabbit behavior", "collision", "run verification"],
+            },
+            "tasks": [
+                {
+                    "phase": "node-logic",
+                    "effectId": effect_id,
+                    "title": f"goal step {index}",
+                    "message": f"build gameplay effect {effect_id}",
+                    "suggestion": f"finish the {effect_id} node logic",
+                    "completionCriteria": f"signal {signal} is observed for the requested effect",
+                    "completionSignal": signal,
+                    "requiredBlockTypes": block_types,
+                }
+                for index, (effect_id, signal, block_types) in enumerate(task_specs, start=1)
+            ],
+        }
+
+    def test_empty_world_prompt_keeps_default_tutorial_tasks(self):
+        response = self.service.start_goal_plan({"prompt": "", "mode": "story"})
+        self.assertTrue(response["success"])
+        self.assertEqual("completed", response["status"])
+        context = response["context"]
+        self.assertEqual("default", context["worldGoal"]["source"])
+        self.assertTrue(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+        self.assertFalse(any(task.get("type") == "goal" for task in context["activeTasks"]))
+
+    def test_goal_plan_prompt_only_requests_personalized_guidance_tasks(self):
+        prompt = self.service._goal_plan_prompt(
+            "水墨风的仙侠秘境，有兔子、机关和可以跳跃的平台", "story",
+        )
+        self.assertIn("个性化搭建任务", prompt)
+        self.assertIn("不能直接修改当前节点区", prompt)
+        self.assertIn("不是替用户生成一套节点积木", prompt)
+        self.assertIn("一步一步引导用户亲自完成世界", prompt)
+
+    def test_goal_plan_rejects_unknown_completion_signal(self):
+        context = self.service._default_context(self.world)
+        payload = self.goal_plan_payload()
+        payload["tasks"][0]["completionSignal"] = "write_python_script"
+        with self.assertRaises(ValueError):
+            self.service._normalize_goal_plan_tasks(payload, context, self.service._now_ms())
+
+
+    def test_goal_plan_rejects_unknown_block_type(self):
+        context = self.service._default_context(self.world)
+        payload = self.goal_plan_payload()
+        payload["tasks"][1]["requiredBlockTypes"] = ["invented_collision_block"]
+        with self.assertRaises(ValueError):
+            self.service._normalize_goal_plan_tasks(payload, context, self.service._now_ms())
+
+    def test_goal_plan_requires_node_tasks_before_scene_polish(self):
+        context = self.service._default_context(self.world)
+        payload = self.goal_plan_payload()
+        payload["tasks"][1].update({
+            "phase": "scene-polish",
+            "effectId": "",
+            "completionSignal": "object_transformed",
+            "requiredBlockTypes": [],
+        })
+        with self.assertRaises(ValueError):
+            self.service._normalize_goal_plan_tasks(payload, context, self.service._now_ms())
+
+    def test_goal_block_task_ignores_unrelated_block_type(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "ink fantasy world with a rabbit and mechanisms",
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": self.service._now_ms(),
+            "generationError": "",
+        }
+        context["activeTasks"] = self.service._normalize_goal_plan_tasks(
+            self.goal_plan_payload(), context, self.service._now_ms(),
+        )
+        self.service._ensure_task_slots_locked(context, self.service._now_ms())
+        self.service._write_locked(self.world, context)
+
+        unrelated = self.service.record_event({
+            "type": "block_added",
+            "category": "node",
+            "success": True,
+            "details": {"blockType": "logic_boolean", "interaction": "drag"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual([], unrelated["completedTaskKeys"])
+        move_task = next(
+            task for task in unrelated["context"]["activeTasks"]
+            if task.get("taskKey") == "goal.ai.02"
+        )
+        self.assertEqual([], move_task["observedBlockTypes"])
+
+        matched = self.service.record_event({
+            "type": "block_added",
+            "category": "node",
+            "success": True,
+            "details": {"blockType": "object_third_person_move", "interaction": "drag"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["goal.ai.02"], matched["completedTaskKeys"])
+        archived = self.history_task(matched["context"], "goal.ai.02")
+        self.assertEqual(["object_third_person_move"], archived["observedBlockTypes"])
+
+    def test_ai_goal_plan_replaces_tutorials_and_shows_two_tasks(self):
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            return_value=self.goal_plan_payload(),
+        ):
+            started = self.service.start_goal_plan({
+                "prompt": "a puzzle world across floating islands",
+                "mode": "story",
+            })
+            self.assertTrue(started["success"])
+            self.assertEqual("pending", started["status"])
+            deadline = time.monotonic() + 3
+            result = None
+            while time.monotonic() < deadline:
+                status = self.service.goal_plan_status(started["taskId"])
+                if status.get("status") == "completed":
+                    result = status.get("result")
+                    break
+                time.sleep(0.02)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["success"])
+        context = result["context"]
+        self.assertEqual("ai", context["worldGoal"]["source"])
+        self.assertEqual(2, context["goalTaskPlan"]["schemaVersion"])
+        self.assertEqual(6, context["goalTaskPlan"]["taskCount"])
+        self.assertEqual(6, context["goalTaskPlan"]["nodeTaskCount"])
+        self.assertEqual(0, context["goalTaskPlan"]["sceneTaskCount"])
+        self.assertEqual(
+            "an ink-style fantasy exploration world",
+            context["goalTaskPlan"]["logicBlueprint"]["worldSummary"],
+        )
+        self.assertFalse(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+        visible = [
+            task for task in context["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "active"
+        ]
+        queued = [
+            task for task in context["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "queued"
+        ]
+        self.assertEqual(2, len(visible))
+        self.assertEqual(4, len(queued))
+
+    def test_completing_goal_task_reveals_next_ai_task(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "a puzzle world across floating islands",
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": self.service._now_ms(),
+            "generationError": "",
+        }
+        context["activeTasks"] = self.service._normalize_goal_plan_tasks(
+            self.goal_plan_payload(), context, self.service._now_ms(),
+        )
+        self.service._ensure_task_slots_locked(context, self.service._now_ms())
+        self.service._write_locked(self.world, context)
+
+        response = self.service.record_event({
+            "type": "node_created",
+            "category": "node",
+            "success": True,
+            "details": {"nodeId": "start"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["goal.ai.01"], response["completedTaskKeys"])
+        self.assertIsNotNone(self.history_task(response["context"], "goal.ai.01"))
+        visible_keys = {
+            task.get("taskKey")
+            for task in response["context"]["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "active"
+        }
+        self.assertEqual({"goal.ai.02", "goal.ai.03"}, visible_keys)
 
 
 if __name__ == "__main__":

@@ -158,6 +158,12 @@ class AITool(PluginBase):
                 return cls._cabbage_context_service.update_task(parsed.get("payload") or {})
             if operation == "cabbage.context.append_message":
                 return cls._cabbage_context_service.append_message(parsed.get("payload") or {})
+            if operation == "cabbage.goal_plan.start":
+                return cls._cabbage_context_service.start_goal_plan(parsed.get("payload") or {})
+            if operation == "cabbage.goal_plan.status":
+                return cls._cabbage_context_service.goal_plan_status(
+                    parsed.get("taskId") or parsed.get("task_id") or ""
+                )
             if operation == "cabbage.profile.score.start":
                 return cls._cabbage_context_service.start_score_update(parsed.get("payload") or {})
             if operation == "cabbage.profile.score.status":

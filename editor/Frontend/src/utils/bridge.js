@@ -963,6 +963,20 @@ export const aiService = {
     });
     return response?.data ?? response;
   },
+  startCabbageGoalPlan: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.goal_plan.start',
+      payload,
+    });
+    return response?.data ?? response;
+  },
+  getCabbageGoalPlanStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.goal_plan.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
   startCabbageProfileScoreUpdate: async (payload = {}) => {
     const response = await editorApi.ai.submitRequest({
       operation: 'cabbage.profile.score.start',

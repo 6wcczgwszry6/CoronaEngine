@@ -138,16 +138,20 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
   if (!raw || typeof raw !== 'object') return null;
   const taskKey = String(raw.taskKey || raw.issueKey || raw.code || '').trim();
   if (!taskKey) return null;
-  const type = raw.type === 'tutorial' ? 'tutorial' : 'node-issue';
-  const defaultTitle = type === 'tutorial' ? '\u5f15\u5bfc\u4efb\u52a1' : '\u8282\u70b9\u903b\u8f91\u9700\u8981\u8c03\u6574';
+  const type = ['tutorial', 'goal', 'node-issue'].includes(raw.type)
+    ? raw.type
+    : 'node-issue';
+  const defaultTitle = type === 'node-issue'
+    ? '\u8282\u70b9\u903b\u8f91\u9700\u8981\u8c03\u6574'
+    : '\u4e16\u754c\u5236\u4f5c\u4efb\u52a1';
   return {
     taskKey,
     issueKey: taskKey,
     type,
-    // Track is retained only for backend tutorial sequencing. It is never shown as a user label.
-    track: type === 'tutorial' ? String(raw.track || '').slice(0, 40) : '',
+    // Track is retained only for backend task sequencing. It is never shown as a user label.
+    track: type !== 'node-issue' ? String(raw.track || '').slice(0, 40) : '',
     order: Number(raw.order) || 0,
-    status: String(raw.status || (type === 'tutorial' ? 'pending' : 'candidate')),
+    status: String(raw.status || (type === 'node-issue' ? 'candidate' : 'pending')),
     code: String(raw.code || taskKey),
     severity: String(raw.severity || 'warning'),
     confidence: Number(raw.confidence ?? 0),
@@ -159,6 +163,17 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
     message: String(raw.message || '').trim().slice(0, 1600),
     suggestion: String(raw.suggestion || '').trim().slice(0, 1600),
     completionCriteria: String(raw.completionCriteria || '').trim().slice(0, 800),
+    completionSignal: String(raw.completionSignal || '').trim().slice(0, 80),
+    requiredCount: Math.max(1, Number(raw.requiredCount) || 1),
+    phase: String(raw.phase || '').trim().slice(0, 40),
+    effectId: String(raw.effectId || '').trim().slice(0, 120),
+    requiredBlockTypes: Array.isArray(raw.requiredBlockTypes)
+      ? [...new Set(raw.requiredBlockTypes.map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 20)
+      : [],
+    observedBlockTypes: Array.isArray(raw.observedBlockTypes)
+      ? [...new Set(raw.observedBlockTypes.map((item) => String(item || '').trim()).filter(Boolean))].slice(0, 20)
+      : [],
+    guidanceIntent: String(raw.guidanceIntent || '').trim().slice(0, 80),
     graphRevision: String(raw.graphRevision || graphRevision || ''),
     createdAt: Number(raw.createdAt) || now,
     firstDetectedAt: Number(raw.firstDetectedAt || raw.createdAt) || now,
@@ -192,6 +207,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     profileHistory: [],
     issueMemory: {},
     metrics: {},
+    worldGoal: {},
+    goalTaskPlan: {},
+    goalSignalCounts: {},
     activeTasks: [],
     taskHistory: [],
     recentOperationEvents: [],
@@ -212,9 +230,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
   getters: {
     tasks(state) {
       return state.activeTasks.filter((task) => (
-        task.type === 'tutorial'
-          ? ['pending', 'active'].includes(task.status)
-          : task.status === 'active'
+        task.type === 'node-issue'
+          ? task.status === 'active'
+          : ['pending', 'active'].includes(task.status)
       ));
     },
     candidateTasks(state) {
@@ -244,6 +262,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.profileHistory = [];
       this.issueMemory = {};
       this.metrics = {};
+      this.worldGoal = {};
+      this.goalTaskPlan = {};
+      this.goalSignalCounts = {};
       this.activeTasks = [];
       this.taskHistory = [];
       this.recentOperationEvents = [];
@@ -286,6 +307,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.profileHistory = clone(context.profileHistory || [], []);
       this.issueMemory = clone(context.issueMemory || {}, {});
       this.metrics = clone(context.metrics || {}, {});
+      this.worldGoal = clone(context.worldGoal || {}, {});
+      this.goalTaskPlan = clone(context.goalTaskPlan || {}, {});
+      this.goalSignalCounts = clone(context.goalSignalCounts || {}, {});
       this.activeTasks = (Array.isArray(context.activeTasks) ? context.activeTasks : [])
         .map((task) => normalizeTask(task, this.graphRevision, Number(task?.updatedAt) || Date.now()))
         .filter(Boolean);
@@ -326,7 +350,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
 
       const existingNodeTasks = this.activeTasks.filter((task) => task.type === 'node-issue');
       const existingByKey = new Map(existingNodeTasks.map((task) => [task.taskKey, task]));
-      const tutorialTasks = this.activeTasks.filter((task) => task.type === 'tutorial');
+      const guidanceTasks = this.activeTasks.filter((task) => task.type !== 'node-issue');
       const actions = [];
       const now = Date.now();
 
@@ -376,7 +400,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       }).filter(Boolean);
 
       const previousVisibleKeys = new Set(this.tasks.map((task) => task.taskKey));
-      this.activeTasks = [...tutorialTasks, ...nextNodeTasks];
+      this.activeTasks = [...guidanceTasks, ...nextNodeTasks];
       const nextVisibleKeys = new Set(this.tasks.map((task) => task.taskKey));
       if ([...nextVisibleKeys].some((key) => !previousVisibleKeys.has(key))) this.attentionToken += 1;
       if (this.selectedTaskKey && !nextVisibleKeys.has(this.selectedTaskKey)) this.selectedTaskKey = '';

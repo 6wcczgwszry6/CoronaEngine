@@ -142,14 +142,19 @@ class NodeGraphReviewChatService:
             if not isinstance(task, dict):
                 continue
             task_key = str(task.get("taskKey") or task.get("issueKey") or "")[:160]
+            task_type = str(task.get("type") or "")
+            if task_type not in {"tutorial", "goal", "node-issue"}:
+                task_type = "node-issue"
             tasks.append({
                 "taskKey": task_key,
                 "issueKey": task_key,
-                "type": "tutorial" if task.get("type") == "tutorial" else "node-issue",
+                "type": task_type,
                 "title": str(task.get("title") or "")[:160],
                 "message": str(task.get("message") or "")[:800],
                 "suggestion": str(task.get("suggestion") or "")[:800],
                 "completionCriteria": str(task.get("completionCriteria") or "")[:600],
+                "completionSignal": str(task.get("completionSignal") or "")[:80],
+                "guidanceIntent": str(task.get("guidanceIntent") or "")[:80],
                 "nodeId": str(task.get("nodeId") or "")[:160],
                 "blockId": str(task.get("blockId") or "")[:160],
                 "edgeId": str(task.get("edgeId") or "")[:160],
@@ -226,7 +231,14 @@ class NodeGraphReviewChatService:
                 break
 
         if not resolved and selected:
-            resolved = cls.GUIDANCE_BY_TASK.get(str(selected.get("taskKey") or ""))
+            if selected.get("type") == "goal":
+                selected_intent = str(selected.get("guidanceIntent") or "")
+                resolved = next(
+                    (candidate for candidate in cls.GUIDANCE_BY_TASK.values() if candidate[0] == selected_intent),
+                    None,
+                )
+            if not resolved:
+                resolved = cls.GUIDANCE_BY_TASK.get(str(selected.get("taskKey") or ""))
             if not resolved:
                 resolved = cls.GUIDANCE_BY_ISSUE.get(str(selected.get("code") or ""))
 
@@ -297,7 +309,7 @@ class NodeGraphReviewChatService:
                 "role": "system",
                 "content": (
                     "你是 CoronaEngine 的包菜答疑助手。请围绕当前世界、待处理任务和节点图回答。"
-                    "对基础引导任务，说明如何在引擎内完成；对节点问题，说明原因、修改位置和验证方法。"
+                    "对基础引导任务和世界制作任务，说明如何在引擎内完成；对节点问题，说明原因、修改位置和验证方法。"
                     "不得编造不存在的节点、积木、对象或 API。信息不足时应使用条件式建议。"
                     "不要向用户显示内部评分，不要给用户贴美术、程序、入门、熟悉或熟练标签。"
                     "不要输出 JSON，不要为用户生成或覆盖 Python 脚本。"

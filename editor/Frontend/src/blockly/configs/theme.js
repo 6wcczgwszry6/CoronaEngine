@@ -1,6 +1,6 @@
 import * as Blockly from 'blockly/core';
 
-// ── 辅助：自动生成 secondary / tertiary（比主色暗 30% / 50%）──
+// Colour helpers: keep Zelos edges distinct without making connected blocks look muddy.
 function darker(hex, pct) {
   const num = parseInt(hex.replace('#', ''), 16);
   const r = Math.round(((num >> 16) & 0xff) * (1 - pct));
@@ -9,34 +9,34 @@ function darker(hex, pct) {
   return '#' + ((1 << 24) + (r << 16) + (g << 8) + b).toString(16).slice(1);
 }
 
-// ── 统一定义：每种分类色同时用于 blockStyle 和 categoryStyle ──
+// Semantic palette: the editor shell remains black/gold, while blocks use muted
+// category colours so events, control flow, data, objects and physics stay readable.
 const COLOURS = {
-  engine:     '#C49A45',
-  motion:     '#D0AA59',
-  physics:    '#9B7A38',
-  condition:  '#D8B86C',
-  gameplay:   '#B7791F',
-  camera:     '#A9823F',
-  appearance: '#C3A059',
-  event:      '#A86E24',
-  control:    '#E0B85B',
-  detect:     '#AA8A4A',
-  math:       '#D0A84B',
-  variable:   '#A76E2E',
-  list:       '#8E622C',
-  text:       '#B39452',
-  function:   '#9C7740',
-  audio:      '#B07A48',
-  object:     '#C6A14D',
-  ui:         '#956B34',
+  engine:     '#5668AD', // indigo
+  motion:     '#426AA1', // blue
+  physics:    '#3C7552', // green
+  condition:  '#32776E', // teal
+  gameplay:   '#8F5F29', // copper
+  camera:     '#496D97', // slate blue
+  appearance: '#845A9B', // purple
+  event:      '#965B32', // orange
+  control:    '#8C742F', // amber
+  detect:     '#38748A', // cyan blue
+  math:       '#367467', // deep teal
+  variable:   '#9B533D', // coral
+  list:       '#9F5745', // brick
+  text:       '#427753', // grass green
+  function:   '#8C5892', // magenta purple
+  audio:      '#A65778', // rose
+  object:     '#34766E', // blue green
+  ui:         '#9E574B', // warm red
 };
 
-// 生成标准格式的 blockStyle
 function bs(hex) {
   return {
     colourPrimary: hex,
-    colourSecondary: darker(hex, 0.3),
-    colourTertiary: darker(hex, 0.5),
+    colourSecondary: darker(hex, 0.18),
+    colourTertiary: darker(hex, 0.32),
   };
 }
 
@@ -92,8 +92,8 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
     logic_blocks:             bs(COLOURS.condition),
     loop_blocks:              bs(COLOURS.control),
     variable_dynamic_blocks:  bs(COLOURS.variable),
-    colour_blocks:            bs('#9b7845'),
-    hat_blocks:               bs('#665025'),
+    colour_blocks:            bs('#6D5D85'),
+    hat_blocks:               bs(COLOURS.event),
   },
 
   // ── 工具箱分类样式（categoryStyles）──
