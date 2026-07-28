@@ -1628,12 +1628,18 @@ function onActiveWorkspaceChange(s) {
   scheduleRememberedIssueCheck();
 }
 function refreshEmbeddedWorkspaceStates() {
-  const g = variablesBlocklyRef.value?.getState?.();
-  if (g) graph.globalVariablesWorkspace = g;
-  const a = activeBlocklyRef.value?.getState?.();
-  if (a) {
-    if (selectedNode.value) selectedNode.value.workspace = a;
-    if (selectedEdge.value) selectedEdge.value.conditionWorkspace = a;
+  const variablesEditor = variablesBlocklyRef.value;
+  if (variablesEditor?.isReady?.()) {
+    const state = variablesEditor.getState?.();
+    if (state && typeof state === 'object') graph.globalVariablesWorkspace = state;
+  }
+  const activeEditor = activeBlocklyRef.value;
+  if (activeEditor?.isReady?.()) {
+    const state = activeEditor.getState?.();
+    if (state && typeof state === 'object') {
+      if (selectedNode.value) selectedNode.value.workspace = state;
+      if (selectedEdge.value) selectedEdge.value.conditionWorkspace = state;
+    }
   }
 }
 function graphSnapshot() {
@@ -1767,7 +1773,7 @@ function findGeneratedGraphFocus(previous = {}, candidate = {}, selection = {}) 
 }
 
 async function revealGeneratedGraphFocus(focus) {
-  if (!focus) return;
+  if (!focus) return true;
   if (focus.kind === 'node') {
     const node = graph.nodes.find((item) => String(item.id) === focus.id);
     if (node) {
@@ -1780,11 +1786,11 @@ async function revealGeneratedGraphFocus(focus) {
     const edge = graph.edges.find((item) => String(item.id) === focus.id);
     if (edge) focusGuidanceEdge(edge);
   }
-  if (!focus.blockId) return;
+  if (!focus.blockId) return true;
   await nextTick();
   await new Promise((resolve) => window.requestAnimationFrame(resolve));
   activeBlocklyRef.value?.resizeBlockly?.();
-  activeBlocklyRef.value?.focusBlock?.(focus.blockId);
+  return activeBlocklyRef.value?.focusBlock?.(focus.blockId) === true;
 }
 const PORT_SIDES = ['left', 'right', 'bottom'];
 function normalizeEndpoint(e) {
@@ -2085,10 +2091,7 @@ async function loadGraphForCurrentTarget() {
     isLoading = false;
     initialLoadComplete = true;
     graphDirty = false;
-    await nextTick();
-    variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
-    activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
-    updateCanvasSize();
+    await loadEmbeddedWorkspaceStates();
     reconcileSceneActorReferenceIssues();
     requestNodeGraphReview();
   }
@@ -2102,11 +2105,54 @@ function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
 }
 
-async function loadEmbeddedWorkspaceStates() {
+async function loadEmbeddedWorkspaceStates({ strict = false, verifyActive = false } = {}) {
   await nextTick();
-  variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
-  activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
+
+  const loadEditor = async (editor, state, label, required) => {
+    if (!editor) {
+      if (required) throw new Error(`${label}尚未挂载`);
+      return null;
+    }
+    const ready = await editor.whenReady?.();
+    if (ready?.success === false) {
+      if (required) throw new Error(`${label}初始化失败：${ready.error || '未知错误'}`);
+      return ready;
+    }
+    const loaded = editor.loadState?.(state || {});
+    if (loaded?.success !== true) {
+      if (required) throw new Error(`${label}加载失败：${loaded?.error || '工作区尚未就绪'}`);
+      return loaded || null;
+    }
+    return loaded;
+  };
+
+  const variables = await loadEditor(
+    variablesBlocklyRef.value,
+    graph.globalVariablesWorkspace || {},
+    '全局变量积木区',
+    strict
+  );
+  const activeRequired = strict && Boolean(activeEditorKey.value);
+  const active = await loadEditor(
+    activeBlocklyRef.value,
+    activeEditorState.value || {},
+    selectedEdge.value ? '连线条件积木区' : '节点内部积木区',
+    activeRequired
+  );
+
+  if (verifyActive && activeEditorKey.value) {
+    const expectedIds = [...serializedBlocksById(activeEditorState.value || {}).keys()];
+    const loadedIds = new Set(Array.isArray(active?.blockIds) ? active.blockIds.map(String) : []);
+    const missingIds = expectedIds.filter((blockId) => !loadedIds.has(String(blockId)));
+    if (missingIds.length || Number(active?.blockCount || 0) !== expectedIds.length) {
+      throw new Error(
+        `生成的积木没有完整加载到编辑区（期望 ${expectedIds.length} 个，实际 ${Number(active?.blockCount || 0)} 个）`
+      );
+    }
+  }
+
   updateCanvasSize();
+  return { variables, active };
 }
 
 async function handleGeneratedNodeGraph(result) {
@@ -2151,8 +2197,9 @@ async function handleGeneratedNodeGraph(result) {
       selectedKind.value = 'edge';
       selectedId.value = focus.id;
     }
-    await loadEmbeddedWorkspaceStates();
-    await revealGeneratedGraphFocus(focus);
+    const embeddedLoad = await loadEmbeddedWorkspaceStates({ strict: true, verifyActive: true });
+    const focused = await revealGeneratedGraphFocus(focus);
+    if (focus?.blockId && !focused) throw new Error('生成的目标积木没有出现在当前积木编辑区');
     isLoading = false;
     graphDirty = true;
 
@@ -2170,7 +2217,7 @@ async function handleGeneratedNodeGraph(result) {
         focusedId: focus?.id || '',
         focusedNodeName: focus?.nodeName || '',
         focusedEdgeName: focus?.edgeName || '',
-        visibleBlockCount: Number(focus?.visibleBlockCount || 0),
+        visibleBlockCount: Number(embeddedLoad?.active?.blockCount || 0),
       },
     };
   } catch (error) {

@@ -54,8 +54,36 @@ let blocklyEN = null;
 let resizeObserver = null;
 let isLoadingWorkspace = false;
 let changeListener = null;
+let readyResolved = false;
+let resolveReady;
+const readyPromise = new Promise((resolve) => {
+  resolveReady = resolve;
+});
 
 let blocksRegistered = false;
+
+function loadedBlockSummary() {
+  const blocks = workspace?.getAllBlocks?.(false) || [];
+  return {
+    blockCount: blocks.length,
+    blockIds: blocks.map((block) => String(block?.id || '')).filter(Boolean),
+  };
+}
+
+function settleReady(result) {
+  if (readyResolved) return;
+  readyResolved = true;
+  resolveReady?.(result);
+}
+
+function isReady() {
+  return Boolean(workspace && BlocklyLib);
+}
+
+function whenReady() {
+  if (isReady()) return Promise.resolve({ success: true, ready: true, ...loadedBlockSummary() });
+  return readyPromise;
+}
 
 function hasSerializedWorkspaceContent(state) {
   if (!state || typeof state !== 'object') return false;
@@ -158,7 +186,15 @@ function getState() {
 }
 
 function loadState(state) {
-  if (!workspace || !BlocklyLib) return;
+  if (!workspace || !BlocklyLib) {
+    return {
+      success: false,
+      ready: false,
+      error: '积木工作区尚未初始化完成',
+      blockCount: 0,
+      blockIds: [],
+    };
+  }
   isLoadingWorkspace = true;
   try {
     workspace.clear();
@@ -169,8 +205,15 @@ function loadState(state) {
     }
     applyWorkspaceRoleVisualStyles();
     window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
+    return { success: true, ready: true, ...loadedBlockSummary() };
   } catch (e) {
     logError('加载子工作区状态失败', e);
+    return {
+      success: false,
+      ready: true,
+      error: String(e?.message || e),
+      ...loadedBlockSummary(),
+    };
   } finally {
     isLoadingWorkspace = false;
     resizeBlockly();
@@ -426,17 +469,31 @@ async function initBlockly() {
       validateWorkspace();
     };
     workspace.addChangeListener(changeListener);
-    loadState(props.initialState);
+    const initialLoad = loadState(props.initialState);
 
     resizeObserver = new ResizeObserver(() => resizeBlockly());
     resizeObserver.observe(container);
     await nextTick();
     resizeBlockly();
     syncGuidanceBlockMetadata();
-    emit('ready');
+    const readyResult = {
+      success: true,
+      ready: true,
+      initialLoad,
+      ...loadedBlockSummary(),
+    };
+    settleReady(readyResult);
+    emit('ready', readyResult);
   } catch (e) {
     logError('初始化子 Blockly 工作区失败', e);
     loadingLabel.value = '积木工作区加载失败';
+    settleReady({
+      success: false,
+      ready: false,
+      error: String(e?.message || e),
+      blockCount: 0,
+      blockIds: [],
+    });
     return;
   }
   loadingLabel.value = '';
@@ -481,6 +538,9 @@ defineExpose({
   resizeBlockly,
   focusBlock,
   hasBlock,
+  isReady,
+  whenReady,
+  loadedBlockSummary,
 });
 </script>
 
