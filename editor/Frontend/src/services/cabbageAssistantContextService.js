@@ -68,7 +68,9 @@ function normalizeSnapshot(value) {
     taskHistory,
     chatMessages: clone(context.chatMessages || [], []),
     recentOperationEvents: clone(context.recentOperationEvents || [], []),
-    selectedTaskKey: activeTasks.some((task) => task.taskKey === selectedTaskKey) ? selectedTaskKey : '',
+    selectedTaskKey: [...activeTasks, ...taskHistory].some((task) => task.taskKey === selectedTaskKey)
+      ? selectedTaskKey
+      : '',
     updatedAt: Number(context.updatedAt || value.updatedAt) || Date.now(),
   };
 }

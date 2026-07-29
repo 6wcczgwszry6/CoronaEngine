@@ -61,6 +61,53 @@ function normalizeSteps(raw) {
     .slice(0, 8);
 }
 
+const ART_COMPLETION_SIGNALS = new Set([
+  'model_imported',
+  'object_transformed',
+  'lighting_adjusted',
+  'physics_adjusted',
+]);
+
+const PROGRAMMING_COMPLETION_SIGNALS = new Set([
+  'node_created',
+  'node_moved',
+  'nodes_connected',
+  'block_added',
+  'block_parameter_changed',
+  'transition_condition_set',
+  'node_graph_run',
+  'run_succeeded',
+]);
+
+const ART_GUIDANCE_INTENTS = new Set([
+  'import_model',
+  'transform_model',
+  'adjust_lighting',
+  'adjust_physics',
+]);
+
+function inferTaskDiscipline(raw = {}, type = '') {
+  const explicit = String(raw.discipline || '').trim().toLowerCase();
+  if (['programming', 'art'].includes(explicit)) return explicit;
+  if (type === 'node-issue') return 'programming';
+
+  const track = String(raw.track || '').trim().toLowerCase();
+  if (['scene', 'art'].includes(track)) return 'art';
+  if (['node', 'programming'].includes(track)) return 'programming';
+
+  const phase = String(raw.phase || '').trim().toLowerCase();
+  if (phase === 'scene-polish') return 'art';
+  if (phase === 'node-logic') return 'programming';
+
+  const completionSignal = String(raw.completionSignal || '').trim();
+  if (ART_COMPLETION_SIGNALS.has(completionSignal)) return 'art';
+  if (PROGRAMMING_COMPLETION_SIGNALS.has(completionSignal)) return 'programming';
+
+  const guidanceIntent = String(raw.guidanceIntent || '').trim();
+  if (ART_GUIDANCE_INTENTS.has(guidanceIntent)) return 'art';
+  return 'programming';
+}
+
 function walkBlocks(value, result = []) {
   if (Array.isArray(value)) {
     value.forEach((item) => walkBlocks(item, result));
@@ -205,7 +252,7 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
     taskKey,
     issueKey: taskKey,
     type,
-    // Track is retained only for backend task sequencing. It is never shown as a user label.
+    discipline: inferTaskDiscipline(raw, type),
     track: type !== 'node-issue' ? String(raw.track || '').slice(0, 40) : '',
     order: Number(raw.order) || 0,
     status: String(raw.status || (type === 'node-issue' ? 'candidate' : 'pending')),
@@ -296,8 +343,24 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     candidateTasks(state) {
       return state.activeTasks.filter((task) => task.type === 'node-issue' && task.status === 'candidate');
     },
+    completedTasks(state) {
+      return state.taskHistory
+        .filter((task) => {
+          const status = String(task.status || '').toLowerCase();
+          if (['cancelled', 'canceled', 'retired'].includes(status)) return false;
+          if (task.type === 'node-issue') return status === 'resolved' || Number(task.resolvedAt) > 0;
+          return status === 'completed' || Number(task.completedAt) > 0;
+        })
+        .slice()
+        .sort((left, right) => (
+          Math.max(Number(right.completedAt) || 0, Number(right.resolvedAt) || 0, Number(right.updatedAt) || 0)
+          - Math.max(Number(left.completedAt) || 0, Number(left.resolvedAt) || 0, Number(left.updatedAt) || 0)
+        ));
+    },
     selectedTask() {
-      return this.tasks.find((task) => task.taskKey === this.selectedTaskKey) || null;
+      return this.tasks.find((task) => task.taskKey === this.selectedTaskKey)
+        || this.completedTasks.find((task) => task.taskKey === this.selectedTaskKey)
+        || null;
     },
     taskCount() {
       return this.tasks.length;
@@ -394,7 +457,8 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         }))
         .filter((message) => message.content);
       this.recentOperationEvents = clone(context.recentOperationEvents || [], []);
-      if (this.selectedTaskKey && !this.tasks.some((task) => task.taskKey === this.selectedTaskKey)) {
+      if (this.selectedTaskKey && !this.tasks.some((task) => task.taskKey === this.selectedTaskKey)
+        && !this.completedTasks.some((task) => task.taskKey === this.selectedTaskKey)) {
         this.selectedTaskKey = '';
       }
       this.contextUpdatedAt = Math.max(this.contextUpdatedAt, incomingUpdatedAt);
@@ -687,7 +751,10 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
 
     selectTask(taskKey = '') {
       const key = String(taskKey || '');
-      this.selectedTaskKey = this.tasks.some((task) => task.taskKey === key) ? key : '';
+      this.selectedTaskKey = this.tasks.some((task) => task.taskKey === key)
+        || this.completedTasks.some((task) => task.taskKey === key)
+        ? key
+        : '';
     },
 
     appendMessage(message) {

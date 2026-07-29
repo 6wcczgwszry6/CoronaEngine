@@ -455,10 +455,24 @@
       </button>
     </nav>
 
-    <CabbageReviewAssistant
-      :tasks="cabbageAssistant.tasks"
-      :attention-token="cabbageAssistant.attentionToken"
-    />
+    <aside
+      class="cabbage-resident-stack"
+      aria-label="包菜任务与答疑"
+      @mousedown.stop
+      @pointerdown.stop
+      @click.stop
+      @wheel.stop
+    >
+      <CabbageReviewAssistant
+        resident
+        class="cabbage-resident-tasks"
+        :tasks="cabbageAssistant.tasks"
+        :attention-token="cabbageAssistant.attentionToken"
+      />
+      <div v-if="!cabbageChatDetached" class="cabbage-resident-chat">
+        <CabbageChatPanel resident @detach="detachResidentCabbageChat" />
+      </div>
+    </aside>
     <CabbageGuidanceOverlay />
   </div>
 </template>
@@ -485,6 +499,7 @@ import {
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
+import CabbageChatPanel from '@/views/sidebar/CabbageChatPanel.vue';
 import CabbageGuidanceOverlay from '@/components/ui/CabbageGuidanceOverlay.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
@@ -507,10 +522,13 @@ const cabbageAssistant = useCabbageAssistantStore();
 const dockShortcuts = [
   { id: 'AITalkBar', label: 'AI 对话', icon: 'AI' },
   { id: 'SceneTools', label: '场景管理', icon: '景' },
-  { id: 'SceneDatas', label: '对象', icon: '物' },
   { id: 'NodeGraphPanel', label: '节点', icon: '点' },
 ];
 const isShortcutOpen = (id) => Boolean(dockStore.panels[id]?.open);
+const cabbageChatDetached = computed(() => {
+  const panel = dockStore.panels.CabbageChatPanel;
+  return Boolean(panel?.open && panel.mode === 'external');
+});
 const openDockedPanel = (id, { preserveZone = false } = {}) => {
   const panel = dockStore.panels[id];
   const manifest = PLUGIN_MANIFEST.find((item) => item.id === id);
@@ -522,6 +540,27 @@ const openDockedPanel = (id, { preserveZone = false } = {}) => {
   dockStore.openPanel(id);
   nextTick(() => window.dispatchEvent(new Event('resize')));
 };
+const detachResidentCabbageChat = async () => {
+  if (cabbageAssistant.chatBusy || cabbageChatDetached.value) return;
+  const panelId = 'CabbageChatPanel';
+  const manifest = PLUGIN_MANIFEST.find((item) => item.id === panelId);
+  if (!manifest) return;
+  try {
+    const result = await appService.createDetachedPanel({
+      panelId,
+      routePath: '#' + (manifest.routePath || ''),
+      width: Math.max(420, Number(manifest.defaultWidth) || 420),
+      height: Math.max(640, Number(manifest.defaultHeight) || 640),
+      x: 120,
+      y: 120,
+    });
+    const tabId = result?.tab_id ?? result?.data?.tab_id;
+    dockStore.setExternal(panelId, tabId);
+  } catch (error) {
+    logError('Failed to detach resident Cabbage chat', error);
+  }
+};
+
 const toggleDockShortcut = async (id) => {
   const panel = dockStore.panels[id];
   if (!panel) return;
@@ -2566,6 +2605,11 @@ const handlePanelRedockRequest = (payload) => {
   if (previousTimer) window.clearTimeout(previousTimer);
   const timer = window.setTimeout(() => pendingPanelRedocks.delete(panelId), PANEL_REDOCK_TTL_MS);
   pendingPanelRedocks.set(panelId, timer);
+  if (panelId === 'CabbageChatPanel') {
+    dockStore.popIn(panelId);
+    dockStore.closePanel(panelId);
+    return;
+  }
   openDockedPanel(panelId, { preserveZone: true });
 };
 
@@ -2576,7 +2620,12 @@ const handlePanelClosed = (payload) => {
   if (redockTimer) {
     window.clearTimeout(redockTimer);
     pendingPanelRedocks.delete(panelId);
-    openDockedPanel(panelId, { preserveZone: true });
+    if (panelId === 'CabbageChatPanel') {
+      dockStore.popIn(panelId);
+      dockStore.closePanel(panelId);
+    } else {
+      openDockedPanel(panelId, { preserveZone: true });
+    }
     return;
   }
   if (isFloatingPanel(panelId)) {
@@ -2670,7 +2719,7 @@ onMounted(async () => {
 
   // Primary work docks start hidden. If this main CEF page is reused, close any native
   // floating tab left by the previous project before resetting the shortcut state.
-  for (const panelId of [...dockShortcuts.map((item) => item.id), 'CabbageChatPanel']) {
+  for (const panelId of [...dockShortcuts.map((item) => item.id), 'SceneDatas', 'CabbageChatPanel']) {
     const panelState = dockStore.panels[panelId];
     if (panelState?.mode === 'external') {
       await closeFloatingPanel(dockStore, panelId);
@@ -2792,8 +2841,36 @@ onUnmounted(() => {
 .dock-shortcut-button:hover { border-color: #b79232; color: #fff4cd; }
 .dock-shortcut-button.active { border-color: #d8b86c; background: #332712; color: #fff4cd; box-shadow: inset 0 0 0 1px rgba(216, 184, 108, .18); }
 .dock-shortcut-icon { display:grid; place-items:center; width:19px; height:19px; border-radius:4px; background:#0e0d09; color:#d6b66b; font-size:10px; font-weight:700; }
+
+.cabbage-resident-stack {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2147482500;
+  width: min(418px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  pointer-events: auto;
+}
+.cabbage-resident-tasks {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.cabbage-resident-chat {
+  height: clamp(340px, 52vh, 500px);
+  min-height: 320px;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
 @media (max-width: 720px) {
   .dock-shortcut-bar { max-width: calc(100vw - 32px); overflow-x: auto; }
   .dock-shortcut-button { padding: 7px 8px; white-space: nowrap; }
+  .cabbage-resident-stack { width: min(390px, calc(100% - 24px)); }
+}
+@media (max-height: 680px) {
+  .cabbage-resident-stack { max-height: calc(100% - 16px); bottom: 8px; }
+  .cabbage-resident-chat { height: clamp(270px, 48vh, 370px); min-height: 250px; }
 }
 </style>

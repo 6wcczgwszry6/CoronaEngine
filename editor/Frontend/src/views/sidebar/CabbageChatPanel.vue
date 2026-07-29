@@ -1,21 +1,35 @@
 <template>
-  <div class="cabbage-chat-shell flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-lg relative">
+  <div
+    class="cabbage-chat-shell flex h-full min-h-0 w-full flex-1 flex-col overflow-hidden rounded-lg relative"
+    :class="{ resident: props.resident }"
+  >
     <DockTitleBar
-      v-if="!isDocked"
+      v-if="!props.resident && !isDocked"
       title="包菜答疑"
       routePath="/CabbageChat"
       @close="closeFloat"
     />
 
+    <div v-if="props.resident" class="resident-chat-title">
+      <span>包菜答疑</span>
+      <button
+        type="button"
+        class="resident-float-button"
+        :title="'弹出为可拖动窗口'"
+        :disabled="assistant.chatBusy"
+        @click.stop="emit('detach')"
+      >&#x29C9;</button>
+    </div>
+
     <div class="context-strip">
       <div class="context-title">当前任务</div>
-      <select v-model="selectedKey" :disabled="!assistant.tasks.length" class="context-select">
+      <select v-model="selectedKey" :disabled="!contextTasks.length" class="context-select">
         <option value="">{{ assistant.tasks.length ? '全部待处理任务' : '当前没有待处理任务' }}</option>
-        <option v-for="task in assistant.tasks" :key="task.taskKey || task.issueKey" :value="task.taskKey || task.issueKey">
+        <option v-for="task in contextTasks" :key="task.taskKey || task.issueKey" :value="task.taskKey || task.issueKey">
           {{ task.title }}
         </option>
       </select>
-      <span class="context-count">{{ assistant.tasks.length }}</span>
+      <span class="context-count">{{ contextTasks.length }}</span>
     </div>
 
     <div ref="historyRef" class="chat-history">
@@ -59,6 +73,7 @@
 
     <form class="chat-composer" @submit.prevent="sendMessage">
       <textarea
+        ref="composerInputRef"
         v-model="input"
         rows="3"
         maxlength="2000"
@@ -95,10 +110,17 @@ import {
   subscribeCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
 
+const props = defineProps({
+  resident: { type: Boolean, default: false },
+});
+
+const emit = defineEmits(['detach']);
+
 const assistant = useCabbageAssistantStore();
 const { closePanel, isDocked } = useDockPanel();
 const input = ref('');
 const historyRef = ref(null);
+const composerInputRef = ref(null);
 const streamingContent = ref('');
 const activeTaskId = ref('');
 const activeRequestKind = ref('');
@@ -113,6 +135,15 @@ const selectedKey = computed({
     assistant.selectTask(value);
     publishCabbageAssistantContext(assistant);
   },
+});
+
+const contextTasks = computed(() => {
+  const tasks = assistant.tasks.map((task) => ({ ...task, __history: false }));
+  const selected = assistant.completedTasks.find((task) => task.taskKey === assistant.selectedTaskKey);
+  if (selected && !tasks.some((task) => task.taskKey === selected.taskKey)) {
+    tasks.push({ ...selected, __history: true });
+  }
+  return tasks;
 });
 
 function cleanAssistantText(value = '') {
@@ -315,7 +346,7 @@ async function sendMessage() {
       graphRevision: assistant.graphRevision,
       assistanceProfile: assistant.assistanceProfile,
       selectedTaskKey: messageContext.taskKey,
-      tasks: assistant.tasks,
+      tasks: contextTasks.value,
       graphExcerpt: assistant.graphExcerpt,
       projectContext: assistant.projectContext,
       messages: assistant.messages.map(({ role, content: text }) => ({ role, content: text })),
@@ -365,10 +396,26 @@ function closeFloat() {
   closePanel();
 }
 
+function focusResidentComposer() {
+  if (!props.resident) return;
+  nextTick(() => {
+    const composer = composerInputRef.value;
+    if (!composer) return;
+    try {
+      composer.focus({ preventScroll: true });
+    } catch (_) {
+      composer.focus();
+    }
+  });
+}
+
 watch(() => assistant.messages.length, scrollToBottom);
 watch(streamingContent, scrollToBottom);
 
 onMounted(() => {
+  if (props.resident) {
+    window.addEventListener('cabbage-chat-focus-request', focusResidentComposer);
+  }
   const currentProjectScopeId = () => reviewScopeId(
     String(window.localStorage?.getItem('corona.activeProjectPath') || '')
   );
@@ -379,6 +426,7 @@ onMounted(() => {
 });
 
 onBeforeUnmount(() => {
+  window.removeEventListener('cabbage-chat-focus-request', focusResidentComposer);
   unsubscribeAssistantContext?.();
   unsubscribeAssistantContext = null;
   clearPollTimer();
@@ -402,6 +450,51 @@ onBeforeUnmount(() => {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
+}
+
+.cabbage-chat-shell.resident {
+  z-index: auto;
+}
+
+.resident-chat-title {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 7px 0 12px;
+  border-bottom: 1px solid rgba(216, 184, 108, 0.22);
+  background: linear-gradient(180deg, rgba(39, 32, 18, 0.96), rgba(25, 23, 17, 0.92));
+  color: #f0d58c;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.resident-float-button {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.06);
+  color: #d7cba9;
+  font-size: 14px;
+  line-height: 1;
+  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.resident-float-button:hover:not(:disabled) {
+  border-color: rgba(216, 184, 108, 0.36);
+  background: rgba(216, 184, 108, 0.18);
+  color: #ffffff;
+}
+
+.resident-float-button:disabled {
+  opacity: 0.38;
+  cursor: not-allowed;
 }
 
 .context-strip {
