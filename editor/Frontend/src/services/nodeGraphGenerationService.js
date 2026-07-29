@@ -1,5 +1,4 @@
 import { applyGeneratedNodeGraph, getGeneratedNodeGraphSnapshot, PROJECT_NODE_GRAPH_TARGET_ID } from '@/blockly/node-editor/aiNodeGraphService.js';
-import { useDockStore } from '@/stores/dockStore.js';
 import { aiService, appService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 
@@ -65,7 +64,8 @@ export function nodeGraphGenerationIntent(text) {
 }
 
 async function requestNodePanelOpen() {
-  try { useDockStore().openPanel('NodeGraphPanel'); } catch (_) {}
+  // MainPage owns presentation: AI generation requests only the centered in-editor
+  // floating panel, avoiding a second NodeGraphPanel in the bottom Dock.
   coronaEventBus.emit('node-graph-panel-open-request');
   try {
     await appService.crossTabBroadcast('node-graph-panel-open-request', {});

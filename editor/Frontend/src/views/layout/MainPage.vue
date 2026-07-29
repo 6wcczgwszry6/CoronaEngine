@@ -338,29 +338,6 @@
       @click.stop
       @wheel.stop
     >
-      <div class="scene-quick-run-row">
-        <button
-          type="button"
-          class="scene-quick-run-button"
-          :class="{ running: globalPreviewActive }"
-          :disabled="globalRunDisabled"
-          :title="globalRunTitle"
-          data-testid="main-global-run-button"
-          @click.stop.prevent="toggleGlobalPreview($event)"
-        >
-          <span class="scene-quick-run-icon" aria-hidden="true">{{ globalPreviewActive ? '■' : '▶' }}</span>
-          <span>{{ globalRunLabel }}</span>
-        </button>
-        <span
-          v-if="previewStatusText"
-          class="scene-quick-run-status"
-          :class="{ error: previewDetails.status === 'error' }"
-          :title="previewStatusText"
-        >
-          {{ previewStatusText }}
-        </span>
-      </div>
-
       <section
         class="scene-quick-lighting"
         data-guidance="scene-lighting"
@@ -2476,39 +2453,6 @@ const handleStopGamePreview = async () => {
   }
 };
 
-const currentPreviewScope = computed(() => String(previewDetails.value?.scope || 'project'));
-const globalPreviewActive = computed(() => previewRunning.value && currentPreviewScope.value === 'project');
-const globalRunDisabled = computed(() =>
-  previewBusy.value || (previewRunning.value && currentPreviewScope.value !== 'project')
-);
-const globalRunLabel = computed(() =>
-  globalPreviewActive.value ? translate('layout.stopAndRestore') : translate('layout.run')
-);
-const globalRunTitle = computed(() => {
-  if (globalPreviewActive.value) return translate('layout.stopAndRestoreTitle');
-  if (previewRunning.value) return translate('layout.otherPreviewRunning');
-  return translate('layout.runGlobalTitle');
-});
-
-const toggleGlobalPreview = async (event = null) => {
-  event?.currentTarget?.blur?.();
-  if (previewBusy.value) return;
-  try {
-    const live = applyPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
-    const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
-      || live.runningCount > 0
-      || live.hasSnapshot;
-    if (liveActive && String(live.scope || 'project') === 'project') {
-      await handleStopGamePreview();
-      return;
-    }
-    if (liveActive) return;
-    await handleStartGamePreview({ scope: 'project' });
-  } catch (error) {
-    logError(globalPreviewActive.value ? '停止并恢复失败' : '运行失败', error);
-  }
-};
-
 const handleRunProject = async () => {
   try {
     console.log('运行项目');
@@ -3074,7 +3018,6 @@ onUnmounted(() => {
   pointer-events: auto;
 }
 
-.scene-quick-run-row,
 .scene-quick-lighting-header,
 .scene-quick-direction,
 .scene-quick-light-toggle,
@@ -3083,66 +3026,8 @@ onUnmounted(() => {
   align-items: center;
 }
 
-.scene-quick-run-row {
-  min-width: 0;
-  gap: 8px;
-}
-
-.scene-quick-run-button {
-  display: inline-flex;
-  flex: 0 0 auto;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  min-width: 82px;
-  padding: 7px 12px;
-  border: 1px solid rgba(216, 184, 108, 0.7);
-  border-radius: 6px;
-  background: linear-gradient(180deg, rgba(91, 69, 29, 0.95), rgba(48, 37, 18, 0.95));
-  color: #fff2c5;
-  font-size: 12px;
-  font-weight: 700;
-  line-height: 1;
-  transition: border-color 140ms ease, background 140ms ease, opacity 140ms ease;
-}
-
-.scene-quick-run-button:hover:not(:disabled) {
-  border-color: #f0d38c;
-  background: linear-gradient(180deg, rgba(119, 89, 34, 0.98), rgba(66, 49, 20, 0.98));
-}
-
-.scene-quick-run-button.running {
-  border-color: rgba(211, 103, 86, 0.86);
-  background: linear-gradient(180deg, rgba(117, 48, 42, 0.94), rgba(65, 30, 27, 0.94));
-  color: #ffd9d2;
-}
-
-.scene-quick-run-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.5;
-}
-
-.scene-quick-run-icon {
-  font-size: 9px;
-}
-
-.scene-quick-run-status {
-  min-width: 0;
-  overflow: hidden;
-  color: #bfb493;
-  font-size: 10px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.scene-quick-run-status.error {
-  color: #f1a293;
-}
-
 .scene-quick-lighting {
-  margin-top: 8px;
-  padding-top: 8px;
-  border-top: 1px solid rgba(216, 184, 108, 0.2);
+  margin: 0;
 }
 
 .scene-quick-lighting-header {

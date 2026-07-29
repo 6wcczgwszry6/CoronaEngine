@@ -331,7 +331,11 @@ import {
   readCabbageAssistantContext,
   subscribeCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
-import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
+import {
+  publishProjectNodeGraphRuntimeState,
+  registerProjectNodeGraphRuntimeHandler,
+  registerProjectNodeGraphSaveHandler,
+} from '@/services/nodeGraphRuntimeService.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
@@ -517,6 +521,7 @@ let isLoading = false,
   graphLoadSequence = 0,
   unsubscribeCabbageContext = null,
   unregisterProjectNodeGraphSaveHandler = null,
+  unregisterProjectNodeGraphRuntimeHandler = null,
   loadedProjectPath = '',
   componentMounted = false,
   initialLoadComplete = false,
@@ -2608,6 +2613,24 @@ async function handleToggleRun() {
   }
 }
 
+function currentProjectNodeGraphRuntimeState() {
+  return {
+    ready: Boolean(componentMounted && unregisterProjectNodeGraphRuntimeHandler),
+    running: codeRunning.value,
+    busy: runBusy.value,
+    status: runStatus.value,
+    detail: runDetail.value,
+  };
+}
+function syncProjectNodeGraphRuntimeState() {
+  if (!isProjectTarget.value || !unregisterProjectNodeGraphRuntimeHandler) return;
+  publishProjectNodeGraphRuntimeState(currentProjectNodeGraphRuntimeState());
+}
+watch(
+  [codeRunning, runBusy, runStatus, runDetail],
+  syncProjectNodeGraphRuntimeState
+);
+
 function normalizeActorContextName(value) {
   const text = String(value ?? '').trim();
   try { return text.normalize('NFKC'); } catch (_) { return text; }
@@ -2978,6 +3001,11 @@ onMounted(async () => {
   registerNodeGraphFlusher();
   if (isProjectTarget.value) {
     unregisterProjectNodeGraphSaveHandler = registerProjectNodeGraphSaveHandler(saveNow);
+    unregisterProjectNodeGraphRuntimeHandler = registerProjectNodeGraphRuntimeHandler({
+      toggle: handleToggleRun,
+      getState: currentProjectNodeGraphRuntimeState,
+    });
+    syncProjectNodeGraphRuntimeState();
   }
 });
 onBeforeUnmount(() => {
@@ -3005,6 +3033,8 @@ onBeforeUnmount(() => {
   }
   stopNodeGraphReview?.();
   stopNodeGraphReview = null;
+  unregisterProjectNodeGraphRuntimeHandler?.();
+  unregisterProjectNodeGraphRuntimeHandler = null;
   unregisterProjectNodeGraphSaveHandler?.();
   unregisterProjectNodeGraphSaveHandler = null;
   unregisterAiNodeGraphConsumer?.();

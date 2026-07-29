@@ -10,28 +10,6 @@
 
     <!-- 主内容区域 -->
     <div class="flex flex-col flex-1 min-h-0">
-      <div class="flex items-center gap-2 p-2 bg-[#1a1a1a]/50 border-b border-[#333]">
-        <div class="text-[10px] text-gray-400 truncate flex-1">
-          <span class="text-[#d8b86c] font-bold">{{ currentSceneName }}</span>
-          <span
-            v-if="visionModeLabel"
-            class="ml-2 px-1.5 py-0.5 rounded bg-[#4b391c]/70 text-[#e5c77f] border border-[#665025]/60"
-            :title="visionStatusTitle"
-            data-testid="scene-vision-status"
-          >
-            {{ visionModeLabel }}
-          </span>
-          <span
-            v-if="sceneVision.unsupported_count"
-            class="ml-1 px-1.5 py-0.5 rounded bg-[#5a3a1f]/70 text-[#f0c674] border border-[#8a5a2b]/60"
-            :title="visionUnsupportedTitle"
-            data-testid="scene-vision-unsupported"
-          >
-            unsupported {{ sceneVision.unsupported_count }}
-          </span>
-        </div>
-      </div>
-
       <div
         v-if="RESOURCE_SEARCH_ENABLED"
         class="flex items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
@@ -550,10 +528,9 @@
 
       <!-- 底部状态栏 -->
       <div
-        class="flex items-center justify-between px-2 py-1 bg-[#3c3c3c]/60 border-t border-[#1a1a1a]/30 text-[10px] text-[#909090]"
+        class="flex items-center px-2 py-1 bg-[#3c3c3c]/60 border-t border-[#1a1a1a]/30 text-[10px] text-[#909090]"
       >
         <span>对象: {{ sceneImages.length }}</span>
-        <span>{{ currentSceneName }}</span>
       </div>
     </div>
   </div>
@@ -672,25 +649,6 @@ const searchActive = computed(() => {
     || !!searchError.value || !!searchLastQuery.value;
 });
 
-const visionModeLabel = computed(() => {
-  const mode = sceneVision.value?.import_mode || '';
-  if (mode === 'external_live') return 'Vision Live';
-  if (mode === 'external') return 'Vision External';
-  return '';
-});
-
-const visionStatusTitle = computed(() => {
-  const mode = sceneVision.value?.import_mode || 'none';
-  const source = sceneVision.value?.source_path || '';
-  const count = sceneVision.value?.binding_count ?? 0;
-  return `mode=${mode}; bindings=${count}${source ? `; source=${source}` : ''}`;
-});
-
-const visionUnsupportedTitle = computed(() => {
-  const byType = sceneVision.value?.unsupported_by_type || {};
-  const details = Object.entries(byType).map(([type, count]) => `${type}: ${count}`);
-  return details.length ? details.join(', ') : 'Unsupported Vision shapes';
-});
 
 const typeIcon = (type) => ({
   model: '📦', actor: '👤', scene: '🎬',
