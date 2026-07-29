@@ -460,6 +460,22 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertTrue(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
         self.assertFalse(any(task.get("type") == "goal" for task in context["activeTasks"]))
 
+    def test_context_load_rejects_a_different_world_id(self):
+        response = self.service.load({"worldId": "another_world"})
+        self.assertFalse(response["success"])
+        self.assertEqual("CONTEXT_LOAD_FAILED", response["error"])
+        self.assertFalse(self.service._context_path(self.world).exists())
+
+    def test_goal_plan_rejects_a_different_world_id_without_writing_context(self):
+        response = self.service.start_goal_plan({
+            "worldId": "another_world",
+            "prompt": "a world that must not leak into this project",
+            "mode": "story",
+        })
+        self.assertFalse(response["success"])
+        self.assertEqual("GOAL_PLAN_START_FAILED", response["error"])
+        self.assertFalse(self.service._context_path(self.world).exists())
+
     def test_goal_plan_prompt_only_requests_personalized_guidance_tasks(self):
         description = "一间会随音乐改变颜色的抽象几何空间"
         prompt = self.service._goal_plan_prompt(description, "story")
@@ -684,6 +700,11 @@ class CabbageContextServiceTests(unittest.TestCase):
         ]
         self.assertEqual(2, len(visible))
         self.assertEqual(4, len(queued))
+
+        self.assertFalse(
+            (self.world / "Scripts" / "blockly").exists(),
+            "World-description planning must not create or modify Blockly graph files",
+        )
 
     def test_completing_goal_task_reveals_next_ai_task(self):
         context = self.service._default_context(self.world)

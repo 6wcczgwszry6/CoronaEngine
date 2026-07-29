@@ -51,6 +51,60 @@
         </div>
       </section>
 
+      <section class="settings-section viewport-settings" data-guidance="settings-viewport">
+        <div class="section-heading">
+          <h3>{{ t('editorSettings.viewport') }}</h3>
+          <span v-if="viewportControlState.sceneId" class="current-scene" :title="viewportControlState.sceneId">
+            {{ viewportControlState.sceneId }}
+          </span>
+        </div>
+
+        <div class="viewport-setting-row" data-guidance="settings-viewport-ui">
+          <span class="setting-label">{{ t('editorSettings.viewportUiMode') }}</span>
+          <div class="viewport-mode-switch" role="group" :aria-label="t('editorSettings.viewportUiMode')">
+            <button
+              v-for="item in viewportControlState.viewportUiModes"
+              :key="item.mode"
+              type="button"
+              class="viewport-mode-option"
+              :class="{ active: viewportControlState.viewportUiMode === item.mode }"
+              :disabled="!viewportControlState.available"
+              :title="viewportModeTitle(item)"
+              @click="setViewportUiMode(item.mode)"
+            >
+              {{ item.label }}
+            </button>
+          </div>
+        </div>
+
+        <label class="viewport-setting-row speed-setting" data-guidance="settings-camera-speed">
+          <span class="setting-label">{{ t('editorSettings.cameraSpeed') }}</span>
+          <input
+            v-model.number="viewportControlState.cameraSpeed"
+            type="range"
+            min="0.01"
+            max="2"
+            step="0.01"
+            :disabled="!viewportControlState.available"
+            :title="t('editorSettings.cameraSpeed')"
+            @input="handleCameraSpeedInput"
+          />
+          <strong>{{ cameraSpeedLabel }}</strong>
+        </label>
+
+        <label class="viewport-setting-row grid-setting" data-guidance="settings-grid">
+          <span class="setting-label">{{ t('editorSettings.editGrid') }}</span>
+          <input
+            v-model="viewportControlState.gridEnabled"
+            type="checkbox"
+            :disabled="!viewportControlState.available || gridApplying"
+            :title="t('editorSettings.editGridDescription')"
+            @change="setGridEnabled"
+          />
+          <span class="setting-description">{{ t('editorSettings.editGridDescription') }}</span>
+        </label>
+      </section>
+
       <section class="settings-section leave-section">
         <div class="section-heading">
           <h3>{{ t('editorSettings.leave') }}</h3>
@@ -75,13 +129,15 @@
 </template>
 
 <script setup>
-import { computed, ref } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { setLocale } from '@/i18n/index.js';
 import { closeFloatingPanel } from '@/utils/panelWindows.js';
+import { appService } from '@/utils/bridge.js';
+import { coronaEventBus } from '@/utils/eventBus.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const router = useRouter();
@@ -90,6 +146,140 @@ const dockStore = useDockStore();
 const { closePanel, isDocked } = useDockPanel();
 const confirmHome = ref(false);
 const aiTalkOpen = computed(() => Boolean(dockStore.panels.AITalkBar?.open));
+const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
+const defaultViewportControls = {
+  available: false,
+  sceneId: '',
+  viewportUiMode: 'flat2d',
+  viewportUiModes: [
+    { mode: 'flat2d', label: '2D UI' },
+    { mode: 'stereo3d', label: '3D UI' },
+  ],
+  cameraSpeed: 0.2,
+  gridEnabled: true,
+};
+const viewportControlState = ref({ ...defaultViewportControls });
+const gridApplying = ref(false);
+const cameraSpeedLabel = computed(() => Number(viewportControlState.value.cameraSpeed || 0).toFixed(2));
+let viewportControlPollTimer = null;
+let speedApplyTimer = null;
+
+function normalizeViewportControls(state = {}) {
+  const modes = Array.isArray(state.viewportUiModes) && state.viewportUiModes.length
+    ? state.viewportUiModes
+    : defaultViewportControls.viewportUiModes;
+  const speed = Number(state.cameraSpeed);
+  return {
+    available: Boolean(state.available),
+    sceneId: String(state.sceneId || ''),
+    viewportUiMode: String(state.viewportUiMode || defaultViewportControls.viewportUiMode),
+    viewportUiModes: modes.map((item) => ({
+      mode: String(item.mode || ''),
+      label: String(item.label || item.mode || ''),
+      title: String(item.title || item.label || item.mode || ''),
+    })).filter((item) => item.mode),
+    cameraSpeed: Number.isFinite(speed)
+      ? Math.min(2, Math.max(0.01, speed))
+      : defaultViewportControls.cameraSpeed,
+    gridEnabled: typeof state.gridEnabled === 'boolean'
+      ? state.gridEnabled
+      : defaultViewportControls.gridEnabled,
+  };
+}
+
+function getEditorControls() {
+  return typeof window === 'undefined' ? null : window[EDITOR_CONTROLS_KEY] || null;
+}
+
+function syncViewportControls(state = {}) {
+  viewportControlState.value = normalizeViewportControls(state);
+}
+
+function requestViewportControlsState() {
+  const controls = getEditorControls();
+  if (controls && typeof controls.getState === 'function') {
+    try {
+      syncViewportControls(controls.getState());
+      return;
+    } catch (error) {
+      console.warn('[EditorSettings] failed to read viewport controls', error);
+    }
+  }
+  appService.crossTabBroadcast('viewport-controls-request', { action: 'getState' }).catch(() => {});
+}
+
+async function setViewportUiMode(mode) {
+  const controls = getEditorControls();
+  if (controls && typeof controls.setViewportUiMode === 'function') {
+    const nextState = await controls.setViewportUiMode(mode);
+    if (nextState !== false) syncViewportControls(nextState);
+    return;
+  }
+  viewportControlState.value.viewportUiMode = mode;
+  appService.crossTabBroadcast('viewport-controls-request', {
+    action: 'setViewportUiMode',
+    mode,
+  }).catch(() => requestViewportControlsState());
+}
+
+async function applyCameraSpeed(value) {
+  const speed = Math.min(2, Math.max(0.01, Number(value) || defaultViewportControls.cameraSpeed));
+  const controls = getEditorControls();
+  if (controls && typeof controls.setCameraSpeed === 'function') {
+    const nextState = await controls.setCameraSpeed(speed);
+    if (nextState !== false) syncViewportControls(nextState);
+    return;
+  }
+  appService.crossTabBroadcast('viewport-controls-request', {
+    action: 'setCameraSpeed',
+    value: speed,
+  }).catch(() => requestViewportControlsState());
+}
+
+function handleCameraSpeedInput() {
+  if (speedApplyTimer) window.clearTimeout(speedApplyTimer);
+  speedApplyTimer = window.setTimeout(() => {
+    speedApplyTimer = null;
+    void applyCameraSpeed(viewportControlState.value.cameraSpeed);
+  }, 60);
+}
+
+async function setGridEnabled() {
+  if (gridApplying.value || !viewportControlState.value.sceneId) return;
+  const enabled = Boolean(viewportControlState.value.gridEnabled);
+  const sceneId = viewportControlState.value.sceneId;
+  gridApplying.value = true;
+  try {
+    const controls = getEditorControls();
+    if (controls && typeof controls.setGridEnabled === 'function') {
+      const nextState = await controls.setGridEnabled(enabled, sceneId);
+      if (nextState === false) requestViewportControlsState();
+      else syncViewportControls(nextState);
+      return;
+    }
+    await appService.crossTabBroadcast('viewport-controls-request', {
+      action: 'setGridEnabled',
+      enabled,
+      sceneId,
+    });
+  } catch (error) {
+    console.warn('[EditorSettings] failed to update scene grid', error);
+    requestViewportControlsState();
+  } finally {
+    gridApplying.value = false;
+  }
+}
+
+function viewportModeTitle(item = {}) {
+  if (item.mode === 'flat2d') return t('editorSettings.viewport2dDescription');
+  if (item.mode === 'stereo3d') return t('editorSettings.viewport3dDescription');
+  return item.title || item.label || '';
+}
+
+function onViewportControlsState(state) {
+  syncViewportControls(state);
+}
+
 
 async function toggleAiTalk() {
   const panelId = 'AITalkBar';
@@ -114,6 +304,20 @@ async function toggleAiTalk() {
 function handleLocaleChange(nextLocale) {
   setLocale(nextLocale);
 }
+
+onMounted(() => {
+  coronaEventBus.on('viewport-controls-state', onViewportControlsState);
+  requestViewportControlsState();
+  viewportControlPollTimer = window.setInterval(requestViewportControlsState, 1000);
+});
+
+onBeforeUnmount(() => {
+  coronaEventBus.off('viewport-controls-state', onViewportControlsState);
+  if (viewportControlPollTimer) window.clearInterval(viewportControlPollTimer);
+  viewportControlPollTimer = null;
+  if (speedApplyTimer) window.clearTimeout(speedApplyTimer);
+  speedApplyTimer = null;
+});
 
 function handleContinue() {
   confirmHome.value = false;
@@ -307,6 +511,108 @@ function goHome() {
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   background: rgba(24, 27, 24, 0.58);
+}
+
+.viewport-settings {
+  gap: 10px;
+}
+
+.current-scene {
+  max-width: 58%;
+}
+
+.viewport-setting-row {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(76px, auto) minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: rgba(24, 27, 24, 0.58);
+}
+
+.setting-label {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.viewport-mode-switch {
+  grid-column: 2 / 4;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px;
+  padding: 2px;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  background: rgba(17, 19, 17, 0.96);
+}
+
+.viewport-mode-option {
+  min-width: 0;
+  height: 28px;
+  border: 0;
+  border-radius: 4px;
+  color: var(--text-muted);
+  background: transparent;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.viewport-mode-option:hover:not(:disabled) {
+  color: var(--text-main);
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.viewport-mode-option.active {
+  color: #f4f7ef;
+  background: rgba(216, 184, 108, 0.32);
+  box-shadow: inset 0 0 0 1px rgba(216, 184, 108, 0.35);
+}
+
+.viewport-mode-option:disabled {
+  cursor: not-allowed;
+  opacity: 0.44;
+}
+
+.speed-setting input[type='range'] {
+  width: 100%;
+  min-width: 0;
+  accent-color: var(--accent-strong);
+  cursor: pointer;
+}
+
+.speed-setting strong {
+  width: 36px;
+  color: var(--text-main);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+.grid-setting {
+  grid-template-columns: minmax(76px, auto) auto minmax(0, 1fr);
+}
+
+.grid-setting input[type='checkbox'] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--accent-strong);
+}
+
+.setting-description {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-action-row {

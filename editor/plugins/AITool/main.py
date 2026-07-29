@@ -151,7 +151,7 @@ class AITool(PluginBase):
             if operation == "node_graph.generate.cancel":
                 return cls._node_graph_generation_service.cancel(parsed.get("taskId") or parsed.get("task_id") or "")
             if operation == "cabbage.context.load":
-                return cls._cabbage_context_service.load()
+                return cls._cabbage_context_service.load(parsed.get("payload") or {})
             if operation == "cabbage.context.record_event":
                 return cls._cabbage_context_service.record_event(parsed.get("payload") or {})
             if operation == "cabbage.context.update_task":

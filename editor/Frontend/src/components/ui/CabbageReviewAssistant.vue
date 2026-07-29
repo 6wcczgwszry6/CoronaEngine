@@ -7,36 +7,6 @@
     @click.stop
     @wheel.stop
   >
-    <transition name="task-board">
-      <section v-if="assistant.preWarning" class="assistant-notice pre-warning" aria-live="polite">
-        <div class="notice-copy">
-          <div class="notice-title-row">
-            <span class="task-discipline programming">{{ t('cabbageReview.disciplineProgramming') }}</span>
-            <strong>{{ assistant.preWarning.title }}</strong>
-          </div>
-          <p>{{ assistant.preWarning.message }}</p>
-        </div>
-        <button type="button" class="showcase-button" @click="showcase({ ...assistant.preWarning, sourceType: 'node-issue' })">
-          {{ t('cabbageReview.showcase') }}
-        </button>
-      </section>
-    </transition>
-
-    <transition name="task-board">
-      <section v-if="assistant.ephemeralTip" class="assistant-notice optimization-tip" aria-live="polite">
-        <div class="notice-copy">
-          <div class="notice-title-row">
-            <span class="task-discipline programming">{{ t('cabbageReview.disciplineProgramming') }}</span>
-            <strong>{{ assistant.ephemeralTip.title }}</strong>
-          </div>
-          <p>{{ assistant.ephemeralTip.message }}</p>
-        </div>
-        <button type="button" class="showcase-button" @click="showcase({ ...assistant.ephemeralTip, sourceType: 'optimization-tip' })">
-          {{ t('cabbageReview.showcase') }}
-        </button>
-      </section>
-    </transition>
-
     <section class="task-board" :aria-label="t('cabbageReview.title')">
       <header class="task-board-header">
         <span>{{ t('cabbageReview.title') }}</span>
@@ -53,7 +23,11 @@
           v-for="(task, index) in visibleTasks"
           :key="rowKey(task, index)"
           class="task-item"
-          :class="{ completed: historyVisible }"
+          :class="{
+            completed: historyVisible,
+            'pre-warning': task.type === 'pre-warning',
+            'optimization-opinion': task.type === 'optimization-tip',
+          }"
         >
           <button
             type="button"
@@ -62,7 +36,10 @@
             @click="toggleTask(task, index)"
           >
             <span class="task-summary-topline">
-              <span class="task-discipline" :class="task.discipline === 'art' ? 'art' : 'programming'">
+              <span
+                class="task-discipline"
+                :class="disciplineClass(task)"
+              >
                 {{ disciplineLabel(task) }}
               </span>
               <span class="task-title-text">{{ task.title }}</span>
@@ -117,7 +94,39 @@ const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
 const historyVisible = ref(false);
-const visibleTasks = computed(() => (historyVisible.value ? assistant.completedTasks : props.tasks));
+const preWarningTask = computed(() => {
+  const warning = assistant.preWarning;
+  if (!warning) return null;
+  return {
+    ...warning,
+    taskKey: String(warning.taskKey || warning.warningKey || `pre-warning:${warning.code || 'issue'}`),
+    issueKey: String(warning.taskKey || warning.warningKey || `pre-warning:${warning.code || 'issue'}`),
+    type: 'pre-warning',
+    discipline: 'hint',
+    status: 'active',
+    transient: true,
+    suggestion: String(warning.suggestion || warning.message || ''),
+  };
+});
+const optimizationTask = computed(() => {
+  const tip = assistant.ephemeralTip;
+  if (!tip) return null;
+  const key = String(tip.taskKey || `optimization:${tip.graphRevision || 'graph'}:${tip.tipKey || 'tip'}`);
+  return {
+    ...tip,
+    taskKey: key,
+    issueKey: key,
+    type: 'optimization-tip',
+    discipline: 'opinion',
+    status: 'active',
+    transient: true,
+    suggestion: String(tip.suggestion || tip.message || ''),
+  };
+});
+const visibleTasks = computed(() => {
+  if (historyVisible.value) return assistant.completedTasks;
+  return [preWarningTask.value, optimizationTask.value, ...props.tasks].filter(Boolean);
+});
 const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
 let optimizationTimer = null;
 let preWarningTimer = null;
@@ -135,7 +144,15 @@ function rowKey(task, index = 0) {
   return historyVisible.value ? `history:${key}:${completionTimestamp(task)}:${index}` : `active:${key}`;
 }
 
+function disciplineClass(task) {
+  if (task?.discipline === 'hint') return 'hint';
+  if (task?.discipline === 'opinion') return 'opinion';
+  return task?.discipline === 'art' ? 'art' : 'programming';
+}
+
 function disciplineLabel(task) {
+  if (task?.discipline === 'hint') return t('cabbageReview.disciplineHint');
+  if (task?.discipline === 'opinion') return t('cabbageReview.disciplineOpinion');
   return task?.discipline === 'art'
     ? t('cabbageReview.disciplineArt')
     : t('cabbageReview.disciplineProgramming');
@@ -173,14 +190,14 @@ function toggleTask(task, index) {
   const displayKey = rowKey(task, index);
   if (!logicalKey) return;
   assistant.selectTask(logicalKey);
-  publishCabbageAssistantContext(assistant);
+  if (task?.transient !== true) publishCabbageAssistantContext(assistant);
   if (expandedKeys.has(displayKey)) expandedKeys.delete(displayKey);
   else expandedKeys.add(displayKey);
 }
 
 async function openChat(task) {
   assistant.selectTask(taskKey(task));
-  publishCabbageAssistantContext(assistant);
+  if (task?.transient !== true) publishCabbageAssistantContext(assistant);
 
   if (props.resident) {
     window.dispatchEvent(new CustomEvent('cabbage-chat-focus-request', {
@@ -283,26 +300,6 @@ onBeforeUnmount(() => {
   flex: 0 1 470px;
 }
 .cabbage-review-root.resident .task-board { max-height: 100%; }
-.assistant-notice {
-  width: 100%;
-  box-sizing: border-box;
-  display: flex;
-  align-items: flex-start;
-  gap: 10px;
-  border: 1px solid #55431f;
-  border-radius: 8px;
-  background: #15130d;
-  color: #f2ead5;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, .5);
-  padding: 11px 12px;
-  line-height: 1.55;
-}
-.assistant-notice.pre-warning { border-color: #9b6b2f; background: #1c160c; }
-.notice-copy { min-width: 0; flex: 1; }
-.notice-title-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.notice-title-row strong { min-width: 0; flex: 1; }
-.assistant-notice strong { display: block; color: #e5c77f; font-size: 13px; }
-.assistant-notice p { margin: 5px 0 0; color: #c9bea0; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
 .task-board {
   position: relative;
   width: 100%;
@@ -419,6 +416,12 @@ onBeforeUnmount(() => {
 }
 .task-discipline.programming { border-color: #6d7f9d; background: #1a2433; color: #b9d2ff; }
 .task-discipline.art { border-color: #8d674f; background: #312018; color: #f0c4a4; }
+.task-discipline.hint { border-color: #b74747; background: #3a1717; color: #ffb4aa; }
+.task-discipline.opinion { border-color: #4f8a72; background: #13271f; color: #a9e7c9; }
+.task-item.pre-warning { border-color: #7f3030; background: #211010; }
+.task-item.pre-warning:hover, .task-item.pre-warning:has(.task-summary.selected) { border-color: #cf5f52; background: #2a1312; }
+.task-item.optimization-opinion { border-color: #315f4c; background: #101d18; }
+.task-item.optimization-opinion:hover, .task-item.optimization-opinion:has(.task-summary.selected) { border-color: #57977c; background: #14271f; }
 .task-completed-badge { border-color: #637b42; background: #1c2913; color: #c8e6a1; }
 .task-title-text { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 700; }
 .task-chevron { flex: 0 0 auto; color: #9ca3af; transform: rotate(0deg); transition: transform .14s ease; }

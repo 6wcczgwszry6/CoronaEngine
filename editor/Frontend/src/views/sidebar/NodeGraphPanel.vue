@@ -31,6 +31,7 @@ const { closePanel, isDocked } = useDockPanel();
 // different scene, which resets the main viewport camera when this panel opens.
 const sceneName = ref('');
 const workspaceRef = ref(null);
+let closeStopPromise = null;
 
 function applyViewportState(state = {}) {
   const nextSceneName = String(state?.sceneId || '').trim();
@@ -52,8 +53,11 @@ function requestViewportState() {
   appService.crossTabBroadcast('viewport-controls-request', { action: 'getState' }).catch(() => {});
 }
 
-async function stopNodeRunForClose() {
-  await workspaceRef.value?.stopForPanelClose?.();
+function stopNodeRunForClose() {
+  if (!closeStopPromise) {
+    closeStopPromise = Promise.resolve(workspaceRef.value?.stopForPanelClose?.());
+  }
+  return closeStopPromise;
 }
 function handleWindowClosing() {
   stopNodeRunForClose().catch(() => {});

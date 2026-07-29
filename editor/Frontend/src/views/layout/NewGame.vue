@@ -100,7 +100,7 @@
 <script setup>
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { projectLauncherService } from '@/utils/bridge';
+import { projectLauncherService, projectSettingsService } from '@/utils/bridge';
 import { initializeWorldTasks } from '@/services/cabbageAssistantContextService.js';
 import lanchat from '@/stores/lanchat.js';
 
@@ -138,6 +138,32 @@ const goHome = () => {
   router.push('/StartScreen');
 };
 
+const normalizeProjectPath = (value) => String(value || '')
+  .trim()
+  .replace(/\\/g, '/')
+  .replace(/\/+$/, '')
+  .toLocaleLowerCase('en-US');
+
+const activeProjectPathFrom = (response) => String(
+  response?.project_path
+    || response?.data?.project_path
+    || response?.data?.data?.project_path
+    || '',
+);
+
+const waitForPythonProjectActivation = async (expectedPath, timeoutMs = 7000) => {
+  const expected = normalizeProjectPath(expectedPath);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await projectSettingsService.getActiveProjectInfo();
+      if (normalizeProjectPath(activeProjectPathFrom(response)) === expected) return true;
+    } catch (_) {}
+    await new Promise((resolve) => window.setTimeout(resolve, 200));
+  }
+  return false;
+};
+
 const handleCreate = async () => {
   if (creating.value) return;
   const prompt = worldPrompt.value.trim(); // 允许为空：无提示词也可创建
@@ -154,19 +180,27 @@ const handleCreate = async () => {
     if (info && info.path) {
       const opened = await projectLauncherService.openProject(info.path);
       if (opened?.data) {
-        // Apply mode settings only after the new world is active. Otherwise the
-        // previous world can receive the new description and task request.
-        await projectLauncherService.setProjectMode(mode.value, { prompt });
-        try {
-          // A described world enters the editor with its first two personalized
-          // tasks ready instead of briefly showing unrelated default tutorials.
-          await initializeWorldTasks({
-            prompt,
-            mode: mode.value,
-            waitForCompletion: Boolean(prompt),
-          });
-        } catch (taskError) {
-          console.warn('World task initialization failed; opening the world with fallback tasks:', taskError?.message || taskError);
+        // Never send a world description or task request until Python confirms
+        // that the newly created world is the active project. Otherwise the old
+        // world can receive the new task plan and a stale node request can cross over.
+        const projectReady = await waitForPythonProjectActivation(info.path);
+        if (projectReady) {
+          await projectLauncherService.setProjectMode(mode.value, { prompt });
+          try {
+            // This operation only creates personalized guidance tasks. It never
+            // creates or modifies the project node graph.
+            await initializeWorldTasks({
+              prompt,
+              mode: mode.value,
+              waitForCompletion: Boolean(prompt),
+            });
+          } catch (taskError) {
+            console.warn('World task initialization failed; opening the world with fallback tasks:', taskError?.message || taskError);
+          }
+        } else {
+          // project.ini already contains the prompt. MainPage will retry loading the
+          // current world and let the task service recover from that durable value.
+          console.warn('Python project activation is still pending; skipped the creation-page task request to protect the previous world.');
         }
         try {
           if (lanchat.state.inRoom) {

@@ -938,8 +938,11 @@ export const aiService = {
     });
     return response?.data ?? response;
   },
-  loadCabbageContext: async () => {
-    const response = await editorApi.ai.submitRequest({ operation: 'cabbage.context.load' });
+  loadCabbageContext: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.load',
+      payload,
+    });
     return response?.data ?? response;
   },
   recordCabbageEvent: async (payload) => {

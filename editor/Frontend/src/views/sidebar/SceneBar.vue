@@ -30,79 +30,8 @@
             unsupported {{ sceneVision.unsupported_count }}
           </span>
         </div>
-        <span
-          v-if="scenePreviewSummary"
-          class="scene-preview-summary"
-          :class="{ error: scenePreviewHasError }"
-          :title="scenePreviewDetailTitle"
-          data-testid="scene-global-run-status"
-        >
-          {{ scenePreviewSummary }}
-        </span>
-        <button
-          type="button"
-          class="scene-preview-button"
-          :class="{ running: scenePreviewStopAvailable }"
-          :disabled="scenePreviewButtonDisabled"
-          :title="scenePreviewButtonTitle"
-          data-testid="scene-global-run-button"
-          @pointerdown.stop
-          @click.stop.prevent="toggleSceneScripts($event)"
-        >
-          {{ scenePreviewButtonLabel }}
-        </button>
       </div>
 
-      <div class="viewport-control-strip" data-testid="scenebar-viewport-controls">
-        <div class="viewport-control-group" role="group" aria-label="视口 UI 模式">
-          <button
-            v-for="item in viewportControlState.viewportUiModes"
-            :key="item.mode"
-            class="viewport-mode-button"
-            :class="{ active: viewportControlState.viewportUiMode === item.mode }"
-            type="button"
-            :title="item.title"
-            @click="setViewportUiModeFromSceneBar(item.mode)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
-        <div class="viewport-speed-control">
-          <span>速度</span>
-          <input
-            v-model.number="viewportControlState.cameraSpeed"
-            type="range"
-            min="0.01"
-            max="2"
-            step="0.01"
-            title="摄像头移动速度"
-            @input="handleCameraSpeedInput"
-          />
-          <strong>{{ cameraSpeedLabel }}</strong>
-        </div>
-      </div>
-
-      <!-- 场景基础设置 -->
-      <section class="scene-settings" data-guidance="scene-lighting" data-assistant-title="场景基础设置" data-assistant-description="调整当前场景的主光照方向与编辑网格显示。">
-        <div class="scene-settings-title">场景设置</div>
-        <div class="scene-setting-row">
-          <label class="scene-setting-label" for="scene-light-enabled">光照</label>
-          <input id="scene-light-enabled" v-model="sceneSettings.light.enabled" type="checkbox" data-assistant-title="场景光照" data-assistant-description="启用后可通过方向参数改变当前场景主光照的照射方向。" @change="updateSceneLight" />
-          <div class="scene-direction-inputs" :class="{ disabled: !sceneSettings.light.enabled }">
-            <label v-for="axis in ['x', 'y', 'z']" :key="axis">
-              <span>{{ axis.toUpperCase() }}</span>
-              <input v-model.number="sceneSettings.light.direction[axis]" type="number" step="0.1" :disabled="!sceneSettings.light.enabled" :data-assistant-title="`光照方向 ${axis.toUpperCase()}`" data-assistant-description="修改后会改变场景主光照从该轴方向照射的强度和方向。" @change="updateSceneLight" />
-            </label>
-          </div>
-        </div>
-        <div class="scene-setting-row">
-          <label class="scene-setting-label" for="scene-grid-enabled">编辑网格</label>
-          <input id="scene-grid-enabled" v-model="sceneSettings.gridEnabled" type="checkbox" data-assistant-title="编辑网格" data-assistant-description="控制当前场景地面参考网格的显示，方便判断位置、距离和方向。" @change="updateSceneGrid" />
-          <span class="scene-setting-help">用于摆放和对齐场景对象</span>
-        </div>
-      </section>
-
-      <!-- 资源搜索栏(B-2 竞态保护 + 防抖 + 错误兜底) -->
       <div
         v-if="RESOURCE_SEARCH_ENABLED"
         class="flex items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
@@ -634,358 +563,22 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { editorApi, appService, sceneService, projectService, resourceService, scriptingService } from '@/utils/bridge.js';
+import { editorApi, appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
-import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 import { cabbageContextService } from '@/services/cabbageAssistantContextService.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
 const { error: logError, warn: logWarn } = useErrorHandler('SceneBar');
 
-const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
-const defaultViewportControls = {
-  available: false,
-  previewRunning: false,
-  previewBusy: false,
-  previewStatusText: '',
-  preview: {},
-  viewportUiMode: 'flat2d',
-  viewportUiModes: [
-    { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI', active: true },
-    { mode: 'stereo3d', label: '3D UI', title: '光场屏立体 UI', active: false },
-  ],
-  cameraSpeed: 0.2,
-};
 const currentSceneName = ref('');
-const sceneSettings = reactive({
-  light: { enabled: true, direction: { x: 1, y: 1, z: 1 } },
-  gridEnabled: true,
-});
-
-const unwrapSceneData = (result) => result?.data ?? result ?? {};
-
-const loadSceneSettings = async () => {
-  if (!currentSceneName.value) return;
-  try {
-    const data = unwrapSceneData(await sceneService.getScene(currentSceneName.value));
-    const sun = data?.sun || {};
-    const direction = Array.isArray(sun.direction) ? sun.direction : [1, 1, 1];
-    sceneSettings.light.enabled = sun.enabled !== false;
-    sceneSettings.light.direction.x = Number(direction[0] ?? 1);
-    sceneSettings.light.direction.y = Number(direction[1] ?? 1);
-    sceneSettings.light.direction.z = Number(direction[2] ?? 1);
-    if (typeof data?.grid?.enabled === 'boolean') sceneSettings.gridEnabled = data.grid.enabled;
-    else if (typeof data?.floor_grid_enabled === 'boolean') sceneSettings.gridEnabled = data.floor_grid_enabled;
-  } catch (error) {
-    logWarn('读取场景基础设置失败', error);
-  }
-};
-
-const updateSceneLight = async () => {
-  if (!currentSceneName.value) return;
-  const direction = sceneSettings.light.direction;
-  try {
-    await sceneService.sunDirection(currentSceneName.value, sceneSettings.light.enabled, [Number(direction.x) || 0, Number(direction.y) || 0, Number(direction.z) || 0]);
-    void cabbageContextService.recordEvent({
-      type: 'lighting_changed',
-      category: 'lighting',
-      success: true,
-      details: { sceneName: currentSceneName.value },
-    });
-  } catch (error) {
-    logError('更新场景光照失败', error);
-  }
-};
-
-const updateSceneGrid = async () => {
-  if (!currentSceneName.value) return;
-  try {
-    await sceneService.floorGrid(currentSceneName.value, sceneSettings.gridEnabled);
-  } catch (error) {
-    logError('更新场景网格失败', error);
-  }
-};
-const viewportControlState = ref({ ...defaultViewportControls });
-const cameraSpeedLabel = computed(() =>
-  Number(viewportControlState.value.cameraSpeed || 0).toFixed(2)
-);
-let viewportControlPollTimer = null;
-let speedApplyTimer = null;
 let actorChangedCallbackToken = null;
 let focusPoseResultCallbackToken = null;
 let sceneTreeChangedCallbackToken = null;
-let directPreviewPollTimer = null;
-
-const normalizeViewportControls = (state = {}) => {
-  const modes = Array.isArray(state.viewportUiModes) && state.viewportUiModes.length > 0
-    ? state.viewportUiModes
-    : defaultViewportControls.viewportUiModes;
-  const speed = Number(state.cameraSpeed);
-  return {
-    available: Boolean(state.available),
-    previewRunning: Boolean(state.previewRunning),
-    previewBusy: Boolean(state.previewBusy),
-    previewStatusText: String(state.previewStatusText || ''),
-    preview: state.preview && typeof state.preview === 'object' ? { ...state.preview } : {},
-    viewportUiMode: state.viewportUiMode || defaultViewportControls.viewportUiMode,
-    viewportUiModes: modes.map((item) => ({
-      mode: item.mode,
-      label: item.label,
-      title: item.title || item.label,
-      active: Boolean(item.active),
-    })),
-    cameraSpeed: Number.isFinite(speed) ? Math.min(2, Math.max(0.01, speed)) : defaultViewportControls.cameraSpeed,
-  };
-};
-
-const getEditorControls = () => {
-  if (typeof window === 'undefined') return null;
-  return window[EDITOR_CONTROLS_KEY] || null;
-};
-
-const syncViewportControls = (state = {}) => {
-  viewportControlState.value = normalizeViewportControls(state);
-};
-
-const requestViewportControlsState = () => {
-  const controls = getEditorControls();
-  if (controls && typeof controls.getState === 'function') {
-    try {
-      syncViewportControls(controls.getState());
-      return;
-    } catch (error) {
-      logWarn('读取视口控制状态失败', error);
-    }
-  }
-  appService
-    .crossTabBroadcast('viewport-controls-request', { action: 'getState' })
-    .catch(() => {});
-};
-
-const setViewportUiModeFromSceneBar = async (mode) => {
-  const controls = getEditorControls();
-  if (controls && typeof controls.setViewportUiMode === 'function') {
-    const nextState = await controls.setViewportUiMode(mode);
-    if (nextState !== false) syncViewportControls(nextState);
-    return;
-  }
-  appService
-    .crossTabBroadcast('viewport-controls-request', { action: 'setViewportUiMode', mode })
-    .catch((error) => logWarn('切换视口 UI 模式失败', error));
-};
-
-const applyCameraSpeedFromSceneBar = async (value) => {
-  const speed = Math.min(2, Math.max(0.01, Number(value) || defaultViewportControls.cameraSpeed));
-  const controls = getEditorControls();
-  if (controls && typeof controls.setCameraSpeed === 'function') {
-    const nextState = await controls.setCameraSpeed(speed);
-    if (nextState !== false) syncViewportControls(nextState);
-    return;
-  }
-  appService
-    .crossTabBroadcast('viewport-controls-request', { action: 'setCameraSpeed', value: speed })
-    .catch((error) => logWarn('设置摄像头速度失败', error));
-};
-
-const handleCameraSpeedInput = () => {
-  if (speedApplyTimer) {
-    clearTimeout(speedApplyTimer);
-  }
-  speedApplyTimer = window.setTimeout(() => {
-    speedApplyTimer = null;
-    applyCameraSpeedFromSceneBar(viewportControlState.value.cameraSpeed);
-  }, 60);
-};
-
-const onViewportControlsState = (state) => {
-  syncViewportControls(state);
-};
-
-const scenePreviewActionBusy = ref(false);
-const activePreview = computed(() => viewportControlState.value.preview || {});
-const anyPreviewActive = computed(() =>
-  Boolean(viewportControlState.value.previewRunning || activePreview.value.hasSnapshot || activePreview.value.has_snapshot)
-);
-// 顶部按钮标记为“全局运行”，因此必须启动并停止项目级预览。
-// 项目常驻节点图是 project target；scene scope 会按设计跳过它。
-const scenePreviewStopAvailable = computed(() =>
-  anyPreviewActive.value && activePreview.value.scope === 'project'
-);
-const scenePreviewHasError = computed(() =>
-  Number(activePreview.value.errorCount ?? activePreview.value.error_count ?? 0) > 0
-  || activePreview.value.status === 'error'
-);
-const scenePreviewButtonDisabled = computed(() =>
-  scenePreviewActionBusy.value
-  || viewportControlState.value.previewBusy
-  || (!currentSceneName.value && !scenePreviewStopAvailable.value)
-  || (anyPreviewActive.value && !scenePreviewStopAvailable.value)
-);
-const scenePreviewButtonLabel = computed(() =>
-  scenePreviewStopAvailable.value ? '停止并恢复' : '全局运行'
-);
-const scenePreviewButtonTitle = computed(() => {
-  if (scenePreviewStopAvailable.value) return '停止正在运行的项目节点并恢复运行前状态';
-  if (!currentSceneName.value) return '请先打开场景';
-  if (anyPreviewActive.value) return '项目预览正在运行';
-  return '运行场景“节点”中的项目全局逻辑';
-});
-const scenePreviewSummary = computed(() => {
-  const preview = activePreview.value;
-  const state = preview.status || '';
-  const running = Number(preview.runningCount ?? preview.running_count ?? 0);
-  const started = Number(preview.startedCount ?? preview.started_count ?? 0);
-  const blockly = Number(preview.blocklyCount ?? preview.blockly_count ?? 0);
-  const nodeGraph = Number(preview.nodeGraphCount ?? preview.node_graph_count ?? 0);
-  const errors = Number(preview.errorCount ?? preview.error_count ?? 0);
-  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return '处理中...';
-  if (anyPreviewActive.value && !scenePreviewStopAvailable.value) {
-    return '项目预览运行中';
-  }
-  if (scenePreviewStopAvailable.value) {
-    return `运行 ${running || started}（积木 ${blockly} / 节点 ${nodeGraph}）`;
-  }
-  if (preview.scope !== 'project') return '';
-  if (state === 'completed') return errors ? `已完成，${errors} 个错误` : '已完成';
-  if (state === 'stopped') return '已停止并恢复';
-  if (state === 'error') return (preview.restoreError || preview.restore_error) ? '场景恢复失败' : (errors ? `${errors} 个脚本错误` : '运行失败');
-  if (!started && Array.isArray(preview.warnings) && preview.warnings.length) return '无可运行脚本';
-  return viewportControlState.value.previewStatusText || '';
-});
-const scenePreviewDetailTitle = computed(() => {
-  const preview = activePreview.value;
-  const details = [preview.restoreError || preview.restore_error, ...(preview.errors || []), ...(preview.warnings || [])].filter(Boolean);
-  return details.length ? details.join('\n') : scenePreviewSummary.value;
-});
-
-const unwrapBridgeData = (result) => result?.data ?? result;
-
-const publishGamePreviewStatus = (preview = {}) => {
-  if (typeof window === 'undefined') return;
-  window.__coronaGamePreviewState = preview;
-  window.dispatchEvent(new CustomEvent('corona-game-preview-status', { detail: preview }));
-};
-
-const applyDirectPreviewStatus = (payload = {}) => {
-  const preview = {
-    ...payload,
-    scope: payload.scope || 'project',
-    sceneName: payload.sceneName ?? payload.scene_name ?? '',
-    runningCount: Number(payload.runningCount ?? payload.running_count ?? 0),
-    startedCount: Number(payload.startedCount ?? payload.started_count ?? 0),
-    errorCount: Number(payload.errorCount ?? payload.error_count ?? 0),
-    blocklyCount: Number(payload.blocklyCount ?? payload.blockly_count ?? 0),
-    nodeGraphCount: Number(payload.nodeGraphCount ?? payload.node_graph_count ?? 0),
-    hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
-    stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
-  };
-  const active = ['starting', 'running', 'stopping'].includes(preview.status)
-    || preview.runningCount > 0
-    || preview.hasSnapshot;
-  viewportControlState.value = {
-    ...viewportControlState.value,
-    available: true,
-    previewRunning: active,
-    previewBusy: false,
-    preview,
-  };
-  publishGamePreviewStatus(preview);
-  return preview;
-};
-
-const pollDirectPreviewStatus = () => {
-  if (directPreviewPollTimer) clearTimeout(directPreviewPollTimer);
-  const poll = async () => {
-    try {
-      const preview = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
-      if (['starting', 'running', 'stopping'].includes(preview.status) || preview.stopPending) {
-        directPreviewPollTimer = window.setTimeout(poll, 500);
-      } else {
-        directPreviewPollTimer = null;
-      }
-    } catch (error) {
-      directPreviewPollTimer = null;
-      logWarn('查询全局运行状态失败', error);
-    }
-  };
-  directPreviewPollTimer = window.setTimeout(poll, 150);
-};
-
-const refreshPreviewStateSoon = () => {
-  requestViewportControlsState();
-  window.setTimeout(requestViewportControlsState, 250);
-  window.setTimeout(requestViewportControlsState, 900);
-};
-
-const toggleSceneScripts = async (event = null) => {
-  // Remove button focus immediately so the game's Space input cannot retrigger
-  // the preview button after global execution starts.
-  event?.currentTarget?.blur?.();
-  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return;
-  const controls = getEditorControls();
-  window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
-  window.__coronaPreviewActionPending = true;
-  window.__coronaPreviewPendingScope = 'project';
-  scenePreviewActionBusy.value = true;
-  let stopping = false;
-  try {
-    // 始终以后端状态决定本次点击是启动还是停止，避免场景栏轮询稍慢时
-    // 第二次点击再次发送 start，或第一次启动后仍显示成“全局运行”。
-    const live = applyDirectPreviewStatus(
-      unwrapBridgeData(await scriptingService.getGamePreviewStatus())
-    );
-    const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
-      || live.runningCount > 0
-      || live.hasSnapshot;
-    stopping = liveActive && live.scope === 'project';
-
-    if (stopping) {
-      if (controls && typeof controls.stopPreview === 'function') {
-        await controls.stopPreview();
-      } else {
-        applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.stopGamePreview()));
-        pollDirectPreviewStatus();
-      }
-    } else if (liveActive) {
-      throw new Error('当前场景预览正在运行，请先停止后再启动全局运行');
-    } else {
-      const request = { scope: 'project' };
-      let started;
-      if (controls && typeof controls.startPreview === 'function') {
-        // MainPage owns the save-before-run sequence when its controls are available.
-        started = await controls.startPreview(request);
-      } else {
-        // Detached/fallback SceneBar must flush the project node graph itself.
-        await flushProjectNodeGraphBeforeRun();
-        started = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.startGamePreview(request)));
-        pollDirectPreviewStatus();
-      }
-      if (started === false || started?.status === 'error') {
-        const refreshed = started?.status === 'error'
-          ? started
-          : applyDirectPreviewStatus(
-              unwrapBridgeData(await scriptingService.getGamePreviewStatus())
-            );
-        const message = refreshed.message || refreshed.errors?.[0] || '全局运行启动失败';
-        throw new Error(message);
-      }
-    }
-  } catch (error) {
-    logError(stopping ? '停止并恢复失败' : '全局运行失败', error);
-  } finally {
-    window.__coronaPreviewActionPendingCount = Math.max(0, Number(window.__coronaPreviewActionPendingCount || 1) - 1);
-    window.__coronaPreviewActionPending = window.__coronaPreviewActionPendingCount > 0;
-    if (!window.__coronaPreviewActionPending) window.__coronaPreviewPendingScope = '';
-    scenePreviewActionBusy.value = false;
-    refreshPreviewStateSoon();
-    pollDirectPreviewStatus();
-  }
-};
 
 const showLoading = (title, message, progress = 0) => {
   coronaEventBus.emit('loading-show', { title, message, progress });
@@ -2104,14 +1697,9 @@ onMounted(async () => {
   const activeScene = initData?.scenes?.[initData?.active_index ?? 0];
   currentSceneName.value = urlSceneName || activeScene?.path || DEFAULT_SCENE_NAME;
 
-  await loadSceneSettings();
   await OnInitObjTree();
   await RefreshRenderBackendState();
-  requestViewportControlsState();
-  viewportControlPollTimer = window.setInterval(requestViewportControlsState, 1000);
-
   // 后端对象变化：场景切换/物体变化时重新加载场景树
-  coronaEventBus.on('viewport-controls-state', onViewportControlsState);
   actorChangedCallbackToken = await editorApi.events.onActorChanged(onActorChangeEvent);
   sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onSceneTreeChangedEvent);
   focusPoseResultCallbackToken = await editorApi.events.onFocusPoseResult(handleFocusPoseResult);
@@ -2123,7 +1711,6 @@ const onActorChangeEvent = (payload, maybeSceneId /*, actorId, oldPath */) => {
   const sceneId = payload?.scene ?? maybeSceneId;
   if (type !== 'scene' || !sceneId) return;
   currentSceneName.value = sceneId;
-  loadSceneSettings();
   OnInitObjTree();
 };
 
@@ -2198,18 +1785,6 @@ onUnmounted(() => {
     clearTimeout(searchIndexRetry);
     searchIndexRetry = null;
   }
-  if (viewportControlPollTimer) {
-    clearInterval(viewportControlPollTimer);
-    viewportControlPollTimer = null;
-  }
-  if (speedApplyTimer) {
-    clearTimeout(speedApplyTimer);
-    speedApplyTimer = null;
-  }
-  if (directPreviewPollTimer) {
-    clearTimeout(directPreviewPollTimer);
-    directPreviewPollTimer = null;
-  }
   clearFocusPoseCache();
   clearActorSingleClickTimer();
   actorFocusSeq++;
@@ -2221,7 +1796,6 @@ onUnmounted(() => {
   pendingFocusCameraMoveFrames.forEach((rafId) => window.cancelAnimationFrame(rafId));
   pendingFocusCameraMoveFrames.clear();
 
-  coronaEventBus.off('viewport-controls-state', onViewportControlsState);
   if (actorChangedCallbackToken) {
     editorApi.off(actorChangedCallbackToken).catch((error) => {
       logError('Failed to unregister actor changed callback', error);
@@ -2245,118 +1819,6 @@ onUnmounted(() => {
 
 <style scoped>
 
-.scene-settings {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  padding: 9px 10px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.34);
-  background: rgba(36, 32, 22, 0.68);
-}
-
-.scene-settings-title {
-  color: #e9dfc5;
-  font-size: 12px;
-  font-weight: 700;
-}
-
-.scene-setting-row {
-  display: grid;
-  grid-template-columns: 62px auto minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  min-width: 0;
-}
-
-.scene-setting-label,
-.scene-setting-help {
-  color: #b9ad8f;
-  font-size: 11px;
-}
-
-.scene-setting-help {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.scene-direction-inputs {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 5px;
-  min-width: 0;
-}
-
-.scene-direction-inputs.disabled {
-  opacity: 0.5;
-}
-
-.scene-direction-inputs label {
-  display: grid;
-  grid-template-columns: 12px minmax(0, 1fr);
-  align-items: center;
-  gap: 3px;
-  color: #9d9278;
-  font-size: 9px;
-}
-
-.scene-direction-inputs input {
-  width: 100%;
-  min-width: 0;
-  border: 1px solid #55431f;
-  border-radius: 4px;
-  background: #0f0e0a;
-  color: #e5e7eb;
-  padding: 4px 5px;
-  font-size: 10px;
-  outline: none;
-}
-
-.scene-direction-inputs input:focus {
-  border-color: #d8b86c;
-}
-
-.scene-preview-button {
-  flex: 0 0 auto;
-  min-width: 72px;
-  padding: 4px 8px;
-  border: 1px solid rgba(216, 184, 108, 0.65);
-  border-radius: 5px;
-  background: rgba(75, 57, 28, 0.82);
-  color: #fff3c8;
-  font-size: 10px;
-  line-height: 1.2;
-  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
-}
-
-.scene-preview-button:hover:not(:disabled) {
-  background: rgba(112, 84, 35, 0.92);
-  border-color: #e5c77f;
-}
-
-.scene-preview-button.running {
-  border-color: rgba(211, 103, 86, 0.85);
-  background: rgba(117, 48, 42, 0.82);
-  color: #ffd9d2;
-}
-
-.scene-preview-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.scene-preview-summary {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #c9bea0;
-  font-size: 10px;
-}
-
-.scene-preview-summary.error {
-  color: #ff9b8f;
-}
 
 .scene-tools-panel {
   background: linear-gradient(180deg, rgba(33, 29, 18, 0.66), rgba(17, 16, 13, 0.58));
@@ -2368,93 +1830,4 @@ onUnmounted(() => {
   background: rgba(40, 40, 40, 0.24);
 }
 
-.viewport-control-strip {
-  display: grid;
-  grid-template-columns: minmax(124px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.34);
-  background:
-    linear-gradient(180deg, rgba(36, 32, 22, 0.64), rgba(21, 19, 13, 0.62)),
-    rgba(17, 16, 13, 0.62);
-}
-
-.viewport-control-group {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(52px, 1fr));
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
-  background: rgba(11, 13, 12, 0.58);
-}
-
-.viewport-mode-button {
-  height: 25px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: #b9ad8f;
-  background: transparent;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  transition:
-    background-color 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease,
-    transform 140ms ease;
-}
-
-.viewport-mode-button:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.viewport-mode-button.active {
-  color: #ffffff;
-  border-color: rgba(216, 184, 108, 0.5);
-  background: rgba(216, 184, 108, 0.24);
-}
-
-.viewport-mode-button:active {
-  transform: translateY(1px);
-}
-
-.viewport-mode-button:focus-visible {
-  outline: 2px solid rgba(216, 184, 108, 0.72);
-  outline-offset: 1px;
-}
-
-.viewport-speed-control {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(72px, 1fr) 34px;
-  align-items: center;
-  gap: 8px;
-  color: #b9ad8f;
-  font-size: 11px;
-}
-
-.viewport-speed-control input[type='range'] {
-  width: 100%;
-  height: 3px;
-  accent-color: #d8b86c;
-  cursor: pointer;
-}
-
-.viewport-speed-control strong {
-  color: #f2ead5;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 600;
-  text-align: right;
-}
-
-@media (max-width: 380px) {
-  .viewport-control-strip {
-    grid-template-columns: 1fr;
-  }
-}
 </style>

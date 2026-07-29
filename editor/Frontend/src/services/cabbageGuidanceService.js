@@ -4,8 +4,10 @@ import { closeFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
 import { getPluginManifest } from '@/config/pluginManifest.js';
 
 const PANEL_ZONES = Object.freeze({
+  MainPage: 'center',
   SceneTools: 'right',
   SceneDatas: 'right',
+  EditorSettings: 'right',
   // Keep node guidance in the main-page DOM so the highlight can target nodes,
   // ports and blocks without falling back to the legacy bottom dock.
   NodeGraphPanel: 'center',
@@ -14,6 +16,10 @@ const PANEL_ZONES = Object.freeze({
 const SELECTOR_KEYS = Object.freeze({
   'scene-import-model': '[data-guidance="scene-import-model"]',
   'scene-lighting': '[data-guidance="scene-lighting"]',
+  'settings-viewport': '[data-guidance="settings-viewport"]',
+  'settings-viewport-ui': '[data-guidance="settings-viewport-ui"]',
+  'settings-camera-speed': '[data-guidance="settings-camera-speed"]',
+  'settings-grid': '[data-guidance="settings-grid"]',
   'object-transform': '[data-guidance="object-transform"]',
   'object-physics': '[data-guidance="object-physics"]',
   'node-run': '[data-guidance="node-run"]',
@@ -128,11 +134,14 @@ function revealTarget(target = {}) {
 
 function refreshRects() {
   if (!state.active) return;
-  const dockStore = useDockStore();
-  const panel = dockStore.panels[state.guidance?.panelId];
-  if (!panel?.open || panel.mode !== 'docked') {
-    void stop({ restorePanelState: false });
-    return;
+  const panelId = state.guidance?.panelId;
+  if (panelId !== 'MainPage') {
+    const dockStore = useDockStore();
+    const panel = dockStore.panels[panelId];
+    if (!panel?.open || panel.mode !== 'docked') {
+      void stop({ restorePanelState: false });
+      return;
+    }
   }
 
   const step = currentStep();
@@ -181,6 +190,15 @@ function stopRectTracking() {
 
 async function ensurePanel(panelId, selectorKey = '') {
   if (!panelId) return false;
+  if (panelId === 'MainPage') {
+    restoreState = null;
+    window.dispatchEvent(new CustomEvent('cabbage-guidance-prepare', {
+      detail: { panelId, selectorKey },
+    }));
+    await wait(80);
+    const selector = SELECTOR_KEYS[String(selectorKey || '')] || '';
+    return selector ? Boolean(document.querySelector(selector)) : true;
+  }
   const dockStore = useDockStore();
   const panel = dockStore.panels[panelId];
   if (!panel) return false;
@@ -250,8 +268,8 @@ const TUTORIAL_GUIDANCE = Object.freeze({
     steps: [stepFor('object-transform', 'drag', '展开“变换”，修改位置、旋转或缩放中的任意一个参数。')],
   },
   'tutorial.adjust_lighting': {
-    panelId: 'SceneTools',
-    steps: [stepFor('scene-lighting', 'click', '在场景设置里切换光照，或修改光照方向的任意轴。')],
+    panelId: 'MainPage',
+    steps: [stepFor('scene-lighting', 'click', '在页面左上角切换光照，或修改光照方向的任意轴。')],
   },
   'tutorial.adjust_physics': {
     panelId: 'SceneDatas',
@@ -323,8 +341,10 @@ function guidanceForTask(source = {}) {
     const intent = String(source.guidanceIntent || '');
     const template = CHAT_GUIDANCE[intent];
     if (!template) return null;
-    const panelId = ['import_model', 'adjust_lighting'].includes(intent)
-      ? 'SceneTools'
+    const panelId = intent === 'adjust_lighting'
+      ? 'MainPage'
+      : intent === 'import_model'
+        ? 'SceneTools'
       : ['transform_model', 'adjust_physics'].includes(intent)
         ? 'SceneDatas'
         : 'NodeGraphPanel';
@@ -350,7 +370,9 @@ function guidanceForTask(source = {}) {
 
 function panelIdForTarget(target = {}) {
   const selectorKey = String(target.selectorKey || '');
+  if (selectorKey === 'scene-lighting') return 'MainPage';
   if (selectorKey.startsWith('scene-')) return 'SceneTools';
+  if (selectorKey.startsWith('settings-')) return 'EditorSettings';
   if (selectorKey.startsWith('object-')) return 'SceneDatas';
   if (selectorKey.startsWith('node-')) return 'NodeGraphPanel';
   if (['node', 'block', 'edge', 'port'].includes(String(target.kind || ''))) {
@@ -397,7 +419,8 @@ export const guidanceRegistry = {
       const template = CHAT_GUIDANCE[String(source.guidanceIntent || '')];
       if (!template) return null;
       const panelId = String(source.panelId || (
-        ['import_model', 'adjust_lighting'].includes(source.guidanceIntent) ? 'SceneTools'
+        source.guidanceIntent === 'adjust_lighting' ? 'MainPage'
+          : source.guidanceIntent === 'import_model' ? 'SceneTools'
           : ['transform_model', 'adjust_physics'].includes(source.guidanceIntent) ? 'SceneDatas'
             : 'NodeGraphPanel'
       ));

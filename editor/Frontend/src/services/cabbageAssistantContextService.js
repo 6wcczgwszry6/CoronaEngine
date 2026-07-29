@@ -1,20 +1,24 @@
 import { aiService } from '@/utils/bridge.js';
 
 const CHANNEL_NAME = 'corona-cabbage-assistant-context-v2';
+const TRANSIENT_CHANNEL_NAME = 'corona-cabbage-assistant-transient-v1';
 const STORAGE_KEY = 'corona.cabbageAssistantContext.v2';
 const CONTEXT_MESSAGE_TYPE = 'cabbage-assistant-context';
+const PRE_WARNING_MESSAGE_TYPE = 'cabbage-pre-warning';
 const TRANSFORM_DEBOUNCE_MS = 650;
 const PROFILE_POLL_MS = 1200;
 const GOAL_PLAN_POLL_MS = 1000;
 const GOAL_PLAN_TIMEOUT_MS = 60000;
 
 let channel = null;
+let transientChannel = null;
 let latestSnapshot = null;
 let writeChain = Promise.resolve();
 let activeScoreUpdateTaskId = '';
 const activeGoalPlanPolls = new Map();
 const pendingTransforms = new Map();
 const localSubscribers = new Set();
+const localPreWarningSubscribers = new Set();
 
 function getChannel() {
   if (typeof BroadcastChannel === 'undefined') return null;
@@ -22,13 +26,30 @@ function getChannel() {
   return channel;
 }
 
+function getTransientChannel() {
+  if (typeof BroadcastChannel === 'undefined') return null;
+  if (!transientChannel) transientChannel = new BroadcastChannel(TRANSIENT_CHANNEL_NAME);
+  return transientChannel;
+}
+
 function clone(value, fallback) {
   try { return JSON.parse(JSON.stringify(value)); } catch (_) { return fallback; }
 }
 
+function currentProjectPath() {
+  return String(window.localStorage?.getItem('corona.activeProjectPath') || '')
+    .trim().replace(/\\/g, '/').replace(/\/+$/, '');
+}
+
+function currentWorldId() {
+  const path = currentProjectPath();
+  if (!path) return '';
+  const parts = path.split('/').filter(Boolean);
+  return String(parts[parts.length - 1] || '');
+}
+
 function currentScopeId() {
-  const path = String(window.localStorage?.getItem('corona.activeProjectPath') || '')
-    .trim().replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase('en-US');
+  const path = currentProjectPath().toLocaleLowerCase('en-US');
   let hash = 2166136261;
   for (let index = 0; index < path.length; index += 1) {
     hash ^= path.charCodeAt(index);
@@ -72,6 +93,24 @@ function normalizeSnapshot(value) {
       ? selectedTaskKey
       : '',
     updatedAt: Number(context.updatedAt || value.updatedAt) || Date.now(),
+  };
+}
+
+function normalizePreWarningEnvelope(value) {
+  if (!value || typeof value !== 'object') return null;
+  const warning = clone(value.warning && typeof value.warning === 'object' ? value.warning : value, {});
+  const code = String(warning.code || '').trim();
+  const graphRevision = String(warning.graphRevision || '').trim();
+  if (!code || !graphRevision) return null;
+  return {
+    projectScopeId: String(value.projectScopeId || warning.projectScopeId || currentScopeId()),
+    worldId: String(value.worldId || warning.worldId || currentWorldId()),
+    publishedAt: Number(value.publishedAt) || Date.now(),
+    warning: {
+      ...warning,
+      code,
+      graphRevision,
+    },
   };
 }
 
@@ -154,21 +193,49 @@ export function publishCabbageAssistantContext(source = {}) {
   return publishSnapshot(createCabbageAssistantContext(source));
 }
 
+function sameSerializableValue(left, right) {
+  try { return JSON.stringify(left ?? {}) === JSON.stringify(right ?? {}); } catch (_) { return false; }
+}
+
+export function publishCabbageProjectContext(projectContext = {}, projectScopeId = '') {
+  const scope = String(projectScopeId || currentScopeId());
+  const current = readCabbageAssistantContext(scope);
+  // A secondary CEF page (for example the node window) must never create a
+  // task-less assistant snapshot before the main page has loaded the world context.
+  if (!current) return null;
+
+  const nextProjectContext = clone(projectContext, {});
+  if (sameSerializableValue(current.projectContext, nextProjectContext)) return current;
+
+  return publishSnapshot({
+    ...current,
+    projectScopeId: scope,
+    projectContext: nextProjectContext,
+    updatedAt: Math.max(Date.now(), Number(current.updatedAt || 0) + 1),
+  });
+}
+
 export function readCabbageAssistantContext(projectScopeId = '') {
+  const expectedScope = String(projectScopeId || '');
   let snapshot = latestSnapshot;
-  if (!snapshot) {
+  if (!snapshot || (expectedScope && snapshot.projectScopeId !== expectedScope)) {
     try { snapshot = normalizeSnapshot(JSON.parse(window.localStorage?.getItem(STORAGE_KEY) || 'null')); } catch (_) { snapshot = null; }
   }
   if (!snapshot) return null;
-  if (projectScopeId && snapshot.projectScopeId !== String(projectScopeId)) return null;
+  if (expectedScope && snapshot.projectScopeId !== expectedScope) return null;
   return clone(snapshot, null);
 }
 
 export async function loadCurrentWorld() {
   cancelPendingTransformEvents();
-  const response = await aiService.loadCabbageContext();
+  const expectedWorldId = currentWorldId();
+  const response = await aiService.loadCabbageContext({ worldId: expectedWorldId });
   if (response?.success !== true || !response?.context) {
     throw new Error(response?.message || '加载当前世界的包菜上下文失败');
+  }
+  const loadedWorldId = String(response.context.worldId || '');
+  if (expectedWorldId && loadedWorldId !== expectedWorldId) {
+    throw new Error(`后端返回了其他世界的上下文（${loadedWorldId || '未知'}），已拒绝加载`);
   }
   return publishSnapshot({ context: response.context, projectScopeId: currentScopeId() });
 }
@@ -215,6 +282,7 @@ function trackGoalPlan(taskId, expectedScopeId = '') {
 export async function initializeWorldTasks({ prompt = '', mode = 'story', waitForCompletion = true } = {}) {
   const expectedScopeId = currentScopeId();
   const response = await aiService.startCabbageGoalPlan({
+    worldId: currentWorldId(),
     prompt: String(prompt || '').trim(),
     mode: String(mode || 'story'),
   });
@@ -347,6 +415,47 @@ export function subscribeCabbageAssistantContext(listener, { projectScopeId = ''
   };
 }
 
+// Repeated-issue warnings are intentionally transient. They travel between the
+// node graph window and the main task board, but are never written to localStorage
+// or the world's CabbageAssistant/context.json.
+export function publishCabbagePreWarning(warning = {}) {
+  const envelope = normalizePreWarningEnvelope(warning);
+  if (!envelope) return null;
+  for (const subscriber of Array.from(localPreWarningSubscribers)) {
+    try { subscriber(envelope); } catch (error) {
+      console.warn('[CabbageContext] local pre-warning subscriber failed', error?.message || error);
+    }
+  }
+  try {
+    getTransientChannel()?.postMessage({ type: PRE_WARNING_MESSAGE_TYPE, payload: envelope });
+  } catch (_) {}
+  return clone(envelope.warning, envelope.warning);
+}
+
+export function subscribeCabbagePreWarnings(listener, { projectScopeId = '', worldId = '' } = {}) {
+  const getExpectedScope = () => String(typeof projectScopeId === 'function' ? projectScopeId() : projectScopeId || '');
+  const getExpectedWorld = () => String(typeof worldId === 'function' ? worldId() : worldId || '');
+  const accept = (value) => {
+    const envelope = normalizePreWarningEnvelope(value);
+    if (!envelope) return;
+    const expectedScope = getExpectedScope();
+    const expectedWorld = getExpectedWorld();
+    if (expectedScope && envelope.projectScopeId !== expectedScope) return;
+    if (expectedWorld && envelope.worldId && envelope.worldId !== expectedWorld) return;
+    listener(clone(envelope.warning, envelope.warning), clone(envelope, envelope));
+  };
+  const onBroadcast = (event) => {
+    if (event?.data?.type === PRE_WARNING_MESSAGE_TYPE) accept(event.data.payload);
+  };
+  const currentChannel = getTransientChannel();
+  localPreWarningSubscribers.add(accept);
+  currentChannel?.addEventListener('message', onBroadcast);
+  return () => {
+    localPreWarningSubscribers.delete(accept);
+    currentChannel?.removeEventListener('message', onBroadcast);
+  };
+}
+
 export function cancelPendingTransformEvents() {
   for (const entry of pendingTransforms.values()) {
     if (entry.timer) window.clearTimeout(entry.timer);
@@ -371,5 +480,7 @@ export const cabbageContextService = {
   updateTask,
   appendMessage,
   requestProfileScoreUpdate,
+  publishPreWarning: publishCabbagePreWarning,
+  subscribePreWarnings: subscribeCabbagePreWarnings,
   flush,
 };

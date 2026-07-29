@@ -326,7 +326,10 @@ import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
   cabbageContextService,
   publishCabbageAssistantContext,
+  publishCabbagePreWarning,
+  publishCabbageProjectContext,
   readCabbageAssistantContext,
+  subscribeCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
 import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
 
@@ -511,6 +514,8 @@ let isLoading = false,
   sceneTreeChangedCallbackToken = null,
   actorOptionsRefreshTimer = null,
   actorOptionsRefreshSequence = 0,
+  graphLoadSequence = 0,
+  unsubscribeCabbageContext = null,
   unregisterProjectNodeGraphSaveHandler = null,
   loadedProjectPath = '',
   componentMounted = false,
@@ -537,11 +542,18 @@ function scheduleRememberedIssueCheck(delay = 140) {
     if (!componentMounted || isLoading || !initialLoadComplete || !isProjectTarget.value) return;
     const snapshot = graphSnapshot();
     const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
-    cabbageAssistant.evaluateRememberedIssuePatterns(
+    const warning = cabbageAssistant.evaluateRememberedIssuePatterns(
       snapshot,
       reviewGraphRevision(snapshot, scope),
       generatedProjectContext(),
     );
+    if (warning) {
+      publishCabbagePreWarning({
+        projectScopeId: reviewScopeId(scope),
+        worldId: cabbageAssistant.worldId,
+        warning,
+      });
+    }
   }, Math.max(0, Number(delay) || 0));
 }
 function currentAssistanceProfile() {
@@ -2015,6 +2027,7 @@ async function saveNow(targetOverride = null, { force = false } = {}) {
 }
 
 async function loadGraphForCurrentTarget() {
+  const loadSequence = ++graphLoadSequence;
   resetZoom();
   initialLoadComplete = false;
   if (!targetReady.value) {
@@ -2027,8 +2040,10 @@ async function loadGraphForCurrentTarget() {
   isLoading = true;
   saveLabel.value = '\u9879\u76ee\u52a0\u8f7d\u4e2d...';
   let shouldMigrateLocal = false;
+  let loadCancelled = false;
   try {
     await refreshActiveProjectPath();
+    if (!componentMounted || loadSequence !== graphLoadSequence) return;
     let requestProjectPath = activeProjectPath.value || readActiveProjectPath();
     let target = null;
     let response = null;
@@ -2043,6 +2058,7 @@ async function loadGraphForCurrentTarget() {
         script_kind: 'node_graph',
         project_path: requestProjectPath,
       }));
+      if (!componentMounted || loadSequence !== graphLoadSequence) return;
 
       if (response?.status === 'error' && response?.code === 'PROJECT_CONTEXT_CHANGED' && attempt === 0) {
         const backendProjectPath = String(response.project_path || '').trim();
@@ -2090,14 +2106,21 @@ async function loadGraphForCurrentTarget() {
       saveLabel.value = '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25';
     }
   } finally {
-    isLoading = false;
-    initialLoadComplete = true;
-    graphDirty = false;
-    await loadEmbeddedWorkspaceStates();
-    reconcileSceneActorReferenceIssues();
-    requestNodeGraphReview();
+    loadCancelled = !componentMounted || loadSequence !== graphLoadSequence;
+    if (!loadCancelled) {
+      isLoading = false;
+      initialLoadComplete = true;
+      graphDirty = false;
+      await loadEmbeddedWorkspaceStates();
+      loadCancelled = !componentMounted || loadSequence !== graphLoadSequence;
+      if (!loadCancelled) {
+        reconcileSceneActorReferenceIssues();
+        requestNodeGraphReview();
+      }
+    }
   }
-  if (shouldMigrateLocal) {
+  if (loadCancelled) return;
+  if (shouldMigrateLocal && componentMounted && loadSequence === graphLoadSequence) {
     graphDirty = true;
     await saveNow();
   }
@@ -2425,10 +2448,10 @@ async function stopNodeGraphRun(statusText = '已停止', restoreState = false, 
 async function stopForPanelClose() {
   panelClosing = true;
   if (!panelCloseStopPromise) {
-    panelCloseStopPromise = stopNodeGraphRun('节点窗口已关闭，运行已停止', false, true)
-      .finally(() => {
-        panelCloseStopPromise = null;
-      });
+    // Closing can be reported by the title bar, pagehide, beforeunload and both
+    // parent/child unmount hooks. Keep one promise for the rest of this component
+    // lifetime so the backend stop and input unlock are never issued repeatedly.
+    panelCloseStopPromise = stopNodeGraphRun('\u8282\u70b9\u7a97\u53e3\u5df2\u5173\u95ed\uff0c\u8fd0\u884c\u5df2\u505c\u6b62', false, true);
   }
   return panelCloseStopPromise;
 }
@@ -2690,8 +2713,11 @@ async function refreshSceneActorOptions({ rescan = false } = {}) {
 
     reconcileSceneActorReferenceIssues();
     if (changed) {
-      cabbageAssistant.updateProjectContext(generatedProjectContext());
-      publishCabbageAssistantContext(cabbageAssistant);
+      const projectContext = generatedProjectContext();
+      cabbageAssistant.updateProjectContext(projectContext);
+      publishCabbageProjectContext(projectContext, reviewScopeId(
+        normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+      ));
       scheduleRememberedIssueCheck(80);
       if (rescan) requestNodeGraphReview(0);
     }
@@ -2703,8 +2729,11 @@ async function refreshSceneActorOptions({ rescan = false } = {}) {
       sceneActorContext.revision = '';
       sceneActorContext.actors = [];
       window.__coronaBlocklyActorOptions = [];
-      cabbageAssistant.updateProjectContext(generatedProjectContext());
-      publishCabbageAssistantContext(cabbageAssistant);
+      const projectContext = generatedProjectContext();
+      cabbageAssistant.updateProjectContext(projectContext);
+      publishCabbageProjectContext(projectContext, reviewScopeId(
+        normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+      ));
     }
     logError('Failed to refresh scene actor options', error);
     return false;
@@ -2787,24 +2816,46 @@ function onProjectStorageChanged(event) {
 
 watch(
   () => [props.sceneName, props.actorName, props.targetType],
-  async (_n, old) => {
+  async (next, old) => {
+    if (!componentMounted || !old) return;
+
+    const nextTargetType = next?.[2] === 'model' ? 'actor' : next?.[2] || 'actor';
+    const oldTargetType = old?.[2] === 'model' ? 'actor' : old?.[2] || 'actor';
+    const sceneChanged = String(next?.[0] || '') !== String(old?.[0] || '');
+    const targetChanged = nextTargetType !== oldTargetType
+      || (nextTargetType !== 'project' && (
+        sceneChanged || String(next?.[1] || '') !== String(old?.[1] || '')
+      ));
+
+    // The project node graph does not change when MainPage reports the active scene.
+    // Only refresh object choices; reloading the whole graph here used to duplicate the
+    // expensive Blockly initialization every time the node window was opened.
+    if (!targetChanged) {
+      if (sceneChanged && initialLoadComplete && !isLoading) {
+        await refreshSceneActorOptions();
+        if (componentMounted) reconcileSceneActorReferenceIssues();
+      }
+      return;
+    }
+
     const oldTarget = {
-      targetType: old?.[2] || 'actor',
+      targetType: oldTargetType,
       sceneName: old?.[0] || '',
       actorName: old?.[1] || '',
     };
-    if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('已停止');
+    if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('\u5df2\u505c\u6b62');
+    if (!componentMounted) return;
     clearExternalDrag();
     cancelMacroPointerDrag();
     if ((oldTarget.targetType === 'project' || oldTarget.actorName) && !isLoading) await saveNow(oldTarget);
+    if (!componentMounted) return;
     runStatus.value = '';
     currentRunNodeId.value = '';
     runWarnings.value = [];
     syncGeneratedNodeGraphConsumer();
     await refreshSceneActorOptions();
-    await loadGraphForCurrentTarget();
-  },
-  { immediate: true }
+    if (componentMounted) await loadGraphForCurrentTarget();
+  }
 );
 function registerNodeGraphFlusher() {
   const flushers = window.__coronaNodeGraphFlushers instanceof Set
@@ -2832,21 +2883,71 @@ function unregisterNodeGraphFlusher() {
 onMounted(async () => {
   componentMounted = true;
   activeProjectPath.value = readActiveProjectPath() || activeProjectPath.value;
+
+  // The node graph runs in its own CEF page and therefore owns a separate Pinia
+  // instance. Hydrate it before the first actor scan so it cannot broadcast an
+  // empty task list over the main page's already-loaded world context.
+  const currentCabbageScopeId = () => reviewScopeId(
+    normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+  );
+  const cachedCabbageContext = readCabbageAssistantContext(currentCabbageScopeId());
+  if (cachedCabbageContext) cabbageAssistant.hydrateContext(cachedCabbageContext);
+  unsubscribeCabbageContext = subscribeCabbageAssistantContext(
+    (snapshot) => {
+      if (componentMounted) cabbageAssistant.hydrateContext(snapshot);
+    },
+    { projectScopeId: currentCabbageScopeId, emitCurrent: true },
+  );
+
   window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.addEventListener('storage', onProjectStorageChanged);
   window.addEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
-  try {
-    actorChangedCallbackToken = await editorApi.events.onActorChanged(onNodeGraphActorChanged);
-  } catch (error) {
-    logError('Failed to subscribe to actor changes', error);
-  }
-  try {
-    sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onNodeGraphSceneTreeChanged);
-  } catch (error) {
-    logError('Failed to subscribe to scene tree changes', error);
-  }
-  await refreshSceneActorOptions();
+
+  // Establish the visible layout before waiting for bridge subscriptions and data loads,
+  // so the native floating surface paints immediately instead of appearing frozen.
+  loadLayout();
+  resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
+  if (workspaceRootRef.value) resizeObserver.observe(workspaceRootRef.value);
+  resizeEmbeddedWorkspaces();
   syncGeneratedNodeGraphConsumer();
+
+  // Event subscription is useful for later object updates, but it must not block the
+  // first graph paint. Some native bridge shutdown/startup transitions can make an
+  // event registration noticeably slower than loading the saved graph itself.
+  Promise.allSettled([
+    editorApi.events.onActorChanged(onNodeGraphActorChanged),
+    editorApi.events.onSceneTreeChanged(onNodeGraphSceneTreeChanged),
+  ]).then((subscriptionResults) => {
+    const [actorSubscription, sceneTreeSubscription] = subscriptionResults;
+    if (actorSubscription.status === 'fulfilled') {
+      if (componentMounted) actorChangedCallbackToken = actorSubscription.value;
+      else editorApi.off(actorSubscription.value).catch(() => {});
+    } else {
+      logError('Failed to subscribe to actor changes', actorSubscription.reason);
+    }
+    if (sceneTreeSubscription.status === 'fulfilled') {
+      if (componentMounted) sceneTreeChangedCallbackToken = sceneTreeSubscription.value;
+      else editorApi.off(sceneTreeSubscription.value).catch(() => {});
+    } else {
+      logError('Failed to subscribe to scene tree changes', sceneTreeSubscription.reason);
+    }
+  });
+
+  // Actor choices are needed by object-reference dropdowns, so finish the first scan
+  // before hydrating Blockly. Unlike the event subscriptions above, this request is on
+  // the critical path and is guarded against a panel that was closed while awaiting it.
+  await refreshSceneActorOptions();
+  if (!componentMounted) return;
+
+  // Initial graph data used to be loaded once by the immediate watcher and again by
+  // onMounted. Keep a single load after the actor scan has completed.
+  await loadGraphForCurrentTarget();
+  if (!componentMounted) return;
+  if (sceneActorContext.sceneName !== String(props.sceneName || '').trim()) {
+    await refreshSceneActorOptions();
+    if (!componentMounted) return;
+  }
+
   if (isProjectTarget.value) {
     stopNodeGraphReview = startNodeGraphReview({
       getWorkspace: () => ({
@@ -2878,17 +2979,16 @@ onMounted(async () => {
   if (isProjectTarget.value) {
     unregisterProjectNodeGraphSaveHandler = registerProjectNodeGraphSaveHandler(saveNow);
   }
-  loadLayout();
-  resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
-  if (workspaceRootRef.value) resizeObserver.observe(workspaceRootRef.value);
-  resizeEmbeddedWorkspaces();
 });
 onBeforeUnmount(() => {
   componentMounted = false;
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onProjectStorageChanged);
   window.removeEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
+  unsubscribeCabbageContext?.();
+  unsubscribeCabbageContext = null;
   actorOptionsRefreshSequence += 1;
+  graphLoadSequence += 1;
   if (actorOptionsRefreshTimer) window.clearTimeout(actorOptionsRefreshTimer);
   actorOptionsRefreshTimer = null;
   if (actorChangedCallbackToken) {

@@ -680,9 +680,10 @@ class CabbageContextService:
         temp_path.write_text(json.dumps(context, ensure_ascii=False, indent=2), encoding="utf-8")
         os.replace(temp_path, path)
 
-    def load(self) -> dict[str, Any]:
+    def load(self, payload: Any = None) -> dict[str, Any]:
         try:
             project_path = self._active_project_path()
+            self._validate_payload_world(project_path, payload)
             project_prompt, project_mode = self._project_goal_metadata(project_path)
             with self._lock:
                 context = self._read_locked(project_path)
@@ -697,6 +698,7 @@ class CabbageContextService:
                 # Recover from its missed/raced request by treating project.ini as the
                 # durable source of the original world description.
                 goal_plan = self.start_goal_plan({
+                    "worldId": project_path.name,
                     "prompt": project_prompt,
                     "mode": project_mode,
                 })
@@ -1485,6 +1487,7 @@ class CabbageContextService:
             mode = "story"
         try:
             project_path = self._active_project_path()
+            self._validate_payload_world(project_path, payload)
             now = self._now_ms()
             with self._lock:
                 context = self._read_locked(project_path)

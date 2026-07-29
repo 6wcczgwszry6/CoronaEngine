@@ -133,7 +133,7 @@ const selectedKey = computed({
   get: () => assistant.selectedTaskKey,
   set: (value) => {
     assistant.selectTask(value);
-    publishCabbageAssistantContext(assistant);
+    if (assistant.selectedTask?.transient !== true) publishCabbageAssistantContext(assistant);
   },
 });
 
@@ -142,6 +142,12 @@ const contextTasks = computed(() => {
   const selected = assistant.completedTasks.find((task) => task.taskKey === assistant.selectedTaskKey);
   if (selected && !tasks.some((task) => task.taskKey === selected.taskKey)) {
     tasks.push({ ...selected, __history: true });
+  }
+  const selectedWarning = assistant.preWarning?.taskKey === assistant.selectedTaskKey
+    ? assistant.preWarning
+    : null;
+  if (selectedWarning && !tasks.some((task) => task.taskKey === selectedWarning.taskKey)) {
+    tasks.unshift({ ...selectedWarning, __transient: true });
   }
   return tasks;
 });
@@ -396,6 +402,25 @@ function closeFloat() {
   closePanel();
 }
 
+function resetChatForProjectChange() {
+  const taskId = activeTaskId.value;
+  const requestKind = activeRequestKind.value;
+  clearPollTimer();
+  assistant.activeRequestId = '';
+  activeTaskId.value = '';
+  activeRequestKind.value = '';
+  streamingContent.value = '';
+  assistant.chatBusy = false;
+  assistant.chatError = '';
+  activeMessageContext = null;
+  if (requestKind === 'generation') cancelActiveNodeGraphGeneration().catch(() => {});
+  else if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
+}
+
+function resetChatForProjectStorageChange(event) {
+  if (event?.key === 'corona.activeProjectPath') resetChatForProjectChange();
+}
+
 function focusResidentComposer() {
   if (!props.resident) return;
   nextTick(() => {
@@ -416,6 +441,8 @@ onMounted(() => {
   if (props.resident) {
     window.addEventListener('cabbage-chat-focus-request', focusResidentComposer);
   }
+  window.addEventListener('corona-active-project-changed', resetChatForProjectChange);
+  window.addEventListener('storage', resetChatForProjectStorageChange);
   const currentProjectScopeId = () => reviewScopeId(
     String(window.localStorage?.getItem('corona.activeProjectPath') || '')
   );
@@ -427,6 +454,8 @@ onMounted(() => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('cabbage-chat-focus-request', focusResidentComposer);
+  window.removeEventListener('corona-active-project-changed', resetChatForProjectChange);
+  window.removeEventListener('storage', resetChatForProjectStorageChange);
   unsubscribeAssistantContext?.();
   unsubscribeAssistantContext = null;
   clearPollTimer();

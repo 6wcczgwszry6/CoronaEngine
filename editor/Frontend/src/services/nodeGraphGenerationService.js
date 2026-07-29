@@ -19,6 +19,16 @@ const GENERATION_TIMEOUT_MS = 120000;
 
 let activeGeneration = null;
 
+const ACTIVE_PROJECT_PATH_KEY = 'corona.activeProjectPath';
+
+function normalizeProjectPath(value) {
+  return String(value || '').trim().replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase('en-US');
+}
+
+function currentProjectPath() {
+  return normalizeProjectPath(window.localStorage?.getItem(ACTIVE_PROJECT_PATH_KEY) || '');
+}
+
 function wait(delay) {
   return new Promise((resolve) => window.setTimeout(resolve, delay));
 }
@@ -79,11 +89,19 @@ function assertCurrentRequest(state) {
   if (activeGeneration !== state || state.cancelled) {
     throw new Error('已停止本次节点生成。');
   }
+  if (state.projectPath !== currentProjectPath()) {
+    state.cancelled = true;
+    throw new Error('生成期间已切换世界，旧结果不会修改当前节点图。');
+  }
 }
 
 export async function generateNodeGraphFromInstruction(instruction, operation = 'create') {
   if (activeGeneration) throw new Error('包菜正在生成上一份节点逻辑，请先等待或停止。');
-  const state = { taskId: '', cancelled: false };
+  const state = {
+    taskId: '',
+    cancelled: false,
+    projectPath: currentProjectPath(),
+  };
   activeGeneration = state;
   try {
     const snapshot = await acquireSnapshot();
@@ -148,6 +166,7 @@ export async function generateNodeGraphFromInstruction(instruction, operation = 
       throw new Error('生成期间当前世界或节点逻辑已经改变，旧结果没有覆盖你的编辑。');
     }
 
+    assertCurrentRequest(state);
     const applied = await applyGeneratedNodeGraph(generated);
     if (applied?.success !== true) {
       const details = Array.isArray(applied?.errors) ? applied.errors.join('；') : '';
@@ -186,4 +205,18 @@ export async function cancelActiveNodeGraphGeneration() {
     try { await aiService.cancelNodeGraphGeneration(state.taskId); } catch (_) {}
   }
   return true;
+}
+
+
+function cancelGenerationForProjectChange() {
+  void cancelActiveNodeGraphGeneration();
+}
+
+function cancelGenerationForProjectStorageChange(event) {
+  if (event?.key === ACTIVE_PROJECT_PATH_KEY) void cancelActiveNodeGraphGeneration();
+}
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('corona-active-project-changed', cancelGenerationForProjectChange);
+  window.addEventListener('storage', cancelGenerationForProjectStorageChange);
 }

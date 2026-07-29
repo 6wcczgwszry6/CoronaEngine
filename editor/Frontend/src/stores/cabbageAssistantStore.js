@@ -360,6 +360,8 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     selectedTask() {
       return this.tasks.find((task) => task.taskKey === this.selectedTaskKey)
         || this.completedTasks.find((task) => task.taskKey === this.selectedTaskKey)
+        || (this.preWarning?.taskKey === this.selectedTaskKey ? this.preWarning : null)
+        || (this.ephemeralTip?.taskKey === this.selectedTaskKey ? this.ephemeralTip : null)
         || null;
     },
     taskCount() {
@@ -458,7 +460,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         .filter((message) => message.content);
       this.recentOperationEvents = clone(context.recentOperationEvents || [], []);
       if (this.selectedTaskKey && !this.tasks.some((task) => task.taskKey === this.selectedTaskKey)
-        && !this.completedTasks.some((task) => task.taskKey === this.selectedTaskKey)) {
+        && !this.completedTasks.some((task) => task.taskKey === this.selectedTaskKey)
+        && this.preWarning?.taskKey !== this.selectedTaskKey
+        && this.ephemeralTip?.taskKey !== this.selectedTaskKey) {
         this.selectedTaskKey = '';
       }
       this.contextUpdatedAt = Math.max(this.contextUpdatedAt, incomingUpdatedAt);
@@ -540,7 +544,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.activeTasks = [...guidanceTasks, ...nextNodeTasks];
       const nextVisibleKeys = new Set(this.tasks.map((task) => task.taskKey));
       if ([...nextVisibleKeys].some((key) => !previousVisibleKeys.has(key))) this.attentionToken += 1;
-      if (this.selectedTaskKey && !nextVisibleKeys.has(this.selectedTaskKey)) this.selectedTaskKey = '';
+      if (this.selectedTaskKey && !nextVisibleKeys.has(this.selectedTaskKey)
+        && this.preWarning?.taskKey !== this.selectedTaskKey
+        && this.ephemeralTip?.taskKey !== this.selectedTaskKey) this.selectedTaskKey = '';
 
       if (!issues.length && result.optimizationTip) {
         this.showOptimizationTip(result.optimizationTip, this.graphRevision);
@@ -611,10 +617,18 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       if (this.shownOptimizationRevisions.includes(revision)) return false;
       const now = Date.now();
       if (this.lastOptimizationTipAt && now - this.lastOptimizationTipAt < OPTIMIZATION_TIP_COOLDOWN_MS) return false;
+      const taskKey = `optimization:${revision}:${tipKey}`;
       this.ephemeralTip = {
+        taskKey,
+        issueKey: taskKey,
+        type: 'optimization-tip',
+        discipline: 'opinion',
+        status: 'active',
+        transient: true,
         tipKey,
         title,
         message,
+        suggestion: String(tip.suggestion || message).trim().slice(0, 360),
         graphRevision: revision,
         createdAt: now,
         expiresAt: now + OPTIMIZATION_TIP_DURATION_MS,
@@ -629,7 +643,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     },
 
     clearOptimizationTip() {
+      const taskKey = String(this.ephemeralTip?.taskKey || '');
       this.ephemeralTip = null;
+      if (taskKey && this.selectedTaskKey === taskKey) this.selectedTaskKey = '';
     },
 
     showPreWarning(warning = {}) {
@@ -639,11 +655,19 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       const warningKey = `${revision}|${code}|${patternKey}`;
       if (!revision || !PRE_WARNING_CODES.has(code) || this.shownPreWarningKeys.includes(warningKey)) return false;
       const now = Date.now();
+      const taskKey = `pre-warning:${warningKey}`;
       this.preWarning = {
         warningKey,
+        taskKey,
+        issueKey: taskKey,
+        type: 'pre-warning',
+        discipline: 'hint',
+        status: 'active',
+        transient: true,
         code,
         title: String(warning.title || '编辑提醒').trim().slice(0, 80),
         message: String(warning.message || '').trim().slice(0, 360),
+        suggestion: String(warning.suggestion || warning.message || '').trim().slice(0, 360),
         nodeId: String(warning.nodeId || ''),
         blockId: String(warning.blockId || ''),
         edgeId: String(warning.edgeId || ''),
@@ -658,7 +682,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     },
 
     clearPreWarning() {
+      const taskKey = String(this.preWarning?.taskKey || '');
       this.preWarning = null;
+      if (taskKey && this.selectedTaskKey === taskKey) this.selectedTaskKey = '';
     },
 
     evaluateRememberedIssuePatterns(workspace = {}, graphRevision = '', projectContext = {}) {
@@ -753,6 +779,8 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       const key = String(taskKey || '');
       this.selectedTaskKey = this.tasks.some((task) => task.taskKey === key)
         || this.completedTasks.some((task) => task.taskKey === key)
+        || this.preWarning?.taskKey === key
+        || this.ephemeralTip?.taskKey === key
         ? key
         : '';
     },
