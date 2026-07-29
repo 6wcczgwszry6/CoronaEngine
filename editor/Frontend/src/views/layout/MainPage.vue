@@ -490,6 +490,7 @@ import {
   closeFloatingPanel,
   consumeExpectedPanelClosed,
   isFloatingPanel,
+  openFloatingPanel,
 } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
@@ -520,7 +521,6 @@ const router = useRouter();
 const dockStore = useDockStore();
 const cabbageAssistant = useCabbageAssistantStore();
 const dockShortcuts = [
-  { id: 'AITalkBar', label: 'AI 对话', icon: 'AI' },
   { id: 'SceneTools', label: '场景管理', icon: '景' },
   { id: 'NodeGraphPanel', label: '节点', icon: '点' },
 ];
@@ -571,6 +571,10 @@ const toggleDockShortcut = async (id) => {
   if (panel.open) {
     dockStore.closePanel(id);
     nextTick(() => window.dispatchEvent(new Event('resize')));
+    return;
+  }
+  if (id === 'NodeGraphPanel') {
+    await openFloatingPanel(dockStore, id);
     return;
   }
   openDockedPanel(id);
@@ -2719,7 +2723,12 @@ onMounted(async () => {
 
   // Primary work docks start hidden. If this main CEF page is reused, close any native
   // floating tab left by the previous project before resetting the shortcut state.
-  for (const panelId of [...dockShortcuts.map((item) => item.id), 'SceneDatas', 'CabbageChatPanel']) {
+  for (const panelId of [
+    ...dockShortcuts.map((item) => item.id),
+    'AITalkBar',
+    'SceneDatas',
+    'CabbageChatPanel',
+  ]) {
     const panelState = dockStore.panels[panelId];
     if (panelState?.mode === 'external') {
       await closeFloatingPanel(dockStore, panelId);

@@ -37,6 +37,18 @@
             </button>
           </div>
         </label>
+        <div class="settings-action-row">
+          <span>{{ t('editorSettings.aiTalk') }}</span>
+          <button
+            type="button"
+            class="action-button ai-talk-button"
+            :class="{ active: aiTalkOpen }"
+            :aria-pressed="aiTalkOpen"
+            @click="toggleAiTalk"
+          >
+            {{ aiTalkOpen ? t('editorSettings.closeAiTalk') : t('editorSettings.openAiTalk') }}
+          </button>
+        </div>
       </section>
 
       <section class="settings-section leave-section">
@@ -63,12 +75,13 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { computed, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { setLocale } from '@/i18n/index.js';
+import { closeFloatingPanel } from '@/utils/panelWindows.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const router = useRouter();
@@ -76,6 +89,27 @@ const { t, locale } = useI18n();
 const dockStore = useDockStore();
 const { closePanel, isDocked } = useDockPanel();
 const confirmHome = ref(false);
+const aiTalkOpen = computed(() => Boolean(dockStore.panels.AITalkBar?.open));
+
+async function toggleAiTalk() {
+  const panelId = 'AITalkBar';
+  const panel = dockStore.panels[panelId];
+  if (!panel) return;
+
+  if (panel.open && panel.mode === 'external') {
+    await closeFloatingPanel(dockStore, panelId);
+    return;
+  }
+
+  if (panel.open) {
+    dockStore.closePanel(panelId);
+  } else {
+    dockStore.setDockZone(panelId, 'right');
+    dockStore.popIn(panelId);
+    dockStore.openPanel(panelId);
+  }
+  window.dispatchEvent(new Event('resize'));
+}
 
 function handleLocaleChange(nextLocale) {
   setLocale(nextLocale);
@@ -273,6 +307,39 @@ function goHome() {
   border: 1px solid var(--panel-border);
   border-radius: 7px;
   background: rgba(24, 27, 24, 0.58);
+}
+
+.settings-action-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-width: 0;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 7px;
+  background: rgba(24, 27, 24, 0.58);
+}
+
+.settings-action-row > span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ai-talk-button {
+  min-height: 30px;
+  padding: 5px 12px;
+}
+
+.ai-talk-button.active {
+  color: #f4f7ef;
+  border-color: rgba(216, 184, 108, 0.58);
+  background: rgba(216, 184, 108, 0.22);
 }
 
 .locale-field span {

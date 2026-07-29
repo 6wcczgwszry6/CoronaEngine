@@ -107,6 +107,9 @@ export default {
     },
   },
   editorSettings: {
+    aiTalk: 'AI Chat',
+    closeAiTalk: 'Close AI Chat',
+    openAiTalk: 'Open AI Chat',
     applyPhysics: 'Apply Physics',
     common: 'Common',
     confirmHome: 'Return to home?',

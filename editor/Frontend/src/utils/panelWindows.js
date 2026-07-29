@@ -151,8 +151,8 @@ async function openFloatingPanelNow(dockStore, panelId) {
   }
 
   const routePath = `#${manifest.routePath || ''}`;
-  const width = manifest.defaultWidth || 400;
-  const height = manifest.defaultHeight || 600;
+  const width = manifest.defaultFloatWidth || manifest.defaultWidth || 400;
+  const height = manifest.defaultFloatHeight || manifest.defaultHeight || 600;
   const dockingPos = normalizeFloatPosition(manifest.defaultFloatPosition);
   const zPriority = Number.isFinite(Number(manifest.floatingPriority)) ? Number(manifest.floatingPriority) : 0;
 

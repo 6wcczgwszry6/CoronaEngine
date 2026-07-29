@@ -23,7 +23,7 @@ export const PLUGIN_MANIFEST = [
     displayNameKey: 'plugins.SceneTools',
     displayName: '场景管理',
     pageType: 'view',
-    defaultDock: 'left',
+    defaultDock: 'right',
     defaultWidth: 360,
     defaultHeight: 540,
     autoInit: false,
@@ -52,7 +52,7 @@ export const PLUGIN_MANIFEST = [
     displayNameKey: 'plugins.SceneDatas',
     displayName: '对象',
     pageType: 'view',
-    defaultDock: 'left',
+    defaultDock: 'right',
     defaultWidth: 360,
     defaultHeight: 540,
     autoInit: false,
@@ -139,6 +139,10 @@ export const PLUGIN_MANIFEST = [
     // fall back to NodeGraphWorkspace's compact responsive layout.
     defaultWidth: 1100,
     defaultHeight: 320,
+    // Keep the docked height compact, but open the shortcut-created floating panel
+    // at the large centered size used by the node editing workflow.
+    defaultFloatWidth: 1480,
+    defaultFloatHeight: 790,
     autoInit: false,
     defaultOpenMode: 'docked',
     defaultFloatPosition: 'center',

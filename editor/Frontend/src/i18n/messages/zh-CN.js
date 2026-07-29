@@ -107,6 +107,9 @@ export default {
     },
   },
   editorSettings: {
+    aiTalk: 'AI 对话',
+    closeAiTalk: '关闭 AI 对话',
+    openAiTalk: '打开 AI 对话',
     applyPhysics: '应用物理参数',
     common: '常用',
     confirmHome: '确定回到主页？',
