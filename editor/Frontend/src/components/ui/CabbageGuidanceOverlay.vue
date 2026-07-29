@@ -12,7 +12,6 @@
       @wheel.prevent.stop
     >
       <div v-if="highlightStyle" class="guidance-highlight" :style="highlightStyle"></div>
-      <div v-if="trailStyle" class="guidance-trail" :style="trailStyle"></div>
       <section class="guidance-card">
         <div class="guidance-card-head">
           <strong>{{ guidance.state.guidance?.title || '操作展示' }}</strong>
@@ -39,8 +38,6 @@ import { guidanceService as guidance } from '@/services/cabbageGuidanceService.j
 const step = computed(() => guidance.state.guidance?.steps?.[guidance.state.stepIndex] || null);
 const isLast = computed(() => guidance.state.stepIndex >= (guidance.state.guidance?.steps?.length || 1) - 1);
 const rect = computed(() => guidance.state.targetRect);
-const fromRect = computed(() => guidance.state.fromRect);
-const center = (value) => value ? ({ x: value.left + value.width / 2, y: value.top + value.height / 2 }) : null;
 
 const highlightStyle = computed(() => {
   const value = rect.value;
@@ -48,20 +45,6 @@ const highlightStyle = computed(() => {
   return {
     left: `${value.left - 5}px`, top: `${value.top - 5}px`,
     width: `${value.width + 10}px`, height: `${value.height + 10}px`,
-  };
-});
-
-const trailStyle = computed(() => {
-  if (!['drag', 'connect'].includes(step.value?.action)) return null;
-  const start = center(fromRect.value) || (rect.value ? { x: rect.value.left + 20, y: rect.value.top + 20 } : null);
-  const end = center(rect.value);
-  if (!start || !end) return null;
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  const length = Math.sqrt(dx * dx + dy * dy);
-  return {
-    left: `${start.x}px`, top: `${start.y}px`, width: `${Math.max(24, length)}px`,
-    transform: `rotate(${Math.atan2(dy, dx)}rad)`,
   };
 });
 
@@ -79,8 +62,6 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true));
 <style scoped>
 .guidance-overlay { position:fixed; inset:0; z-index:2147483600; pointer-events:auto; overflow:hidden; }
 .guidance-highlight { position:fixed; border:2px solid #f2cf73; border-radius:9px; box-shadow:0 0 0 9999px rgba(0,0,0,.58),0 0 0 4px rgba(216,184,108,.2),0 0 26px rgba(242,207,115,.72); animation:guide-pulse 1.25s ease-in-out infinite; }
-.guidance-trail { position:fixed; height:3px; transform-origin:left center; border-radius:999px; background:linear-gradient(90deg,rgba(216,184,108,.15),#f2cf73); box-shadow:0 0 12px rgba(242,207,115,.75); }
-.guidance-trail::after { position:absolute; right:-2px; top:-4px; width:10px; height:10px; border-radius:50%; background:#fff3c8; content:''; }
 .guidance-card { position:fixed; left:50%; bottom:26px; width:min(480px,calc(100% - 32px)); transform:translateX(-50%); border:1px solid #8c6f36; border-radius:10px; background:#15130d; box-shadow:0 18px 50px rgba(0,0,0,.7); padding:13px 14px; color:#f2ead5; }
 .guidance-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#e5c77f; font-size:13px; }
 .guidance-card-head span { color:#9d9278; font-size:11px; }

@@ -152,9 +152,22 @@ const handleCreate = async () => {
     const info = result?.data;
 
     if (info && info.path) {
-      await projectLauncherService.setProjectMode(mode.value, { prompt });
       const opened = await projectLauncherService.openProject(info.path);
       if (opened?.data) {
+        // Apply mode settings only after the new world is active. Otherwise the
+        // previous world can receive the new description and task request.
+        await projectLauncherService.setProjectMode(mode.value, { prompt });
+        try {
+          // A described world enters the editor with its first two personalized
+          // tasks ready instead of briefly showing unrelated default tutorials.
+          await initializeWorldTasks({
+            prompt,
+            mode: mode.value,
+            waitForCompletion: Boolean(prompt),
+          });
+        } catch (taskError) {
+          console.warn('World task initialization failed; opening the world with fallback tasks:', taskError?.message || taskError);
+        }
         try {
           if (lanchat.state.inRoom) {
             if (lanchat.state.role === 'host') {
@@ -172,11 +185,6 @@ const handleCreate = async () => {
           });
         } catch (roomError) {
           console.warn('Default AI conversation room initialization failed:', roomError);
-        }
-        try {
-          await initializeWorldTasks({ prompt, mode: mode.value, waitForCompletion: false });
-        } catch (taskError) {
-          console.warn('世界任务初始化失败，继续进入世界：', taskError?.message || taskError);
         }
         router.push('/');
         return;

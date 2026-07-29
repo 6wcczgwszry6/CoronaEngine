@@ -461,15 +461,50 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertFalse(any(task.get("type") == "goal" for task in context["activeTasks"]))
 
     def test_goal_plan_prompt_only_requests_personalized_guidance_tasks(self):
-        prompt = self.service._goal_plan_prompt(
-            "水墨风的仙侠秘境，有兔子、机关和可以跳跃的平台", "story",
-        )
+        description = "一间会随音乐改变颜色的抽象几何空间"
+        prompt = self.service._goal_plan_prompt(description, "story")
         self.assertIn("个性化搭建任务", prompt)
         self.assertIn("不能直接修改当前节点区", prompt)
         self.assertIn("不是替用户生成一套节点积木", prompt)
         self.assertIn("一步一步引导用户亲自完成世界", prompt)
         self.assertIn("每个任务只能对应一个可由 completionSignal 验证的操作目标", prompt)
         self.assertIn("不要把光照和物理", prompt)
+        self.assertIn("任意语言、任意题材、任意详细程度", prompt)
+        self.assertIn("不得使用固定题材模板或按关键词套用预制任务", prompt)
+        self.assertIn(
+            json.dumps(
+                {"mode": "story", "description": description},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            prompt,
+        )
+        self.assertNotIn('"effectId":"player_move_jump"', prompt)
+        self.assertNotIn(
+            '"recommendedBlockTypes":["object_third_person_move"]',
+            prompt,
+        )
+
+    def test_goal_plan_prompt_preserves_arbitrary_world_descriptions(self):
+        descriptions = [
+            "一个可以控制飞船采集陨石的太空世界",
+            "一间可以开关灯和移动家具的房间",
+            "暴雨中的赛车计时挑战",
+            "抽象几何音乐可视化空间",
+            "No characters; only fog, sound, and a slowly changing light.\nKeep it calm.",
+            '包含引号“测试”、符号 #[]{} 与完全自定义名词 Zeta-42',
+        ]
+        for description in descriptions:
+            with self.subTest(description=description):
+                prompt = self.service._goal_plan_prompt(description, "creative")
+                request_data = json.dumps(
+                    {"mode": "creative", "description": description},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                self.assertIn(request_data, prompt)
+                self.assertIn("唯一的世界语义来源", prompt)
+                self.assertIn("只代表可选能力，不是必须加入世界的内容", prompt)
 
     def test_goal_plan_rejects_unknown_completion_signal(self):
         context = self.service._default_context(self.world)
@@ -538,6 +573,72 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertEqual(["goal.ai.02"], matched["completedTaskKeys"])
         archived = self.history_task(matched["context"], "goal.ai.02")
         self.assertEqual(["object_third_person_move"], archived["observedBlockTypes"])
+
+    def test_load_recovers_personalized_plan_from_project_ini(self):
+        self.world.joinpath("project.ini").write_text(
+            "[Project]\nname=story_world_test\nmode=creative\n"
+            "world_prompt=an ink fantasy world with rabbits and mechanisms\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            return_value=self.goal_plan_payload(),
+        ):
+            response = self.service.load()
+            task_id = response["goalPlan"]["taskId"]
+            deadline = time.monotonic() + 3
+            result = None
+            while time.monotonic() < deadline:
+                status = self.service.goal_plan_status(task_id)
+                if status.get("status") == "completed":
+                    result = status.get("result")
+                    break
+                time.sleep(0.02)
+
+        self.assertTrue(response["success"])
+        self.assertIsNotNone(result)
+        self.assertTrue(result["success"])
+        context = result["context"]
+        self.assertEqual("creative", context["worldGoal"]["mode"])
+        self.assertEqual(
+            "an ink fantasy world with rabbits and mechanisms",
+            context["worldGoal"]["prompt"],
+        )
+        self.assertEqual(2, len([
+            task for task in context["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "active"
+        ]))
+        self.assertFalse(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+
+    def test_load_does_not_restart_matching_personalized_plan(self):
+        prompt = "a completed personalized world"
+        self.world.joinpath("project.ini").write_text(
+            f"[Project]\nname=story_world_test\nmode=story\nworld_prompt={prompt}\n",
+            encoding="utf-8",
+        )
+        context = self.service._default_context(self.world)
+        now = self.service._now_ms()
+        tasks = self.service._normalize_goal_plan_tasks(self.goal_plan_payload(), context, now)
+        context["worldGoal"] = {
+            "prompt": prompt,
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": now,
+            "generationError": "",
+            "generationId": "",
+        }
+        context["activeTasks"] = tasks
+        self.service._ensure_task_slots_locked(context, now)
+        self.service._write_locked(self.world, context)
+
+        with mock.patch.object(self.service, "start_goal_plan") as start_goal_plan:
+            response = self.service.load()
+
+        self.assertTrue(response["success"])
+        start_goal_plan.assert_not_called()
+        self.assertEqual(prompt, response["context"]["worldGoal"]["prompt"])
 
     def test_ai_goal_plan_replaces_tutorials_and_shows_two_tasks(self):
         with mock.patch.object(

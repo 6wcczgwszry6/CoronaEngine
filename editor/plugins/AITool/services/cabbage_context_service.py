@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import configparser
 import json
 import logging
 import os
@@ -267,6 +268,42 @@ class CabbageContextService:
     @classmethod
     def _context_path(cls, project_path: Path) -> Path:
         return project_path / cls.CONTEXT_DIR / cls.CONTEXT_FILE
+
+    @staticmethod
+    def _project_goal_metadata(project_path: Path) -> tuple[str, str]:
+        project_file = project_path / "project.ini"
+        if not project_file.is_file():
+            return "", "story"
+        parser = configparser.ConfigParser(interpolation=None)
+        try:
+            parser.read(project_file, encoding="utf-8-sig")
+            section = parser["Project"] if parser.has_section("Project") else parser.defaults()
+            prompt = str(section.get("world_prompt") or section.get("prompt") or "").strip()[:4000]
+            mode = str(section.get("mode") or "story").strip().lower()
+        except Exception:
+            logger.debug("Unable to read world prompt from project.ini: %s", project_file, exc_info=True)
+            return "", "story"
+        if mode not in {"story", "creative"}:
+            mode = "story"
+        return prompt, mode
+
+    @staticmethod
+    def _needs_project_goal_plan(context: dict[str, Any], prompt: str, mode: str) -> bool:
+        if not prompt:
+            return False
+        goal = context.get("worldGoal") if isinstance(context.get("worldGoal"), dict) else {}
+        same_goal = (
+            str(goal.get("prompt") or "").strip() == prompt
+            and str(goal.get("mode") or "story").strip().lower() == mode
+            and goal.get("source") == "ai"
+        )
+        if not same_goal:
+            return True
+        has_goal_plan = any(
+            isinstance(task, dict) and task.get("type") == "goal"
+            for task in [*(context.get("activeTasks") or []), *(context.get("taskHistory") or [])]
+        )
+        return goal.get("status") == "ready" and not has_goal_plan
 
     @staticmethod
     def _validate_payload_world(project_path: Path, payload: Any) -> None:
@@ -646,10 +683,30 @@ class CabbageContextService:
     def load(self) -> dict[str, Any]:
         try:
             project_path = self._active_project_path()
+            project_prompt, project_mode = self._project_goal_metadata(project_path)
             with self._lock:
                 context = self._read_locked(project_path)
+                should_start_goal_plan = self._needs_project_goal_plan(
+                    context, project_prompt, project_mode,
+                )
                 self._write_locked(project_path, context)
-                return {"success": True, "status": "ok", "context": self._clone(context)}
+
+            goal_plan = None
+            if should_start_goal_plan:
+                # The creation page can disappear immediately after opening the world.
+                # Recover from its missed/raced request by treating project.ini as the
+                # durable source of the original world description.
+                goal_plan = self.start_goal_plan({
+                    "prompt": project_prompt,
+                    "mode": project_mode,
+                })
+                with self._lock:
+                    context = self._read_locked(project_path)
+
+            response = {"success": True, "status": "ok", "context": self._clone(context)}
+            if goal_plan is not None:
+                response["goalPlan"] = self._clone(goal_plan)
+            return response
         except Exception as exc:
             logger.warning("Unable to load Cabbage context: %s", exc)
             return self._error("CONTEXT_LOAD_FAILED", str(exc))
@@ -1125,52 +1182,62 @@ class CabbageContextService:
             "logicBlueprint": {
                 "worldSummary": "",
                 "coreLoop": "",
-                "requiredActors": [""],
+                "requiredActors": [],
                 "nodeEffects": [
                     {
-                        "effectId": "player_move_jump",
+                        "effectId": "effect_01",
                         "title": "",
                         "description": "",
                         "trigger": "",
                         "outcome": "",
-                        "recommendedBlockTypes": ["object_third_person_move"],
+                        "recommendedBlockTypes": [],
                         "verification": "",
                     }
                 ],
-                "flow": ["初始化", "核心玩法", "运行验证"],
+                "flow": [],
             },
             "tasks": [
                 {
                     "phase": "node-logic",
-                    "effectId": "player_move_jump",
+                    "effectId": "effect_01",
                     "title": "",
                     "message": "",
                     "suggestion": "",
                     "completionCriteria": "",
                     "completionSignal": "block_added",
-                    "requiredBlockTypes": ["object_third_person_move"],
+                    "requiredBlockTypes": [],
                 }
             ],
         }
+        request_context = {
+            "mode": mode,
+            "description": world_prompt,
+        }
         return (
             "你是 CoronaEngine 3D 游戏编辑器的世界搭建任务规划器。"
-            "先分析用户描述中的角色、机关、交互、移动、碰撞、胜负或目标，形成 logicBlueprint；"
+            "用户的 description 可以是任意语言、任意题材、任意详细程度的自然语言，必须把它作为本次规划唯一的世界语义来源。"
+            "只分析 description 中实际出现或能够直接推导出的场景、对象、体验、交互和目标，形成 logicBlueprint。"
+            "如果描述偏抽象、偏氛围或没有明确玩法，就把其中的视觉与体验目标拆成当前引擎能够验证的场景任务和最小交互任务；"
+            "不得因此擅自加入描述中没有提到的角色、兔子、机关、跳跃、碰撞、战斗、胜负条件或其他固定玩法。"
+            "不得使用固定题材模板或按关键词套用预制任务，也不得照抄返回结构模板中的 effect_01。"
             "logicBlueprint 只是理解世界目标的内部分析，不是节点图、不是积木 JSON，也不能直接修改当前节点区。"
-            "最终产物只能是一套与该世界描述强相关的个性化搭建任务，由任务一步一步引导用户亲自完成世界。"
-            "再生成 6 到 10 个循序渐进的任务。目标是先让当前世界的节点玩法逻辑成立，再完成必要的场景内容和表现，而不是替用户生成一套节点积木。"
+            "最终产物只能是一套与当前 description 强相关的个性化搭建任务，由任务一步一步引导用户亲自完成世界。"
+            "生成 6 到 10 个循序渐进的任务。目标是先让当前世界所需的节点玩法逻辑成立，再完成必要的场景内容和表现，而不是替用户生成一套节点积木。"
             "至少 5 个任务必须是 phase=node-logic，并且所有 node-logic 任务必须排在 scene-polish 前。"
             "每个任务只能对应一个可由 completionSignal 验证的操作目标；不要把光照和物理、导入和变换等不同完成信号合并在同一个任务中。"
             "如果一个玩法效果需要多个积木，可以在同一个积木任务的 requiredBlockTypes 中列出，但标题、说明和完成条件必须与该单一任务目标一致。"
-            "节点任务要围绕用户真正想实现的效果，例如初始化、输入、移动/跳跃、角色行为、机关碰撞、流程条件和运行验证；"
+            "节点任务必须围绕当前 description 真正需要的效果组织；能力目录中的输入、移动、碰撞等只代表可选能力，不是必须加入世界的内容。"
             "禁止使用‘随便创建节点’‘任意拖入积木’这类脱离世界目标的通用教程。"
             "最后一个 node-logic 任务必须使用 run_succeeded，确认前面的玩法节点能够成功运行。"
-            "scene-polish 只能放在节点逻辑验证之后，用于模型、变换、光照或物理外观准备。"
+            "scene-polish 只能放在节点逻辑验证之后，用于当前 description 确实需要的模型、变换、光照或物理准备。"
+            "requiredActors 可以填写角色、普通物体、场景区域或系统，但只能来自当前 description 的需求。"
             "nodeEffects.recommendedBlockTypes 与 tasks.requiredBlockTypes 只能从下方 XML 积木目录选择，必须使用精确 type，不能编造。"
             "completionSignal 为 block_added 或 block_parameter_changed 时必须给出 requiredBlockTypes；其他完成信号不要填写该数组。"
             "每个任务只使用一个 completionSignal。不要输出 Python、脚本、XML 或 Markdown，只输出合法 JSON。\n"
-            "返回结构示例：" + json.dumps(schema, ensure_ascii=False, separators=(",", ":")) + "\n"
-            f"世界模式：{mode}\n"
-            f"用户的世界描述：{world_prompt}\n"
+            "返回结构模板（仅表示字段结构，空数组必须按当前 description 补全，示例标识不能照抄）："
+            + json.dumps(schema, ensure_ascii=False, separators=(",", ":")) + "\n"
+            "本次用户输入数据："
+            + json.dumps(request_context, ensure_ascii=False, separators=(",", ":")) + "\n"
             "可用完成信号：" + json.dumps(capabilities, ensure_ascii=False, separators=(",", ":")) + "\n"
             "可用的项目级积木目录：" + json.dumps(cls._goal_block_catalog(), ensure_ascii=False, separators=(",", ":"))
         )
