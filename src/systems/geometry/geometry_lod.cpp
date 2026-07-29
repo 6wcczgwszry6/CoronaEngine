@@ -65,6 +65,17 @@ float GeometrySystem::compute_angular_epsilon(float pixel_budget,
     return (eps > 0.0f) ? eps : 1e-6f;
 }
 
+float GeometrySystem::compute_pixel_budget_from_pressure(float vram_ratio) {
+    // 默认 1.5px：显存充裕，视觉无损。
+    // 压力越大预算越宽松 → 更多 mesh 倾向粗 LOD → GPU 缓冲缩小 → 显存自然回落。
+    // 阶梯分段而非连续插值：避免相机微动时 pixel_budget 连续波动导致 LOD 跳变。
+    if (vram_ratio < 0.60f) return 1.5f;    // 正常：1.5px
+    if (vram_ratio < 0.75f) return 3.0f;    // 轻度承压：2×
+    if (vram_ratio < 0.85f) return 6.0f;    // 中度承压：4×
+    if (vram_ratio < 0.92f) return 12.0f;   // 重度承压：8×
+    return 24.0f;                           // 极限：16×，几乎总选最粗级
+}
+
 int GeometrySystem::select_lod_by_error(float                     distance_to_aabb,
                                         const std::vector<float>& world_errors,
                                         float                     epsilon) {
