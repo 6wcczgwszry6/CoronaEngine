@@ -1,11 +1,14 @@
 ﻿import { reactive } from 'vue';
 import { useDockStore } from '@/stores/dockStore.js';
 import { closeFloatingPanel, openFloatingPanel } from '@/utils/panelWindows.js';
+import { getPluginManifest } from '@/config/pluginManifest.js';
 
 const PANEL_ZONES = Object.freeze({
-  SceneTools: 'left',
-  SceneDatas: 'left',
-  NodeGraphPanel: 'bottom',
+  SceneTools: 'right',
+  SceneDatas: 'right',
+  // Keep node guidance in the main-page DOM so the highlight can target nodes,
+  // ports and blocks without falling back to the legacy bottom dock.
+  NodeGraphPanel: 'center',
 });
 
 const SELECTOR_KEYS = Object.freeze({
@@ -79,13 +82,18 @@ function fallbackSelector(target = {}) {
   return '';
 }
 
-function rectForTarget(target = {}) {
+function elementForTarget(target = {}, { allowFallback = true } = {}) {
   const selector = targetSelector(target);
   let element = selector ? document.querySelector(selector) : null;
-  if (!element) {
+  if (!element && allowFallback) {
     const fallback = fallbackSelector(target);
     element = fallback ? document.querySelector(fallback) : null;
   }
+  return element;
+}
+
+function rectForTarget(target = {}) {
+  const element = elementForTarget(target);
   if (!element) return null;
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
@@ -102,8 +110,20 @@ function currentStep() {
 }
 
 function exactElementForTarget(target = {}) {
-  const selector = targetSelector(target);
-  return selector ? document.querySelector(selector) : null;
+  return elementForTarget(target, { allowFallback: false });
+}
+
+function revealTarget(target = {}) {
+  const element = elementForTarget(target);
+  if (!element || typeof element.scrollIntoView !== 'function') return;
+  const rect = element.getBoundingClientRect();
+  const outsideViewport = rect.top < 8
+    || rect.left < 8
+    || rect.bottom > window.innerHeight - 8
+    || rect.right > window.innerWidth - 8;
+  if (outsideViewport) {
+    element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+  }
 }
 
 function refreshRects() {
@@ -169,12 +189,20 @@ async function ensurePanel(panelId, selectorKey = '') {
   if (panel.open && panel.mode === 'external') await closeFloatingPanel(dockStore, panelId);
   dockStore.popIn(panelId);
   dockStore.setDockZone(panelId, PANEL_ZONES[panelId] || panel.dockZone || 'right');
+
+  if (panelId === 'NodeGraphPanel') {
+    const manifest = getPluginManifest(panelId);
+    const width = Number(manifest?.defaultFloatWidth || manifest?.defaultWidth || panel.width);
+    const height = Number(manifest?.defaultFloatHeight || manifest?.defaultHeight || panel.height);
+    dockStore.resizePanel(panelId, width, height);
+  }
+
   dockStore.openPanel(panelId);
   window.dispatchEvent(new CustomEvent('cabbage-guidance-prepare', {
     detail: { panelId, selectorKey },
   }));
   window.dispatchEvent(new Event('resize'));
-  await wait(180);
+  await wait(panelId === 'NodeGraphPanel' ? 260 : 180);
   return Boolean(dockStore.panels[panelId]?.open && dockStore.panels[panelId]?.mode === 'docked');
 }
 
@@ -320,10 +348,50 @@ function guidanceForTask(source = {}) {
   };
 }
 
+function panelIdForTarget(target = {}) {
+  const selectorKey = String(target.selectorKey || '');
+  if (selectorKey.startsWith('scene-')) return 'SceneTools';
+  if (selectorKey.startsWith('object-')) return 'SceneDatas';
+  if (selectorKey.startsWith('node-')) return 'NodeGraphPanel';
+  if (['node', 'block', 'edge', 'port'].includes(String(target.kind || ''))) {
+    return 'NodeGraphPanel';
+  }
+  return '';
+}
+
+function normalizeGuidanceStep(step = {}) {
+  return {
+    ...step,
+    target: step?.target ? { ...step.target } : {},
+    ...(step?.fromTarget ? { fromTarget: { ...step.fromTarget } } : {}),
+  };
+}
+
+function normalizeGuidance(source, sourceType, resolved) {
+  const steps = (resolved?.steps || []).map(normalizeGuidanceStep);
+  if (!steps.length) return null;
+  const inferredPanelId = steps
+    .map((step) => panelIdForTarget(step.target) || panelIdForTarget(step.fromTarget))
+    .find(Boolean);
+  const panelId = inferredPanelId || String(resolved?.panelId || source?.panelId || '');
+  if (!PANEL_ZONES[panelId]) return null;
+  return {
+    guidanceId: String(source.guidanceId || source.taskKey || source.issueKey || source.tipKey || source.id || `guidance_${Date.now()}`),
+    sourceType,
+    title: String(source.title || '\u64cd\u4f5c\u5c55\u793a'),
+    panelId,
+    steps,
+  };
+}
+
 export const guidanceRegistry = {
   resolve(source = {}) {
-    if (source?.steps && Array.isArray(source.steps) && source.panelId) return source;
     const sourceType = String(source.sourceType || source.type || 'node-issue');
+    if (source?.steps && Array.isArray(source.steps)) {
+      // Persisted worlds may contain legacy panelId/dockZone values. Re-infer the
+      // current panel from the target so old data cannot reopen the old layout.
+      return normalizeGuidance(source, sourceType, source);
+    }
     let resolved;
     if (sourceType === 'chat') {
       const template = CHAT_GUIDANCE[String(source.guidanceIntent || '')];
@@ -335,18 +403,11 @@ export const guidanceRegistry = {
       ));
       resolved = { panelId, steps: [{ ...template }] };
     } else if (sourceType === 'optimization-tip') {
-      resolved = { panelId: 'NodeGraphPanel', steps: [stepFor('node-canvas', 'focus', source.message || '查看当前节点图中可以优化的控制流。')] };
+      resolved = { panelId: 'NodeGraphPanel', steps: [stepFor('node-canvas', 'focus', source.message || '\u67e5\u770b\u5f53\u524d\u8282\u70b9\u56fe\u4e2d\u53ef\u4ee5\u4f18\u5316\u7684\u63a7\u5236\u6d41\u3002')] };
     } else {
       resolved = guidanceForTask(source);
     }
-    if (!resolved?.steps?.length) return null;
-    return {
-      guidanceId: String(source.guidanceId || source.taskKey || source.issueKey || source.tipKey || source.id || `guidance_${Date.now()}`),
-      sourceType,
-      title: String(source.title || '操作展示'),
-      panelId: resolved.panelId,
-      steps: resolved.steps.map((step) => ({ ...step })),
-    };
+    return normalizeGuidance(source, sourceType, resolved);
   },
 };
 
@@ -369,6 +430,8 @@ async function showStep(index) {
     },
   }));
   await wait(80);
+  revealTarget(step?.target || {});
+  await wait(120);
   refreshRects();
 }
 
