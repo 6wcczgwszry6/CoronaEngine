@@ -299,6 +299,8 @@
       </div>
       <pre>{{ runDetail }}</pre>
     </div>
+  </div>
+  <Teleport to="body">
     <div
       v-if="externalDrag.active"
       class="ng-drag-ghost"
@@ -306,7 +308,7 @@
     >
       {{ externalDrag.label }}
     </div>
-  </div>
+  </Teleport>
   </Teleport>
 </template>
 
