@@ -160,15 +160,14 @@ async function onToggleFloat() {
   const panelId = panelIdFromRoute();
   if (!panelId) return;
   try {
-    // The main editor owns the Pinia dock state. Tell it to recreate this panel in
-    // its previous dock zone, then close the standalone native tab. Awaiting the
-    // broadcast keeps the redock intent ordered before the native panel-closed event.
-    await appService.crossTabBroadcast('panel-redock-request', { panelId });
-    await appService.closeThisTab(panelId);
+    // createPanelTab starts as a draggable floating surface inside the main editor.
+    // Native code keeps the same tab alive while toggling it between that surface and
+    // a detachable OS window, so the panel state and editor contents are preserved.
+    await appService.togglePanelWindowMode({ panelId });
   } catch (e) {
-    console.error('[DockTitleBar] redock failed:', e);
+    console.error('[DockTitleBar] toggle window mode failed:', e);
   }
-  emit('toggleFloat', false);
+  emit('toggleFloat');
 }
 
 function onClose() {
