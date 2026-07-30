@@ -6,6 +6,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <iphlpapi.h>
+#include <shobjidl.h>
 #pragma comment(lib, "iphlpapi.lib")
 #endif
 
@@ -868,7 +869,10 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
             "geometry.position", "geometry.rotation", "geometry.scale",
             "material.texture", "mechanics.collision_enabled", "mechanics.collision_type",
             "mechanics.physics_enabled", "optics.diffuse", "optics.emission", "optics.metallic",
-            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible"};
+            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible",
+            "runtime.entity_id", "runtime.asset_id", "runtime.model_ref", "runtime.entity_type",
+            "runtime.semantic_role", "runtime.source_plan_id", "runtime.source_batch_id",
+            "runtime.source_scene_version", "runtime.actor_version"};
         if (persisted_fields.is_object()) {
             for (const auto& field : persisted_fields.items()) {
                 const auto dot = field.key().find('.');
@@ -2410,6 +2414,7 @@ nlohmann::json project_resource_load_status() {
         return {
             {"active", false},
             {"loading", false},
+            {"archive_service_ready", python_script_service_dispatcher_registered()},
             {"total", 0},
             {"ready", 0},
             {"failed", 0},
@@ -2451,6 +2456,7 @@ nlohmann::json project_resource_load_status() {
     return {
         {"active", true},
         {"loading", pending > 0},
+        {"archive_service_ready", python_script_service_dispatcher_registered()},
         {"path", state.project_path},
         {"scene", state.scene->route},
         {"total", total},
@@ -3565,6 +3571,163 @@ std::filesystem::path project_template_path() {
 
 std::filesystem::path runtime_data_dir() {
     return editor_root_path() / "data";
+}
+
+std::string settings_value(const std::string& section,
+                           const std::string& key,
+                           const std::string& fallback);
+
+class ScopedComInitialization {
+   public:
+    ScopedComInitialization() {
+#ifdef _WIN32
+        result_ = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+#endif
+    }
+
+    ~ScopedComInitialization() {
+#ifdef _WIN32
+        if (result_ == S_OK || result_ == S_FALSE) {
+            CoUninitialize();
+        }
+#endif
+    }
+
+    [[nodiscard]] bool available() const {
+#ifdef _WIN32
+        return SUCCEEDED(result_) || result_ == RPC_E_CHANGED_MODE;
+#else
+        return false;
+#endif
+    }
+
+   private:
+#ifdef _WIN32
+    HRESULT result_{E_FAIL};
+#endif
+};
+
+std::optional<std::filesystem::path> show_native_path_dialog(
+    bool pick_folder,
+    const std::filesystem::path& default_path,
+    const wchar_t* title) {
+#ifdef _WIN32
+    ScopedComInitialization com;
+    if (!com.available()) {
+        return std::nullopt;
+    }
+
+    IFileOpenDialog* dialog = nullptr;
+    if (FAILED(CoCreateInstance(
+            CLSID_FileOpenDialog,
+            nullptr,
+            CLSCTX_INPROC_SERVER,
+            IID_PPV_ARGS(&dialog)))) {
+        return std::nullopt;
+    }
+
+    FILEOPENDIALOGOPTIONS options{};
+    HRESULT result = dialog->GetOptions(&options);
+    if (SUCCEEDED(result)) {
+        options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+        options |= pick_folder ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST;
+        result = dialog->SetOptions(options);
+    }
+    if (SUCCEEDED(result) && title) {
+        result = dialog->SetTitle(title);
+    }
+    if (SUCCEEDED(result) && !pick_folder) {
+        const COMDLG_FILTERSPEC filters[] = {
+            {L"Corona 场景、项目或 Vision 文件", L"*.ini;*.scene;*.json"},
+            {L"所有文件", L"*.*"},
+        };
+        result = dialog->SetFileTypes(
+            static_cast<UINT>(std::size(filters)),
+            filters);
+    }
+
+    std::error_code ec;
+    auto initial_dir = default_path;
+    if (std::filesystem::is_regular_file(initial_dir, ec)) {
+        initial_dir = initial_dir.parent_path();
+    }
+    ec.clear();
+    if (SUCCEEDED(result) && std::filesystem::is_directory(initial_dir, ec)) {
+        IShellItem* folder = nullptr;
+        if (SUCCEEDED(SHCreateItemFromParsingName(
+                initial_dir.c_str(),
+                nullptr,
+                IID_PPV_ARGS(&folder)))) {
+            dialog->SetFolder(folder);
+            folder->Release();
+        }
+    }
+
+    result = SUCCEEDED(result) ? dialog->Show(nullptr) : result;
+    if (FAILED(result)) {
+        dialog->Release();
+        return std::nullopt;
+    }
+
+    IShellItem* selected = nullptr;
+    result = dialog->GetResult(&selected);
+    dialog->Release();
+    if (FAILED(result) || selected == nullptr) {
+        return std::nullopt;
+    }
+
+    PWSTR selected_path = nullptr;
+    result = selected->GetDisplayName(SIGDN_FILESYSPATH, &selected_path);
+    selected->Release();
+    if (FAILED(result) || selected_path == nullptr) {
+        return std::nullopt;
+    }
+
+    std::filesystem::path path{selected_path};
+    CoTaskMemFree(selected_path);
+    return path;
+#else
+    (void)pick_folder;
+    (void)default_path;
+    (void)title;
+    return std::nullopt;
+#endif
+}
+
+std::optional<std::filesystem::path> open_project_file_native() {
+    const auto default_path = path_from_utf8(settings_value(
+        "General",
+        "default_path",
+        path_to_utf8(runtime_data_dir())));
+    return show_native_path_dialog(
+        false,
+        default_path,
+        L"打开项目或 Vision 场景");
+}
+
+std::optional<std::filesystem::path> browse_folder_native(
+    const std::filesystem::path& default_path,
+    const wchar_t* title) {
+    return show_native_path_dialog(true, default_path, title);
+}
+
+std::optional<std::filesystem::path> choose_portable_scene_target_native() {
+    const auto default_path = path_from_utf8(settings_value(
+        "General",
+        "default_path",
+        path_to_utf8(runtime_data_dir())));
+    const auto parent = browse_folder_native(
+        default_path,
+        L"选择便携场景保存位置");
+    if (!parent) {
+        return std::nullopt;
+    }
+
+    auto target = *parent / "PortableScene";
+    for (int suffix = 2; std::filesystem::exists(target); ++suffix) {
+        target = *parent / ("PortableScene_" + std::to_string(suffix));
+    }
+    return target;
 }
 
 std::filesystem::path absolute_normalized_path(const std::filesystem::path& path) {
@@ -6138,7 +6301,17 @@ std::string capture_editor_camera_view_from_python(const std::string& scene_name
 
 void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
-        {"browse_folder", script_method},
+        {"browse_folder", [](const NativeRequest& request, const NativeContext&) {
+            auto default_path = path_from_utf8(arg_string(request.args, 0));
+            if (default_path.empty()) {
+                default_path = path_from_utf8(settings_value(
+                    "General",
+                    "default_path",
+                    path_to_utf8(runtime_data_dir())));
+            }
+            const auto selected = browse_folder_native(default_path, L"选择项目目录");
+            return native_success(selected ? path_to_utf8(*selected) : std::string{});
+        }},
         {"get_default_project_path", [](const NativeRequest&, const NativeContext&) {
             const auto value = settings_value("General", "default_path", path_to_utf8(runtime_data_dir()));
             return native_success(value);
@@ -6234,9 +6407,21 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
                 }
             }
             if (!prepared.service_ok) {
-                return native_failure(prepared.error.empty() ? "Python archive parser failed"
-                                                             : prepared.error,
-                                      503, "python-archive");
+                if (!python_script_service_dispatcher_registered()) {
+                    return native_success({
+                        {"ok", false},
+                        {"status", "service_initializing"},
+                        {"path", path},
+                        {"message", "Archive service is initializing"},
+                    });
+                }
+                return native_success({
+                    {"ok", false},
+                    {"status", "archive_service_error"},
+                    {"path", path},
+                    {"message", prepared.error.empty() ? "Python archive parser failed"
+                                                       : prepared.error},
+                });
             }
             if (!prepared.ready) {
                 return native_success({
@@ -6284,8 +6469,20 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
                 {"scene", {{"path", state.scene->route}, {"name", state.scene->name}}},
             });
         }},
-        {"open_project_file", script_method},
-        {"choose_portable_scene_target", script_method},
+        {"open_project_file", [](const NativeRequest&, const NativeContext&) {
+            const auto selected = open_project_file_native();
+            if (!selected) {
+                return native_success(nlohmann::json::object());
+            }
+            return native_success({
+                {"name", path_to_utf8(selected->stem())},
+                {"path", path_to_utf8(*selected)},
+            });
+        }},
+        {"choose_portable_scene_target", [](const NativeRequest&, const NativeContext&) {
+            const auto selected = choose_portable_scene_target_native();
+            return native_success(selected ? path_to_utf8(*selected) : std::string{});
+        }},
         {"validate_portable_scene", [](const NativeRequest& request, const NativeContext&) {
             const auto data = arg_object(request.args, 0);
             auto root_text = data.value("path", std::string{});

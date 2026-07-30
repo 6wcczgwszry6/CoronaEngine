@@ -353,6 +353,79 @@ class CoronaRenderProcessHandler : public CefRenderProcessHandler {
                 return true;
             }
 
+            if (name == "setViewportGizmoTarget") {
+                // (cameraHandle, sceneId, actorName, actorHandle)
+                if (arguments.size() < 4) {
+                    exception = "setViewportGizmoTarget requires 4 arguments";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                auto ctx = CefV8Context::GetCurrentContext();
+                if (!ctx || !ctx->GetBrowser() ||
+                    !arguments[1]->IsString() || !arguments[2]->IsString()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                CefRefPtr<CefProcessMessage> msg =
+                    CefProcessMessage::Create("ViewportGizmoTarget");
+                auto args = msg->GetArgumentList();
+                const auto set_number = [&](int index) {
+                    if (arguments[index]->IsInt()) {
+                        args->SetInt(index, arguments[index]->GetIntValue());
+                        return true;
+                    }
+                    if (arguments[index]->IsDouble()) {
+                        args->SetDouble(index, arguments[index]->GetDoubleValue());
+                        return true;
+                    }
+                    return false;
+                };
+                if (!set_number(0) || !set_number(3)) {
+                    exception = "setViewportGizmoTarget expects numeric handles";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                args->SetString(1, arguments[1]->GetStringValue());
+                args->SetString(2, arguments[2]->GetStringValue());
+                ctx->GetFrame()->SendProcessMessage(PID_BROWSER, msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
+            if (name == "viewportGizmoPointer") {
+                // (cameraHandle, requestId, type, x, y, vpW, vpH, button, buttons, modifiers)
+                if (arguments.size() < 10) {
+                    exception = "viewportGizmoPointer requires 10 arguments";
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                auto ctx = CefV8Context::GetCurrentContext();
+                if (!ctx || !ctx->GetBrowser() ||
+                    !arguments[1]->IsString() || !arguments[2]->IsString()) {
+                    retval = CefV8Value::CreateBool(false);
+                    return true;
+                }
+                CefRefPtr<CefProcessMessage> msg =
+                    CefProcessMessage::Create("ViewportGizmoPointer");
+                auto args = msg->GetArgumentList();
+                for (int index : {0, 3, 4, 5, 6, 7, 8, 9}) {
+                    if (arguments[index]->IsInt()) {
+                        args->SetInt(index, arguments[index]->GetIntValue());
+                    } else if (arguments[index]->IsDouble()) {
+                        args->SetDouble(index, arguments[index]->GetDoubleValue());
+                    } else {
+                        exception = "viewportGizmoPointer has an invalid numeric argument";
+                        retval = CefV8Value::CreateBool(false);
+                        return true;
+                    }
+                }
+                args->SetString(1, arguments[1]->GetStringValue());
+                args->SetString(2, arguments[2]->GetStringValue());
+                ctx->GetFrame()->SendProcessMessage(PID_BROWSER, msg);
+                retval = CefV8Value::CreateBool(true);
+                return true;
+            }
+
             if (name == "dockCommand") {
                 if (arguments.size() < 1 || !arguments[0] || !arguments[0]->IsString()) {
                     exception = "dockCommand(jsonString) requires a string argument";
@@ -513,6 +586,10 @@ class CoronaRenderProcessHandler : public CefRenderProcessHandler {
         CefRefPtr<CefV8Value> actor_transform = CefV8Value::CreateFunction("actorTransform", handler);
         CefRefPtr<CefV8Value> set_property = CefV8Value::CreateFunction("setProperty", handler);
         CefRefPtr<CefV8Value> pick_actor = CefV8Value::CreateFunction("pickActor", handler);
+        CefRefPtr<CefV8Value> set_viewport_gizmo_target =
+            CefV8Value::CreateFunction("setViewportGizmoTarget", handler);
+        CefRefPtr<CefV8Value> viewport_gizmo_pointer =
+            CefV8Value::CreateFunction("viewportGizmoPointer", handler);
         CefRefPtr<CefV8Value> set_viewport_ui_mode =
             CefV8Value::CreateFunction("setViewportUiMode", handler);
         CefRefPtr<CefV8Value> set_camera_viewport =
@@ -531,6 +608,10 @@ class CoronaRenderProcessHandler : public CefRenderProcessHandler {
         bridge->SetValue("actorTransform", actor_transform, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setProperty", set_property, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("pickActor", pick_actor, V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("setViewportGizmoTarget", set_viewport_gizmo_target,
+                         V8_PROPERTY_ATTRIBUTE_NONE);
+        bridge->SetValue("viewportGizmoPointer", viewport_gizmo_pointer,
+                         V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportUiMode", set_viewport_ui_mode, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setCameraViewport", set_camera_viewport, V8_PROPERTY_ATTRIBUTE_NONE);
         bridge->SetValue("setViewportUiCalibration", set_viewport_ui_calibration, V8_PROPERTY_ATTRIBUTE_NONE);

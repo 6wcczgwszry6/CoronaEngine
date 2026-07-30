@@ -3437,6 +3437,29 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             transform_body.group(0),
         )
 
+    def test_native_actor_serializer_does_not_reappend_owned_runtime_fields(self):
+        source = self._handler_source()
+        normalized_fields = re.search(
+            r"static const std::set<std::string> normalized_fields\{(.*?)\};",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(normalized_fields)
+
+        for field in (
+            "runtime.entity_id",
+            "runtime.asset_id",
+            "runtime.model_ref",
+            "runtime.entity_type",
+            "runtime.semantic_role",
+            "runtime.source_plan_id",
+            "runtime.source_batch_id",
+            "runtime.source_scene_version",
+            "runtime.actor_version",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', normalized_fields.group(1))
+
     def test_actor_file_transfer_uses_runtime_asset_identity_without_wire_changes(self):
         source = self._network_system_source()
 
@@ -3986,6 +4009,73 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         audio_check = handler.index('actor.actor_type == "audio"')
         geometry_failure_check = handler.index("!actor.geometry")
         self.assertLess(audio_check, geometry_failure_check)
+
+    def test_project_launcher_dialogs_are_native_and_archive_startup_is_nonblocking(self):
+        repo_root = self._repo_root()
+        source = self._handler_source()
+        registry_source = (
+            repo_root / "editor" / "backend" / "registry.py"
+        ).read_text(encoding="utf-8")
+        recent_games_source = (
+            repo_root
+            / "editor"
+            / "Frontend"
+            / "src"
+            / "views"
+            / "layout"
+            / "RecentGames.vue"
+        ).read_text(encoding="utf-8")
+        new_game_source = (
+            repo_root
+            / "editor"
+            / "Frontend"
+            / "src"
+            / "views"
+            / "layout"
+            / "NewGame.vue"
+        ).read_text(encoding="utf-8")
+        editor_main_source = (
+            repo_root / "editor" / "main.py"
+        ).read_text(encoding="utf-8")
+        launcher_start = source.index(
+            "void register_project_launcher_api_handlers"
+        )
+        launcher_end = source.index(
+            "void register_main_view_api_handlers",
+            launcher_start,
+        )
+        launcher_body = source[launcher_start:launcher_end]
+
+        self.assertIn("LAZY_PYTHON_SCRIPT_SERVICES", registry_source)
+        self.assertIn('"AITool"', registry_source)
+        self.assertIn("LazyPythonScriptService", registry_source)
+        self.assertIn("open_project_file_native()", launcher_body)
+        self.assertIn('{"browse_folder"', launcher_body)
+        self.assertNotIn('{"open_project_file", script_method}', launcher_body)
+        self.assertNotIn('{"browse_folder", script_method}', launcher_body)
+        self.assertNotIn(
+            '{"choose_portable_scene_target", script_method}',
+            launcher_body,
+        )
+        self.assertIn('"archive_service_ready"', source)
+        self.assertIn('"service_initializing"', launcher_body)
+        self.assertIn("存档服务正在初始化", recent_games_source)
+        self.assertIn("存档服务正在初始化", new_game_source)
+        self.assertNotIn("warmup_all", editor_main_source)
+        self.assertNotIn("plugins.AITool", editor_main_source)
+        self.assertIn(
+            "register_core_python_script_services()",
+            editor_main_source,
+        )
+        core_registration = editor_main_source.index(
+            "register_core_python_script_services()"
+        )
+        dispatcher_registration = editor_main_source.index(
+            "editor.register_script_dispatcher()"
+        )
+        remaining_registration = editor_main_source.index("reimport()")
+        self.assertLess(core_registration, dispatcher_registration)
+        self.assertLess(dispatcher_registration, remaining_registration)
 
     def test_main_on_init_only_reads_committed_native_scene(self):
         source = self._handler_source()

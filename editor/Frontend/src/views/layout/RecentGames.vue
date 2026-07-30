@@ -70,16 +70,17 @@
 
       <div class="mt-6 pt-6 border-t border-[#333] flex items-center gap-3 shrink-0">
         <button
+          :disabled="!archiveReady"
           class="flex-1 py-3 px-6 text-left text-base hover:bg-[#333] rounded flex items-center gap-3"
           @click="handleImport"
         >
           <span class="text-xl">📁</span>
-          打开现有项目...
+          {{ archiveReady ? '打开现有项目...' : '存档服务正在初始化…' }}
         </button>
         <button
           class="py-3 px-10 text-base rounded flex items-center justify-center gap-2 transition-colors shrink-0"
-          :class="selectedProject ? 'bg-[#84a65b] text-white hover:bg-[#9bc46d]' : 'bg-[#333] text-gray-500 cursor-not-allowed'"
-          :disabled="!selectedProject"
+          :class="selectedProject && archiveReady ? 'bg-[#84a65b] text-white hover:bg-[#9bc46d]' : 'bg-[#333] text-gray-500 cursor-not-allowed'"
+          :disabled="!selectedProject || !archiveReady"
           @click="openSelectedProject"
         >
           <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
@@ -101,7 +102,7 @@
 </template>
 
 <script setup>
-import { ref, onMounted } from 'vue';
+import { ref, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService } from '@/utils/bridge';
 
@@ -110,6 +111,8 @@ const router = useRouter();
 const appVersion = ref('V1.0.0');
 const recentProjects = ref([]);
 const selectedProject = ref(null);
+const archiveReady = ref(false);
+let archiveStatusTimer = null;
 
 const goBack = () => {
   router.push('/StartScreen');
@@ -122,12 +125,26 @@ onMounted(async () => {
 
     const saved = await projectLauncherService.getRecentProjects();
     if (saved) recentProjects.value = saved.data;
+
+    const refreshArchiveReady = async () => {
+      const response = await projectLauncherService.getProjectLoadStatus();
+      const status = unwrapResponse(response);
+      archiveReady.value = status?.archive_service_ready === true;
+    };
+    await refreshArchiveReady();
+    archiveStatusTimer = window.setInterval(refreshArchiveReady, 250);
   } catch (error) {
     console.error('RecentGames 初始化失败:', error);
   }
 });
 
 const unwrapResponse = (response) => response?.data ?? response;
+
+onUnmounted(() => {
+  if (archiveStatusTimer !== null) {
+    window.clearInterval(archiveStatusTimer);
+  }
+});
 
 const migrationDiagnostics = (result) => (result?.diagnostics || [])
   .map((item) => `${item.actor || 'scene'}: ${item.path || ''} — ${item.message || ''}`)
@@ -193,6 +210,14 @@ const handleOpenProject = async (path, project = null) => {
     }
     if (opened?.status === 'invalid_archive') {
       window.alert(`无法打开存档：\n${archiveDiagnostics(opened)}`);
+      return;
+    }
+    if (opened?.status === 'service_initializing') {
+      window.alert('存档服务正在初始化，请稍后重试');
+      return;
+    }
+    if (opened?.status === 'archive_service_error') {
+      window.alert(`存档服务错误：${opened.message || '无法解析存档'}`);
       return;
     }
     if (opened?.legacy) {

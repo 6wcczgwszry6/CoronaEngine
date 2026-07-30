@@ -94,6 +94,7 @@ class OpticsSystem : public Kernel::SystemBase {
     bool initialize_hardware_resources();
     bool initialize_render_pipelines();
     bool ensure_cursor_icon_texture();
+    bool ensure_gizmo_axis_textures();
 
     void bind_native_view_resources(std::uintptr_t camera_handle,
                                     uint32_t width,
@@ -291,6 +292,8 @@ class OpticsSystem : public Kernel::SystemBase {
         bool has_follow_camera_instances = false;
         bool stereo_ui = false;
         bool cursor_visible = false;
+        bool gizmo_target = false;
+        bool gizmo_visible = false;
         std::uint32_t instance_count = 0;
         std::uint32_t width = 0;
         std::uint32_t height = 0;

@@ -1,4 +1,5 @@
 import { aiService } from '@/utils/bridge.js';
+import { createServiceResponseError } from '@/utils/serviceInitialization.js';
 
 const CHANNEL_NAME = 'corona-cabbage-assistant-context-v2';
 const STORAGE_KEY = 'corona.cabbageAssistantContext.v2';
@@ -149,7 +150,7 @@ export async function loadCurrentWorld() {
   cancelPendingTransformEvents();
   const response = await aiService.loadCabbageContext();
   if (response?.success !== true || !response?.context) {
-    throw new Error(response?.message || '加载当前世界的包菜上下文失败');
+    throw createServiceResponseError(response, '加载当前世界的包菜上下文失败');
   }
   return publishSnapshot({ context: response.context, projectScopeId: currentScopeId() });
 }
