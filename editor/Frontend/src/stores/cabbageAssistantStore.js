@@ -13,6 +13,20 @@ const OPTIMIZATION_TIP_COOLDOWN_MS = 60000;
 const MAX_SHOWN_OPTIMIZATION_REVISIONS = 80;
 const PRE_WARNING_DURATION_MS = 10000;
 const MAX_SHOWN_PRE_WARNING_KEYS = 160;
+const PRE_WARNING_CODE_ALIASES = Object.freeze({
+  missing_start_node: 'start_node_count',
+  duplicate_start_node: 'start_node_count',
+  multiple_start_nodes: 'start_node_count',
+  too_many_start_nodes: 'start_node_count',
+  missing_object_target: 'missing_actor_target',
+  missing_object_reference: 'missing_actor_target',
+  object_target_not_found: 'actor_target_not_found',
+  object_reference_not_found: 'actor_target_not_found',
+  invalid_transition_condition_count: 'invalid_visible_condition_count',
+  condition_not_boolean: 'non_boolean_condition',
+  unsupported_block: 'unknown_block_type',
+  unsupported_block_type: 'unknown_block_type',
+});
 const PRE_WARNING_CODES = new Set([
   'missing_actor_target',
   'actor_target_not_found',
@@ -22,6 +36,8 @@ const PRE_WARNING_CODES = new Set([
   'non_boolean_condition',
   'unknown_block_type',
   'missing_required_input',
+  'actor_type_mismatch',
+  'unused_block',
 ]);
 const PATTERN_FIELDS = ['blockType', 'workspaceRole', 'relationType', 'missingInput', 'objectRequirement', 'edgeId'];
 
@@ -47,11 +63,20 @@ function normalizeProfile(raw = {}) {
   };
 }
 
+function normalizeIssueCode(value) {
+  const code = String(value || '').trim();
+  return PRE_WARNING_CODE_ALIASES[code] || code;
+}
+
 function normalizeIssuePattern(raw = {}) {
   if (!raw || typeof raw !== 'object') return {};
   return Object.fromEntries(PATTERN_FIELDS
     .map((key) => [key, String(raw[key] || '').trim().slice(0, 160)])
     .filter(([, value]) => value));
+}
+
+function preWarningSignature(code, pattern = {}) {
+  return `${normalizeIssueCode(code)}|${JSON.stringify(normalizeIssuePattern(pattern))}`;
 }
 
 function normalizeSteps(raw) {
@@ -246,8 +271,8 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
     ? raw.type
     : 'node-issue';
   const defaultTitle = type === 'node-issue'
-    ? '\u8282\u70b9\u903b\u8f91\u9700\u8981\u8c03\u6574'
-    : '\u4e16\u754c\u5236\u4f5c\u4efb\u52a1';
+    ? '节点逻辑需要调整'
+    : '世界制作任务';
   return {
     taskKey,
     issueKey: taskKey,
@@ -330,6 +355,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     contextUpdatedAt: 0,
     preWarning: null,
     shownPreWarningKeys: [],
+    activePreWarningSignatures: [],
   }),
 
   getters: {
@@ -403,6 +429,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.contextUpdatedAt = 0;
       this.preWarning = null;
       this.shownPreWarningKeys = [];
+      this.activePreWarningSignatures = [];
     },
 
     clearForProjectChange(projectScopeId = '') {
@@ -500,13 +527,12 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         issues = [{
           issueKey: 'current_node_graph_logic',
           code: 'node_graph_logic_issue',
-          title: '\u8282\u70b9\u903b\u8f91\u9700\u8981\u8c03\u6574',
+          title: '节点逻辑需要调整',
           message: String(result.summary || '').trim(),
           suggestion: String(result.summary || '').trim(),
         }];
       }
 
-      if (issues.length) this.clearOptimizationTip();
       const incomingKeys = new Set(issues.map(issueKey).filter(Boolean));
       for (const existing of existingNodeTasks) {
         if (!incomingKeys.has(existing.taskKey)) {
@@ -529,7 +555,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
           taskKey: key,
           type: 'node-issue',
           status: shouldShow ? 'active' : 'candidate',
-          title: issue.title || '\u8282\u70b9\u903b\u8f91\u9700\u8981\u8c03\u6574',
+          title: issue.title || '节点逻辑需要调整',
           message: issue.message || summary,
           suggestion: issue.suggestion || summary,
           graphRevision: this.graphRevision,
@@ -548,7 +574,9 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         && this.preWarning?.taskKey !== this.selectedTaskKey
         && this.ephemeralTip?.taskKey !== this.selectedTaskKey) this.selectedTaskKey = '';
 
-      if (!issues.length && result.optimizationTip) {
+      // Optimization opinions and repeated-error warnings are independent signals.
+      // If a review contains both an issue and a useful optimization, keep both cards.
+      if (result.optimizationTip) {
         this.showOptimizationTip(result.optimizationTip, this.graphRevision);
       }
       return actions;
@@ -608,7 +636,6 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     },
 
     showOptimizationTip(tip = {}, graphRevision = '') {
-      if (this.activeTasks.some((task) => task.type === 'node-issue')) return false;
       const revision = String(graphRevision || '').trim();
       const tipKey = String(tip.tipKey || '').trim().slice(0, 120);
       const title = String(tip.title || '').trim().slice(0, 80);
@@ -649,10 +676,10 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     },
 
     showPreWarning(warning = {}) {
-      const code = String(warning.code || '').trim();
+      const code = normalizeIssueCode(warning.code);
       const revision = String(warning.graphRevision || this.graphRevision || '').trim();
-      const patternKey = JSON.stringify(normalizeIssuePattern(warning.pattern || {}));
-      const warningKey = `${revision}|${code}|${patternKey}`;
+      const signature = preWarningSignature(code, warning.pattern || {});
+      const warningKey = `${revision}|${signature}`;
       if (!revision || !PRE_WARNING_CODES.has(code) || this.shownPreWarningKeys.includes(warningKey)) return false;
       const now = Date.now();
       const taskKey = `pre-warning:${warningKey}`;
@@ -701,18 +728,26 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       walkBlocks(workspace.globalVariablesWorkspace || {}).forEach((block) => scopedBlocks.push({ block }));
 
       const enabled = Object.entries(this.issueMemory || {})
+        .map(([rawCode, memory]) => [normalizeIssueCode(rawCode), memory])
         .filter(([code, memory]) => {
           const occurrences = Number(memory?.occurrences || 0);
           const discussions = Number(memory?.chatDiscussionCount || 0);
           return PRE_WARNING_CODES.has(code) && occurrences >= 1 && occurrences + discussions >= 2;
         })
         .sort((a, b) => Number(b[1]?.lastSeenAt || 0) - Number(a[1]?.lastSeenAt || 0));
+      const matches = [];
       for (const [code, memory] of enabled) {
         const pattern = normalizeIssuePattern(memory?.pattern || {});
         let match = null;
         if (code === 'start_node_count') {
           const count = nodes.filter((node) => node?.nodeType === 'start').length;
-          if (count !== 1) match = { message: '开始节点似乎又不是唯一的，继续编辑前先保留一个开始节点会更稳妥。' };
+          if (count !== 1) {
+            match = {
+              message: count === 0
+                ? '这里可能又缺少开始节点，继续编辑前先放入一个开始节点会更稳妥。'
+                : '这里可能又出现了多个开始节点，继续编辑前先保留一个开始节点会更稳妥。',
+            };
+          }
         } else if (code === 'invalid_edge_endpoint') {
           const edge = edges.find((item) => !nodeIds.has(String(item?.source?.nodeId || '')) || !nodeIds.has(String(item?.target?.nodeId || '')));
           if (edge) match = { edgeId: String(edge.id || ''), message: '这条连线可能又指向了无效节点，继续编辑前先重新连接两个真实节点。' };
@@ -752,6 +787,8 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
             }
             if (code === 'missing_required_input') return !blockHasInput(block, pattern.missingInput);
             if (code === 'unknown_block_type') return Boolean(pattern.blockType && String(block?.type || '') === pattern.blockType);
+            if (code === 'actor_type_mismatch') return Boolean(pattern.blockType);
+            if (code === 'unused_block') return Boolean(pattern.blockType);
             return false;
           });
           if (scoped) {
@@ -760,6 +797,8 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
               actor_target_not_found: '这里可能又引用了当前场景不存在的对象，继续编辑前先把“对象[]”改成场景中已有的物体。',
               missing_required_input: '这个积木可能又缺少必要输入，先补齐输入再继续连接会更安全。',
               unknown_block_type: '这里可能又使用了当前引擎不支持的积木，可以先换成工具箱中的可用积木。',
+              actor_type_mismatch: '这个积木以前出现过对象类型不匹配，继续配置前可以先确认目标对象类型是否符合要求。',
+              unused_block: '这个积木以前出现过未接入执行链的情况，继续编辑前可以先确认它已连接到节点流程。',
             };
             match = {
               nodeId: String(scoped.nodeId || ''), edgeId: String(scoped.edgeId || ''),
@@ -768,11 +807,30 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
           }
         }
         if (match) {
-          const warning = { code, pattern, graphRevision: revision, title: '可能重复的逻辑问题', ...match };
-          return this.showPreWarning(warning) ? this.preWarning : null;
+          matches.push({
+            signature: preWarningSignature(code, pattern),
+            warning: { code, pattern, graphRevision: revision, title: '可能重复的逻辑问题', ...match },
+          });
         }
       }
-      return null;
+
+      const previouslyActive = new Set(this.activePreWarningSignatures || []);
+      const currentlyActive = [...new Set(matches.map((item) => item.signature))];
+      const currentlyActiveSet = new Set(currentlyActive);
+      const released = [...previouslyActive].filter((signature) => !currentlyActiveSet.has(signature));
+      if (released.length) {
+        this.shownPreWarningKeys = this.shownPreWarningKeys.filter((key) => (
+          !released.some((signature) => String(key).endsWith(`|${signature}`))
+        ));
+      }
+      this.activePreWarningSignatures = currentlyActive;
+
+      // Only warn when a remembered pattern changes from absent to present. This avoids
+      // repeated flashes while the user is still editing the same mistake, but re-arms
+      // the warning after the pattern has been fixed and later appears again.
+      const newlyMatched = matches.find((item) => !previouslyActive.has(item.signature));
+      if (!newlyMatched) return null;
+      return this.showPreWarning(newlyMatched.warning) ? this.preWarning : null;
     },
 
     selectTask(taskKey = '') {
