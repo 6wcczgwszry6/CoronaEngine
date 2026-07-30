@@ -377,6 +377,11 @@ struct UVec2Upload {
     uint32_t y;
 };
 
+struct FVec2Upload {
+    float x;
+    float y;
+};
+
 struct FVec3Upload {
     float x;
     float y;
@@ -485,6 +490,10 @@ struct OpticsEventViewport {
 }
 
 [[nodiscard]] UVec2Upload upload_value(const ktm::uvec2& value) {
+    return {value.x, value.y};
+}
+
+[[nodiscard]] FVec2Upload upload_value(const ktm::fvec2& value) {
     return {value.x, value.y};
 }
 
@@ -4802,6 +4811,8 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     }
 
     const uint32_t overlayDescriptor = target.ui_overlay.storeStorageDescriptor();
+    const auto overlayExtent = target.ui_overlay.extent();
+    const auto compositeExtent = target.composite_output.extent();
     bool follow_camera_overlay_ready = has_follow_camera_instances;
     if (has_follow_camera_instances) {
         const auto ui_instance_capacity = grow_table_capacity(
@@ -5004,6 +5015,25 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     opticsComposite.bind_storage_image(0, background);
     opticsComposite.bind_storage_image(1, stereo_ui ? target.ui_warped_overlay : target.ui_overlay);
     opticsComposite.bind_storage_image(2, target.composite_output);
+    if (gizmo_visible) {
+        CFW_LOG_INFO("Optics gizmo diagnostics: origin=({}, {}) xdir=({}, {}) ydir=({}, {}) zdir=({}, {}) overlay_id={} overlay_desc={} overlay_extent={}x{} composite_id={} composite_extent={}x{} composite_fg_desc={}",
+                     gizmo_layout.origin.x,
+                     gizmo_layout.origin.y,
+                     gizmo_layout.axes[0].direction.x,
+                     gizmo_layout.axes[0].direction.y,
+                     gizmo_layout.axes[1].direction.x,
+                     gizmo_layout.axes[1].direction.y,
+                     gizmo_layout.axes[2].direction.x,
+                     gizmo_layout.axes[2].direction.y,
+                     target.ui_overlay.get_image_id(),
+                     overlayDescriptor,
+                     overlayExtent.width,
+                     overlayExtent.height,
+                     target.composite_output.get_image_id(),
+                     compositeExtent.width,
+                     compositeExtent.height,
+                     compositeOverlayDescriptor);
+    }
     opticsComposite.set_debug_label(make_optics_dispatch_label(
         "ui_composite",
         static_cast<std::uint32_t>(frame_index),
