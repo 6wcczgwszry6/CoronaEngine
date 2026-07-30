@@ -158,7 +158,7 @@
           </div>
           <!-- 应用按钮 -->
           <button
-            class="w-full bg-[#84a65b] hover:bg-[#6b8a48] text-white text-xs py-1.5 rounded transition-colors duration-200"
+            class="w-full bg-[#d8b86c] hover:bg-[#aa8727] text-white text-xs py-1.5 rounded transition-colors duration-200"
             @click="handleApplyPhysics"
           >
             应用物理参数
@@ -330,6 +330,48 @@
       @wheel.prevent="handleWheel"
     ></div>
 
+    <aside
+      class="scene-quick-controls"
+      :aria-label="translate('layout.sceneControls')"
+      @mousedown.stop
+      @pointerdown.stop
+      @click.stop
+      @wheel.stop
+    >
+      <section
+        class="scene-quick-lighting"
+        data-guidance="scene-lighting"
+        :data-assistant-title="translate('layout.sceneLighting')"
+        :data-assistant-description="translate('layout.sceneLightingDescription')"
+      >
+        <div class="scene-quick-lighting-header">
+          <span>{{ translate('layout.sceneLighting') }}</span>
+          <label class="scene-quick-light-toggle">
+            <input
+              v-model="sceneLightSettings.enabled"
+              type="checkbox"
+              :disabled="sceneLightBusy"
+              @change="updateSceneLight"
+            />
+            <span>{{ sceneLightSettings.enabled ? translate('common.yes') : translate('common.no') }}</span>
+          </label>
+        </div>
+        <div class="scene-quick-direction" :class="{ disabled: !sceneLightSettings.enabled || sceneLightBusy }">
+          <span class="scene-quick-direction-label">{{ translate('layout.lightDirection') }}</span>
+          <label v-for="axis in ['x', 'y', 'z']" :key="axis">
+            <span>{{ axis.toUpperCase() }}</span>
+            <input
+              v-model.number="sceneLightSettings.direction[axis]"
+              type="number"
+              step="0.1"
+              :disabled="!sceneLightSettings.enabled || sceneLightBusy"
+              @change="updateSceneLight"
+            />
+          </label>
+        </div>
+      </section>
+    </aside>
+
     <!-- 自定义弹窗 -->
     <div
       v-if="showDialog"
@@ -398,11 +440,11 @@
       v-if="showLocalModal"
       class="fixed inset-0 bg-black/70 flex items-center justify-center z-[9999]"
     >
-      <div class="bg-[#2a2a2a] rounded-lg p-6 min-w-[300px] border border-[#84a65b]/30 shadow-2xl">
+      <div class="bg-[#2a2a2a] rounded-lg p-6 min-w-[300px] border border-[#d8b86c]/30 shadow-2xl">
         <div class="flex items-center gap-3 mb-4">
           <div class="w-6 h-6 animate-spin">
             <svg
-              class="w-full h-full text-[#84a65b]"
+              class="w-full h-full text-[#d8b86c]"
               fill="none"
               stroke="currentColor"
               viewBox="0 0 24 24"
@@ -420,18 +462,18 @@
         <div class="text-sm text-[#909090] mb-2">{{ localModalMessage }}</div>
         <div v-if="localModalProgress > 0" class="w-full bg-[#1a1a1a] rounded-full h-2 mt-4">
           <div
-            class="bg-[#84a65b] h-full rounded-full transition-all duration-300"
+            class="bg-[#d8b86c] h-full rounded-full transition-all duration-300"
             :style="{ width: localModalProgress + '%' }"
           ></div>
         </div>
-        <div v-if="localModalProgress > 0" class="text-xs text-[#84a65b] text-center mt-2">
+        <div v-if="localModalProgress > 0" class="text-xs text-[#d8b86c] text-center mt-2">
           {{ Math.round(localModalProgress) }}%
         </div>
       </div>
     </div>
 
     <div
-      class="fixed right-5 top-28 z-[80] h-24 w-24 pointer-events-none select-none rounded-md border border-white/10 bg-[#101418]/70 shadow-xl backdrop-blur-sm"
+      class="absolute right-5 top-20 z-[80] h-24 w-24 pointer-events-none select-none rounded-md border border-white/10 bg-[#101418]/70 shadow-xl backdrop-blur-sm"
       aria-hidden="true"
     >
       <svg class="h-full w-full" viewBox="0 0 90 90">
@@ -468,7 +510,11 @@
         :key="shortcut.id"
         type="button"
         class="dock-shortcut-button"
-        :class="{ active: isShortcutOpen(shortcut.id) }"
+        :class="{
+          active: isShortcutOpen(shortcut.id),
+          pending: dockShortcutPending.has(shortcut.id),
+        }"
+        :aria-busy="dockShortcutPending.has(shortcut.id)"
         :title="`${isShortcutOpen(shortcut.id) ? '关闭' : '打开'}${shortcut.label}`"
         @click.stop="toggleDockShortcut(shortcut.id)"
       >
@@ -477,16 +523,32 @@
       </button>
     </nav>
 
-    <CabbageReviewAssistant
-      :tasks="cabbageAssistant.tasks"
-      :attention-token="cabbageAssistant.attentionToken"
-    />
+    <aside
+      class="cabbage-resident-stack"
+      aria-label="包菜任务与答疑"
+      @mousedown.stop
+      @pointerdown.stop
+      @click.stop
+      @wheel.stop
+    >
+      <CabbageReviewAssistant
+        resident
+        class="cabbage-resident-tasks"
+        :tasks="cabbageAssistant.tasks"
+        :attention-token="cabbageAssistant.attentionToken"
+      />
+      <div v-if="!cabbageChatDetached" class="cabbage-resident-chat">
+        <CabbageChatPanel resident @detach="detachResidentCabbageChat" />
+      </div>
+    </aside>
+    <CabbageGuidanceOverlay />
   </div>
 </template>
 
 <script setup>
 import { computed, ref, onMounted, onUnmounted, reactive, watch, nextTick } from 'vue';
 import { useRouter } from 'vue-router';
+import { useI18n } from 'vue-i18n';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import {
   Bridge,
@@ -516,31 +578,100 @@ import {
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
+import CabbageChatPanel from '@/views/sidebar/CabbageChatPanel.vue';
+import CabbageGuidanceOverlay from '@/components/ui/CabbageGuidanceOverlay.vue';
 import { reviewScopeId, subscribeNodeGraphReviews } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
   cabbageContextService,
   cancelPendingTransformEvents,
+  initializeWorldTasks,
   publishCabbageAssistantContext,
+  readCabbageAssistantContext,
   subscribeCabbageAssistantContext,
+  subscribeCabbagePreWarnings,
 } from '@/services/cabbageAssistantContextService.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
+import { cancelActiveNodeGraphGeneration } from '@/services/nodeGraphGenerationService.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
 const router = useRouter();
+const { t: translate } = useI18n();
 const dockStore = useDockStore();
 const cabbageAssistant = useCabbageAssistantStore();
 const dockShortcuts = [
-  { id: 'AITalkBar', label: 'AI 对话', icon: 'AI' },
   { id: 'SceneTools', label: '场景管理', icon: '景' },
-  { id: 'SceneDatas', label: '对象', icon: '物' },
   { id: 'NodeGraphPanel', label: '节点', icon: '点' },
 ];
+const dockShortcutPending = reactive(new Set());
 const isShortcutOpen = (id) => Boolean(dockStore.panels[id]?.open);
+const cabbageChatDetached = computed(() => {
+  const panel = dockStore.panels.CabbageChatPanel;
+  return Boolean(panel?.open && panel.mode === 'external');
+});
+const openDockedPanel = (id, { preserveZone = false } = {}) => {
+  const panel = dockStore.panels[id];
+  const manifest = PLUGIN_MANIFEST.find((item) => item.id === id);
+  if (!panel || !manifest) return;
+  if (!preserveZone || !panel.dockZone) {
+    dockStore.setDockZone(id, manifest.defaultDock);
+  }
+  dockStore.popIn(id);
+  dockStore.openPanel(id);
+  nextTick(() => window.dispatchEvent(new Event('resize')));
+};
+const detachResidentCabbageChat = async () => {
+  if (cabbageAssistant.chatBusy || cabbageChatDetached.value) return;
+  const panelId = 'CabbageChatPanel';
+  const manifest = PLUGIN_MANIFEST.find((item) => item.id === panelId);
+  if (!manifest) return;
+  try {
+    const result = await appService.createDetachedPanel({
+      panelId,
+      routePath: '#' + (manifest.routePath || ''),
+      width: Math.max(420, Number(manifest.defaultWidth) || 420),
+      height: Math.max(640, Number(manifest.defaultHeight) || 640),
+      x: 120,
+      y: 120,
+    });
+    const tabId = result?.tab_id ?? result?.data?.tab_id;
+    dockStore.setExternal(panelId, tabId);
+  } catch (error) {
+    logError('Failed to detach resident Cabbage chat', error);
+  }
+};
+
 const toggleDockShortcut = async (id) => {
-  await toggleFloatingPanel(dockStore, id);
+  if (id === 'NodeGraphPanel') {
+    dockShortcutPending.add(id);
+    try {
+      await toggleFloatingPanel(dockStore, id);
+    } finally {
+      dockShortcutPending.delete(id);
+    }
+    return;
+  }
+
+  const panel = dockStore.panels[id];
+  if (!panel) return;
+  if (panel.open && panel.mode === 'external') {
+    await closeFloatingPanel(dockStore, id);
+    return;
+  }
+  if (panel.open) {
+    dockStore.closePanel(id);
+    nextTick(() => window.dispatchEvent(new Event('resize')));
+    return;
+  }
+  openDockedPanel(id);
+};
+const handleNodeGraphPanelOpenRequest = async () => {
+  // AI generation must use the same centered in-editor floating surface as the
+  // Node shortcut. Opening it as a normal dock would honor defaultDock=bottom
+  // and shrink the main viewport. openFloatingPanel also reuses an existing tab.
+  await openFloatingPanel(dockStore, 'NodeGraphPanel');
 };
 
 const goToHome = () => {
@@ -572,7 +703,10 @@ const cameraBindingState = ref({
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
 let actorSelectionCallbackToken = null;
+let actorTransformCallbackToken = null;
 let sceneAddedCallbackToken = null;
+const actorTransformBaselines = new Map();
+const ACTOR_TRANSFORM_EPSILON = 1e-5;
 let sceneRenamedCallbackToken = null;
 const viewportPickSurfaceRef = ref(null);
 const viewportLayoutVersion = ref(0);
@@ -606,6 +740,12 @@ const syncViewportUiCalibrationPanel = (mode) => {
 
 // 摄像头移动速度（可调节）
 const cameraSpeed = ref(0.2);
+const sceneGridEnabled = ref(true);
+const sceneLightSettings = reactive({
+  enabled: true,
+  direction: { x: 1, y: 1, z: 1 },
+});
+const sceneLightBusy = ref(false);
 const mouseSensitivity = ref(0.15);
 
 // 鼠标旋转状态
@@ -656,6 +796,71 @@ const currentViewportUiDescriptor = () => ({
   cameraHandle: cameraBindingState.value.cameraHandle || '',
 });
 
+const normalizeTransformVector = (value, fallback = { x: 0, y: 0, z: 0 }) => ({
+  x: Number(value?.x ?? value?.[0] ?? fallback.x) || 0,
+  y: Number(value?.y ?? value?.[1] ?? fallback.y) || 0,
+  z: Number(value?.z ?? value?.[2] ?? fallback.z) || 0,
+});
+
+const actorTransformKey = (sceneId, actorName) => `${String(sceneId || '')}::${String(actorName || '')}`;
+
+const normalizeActorTransform = (source = {}, fallback = {}) => ({
+  position: normalizeTransformVector(source.position, fallback.position || { x: 0, y: 0, z: 0 }),
+  rotation: normalizeTransformVector(source.rotation, fallback.rotation || { x: 0, y: 0, z: 0 }),
+  scale: normalizeTransformVector(source.scale, fallback.scale || { x: 1, y: 1, z: 1 }),
+});
+
+const transformVectorChanged = (previous, next) => ['x', 'y', 'z'].some((axis) => (
+  Math.abs(Number(previous?.[axis] || 0) - Number(next?.[axis] || 0)) > ACTOR_TRANSFORM_EPSILON
+));
+
+const seedActorTransformBaseline = async (sceneId, actorName) => {
+  const scene = String(sceneId || '').trim();
+  const actor = String(actorName || '').trim();
+  if (!scene || !actor) return;
+  try {
+    const result = await sceneService.getActor(scene, actor);
+    const data = result?.data ?? result ?? {};
+    if (!data || data.status === 'error') return;
+    actorTransformBaselines.set(
+      actorTransformKey(scene, actor),
+      normalizeActorTransform(data.geometry || {}),
+    );
+  } catch (_) {
+    // Selection should still open the Object Dock when a baseline cannot be read.
+  }
+};
+
+const handleActorTransformForCabbage = (payload = {}) => {
+  const sceneId = String(payload?.scene || payload?.scene_id || '').trim();
+  const actorName = String(payload?.actor || payload?.actor_name || '').trim();
+  if (!sceneId || !actorName) return;
+  const key = actorTransformKey(sceneId, actorName);
+  const previous = actorTransformBaselines.get(key);
+  const next = normalizeActorTransform(payload, previous || {});
+  actorTransformBaselines.set(key, next);
+  // The first callback may be an initial state echo. Only compare after a baseline exists.
+  if (!previous) return;
+
+  for (const transformKey of ['position', 'rotation', 'scale']) {
+    if (!transformVectorChanged(previous[transformKey], next[transformKey])) continue;
+    void cabbageContextService.recordEvent({
+      type: transformKey === 'position'
+        ? 'transform_position'
+        : transformKey === 'rotation'
+          ? 'transform_rotation'
+          : 'transform_scale',
+      category: 'scene',
+      success: true,
+      details: {
+        sceneName: sceneId,
+        actorName,
+        source: 'viewport',
+      },
+    });
+  }
+};
+
 const emitActorChangeFast = (type, sceneId, actorName) => {
   editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
     logError('Failed to publish actor selection', error);
@@ -668,9 +873,11 @@ const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = ''
   const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
   if (!actorName || actorType === 'scene') return;
 
-  setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
+  const resolvedSceneId = sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  setActorContext(resolvedSceneId, actorName);
+  void seedActorTransformBaseline(resolvedSceneId, actorName);
   if (!dockStore.panels.SceneDatas?.open) {
-    await openFloatingPanel(dockStore, 'SceneDatas');
+    openDockedPanel('SceneDatas');
   }
 };
 
@@ -868,6 +1075,7 @@ const currentMainCameraId = () =>
 // Cabbage assistant: world-scoped tutorial and node-logic tasks.
 let unsubscribeNodeGraphReview = null;
 let unsubscribeCabbageContext = null;
+let unsubscribeCabbagePreWarnings = null;
 let cabbageCandidateTimer = null;
 let cabbageWorldLoadGeneration = 0;
 const ACTIVE_PROJECT_PATH_KEY = 'corona.activeProjectPath';
@@ -904,27 +1112,64 @@ async function persistCabbageTaskActions(actions = []) {
   }
 }
 
-async function loadCabbageWorldContext({ reset = true } = {}) {
+async function loadCabbageWorldContext({ reset = true, retryCount = 6 } = {}) {
   const generation = ++cabbageWorldLoadGeneration;
+  const expectedProjectPath = normalizeActiveProjectPath(readActiveProjectPath());
+  const scopeId = currentProjectReviewScopeId();
+  // Keep the last snapshot for this same world while the backend context is loading.
+  // Publishing an empty reset here used to overwrite the cached task list, which made
+  // the task board disappear whenever loading was slow or temporarily failed.
+  const cachedSnapshot = readCabbageAssistantContext(scopeId);
   if (reset) {
-    cabbageAssistant.clearForProjectChange(currentProjectReviewScopeId());
-    publishCabbageAssistantContext(cabbageAssistant);
+    cabbageAssistant.clearForProjectChange(scopeId);
+    if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
   }
-  try {
-    const snapshot = await cabbageContextService.loadCurrentWorld();
-    if (generation !== cabbageWorldLoadGeneration) return null;
-    cabbageAssistant.hydrateContext(snapshot);
-    void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
-    return snapshot;
-  } catch (error) {
-    if (generation === cabbageWorldLoadGeneration) {
-      console.warn('[CabbageContext] failed to load world context', error?.message || error);
+
+  let lastError = null;
+  for (let attempt = 0; attempt < Math.max(1, retryCount); attempt += 1) {
+    if (generation !== cabbageWorldLoadGeneration
+      || normalizeActiveProjectPath(readActiveProjectPath()) !== expectedProjectPath) {
+      return null;
     }
-    return null;
+    try {
+      const snapshot = await cabbageContextService.loadCurrentWorld();
+      if (generation !== cabbageWorldLoadGeneration
+        || normalizeActiveProjectPath(readActiveProjectPath()) !== expectedProjectPath) {
+        return null;
+      }
+      cabbageAssistant.hydrateContext(snapshot);
+      void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
+      const goal = snapshot?.worldGoal || {};
+      if (goal.source === 'ai' && goal.status === 'generating' && String(goal.prompt || '').trim()) {
+        // A backend restart can interrupt an in-memory DeepSeek job while leaving the
+        // world context in `generating`. Restart that same plan when the world opens.
+        // The context service deduplicates polling when the original job is still alive.
+        void initializeWorldTasks({
+          prompt: String(goal.prompt || '').trim(),
+          mode: String(goal.mode || 'story'),
+          waitForCompletion: false,
+        }).catch((error) => {
+          console.warn('[CabbageContext] failed to resume world task generation', error?.message || error);
+        });
+      }
+      return snapshot;
+    } catch (error) {
+      lastError = error;
+      if (attempt + 1 < retryCount) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250 + attempt * 150));
+      }
+    }
   }
+
+  if (generation === cabbageWorldLoadGeneration) {
+    if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
+    console.warn('[CabbageContext] failed to load current world context after retries', lastError?.message || lastError);
+  }
+  return null;
 }
 
 function clearNodeReviewForProjectChange() {
+  actorTransformBaselines.clear();
   cancelPendingTransformEvents();
   void loadCabbageWorldContext({ reset: true });
 }
@@ -943,6 +1188,10 @@ function applyActualProjectChange(projectPath) {
   if (normalizedPath === activeProjectPathSnapshot) return false;
 
   activeProjectPathSnapshot = normalizedPath;
+  // A node-generation request belongs to the world where it started. Cancel it
+  // before loading the next world's context so a late DeepSeek response cannot
+  // modify the newly opened world's node graph.
+  void cancelActiveNodeGraphGeneration();
   clearNodeReviewForProjectChange();
   clearKnownEditorCameraInputLocks();
   void reconcileEditorCameraInputLocks();
@@ -1105,6 +1354,12 @@ let sceneCameraBindingRefreshPromise = null;
 let sceneCameraBindingLastRefreshAt = 0;
 const SCENE_CAMERA_BINDING_REFRESH_INTERVAL_MS = 1000;
 
+const sceneGridEnabledFromSnapshot = (snapshot = {}) => {
+  if (typeof snapshot?.grid?.enabled === 'boolean') return snapshot.grid.enabled;
+  if (typeof snapshot?.floor_grid_enabled === 'boolean') return snapshot.floor_grid_enabled;
+  return null;
+};
+
 const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => {
   const snapshot = payload?.scene ?? payload?.data?.scene ?? payload?.data ?? payload;
   if (!snapshot || typeof snapshot !== 'object') {
@@ -1117,6 +1372,14 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
 
   const normalizedSceneId =
     snapshot.scene_id ?? snapshot.sceneId ?? snapshot.id ?? sceneId ?? DEFAULT_SCENE_NAME;
+  const gridEnabled = sceneGridEnabledFromSnapshot(snapshot);
+  if (gridEnabled !== null) sceneGridEnabled.value = gridEnabled;
+  const sun = snapshot.sun && typeof snapshot.sun === 'object' ? snapshot.sun : {};
+  const lightDirection = Array.isArray(sun.direction) ? sun.direction : [1, 1, 1];
+  sceneLightSettings.enabled = sun.enabled !== false;
+  sceneLightSettings.direction.x = Number(lightDirection[0] ?? 1);
+  sceneLightSettings.direction.y = Number(lightDirection[1] ?? 1);
+  sceneLightSettings.direction.z = Number(lightDirection[2] ?? 1);
   const cameras = Array.isArray(snapshot.cameras) ? snapshot.cameras : [];
   actorPickIndex = indexActorsByHandle(Array.isArray(snapshot.actors) ? snapshot.actors : []);
   const activeCameraName =
@@ -1181,12 +1444,42 @@ const syncSceneCameraBinding = async (sceneId, { preservePose = false } = {}) =>
     const result = await sceneService.getScene(sceneId);
     if (requestRevision !== sceneCameraBindingRequestRevision) return false;
     applySceneSnapshot(sceneId, result, { preservePose });
+    broadcastViewportControlsState();
     return true;
   } catch (e) {
     if (requestRevision === sceneCameraBindingRequestRevision) {
       logError('Failed to sync scene camera binding', e);
     }
     return false;
+  }
+};
+
+const updateSceneLight = async () => {
+  if (sceneLightBusy.value) return false;
+  const sceneId = cameraBindingState.value.sceneId
+    || tabs.value[activeTab.value]?.id
+    || DEFAULT_SCENE_NAME;
+  const direction = sceneLightSettings.direction;
+  sceneLightBusy.value = true;
+  try {
+    await sceneService.sunDirection(sceneId, sceneLightSettings.enabled, [
+      Number(direction.x) || 0,
+      Number(direction.y) || 0,
+      Number(direction.z) || 0,
+    ]);
+    void cabbageContextService.recordEvent({
+      type: 'lighting_changed',
+      category: 'lighting',
+      success: true,
+      details: { sceneName: sceneId },
+    });
+    return true;
+  } catch (error) {
+    logError('更新场景光照失败', error);
+    await syncSceneCameraBinding(sceneId, { preservePose: true });
+    return false;
+  } finally {
+    sceneLightBusy.value = false;
   }
 };
 
@@ -2299,6 +2592,27 @@ const setViewportUiModeFromPanel = (mode) => {
   return getEditorControlsState();
 };
 
+const setSceneGridEnabledFromPanel = async (enabled, requestedSceneId = '') => {
+  const currentSceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  const requested = String(requestedSceneId || '').trim();
+  if (requested && requested !== currentSceneId) {
+    await syncSceneCameraBinding(currentSceneId, { preservePose: true });
+    broadcastViewportControlsState();
+    return getEditorControlsState();
+  }
+
+  const nextEnabled = Boolean(enabled);
+  try {
+    await sceneService.floorGrid(currentSceneId, nextEnabled);
+    sceneGridEnabled.value = nextEnabled;
+    broadcastViewportControlsState();
+    return getEditorControlsState();
+  } catch (error) {
+    logError('更新场景编辑网格失败', error);
+    return false;
+  }
+};
+
 const applyPhysicsFromSettings = async (nextParams = {}) => {
   const current = getPhysicsSnapshot();
   physicsParams.value = {
@@ -2338,6 +2652,7 @@ const getEditorControlsState = () => ({
     active: item.mode === viewportUiMode.value,
   })),
   cameraSpeed: Number(cameraSpeed.value),
+  gridEnabled: Boolean(sceneGridEnabled.value),
   physics: getPhysicsSnapshot(),
 });
 
@@ -2360,6 +2675,11 @@ const handleViewportControlsRequest = async (payload = {}) => {
 
   if (payload.action === 'setCameraSpeed') {
     setCameraSpeedFromPanel(payload.value);
+    return;
+  }
+
+  if (payload.action === 'setGridEnabled') {
+    await setSceneGridEnabledFromPanel(payload.enabled, payload.sceneId);
     return;
   }
 
@@ -2394,6 +2714,7 @@ const registerEditorControls = () => {
     selectRenderMode: selectMainRenderMode,
     setViewportUiMode: setViewportUiModeFromPanel,
     setCameraSpeed: setCameraSpeedFromPanel,
+    setGridEnabled: setSceneGridEnabledFromPanel,
   };
 };
 
@@ -2499,9 +2820,39 @@ const onSceneAddedEvent = (payload) => addSceneTab(payload?.name, payload?.route
 
 const onSceneRenamedEvent = (payload) => renameSceneTab(payload?.old_path, payload?.new_path, payload?.name);
 
+const pendingPanelRedocks = new Map();
+const PANEL_REDOCK_TTL_MS = 5000;
+
+const handlePanelRedockRequest = (payload) => {
+  const panelId = payload?.panelId;
+  if (!panelId || !dockStore.panels[panelId]) return;
+  const previousTimer = pendingPanelRedocks.get(panelId);
+  if (previousTimer) window.clearTimeout(previousTimer);
+  const timer = window.setTimeout(() => pendingPanelRedocks.delete(panelId), PANEL_REDOCK_TTL_MS);
+  pendingPanelRedocks.set(panelId, timer);
+  if (panelId === 'CabbageChatPanel') {
+    dockStore.popIn(panelId);
+    dockStore.closePanel(panelId);
+    return;
+  }
+  openDockedPanel(panelId, { preserveZone: true });
+};
+
 const handlePanelClosed = (payload) => {
   const panelId = payload?.panelId;
   if (!panelId) return;
+  const redockTimer = pendingPanelRedocks.get(panelId);
+  if (redockTimer) {
+    window.clearTimeout(redockTimer);
+    pendingPanelRedocks.delete(panelId);
+    if (panelId === 'CabbageChatPanel') {
+      dockStore.popIn(panelId);
+      dockStore.closePanel(panelId);
+    } else {
+      openDockedPanel(panelId, { preserveZone: true });
+    }
+    return;
+  }
   if (isFloatingPanel(panelId)) {
     // Ignore the delayed native event produced by our own close request. The
     // queued shortcut operation may already have opened a replacement tab.
@@ -2577,21 +2928,29 @@ onMounted(async () => {
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
+  coronaEventBus.on('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.on('panel-closed', handlePanelClosed);
   coronaEventBus.on('loading-show', showLoading);
   coronaEventBus.on('loading-update', updateLoading);
   coronaEventBus.on('loading-hide', hideLoading);
   coronaEventBus.on('camera-pose-request', applyCameraPose);
   coronaEventBus.on('viewport-controls-request', handleViewportControlsRequest);
+  coronaEventBus.on('node-graph-panel-open-request', handleNodeGraphPanelOpenRequest);
   sceneAddedCallbackToken = await editorApi.events.onSceneAdded(onSceneAddedEvent);
   sceneRenamedCallbackToken = await editorApi.events.onSceneRenamed(onSceneRenamedEvent);
   actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
+  actorTransformCallbackToken = await editorApi.events.onActorTransformUpdated(handleActorTransformForCabbage);
   actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   // Primary work docks start hidden. If this main CEF page is reused, close any native
   // floating tab left by the previous project before resetting the shortcut state.
-  for (const panelId of [...dockShortcuts.map((item) => item.id), 'CabbageChatPanel']) {
+  for (const panelId of [
+    ...dockShortcuts.map((item) => item.id),
+    'AITalkBar',
+    'SceneDatas',
+    'CabbageChatPanel',
+  ]) {
     const panelState = dockStore.panels[panelId];
     if (panelState?.mode === 'external') {
       await closeFloatingPanel(dockStore, panelId);
@@ -2607,6 +2966,10 @@ onMounted(async () => {
   unsubscribeCabbageContext = subscribeCabbageAssistantContext(
     (snapshot) => cabbageAssistant.hydrateContext(snapshot),
     { projectScopeId: currentProjectReviewScopeId, emitCurrent: true }
+  );
+  unsubscribeCabbagePreWarnings = subscribeCabbagePreWarnings(
+    (warning) => cabbageAssistant.showPreWarning(warning),
+    { projectScopeId: currentProjectReviewScopeId }
   );
   await loadCabbageWorldContext({ reset: true });
   cabbageCandidateTimer = window.setInterval(() => promoteDueCabbageTasks(), 1000);
@@ -2624,18 +2987,24 @@ onUnmounted(() => {
   unsubscribeNodeGraphReview = null;
   unsubscribeCabbageContext?.();
   unsubscribeCabbageContext = null;
+  unsubscribeCabbagePreWarnings?.();
+  unsubscribeCabbagePreWarnings = null;
   if (cabbageCandidateTimer) window.clearInterval(cabbageCandidateTimer);
   cabbageCandidateTimer = null;
   window.removeEventListener('cabbage-run-failed', onCabbageRunFailed);
   void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
+  coronaEventBus.off('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.off('panel-closed', handlePanelClosed);
+  for (const timer of pendingPanelRedocks.values()) window.clearTimeout(timer);
+  pendingPanelRedocks.clear();
   coronaEventBus.off('loading-show', showLoading);
   coronaEventBus.off('loading-update', updateLoading);
   coronaEventBus.off('loading-hide', hideLoading);
   coronaEventBus.off('camera-pose-request', applyCameraPose);
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
+  coronaEventBus.off('node-graph-panel-open-request', handleNodeGraphPanelOpenRequest);
   if (actorPickResultCallbackToken) {
     editorApi.off(actorPickResultCallbackToken).catch((error) => {
       logError('Failed to unregister actor pick result callback', error);
@@ -2648,6 +3017,13 @@ onUnmounted(() => {
     });
     actorSelectionCallbackToken = null;
   }
+  if (actorTransformCallbackToken) {
+    editorApi.off(actorTransformCallbackToken).catch((error) => {
+      logError('Failed to unregister actor transform callback', error);
+    });
+    actorTransformCallbackToken = null;
+  }
+  actorTransformBaselines.clear();
   if (sceneAddedCallbackToken) {
     editorApi.off(sceneAddedCallbackToken).catch((error) => {
       logError('Failed to unregister scene added callback', error);
@@ -2688,23 +3064,142 @@ onUnmounted(() => {
   cursor: none !important;
 }
 
+.scene-quick-controls {
+  position: absolute;
+  top: 12px;
+  left: 12px;
+  z-index: 2147483000;
+  width: min(356px, calc(100% - 24px));
+  padding: 9px;
+  border: 1px solid rgba(216, 184, 108, 0.48);
+  border-radius: 9px;
+  background: rgba(13, 12, 8, 0.94);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(8px);
+  color: #e9dfc5;
+  pointer-events: auto;
+}
+
+.scene-quick-lighting-header,
+.scene-quick-direction,
+.scene-quick-light-toggle,
+.scene-quick-direction label {
+  display: flex;
+  align-items: center;
+}
+
+.scene-quick-lighting {
+  margin: 0;
+}
+
+.scene-quick-lighting-header {
+  justify-content: space-between;
+  color: #eadfbd;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.scene-quick-light-toggle {
+  gap: 5px;
+  color: #bfb493;
+  font-size: 10px;
+  font-weight: 500;
+}
+
+.scene-quick-light-toggle input {
+  accent-color: #d8b86c;
+}
+
+.scene-quick-direction {
+  min-width: 0;
+  margin-top: 7px;
+  gap: 5px;
+}
+
+.scene-quick-direction.disabled {
+  opacity: 0.5;
+}
+
+.scene-quick-direction-label {
+  flex: 0 0 auto;
+  margin-right: 2px;
+  color: #a99d80;
+  font-size: 10px;
+}
+
+.scene-quick-direction label {
+  min-width: 0;
+  flex: 1 1 0;
+  gap: 3px;
+  color: #91876e;
+  font-size: 9px;
+}
+
+.scene-quick-direction input {
+  width: 100%;
+  min-width: 0;
+  padding: 4px 5px;
+  border: 1px solid #55431f;
+  border-radius: 4px;
+  outline: none;
+  background: #0f0e0a;
+  color: #e5e7eb;
+  font-size: 10px;
+}
+
+.scene-quick-direction input:focus {
+  border-color: #d8b86c;
+}
+
 .dock-shortcut-bar {
-  position: fixed; right: 16px; bottom: 16px; z-index: 2147483000;
+  position: absolute; right: 16px; bottom: 16px; z-index: 2147483000;
   display: flex; align-items: center; gap: 7px; padding: 7px;
-  border: 1px solid rgba(91, 103, 92, .78); border-radius: 9px;
-  background: rgba(31, 35, 32, .94); box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+  border: 1px solid rgba(216, 184, 108, .48); border-radius: 9px;
+  background: rgba(13, 12, 8, .96); box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
   backdrop-filter: blur(8px);
 }
 .dock-shortcut-button {
-  display: inline-flex; align-items: center; gap: 6px; border: 1px solid #454c46;
-  border-radius: 6px; background: #2b302c; color: #cbd2c9; padding: 7px 10px;
+  display: inline-flex; align-items: center; gap: 6px; border: 1px solid #56491f;
+  border-radius: 6px; background: #18150d; color: #d8cfb7; padding: 7px 10px;
   font-size: 12px; line-height: 1; transition: border-color .15s ease, background .15s ease, color .15s ease;
 }
-.dock-shortcut-button:hover { border-color: #718365; color: #f1f5ef; }
-.dock-shortcut-button.active { border-color: #8fac76; background: #42533b; color: #effbe8; box-shadow: inset 0 0 0 1px rgba(143, 172, 118, .18); }
-.dock-shortcut-icon { display:grid; place-items:center; width:19px; height:19px; border-radius:4px; background:#202421; color:#9fbd88; font-size:10px; font-weight:700; }
+.dock-shortcut-button:hover { border-color: #b79232; color: #fff4cd; }
+.dock-shortcut-button.active { border-color: #d8b86c; background: #332712; color: #fff4cd; box-shadow: inset 0 0 0 1px rgba(216, 184, 108, .18); }
+.dock-shortcut-button.pending { cursor: progress; border-color: #9f8132; }
+.dock-shortcut-button.pending .dock-shortcut-icon { animation: dock-shortcut-pulse .7s ease-in-out infinite alternate; }
+@keyframes dock-shortcut-pulse { from { opacity: .48; } to { opacity: 1; } }
+.dock-shortcut-icon { display:grid; place-items:center; width:19px; height:19px; border-radius:4px; background:#0e0d09; color:#d6b66b; font-size:10px; font-weight:700; }
+
+.cabbage-resident-stack {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2147482500;
+  width: min(418px, calc(100% - 24px));
+  max-height: calc(100% - 24px);
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  pointer-events: auto;
+}
+.cabbage-resident-tasks {
+  min-height: 0;
+  flex: 1 1 auto;
+}
+.cabbage-resident-chat {
+  height: clamp(340px, 52vh, 500px);
+  min-height: 320px;
+  flex: 0 1 auto;
+  overflow: hidden;
+}
 @media (max-width: 720px) {
+  .scene-quick-controls { width: min(330px, calc(100% - 24px)); }
   .dock-shortcut-bar { max-width: calc(100vw - 32px); overflow-x: auto; }
   .dock-shortcut-button { padding: 7px 8px; white-space: nowrap; }
+  .cabbage-resident-stack { width: min(390px, calc(100% - 24px)); }
+}
+@media (max-height: 680px) {
+  .cabbage-resident-stack { max-height: calc(100% - 16px); bottom: 8px; }
+  .cabbage-resident-chat { height: clamp(270px, 48vh, 370px); min-height: 250px; }
 }
 </style>

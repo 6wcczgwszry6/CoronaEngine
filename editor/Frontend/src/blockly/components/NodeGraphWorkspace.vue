@@ -16,6 +16,7 @@
         <button
           type="button"
           class="ng-run"
+          data-guidance="node-run"
           :class="{ running: codeRunning }"
           :disabled="runBusy || (globalPreviewActive && !codeRunning)"
           :title="globalPreviewActive && !codeRunning ? globalPreviewRunLabel : ''"
@@ -48,7 +49,7 @@
     </div>
     <div v-if="!targetReady" class="ng-empty">请先选中一个物体</div>
     <div v-else class="ng-body">
-      <aside class="ng-panel ng-toolbox">
+      <aside class="ng-panel ng-toolbox" data-guidance="node-toolbox">
         <div class="ng-section-title">
           宏观节点
           <small>拖入中间</small>
@@ -83,6 +84,7 @@
       <main
         ref="canvasRef"
         class="ng-panel ng-canvas" :class="{ 'drop-active': macroDropActive, panning: isCanvasPanning }"
+        data-guidance="node-canvas"
         @dragover.prevent
         @drop.prevent="handleCanvasDrop"
         @wheel.prevent="handleCanvasWheel"
@@ -115,7 +117,7 @@
               orient="auto"
               markerUnits="strokeWidth"
             >
-              <path d="M0,0 L0,6 L9,3 z" fill="#60a5fa" />
+              <path d="M0,0 L0,6 L9,3 z" fill="#d8b86c" />
             </marker>
           </defs>
           <path
@@ -123,7 +125,7 @@
             class="ng-edge-preview"
             :d="pendingEdgePath"
           />
-          <g v-for="edge in edges" :key="edge.id">
+          <g v-for="edge in edges" :key="edge.id" :data-edge-id="edge.id">
             <path
               class="ng-edge-hit"
               :d="edgePath(edge)"
@@ -145,6 +147,8 @@
           v-for="edge in edges"
           :key="`${edge.id}-condition`"
           class="ng-condition-block"
+          :data-edge-id="edge.id"
+          data-guidance="node-transition-condition"
           :class="{ selected: selectedKind === 'edge' && selectedId === edge.id }"
           :style="conditionStyle(edge)"
           @click.stop="selectEdge(edge)"
@@ -156,6 +160,7 @@
           v-for="node in nodes"
           :key="node.id"
           class="ng-node"
+          :data-node-id="node.id"
           :class="[
             `type-${node.nodeType}`,
             {
@@ -178,6 +183,9 @@
               v-if="shouldShowPort(node, port)"
               type="button"
               class="ng-port"
+              :data-node-id="node.id"
+              :data-port-side="port.side"
+              :data-port-index="port.index"
               :class="[
                 port.side,
                 {
@@ -218,7 +226,7 @@
           />
         </section>
         <div class="ng-splitter horizontal" title="拖动调整全局变量池高度" @pointerdown="beginLayoutResize($event, 'variables')"></div>
-        <section class="ng-editor">
+        <section class="ng-editor" data-guidance="node-blockly-editor">
           <div class="ng-section-title">
             {{ activeEditorTitle }}
             <small>{{ activeEditorSubtitle }}</small>
@@ -291,6 +299,8 @@
       </div>
       <pre>{{ runDetail }}</pre>
     </div>
+  </div>
+  <Teleport to="body">
     <div
       v-if="externalDrag.active"
       class="ng-drag-ghost"
@@ -298,7 +308,7 @@
     >
       {{ externalDrag.label }}
     </div>
-  </div>
+  </Teleport>
   </Teleport>
 </template>
 
@@ -307,16 +317,25 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import MiniBlocklyWorkspace from '@/blockly/components/MiniBlocklyWorkspace.vue';
 import BlocklyToolboxPalette from '@/blockly/components/BlocklyToolboxPalette.vue';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
-import { appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
+import { editorApi, appService, projectSettingsService, scriptingService, sceneService } from '@/utils/bridge.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
-import { registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
-import { startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { generatedNodeGraphRevision, registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
+import { graphRevision as reviewGraphRevision, reviewScopeId, startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
+import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
   cabbageContextService,
+  publishCabbageAssistantContext,
+  publishCabbagePreWarning,
+  publishCabbageProjectContext,
   readCabbageAssistantContext,
+  subscribeCabbageAssistantContext,
 } from '@/services/cabbageAssistantContextService.js';
-import { registerProjectNodeGraphSaveHandler } from '@/services/nodeGraphRuntimeService.js';
+import {
+  publishProjectNodeGraphRuntimeState,
+  registerProjectNodeGraphRuntimeHandler,
+  registerProjectNodeGraphSaveHandler,
+} from '@/services/nodeGraphRuntimeService.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
@@ -325,6 +344,7 @@ const props = defineProps({
   reviewActive: { type: Boolean, default: true },
 });
 const { error: logError } = useErrorHandler('NodeGraphWorkspace');
+const cabbageAssistant = useCabbageAssistantStore();
 const NODE_WIDTH = 170,
   NODE_BASE_HEIGHT = 98,
   NODE_PORT_GAP = 20,
@@ -479,6 +499,7 @@ const worldStyle = computed(() => ({
 }));
 let isLoading = false,
   saveTimer = null,
+  preWarningTimer = null,
   resizeObserver = null,
   resizeFrame = 0,
   dragState = null,
@@ -489,9 +510,18 @@ let isLoading = false,
   runPollTimer = null,
   gamePreviewGuardTimer = null,
   startedRunForTarget = false,
+  panelClosing = false,
+  panelCloseStopPromise = null,
   unregisterAiNodeGraphConsumer = null,
   stopNodeGraphReview = null,
+  actorChangedCallbackToken = null,
+  sceneTreeChangedCallbackToken = null,
+  actorOptionsRefreshTimer = null,
+  actorOptionsRefreshSequence = 0,
+  graphLoadSequence = 0,
+  unsubscribeCabbageContext = null,
   unregisterProjectNodeGraphSaveHandler = null,
+  unregisterProjectNodeGraphRuntimeHandler = null,
   loadedProjectPath = '',
   componentMounted = false,
   initialLoadComplete = false,
@@ -500,8 +530,36 @@ let isLoading = false,
   saveQueued = false;
 const targetEnabledByKey = new Map();
 const nodeRunLifecycle = { active: false, terminalReported: false };
+const sceneActorContext = reactive({
+  sceneName: '',
+  available: false,
+  revision: '',
+  actors: [],
+});
 function requestNodeGraphReview(delay = 250) {
   stopNodeGraphReview?.scanNow?.(delay);
+}
+function scheduleRememberedIssueCheck(delay = 140) {
+  if (!componentMounted || isLoading || !initialLoadComplete || !isProjectTarget.value) return;
+  if (preWarningTimer) window.clearTimeout(preWarningTimer);
+  preWarningTimer = window.setTimeout(() => {
+    preWarningTimer = null;
+    if (!componentMounted || isLoading || !initialLoadComplete || !isProjectTarget.value) return;
+    const snapshot = graphSnapshot();
+    const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+    const warning = cabbageAssistant.evaluateRememberedIssuePatterns(
+      snapshot,
+      reviewGraphRevision(snapshot, scope),
+      generatedProjectContext(),
+    );
+    if (warning) {
+      publishCabbagePreWarning({
+        projectScopeId: reviewScopeId(scope),
+        worldId: cabbageAssistant.worldId,
+        warning,
+      });
+    }
+  }, Math.max(0, Number(delay) || 0));
 }
 function currentAssistanceProfile() {
   const profile = readCabbageAssistantContext()?.profile || {};
@@ -714,6 +772,7 @@ function addMacroNodeAt(macroType, clientX, clientY) {
     details: { nodeId: String(node.id || ''), nodeType: String(node.nodeType || '') },
   });
   scheduleSave();
+  scheduleRememberedIssueCheck();
   return true;
 }
 function clearMacroPointerListeners() {
@@ -1102,8 +1161,8 @@ function selectNode(node) {
   }
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
-function selectEdge(edge) {
-  if (mode.value === 'delete') {
+function selectEdge(edge, { allowDelete = true } = {}) {
+  if (allowDelete && mode.value === 'delete') {
     deleteEdge(edge.id);
     return;
   }
@@ -1121,6 +1180,108 @@ function handleEdgeClick(edge) {
   }
   selectEdge(edge);
 }
+
+function serializedWorkspaceContainsBlock(value, blockId, seen = new Set()) {
+  if (!value || !blockId || typeof value !== 'object') return false;
+  if (seen.has(value)) return false;
+  seen.add(value);
+  if (String(value.id || '') === blockId) return true;
+  if (Array.isArray(value)) {
+    return value.some((item) => serializedWorkspaceContainsBlock(item, blockId, seen));
+  }
+  return Object.values(value).some((item) => serializedWorkspaceContainsBlock(item, blockId, seen));
+}
+
+function guidanceBlockOwner(blockId) {
+  if (!blockId) return null;
+  refreshEmbeddedWorkspaceStates();
+  if (serializedWorkspaceContainsBlock(graph.globalVariablesWorkspace, blockId)) {
+    return { kind: 'global' };
+  }
+  const node = graph.nodes.find((item) => serializedWorkspaceContainsBlock(item.workspace, blockId));
+  if (node) return { kind: 'node', node };
+  const edge = graph.edges.find((item) => serializedWorkspaceContainsBlock(item.conditionWorkspace, blockId));
+  if (edge) return { kind: 'edge', edge };
+  if (activeBlocklyRef.value?.hasBlock?.(blockId)) {
+    return selectedNode.value
+      ? { kind: 'node', node: selectedNode.value }
+      : selectedEdge.value
+        ? { kind: 'edge', edge: selectedEdge.value }
+        : null;
+  }
+  if (variablesBlocklyRef.value?.hasBlock?.(blockId)) return { kind: 'global' };
+  return null;
+}
+
+function focusWorldPointIfNeeded(worldX, worldY) {
+  const rect = canvasRef.value?.getBoundingClientRect?.();
+  if (!rect || !Number.isFinite(worldX) || !Number.isFinite(worldY)) return;
+  const localX = viewport.offsetX + worldX * viewport.scale;
+  const localY = viewport.offsetY + worldY * viewport.scale;
+  const marginX = Math.min(140, Math.max(64, rect.width * 0.18));
+  const marginY = Math.min(110, Math.max(60, rect.height * 0.18));
+  const visible = localX >= marginX
+    && localX <= rect.width - marginX
+    && localY >= marginY
+    && localY <= rect.height - marginY;
+  if (visible) return;
+  viewport.offsetX = rect.width / 2 - worldX * viewport.scale;
+  viewport.offsetY = rect.height / 2 - worldY * viewport.scale;
+  clampViewport();
+}
+
+function focusGuidanceNode(node) {
+  if (!node) return false;
+  selectNode(node);
+  focusWorldPointIfNeeded(
+    (Number(node.x) || 0) + NODE_WIDTH / 2,
+    (Number(node.y) || 0) + nodeHeight(node) / 2
+  );
+  return true;
+}
+
+function focusGuidanceEdge(edge) {
+  if (!edge) return false;
+  selectEdge(edge, { allowDelete: false });
+  const source = graph.nodes.find((node) => node.id === edge.source?.nodeId);
+  const target = graph.nodes.find((node) => node.id === edge.target?.nodeId);
+  if (source && target) {
+    focusWorldPointIfNeeded(
+      ((Number(source.x) || 0) + (Number(target.x) || 0) + NODE_WIDTH) / 2,
+      ((Number(source.y) || 0) + (Number(target.y) || 0) + (nodeHeight(source) + nodeHeight(target)) / 2) / 2
+    );
+  }
+  return true;
+}
+
+async function focusGuidanceBlock(blockId) {
+  const owner = guidanceBlockOwner(blockId);
+  if (!owner) return false;
+  if (owner.kind === 'node') focusGuidanceNode(owner.node);
+  if (owner.kind === 'edge') focusGuidanceEdge(owner.edge);
+  await nextTick();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  const targetWorkspace = owner.kind === 'global' ? variablesBlocklyRef.value : activeBlocklyRef.value;
+  targetWorkspace?.resizeBlockly?.();
+  return Boolean(targetWorkspace?.focusBlock?.(blockId));
+}
+
+function handleGuidancePrepare(event) {
+  const detail = event?.detail || {};
+  if (detail.panelId !== 'NodeGraphPanel') return;
+  const blockId = String(detail.blockId || '');
+  if (blockId) {
+    void focusGuidanceBlock(blockId);
+    return;
+  }
+  const edgeId = String(detail.edgeId || '');
+  if (edgeId) {
+    focusGuidanceEdge(graph.edges.find((edge) => String(edge.id) === edgeId));
+    return;
+  }
+  const nodeId = String(detail.nodeId || '');
+  if (nodeId) focusGuidanceNode(graph.nodes.find((node) => String(node.id) === nodeId));
+}
 function deleteNode(id) {
   const i = graph.nodes.findIndex((n) => n.id === id);
   if (i < 0) return;
@@ -1132,6 +1293,7 @@ function deleteNode(id) {
   }
   pendingPort.value = null;
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function deleteEdge(id) {
   const i = graph.edges.findIndex((e) => e.id === id);
@@ -1143,6 +1305,7 @@ function deleteEdge(id) {
   }
   pendingPort.value = null;
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function renameEdge(edge) {
   if (mode.value === 'delete') return;
@@ -1171,6 +1334,7 @@ function setSelectedNodeType(nextType) {
   else if (nextType === 'end') node.name = '结束';
   else node.name = String(node.customName || '').trim() || '自定义节点';
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function updateSelectedNodeName(value) {
   const node = selectedNode.value;
@@ -1347,6 +1511,7 @@ function handlePortClick(node, p) {
   pendingPort.value = null;
   connectionPointer.active = false;
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function getNode(id) {
   return graph.nodes.find((n) => n.id === id);
@@ -1435,6 +1600,7 @@ function conditionStyle(e) {
   return { left: `${p.x - 56}px`, top: `${p.y - 17}px` };
 }
 function onBlockAdded(payload = {}) {
+  scheduleRememberedIssueCheck();
   void cabbageContextService.recordEvent({
     type: 'block_added',
     category: 'node',
@@ -1451,6 +1617,7 @@ function onBlockAdded(payload = {}) {
 }
 
 function onBlockChanged(payload = {}) {
+  scheduleRememberedIssueCheck();
   void cabbageContextService.recordEvent({
     type: 'block_parameter_changed',
     category: 'node',
@@ -1470,20 +1637,28 @@ function onGlobalWorkspaceChange(s) {
   if (isLoading) return;
   graph.globalVariablesWorkspace = s || {};
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function onActiveWorkspaceChange(s) {
   if (isLoading) return;
   if (selectedNode.value) selectedNode.value.workspace = s || {};
   if (selectedEdge.value) selectedEdge.value.conditionWorkspace = s || {};
   scheduleSave();
+  scheduleRememberedIssueCheck();
 }
 function refreshEmbeddedWorkspaceStates() {
-  const g = variablesBlocklyRef.value?.getState?.();
-  if (g) graph.globalVariablesWorkspace = g;
-  const a = activeBlocklyRef.value?.getState?.();
-  if (a) {
-    if (selectedNode.value) selectedNode.value.workspace = a;
-    if (selectedEdge.value) selectedEdge.value.conditionWorkspace = a;
+  const variablesEditor = variablesBlocklyRef.value;
+  if (variablesEditor?.isReady?.()) {
+    const state = variablesEditor.getState?.();
+    if (state && typeof state === 'object') graph.globalVariablesWorkspace = state;
+  }
+  const activeEditor = activeBlocklyRef.value;
+  if (activeEditor?.isReady?.()) {
+    const state = activeEditor.getState?.();
+    if (state && typeof state === 'object') {
+      if (selectedNode.value) selectedNode.value.workspace = state;
+      if (selectedEdge.value) selectedEdge.value.conditionWorkspace = state;
+    }
   }
 }
 function graphSnapshot() {
@@ -1500,6 +1675,141 @@ function graphSnapshot() {
   } catch {
     return { version: 1, nodes: [], edges: [], globalVariablesWorkspace: {} };
   }
+}
+
+function canonicalJson(value) {
+  const normalize = (item) => {
+    if (Array.isArray(item)) return item.map(normalize);
+    if (!item || typeof item !== 'object') return item;
+    return Object.keys(item).sort().reduce((result, key) => {
+      const normalized = normalize(item[key]);
+      if (normalized !== undefined) result[key] = normalized;
+      return result;
+    }, {});
+  };
+  try { return JSON.stringify(normalize(value)); } catch (_) { return ''; }
+}
+
+function serializedBlocksById(workspace = {}) {
+  const blocks = new Map();
+  const visit = (value) => {
+    if (Array.isArray(value)) {
+      value.forEach(visit);
+      return;
+    }
+    if (!value || typeof value !== 'object') return;
+    if (typeof value.type === 'string' && value.id) blocks.set(String(value.id), value);
+    Object.values(value).forEach(visit);
+  };
+  visit(workspace);
+  return blocks;
+}
+
+function changedSerializedBlockIds(previousWorkspace = {}, nextWorkspace = {}) {
+  const previousBlocks = serializedBlocksById(previousWorkspace);
+  const nextBlocks = serializedBlocksById(nextWorkspace);
+  const changed = [];
+  for (const [blockId, block] of nextBlocks) {
+    const previousBlock = previousBlocks.get(blockId);
+    if (!previousBlock || canonicalJson(previousBlock) !== canonicalJson(block)) changed.push(blockId);
+  }
+  return { changed, visibleBlockCount: nextBlocks.size };
+}
+
+function findGeneratedGraphFocus(previous = {}, candidate = {}, selection = {}) {
+  const previousNodes = new Map((previous.nodes || []).map((node) => [String(node.id || ''), node]));
+  const nodeChoices = [];
+  for (const node of candidate.nodes || []) {
+    const nodeId = String(node.id || '');
+    const oldNode = previousNodes.get(nodeId);
+    const blockChange = changedSerializedBlockIds(oldNode?.workspace || {}, node.workspace || {});
+    const workspaceChanged = !oldNode || canonicalJson(oldNode.workspace || {}) !== canonicalJson(node.workspace || {});
+    const metadataChanged = !oldNode
+      || oldNode.nodeType !== node.nodeType
+      || String(oldNode.name || '') !== String(node.name || '')
+      || String(oldNode.customName || '') !== String(node.customName || '');
+    if (!workspaceChanged && !metadataChanged) continue;
+    let score = workspaceChanged ? 500 : 200;
+    if (!oldNode) score += 120;
+    if (selection.kind === 'node' && selection.id === nodeId) score += 80;
+    score += Math.min(60, blockChange.changed.length * 12 + blockChange.visibleBlockCount);
+    nodeChoices.push({
+      kind: 'node',
+      id: nodeId,
+      blockId: blockChange.changed[0] || '',
+      visibleBlockCount: blockChange.visibleBlockCount,
+      nodeName: displayNodeName(node),
+      score,
+    });
+  }
+  if (nodeChoices.length) return nodeChoices.sort((a, b) => b.score - a.score)[0];
+
+  const previousEdges = new Map((previous.edges || []).map((edge) => [String(edge.id || ''), edge]));
+  const edgeChoices = [];
+  for (const edge of candidate.edges || []) {
+    const edgeId = String(edge.id || '');
+    const oldEdge = previousEdges.get(edgeId);
+    const blockChange = changedSerializedBlockIds(oldEdge?.conditionWorkspace || {}, edge.conditionWorkspace || {});
+    const changed = !oldEdge || canonicalJson(oldEdge) !== canonicalJson(edge);
+    if (!changed) continue;
+    let score = 420 + Math.min(50, blockChange.changed.length * 12 + blockChange.visibleBlockCount);
+    if (selection.kind === 'edge' && selection.id === edgeId) score += 80;
+    edgeChoices.push({
+      kind: 'edge',
+      id: edgeId,
+      blockId: blockChange.changed[0] || '',
+      visibleBlockCount: blockChange.visibleBlockCount,
+      edgeName: String(edge.name || '\u6761\u4ef6'),
+      score,
+    });
+  }
+  if (edgeChoices.length) return edgeChoices.sort((a, b) => b.score - a.score)[0];
+
+  if (selection.kind === 'node' && (candidate.nodes || []).some((node) => node.id === selection.id)) {
+    const node = candidate.nodes.find((item) => item.id === selection.id);
+    return {
+      kind: 'node', id: selection.id, blockId: '',
+      visibleBlockCount: serializedBlocksById(node?.workspace || {}).size,
+      nodeName: displayNodeName(node), score: 0,
+    };
+  }
+  if (selection.kind === 'edge' && (candidate.edges || []).some((edge) => edge.id === selection.id)) {
+    const edge = candidate.edges.find((item) => item.id === selection.id);
+    return {
+      kind: 'edge', id: selection.id, blockId: '',
+      visibleBlockCount: serializedBlocksById(edge?.conditionWorkspace || {}).size,
+      edgeName: String(edge?.name || '\u6761\u4ef6'), score: 0,
+    };
+  }
+
+  const fallbackNode = [...(candidate.nodes || [])]
+    .sort((a, b) => serializedBlocksById(b.workspace || {}).size - serializedBlocksById(a.workspace || {}).size)[0];
+  return fallbackNode ? {
+    kind: 'node', id: String(fallbackNode.id || ''), blockId: '',
+    visibleBlockCount: serializedBlocksById(fallbackNode.workspace || {}).size,
+    nodeName: displayNodeName(fallbackNode), score: 0,
+  } : null;
+}
+
+async function revealGeneratedGraphFocus(focus) {
+  if (!focus) return true;
+  if (focus.kind === 'node') {
+    const node = graph.nodes.find((item) => String(item.id) === focus.id);
+    if (node) {
+      focusWorldPointIfNeeded(
+        (Number(node.x) || 0) + NODE_WIDTH / 2,
+        (Number(node.y) || 0) + nodeHeight(node) / 2
+      );
+    }
+  } else if (focus.kind === 'edge') {
+    const edge = graph.edges.find((item) => String(item.id) === focus.id);
+    if (edge) focusGuidanceEdge(edge);
+  }
+  if (!focus.blockId) return true;
+  await nextTick();
+  await new Promise((resolve) => window.requestAnimationFrame(resolve));
+  activeBlocklyRef.value?.resizeBlockly?.();
+  return activeBlocklyRef.value?.focusBlock?.(focus.blockId) === true;
 }
 const PORT_SIDES = ['left', 'right', 'bottom'];
 function normalizeEndpoint(e) {
@@ -1722,6 +2032,7 @@ async function saveNow(targetOverride = null, { force = false } = {}) {
 }
 
 async function loadGraphForCurrentTarget() {
+  const loadSequence = ++graphLoadSequence;
   resetZoom();
   initialLoadComplete = false;
   if (!targetReady.value) {
@@ -1734,8 +2045,10 @@ async function loadGraphForCurrentTarget() {
   isLoading = true;
   saveLabel.value = '\u9879\u76ee\u52a0\u8f7d\u4e2d...';
   let shouldMigrateLocal = false;
+  let loadCancelled = false;
   try {
     await refreshActiveProjectPath();
+    if (!componentMounted || loadSequence !== graphLoadSequence) return;
     let requestProjectPath = activeProjectPath.value || readActiveProjectPath();
     let target = null;
     let response = null;
@@ -1750,6 +2063,7 @@ async function loadGraphForCurrentTarget() {
         script_kind: 'node_graph',
         project_path: requestProjectPath,
       }));
+      if (!componentMounted || loadSequence !== graphLoadSequence) return;
 
       if (response?.status === 'error' && response?.code === 'PROJECT_CONTEXT_CHANGED' && attempt === 0) {
         const backendProjectPath = String(response.project_path || '').trim();
@@ -1797,16 +2111,21 @@ async function loadGraphForCurrentTarget() {
       saveLabel.value = '\u8282\u70b9\u56fe\u52a0\u8f7d\u5931\u8d25';
     }
   } finally {
-    isLoading = false;
-    initialLoadComplete = true;
-    graphDirty = false;
-    await nextTick();
-    variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
-    activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
-    updateCanvasSize();
-    requestNodeGraphReview();
+    loadCancelled = !componentMounted || loadSequence !== graphLoadSequence;
+    if (!loadCancelled) {
+      isLoading = false;
+      initialLoadComplete = true;
+      graphDirty = false;
+      await loadEmbeddedWorkspaceStates();
+      loadCancelled = !componentMounted || loadSequence !== graphLoadSequence;
+      if (!loadCancelled) {
+        reconcileSceneActorReferenceIssues();
+        requestNodeGraphReview();
+      }
+    }
   }
-  if (shouldMigrateLocal) {
+  if (loadCancelled) return;
+  if (shouldMigrateLocal && componentMounted && loadSequence === graphLoadSequence) {
     graphDirty = true;
     await saveNow();
   }
@@ -1816,11 +2135,54 @@ function bridgeResult(response) {
   return response?.data?.data ?? response?.data ?? response ?? {};
 }
 
-async function loadEmbeddedWorkspaceStates() {
+async function loadEmbeddedWorkspaceStates({ strict = false, verifyActive = false } = {}) {
   await nextTick();
-  variablesBlocklyRef.value?.loadState?.(graph.globalVariablesWorkspace || {});
-  activeBlocklyRef.value?.loadState?.(activeEditorState.value || {});
+
+  const loadEditor = async (editor, state, label, required) => {
+    if (!editor) {
+      if (required) throw new Error(`${label}尚未挂载`);
+      return null;
+    }
+    const ready = await editor.whenReady?.();
+    if (ready?.success === false) {
+      if (required) throw new Error(`${label}初始化失败：${ready.error || '未知错误'}`);
+      return ready;
+    }
+    const loaded = editor.loadState?.(state || {});
+    if (loaded?.success !== true) {
+      if (required) throw new Error(`${label}加载失败：${loaded?.error || '工作区尚未就绪'}`);
+      return loaded || null;
+    }
+    return loaded;
+  };
+
+  const variables = await loadEditor(
+    variablesBlocklyRef.value,
+    graph.globalVariablesWorkspace || {},
+    '全局变量积木区',
+    strict
+  );
+  const activeRequired = strict && Boolean(activeEditorKey.value);
+  const active = await loadEditor(
+    activeBlocklyRef.value,
+    activeEditorState.value || {},
+    selectedEdge.value ? '连线条件积木区' : '节点内部积木区',
+    activeRequired
+  );
+
+  if (verifyActive && activeEditorKey.value) {
+    const expectedIds = [...serializedBlocksById(activeEditorState.value || {}).keys()];
+    const loadedIds = new Set(Array.isArray(active?.blockIds) ? active.blockIds.map(String) : []);
+    const missingIds = expectedIds.filter((blockId) => !loadedIds.has(String(blockId)));
+    if (missingIds.length || Number(active?.blockCount || 0) !== expectedIds.length) {
+      throw new Error(
+        `生成的积木没有完整加载到编辑区（期望 ${expectedIds.length} 个，实际 ${Number(active?.blockCount || 0)} 个）`
+      );
+    }
+  }
+
   updateCanvasSize();
+  return { variables, active };
 }
 
 async function handleGeneratedNodeGraph(result) {
@@ -1828,7 +2190,20 @@ async function handleGeneratedNodeGraph(result) {
     return { success: false, errors: ['\u5185\u90e8 AI \u7ed3\u679c\u53ea\u80fd\u5e94\u7528\u5230\u9879\u76ee\u5e38\u9a7b\u8282\u70b9\u56fe'], warnings: [] };
   }
 
+  const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
   const previous = graphSnapshot();
+  const previousSelection = { kind: selectedKind.value, id: selectedId.value };
+  const currentProjectScopeId = reviewScopeId(scope);
+  const currentRevision = generatedNodeGraphRevision({
+    workspace: previous,
+    projectContext: generatedProjectContext(),
+  }, scope);
+  if (String(result?.projectScopeId || '') !== currentProjectScopeId) {
+    return { success: false, errors: ['AI \u7ed3\u679c\u5c5e\u4e8e\u53e6\u4e00\u4e2a\u4e16\u754c\uff0c\u5df2\u62d2\u7edd\u5e94\u7528'], warnings: [] };
+  }
+  if (String(result?.baseGraphRevision || '') !== currentRevision) {
+    return { success: false, errors: ['\u751f\u6210\u671f\u95f4\u8282\u70b9\u903b\u8f91\u5df2\u6539\u53d8\uff0c\u8fdf\u5230\u7684 AI \u7ed3\u679c\u672a\u8986\u76d6\u5f53\u524d\u7f16\u8f91'], warnings: [] };
+  }
   const storageKey = storageKeyForTarget(currentTarget());
   let previousLocal = null;
   try {
@@ -1841,14 +2216,25 @@ async function handleGeneratedNodeGraph(result) {
     const candidate = normalizeGraph(result.workspace);
     const analysis = validateNodeGraph(candidate);
     nodeGraphToCode(candidate); // Deserializes every visible block and validates conditions/generators.
+    const focus = findGeneratedGraphFocus(previous, candidate, previousSelection);
 
     isLoading = true;
     applyGraph(candidate);
-    await loadEmbeddedWorkspaceStates();
+    if (focus?.kind === 'node' && graph.nodes.some((node) => String(node.id) === focus.id)) {
+      selectedKind.value = 'node';
+      selectedId.value = focus.id;
+    } else if (focus?.kind === 'edge' && graph.edges.some((edge) => String(edge.id) === focus.id)) {
+      selectedKind.value = 'edge';
+      selectedId.value = focus.id;
+    }
+    const embeddedLoad = await loadEmbeddedWorkspaceStates({ strict: true, verifyActive: true });
+    const focused = await revealGeneratedGraphFocus(focus);
+    if (focus?.blockId && !focused) throw new Error('生成的目标积木没有出现在当前积木编辑区');
     isLoading = false;
     graphDirty = true;
 
     if (!(await saveNow())) throw new Error('\u5185\u90e8 AI \u8282\u70b9\u56fe\u4fdd\u5b58\u5931\u8d25');
+    requestNodeGraphReview(0);
     saveLabel.value = '\u5185\u90e8 AI \u8282\u70b9\u56fe\u5df2\u5e94\u7528';
     return {
       success: true,
@@ -1857,11 +2243,23 @@ async function handleGeneratedNodeGraph(result) {
       summary: {
         nodeCount: candidate.nodes.length,
         edgeCount: candidate.edges.length,
+        focusedKind: focus?.kind || '',
+        focusedId: focus?.id || '',
+        focusedNodeName: focus?.nodeName || '',
+        focusedEdgeName: focus?.edgeName || '',
+        visibleBlockCount: Number(embeddedLoad?.active?.blockCount || 0),
       },
     };
   } catch (error) {
     isLoading = true;
     applyGraph(normalizeGraph(previous));
+    if (previousSelection.kind === 'node' && graph.nodes.some((node) => node.id === previousSelection.id)) {
+      selectedKind.value = 'node';
+      selectedId.value = previousSelection.id;
+    } else if (previousSelection.kind === 'edge' && graph.edges.some((edge) => edge.id === previousSelection.id)) {
+      selectedKind.value = 'edge';
+      selectedId.value = previousSelection.id;
+    }
     await loadEmbeddedWorkspaceStates();
     isLoading = false;
     try {
@@ -1875,11 +2273,37 @@ async function handleGeneratedNodeGraph(result) {
   }
 }
 
+function generatedProjectContext() {
+  return {
+    sceneName: sceneActorContext.sceneName || props.sceneName || 'default',
+    actorContextAvailable: sceneActorContext.available === true,
+    actorContextRevision: sceneActorContext.revision,
+    actors: sceneActorContext.actors.map((actor) => ({ ...actor })),
+  };
+}
+
+function generatedNodeGraphSnapshot() {
+  const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+  const workspace = graphSnapshot();
+  const projectContext = generatedProjectContext();
+  return {
+    targetId: 'node_graph:project:global',
+    projectScopeId: reviewScopeId(scope),
+    graphRevision: generatedNodeGraphRevision({ workspace, projectContext }, scope),
+    workspace,
+    projectContext,
+  };
+}
+
 function syncGeneratedNodeGraphConsumer() {
   unregisterAiNodeGraphConsumer?.();
   unregisterAiNodeGraphConsumer = null;
   if (componentMounted && isProjectTarget.value) {
-    unregisterAiNodeGraphConsumer = registerGeneratedNodeGraphConsumer(handleGeneratedNodeGraph);
+    unregisterAiNodeGraphConsumer = registerGeneratedNodeGraphConsumer({
+      handler: handleGeneratedNodeGraph,
+      getSnapshot: generatedNodeGraphSnapshot,
+      instanceId: `project-node-graph:${projectStorageScope.value}`,
+    });
   }
 }
 
@@ -1916,12 +2340,28 @@ function formatRunDetail(status) {
   if (!status || typeof status !== 'object') return '';
   const lines = [];
   if (status.error) lines.push(`错误：${status.error}`);
-  if (status.requestedScene || status.requestedActor) lines.push(`请求目标：${status.requestedScene || '(空场景)'} / ${status.requestedActor || '(空物体)'}`);
-  if (status.resolvedSceneName || status.resolvedActorName) lines.push(`绑定目标：${status.resolvedSceneName || '(空场景)'} / ${status.resolvedActorName || '(空物体)'}`);
-  if (status.bindingMode) lines.push(`绑定模式：${status.bindingMode === 'native_editor' ? 'Native Editor' : 'Python Scene'}`);
-  if (Array.isArray(status.pythonScenes)) lines.push(`Python 场景：${status.pythonScenes.join(', ') || '(空)'}`);
-  if (status.nativeScene) lines.push(`原生场景：${status.nativeScene}`);
-  if (Array.isArray(status.actorCandidates) && status.actorCandidates.length) lines.push(`物体候选：${status.actorCandidates.join(', ')}`);
+  if (isProjectTarget.value) {
+    const sceneName = status.resolvedSceneName
+      || status.nativeScene
+      || sceneActorContext.sceneName
+      || props.sceneName
+      || '当前场景';
+    const actorNames = sceneActorContext.actors
+      .map((actor) => String(actor?.name || '').trim())
+      .filter(Boolean);
+    lines.push('运行作用域：当前场景（项目节点图）');
+    lines.push(`运行场景：${sceneName}`);
+    lines.push('对象来源：场景管理中已导入的物体，由各积木的对象参数指定');
+    if (actorNames.length) lines.push(`可用物体：${actorNames.join(', ')}`);
+    else if (!sceneActorContext.available) lines.push('可用物体：暂时无法读取场景对象列表');
+  } else {
+    if (status.requestedScene || status.requestedActor) lines.push(`请求目标：${status.requestedScene || '(空场景)'} / ${status.requestedActor || '(空物体)'}`);
+    if (status.resolvedSceneName || status.resolvedActorName) lines.push(`绑定目标：${status.resolvedSceneName || '(空场景)'} / ${status.resolvedActorName || '(空物体)'}`);
+    if (status.bindingMode) lines.push(`绑定模式：${status.bindingMode === 'native_editor' ? 'Native Editor' : 'Python Scene'}`);
+    if (Array.isArray(status.pythonScenes)) lines.push(`Python 场景：${status.pythonScenes.join(', ') || '(空)'}`);
+    if (status.nativeScene) lines.push(`原生场景：${status.nativeScene}`);
+    if (Array.isArray(status.actorCandidates) && status.actorCandidates.length) lines.push(`物体候选：${status.actorCandidates.join(', ')}`);
+  }
   return lines.join('\n');
 }
 function startRunPoll() {
@@ -1956,26 +2396,47 @@ function startRunPoll() {
     }
   }, 300);
 }
-async function stopNodeGraphRun(statusText = '已停止', restoreState = false) {
+function scriptStatusBelongsToCurrentTarget(status = {}) {
+  const backendTargetType = String(status?.targetType || '').trim().toLowerCase();
+  return !backendTargetType || backendTargetType === normalizedTargetType.value;
+}
+function scriptStatusNeedsStop(status = {}) {
+  const state = String(status?.status || '').trim().toLowerCase();
+  return ['starting', 'running', 'stopping'].includes(state)
+    || Boolean(status?.threadAlive)
+    || Boolean(status?.inputLocked)
+    || Boolean(status?.snapshotCaptured ?? status?.hasSnapshot ?? status?.has_snapshot);
+}
+async function stopNodeGraphRun(statusText = '已停止', restoreState = false, verifyBackend = false) {
   clearRunPoll();
-  if (!startedRunForTarget && !codeRunning.value) {
-    setNodeGraphInputLocked(false);
-    return;
+  let shouldStop = startedRunForTarget || codeRunning.value || runBusy.value;
+  if (verifyBackend && !shouldStop) {
+    try {
+      const status = bridgeResult(await scriptingService.getScriptStatus()) || {};
+      shouldStop = scriptStatusBelongsToCurrentTarget(status) && scriptStatusNeedsStop(status);
+    } catch (error) {
+      // This endpoint only controls the standalone node/script executor, not game preview.
+      // If status lookup fails while closing, stopping is the safer fallback.
+      shouldStop = true;
+      logError('关闭节点窗口前查询运行状态失败', error);
+    }
   }
   try {
-    const response = bridgeResult(await scriptingService.stopScriptExecution(Boolean(restoreState)));
-    if (restoreState) {
-      if (response?.restored) {
-        runStatus.value = '已停止并恢复运行前状态';
-        runDetail.value = '';
-      } else if (response?.restoreError) {
-        runStatus.value = `已停止，但场景恢复失败：${response.restoreError}`;
-        runDetail.value = response.restoreError;
+    if (shouldStop) {
+      const response = bridgeResult(await scriptingService.stopScriptExecution(Boolean(restoreState)));
+      if (restoreState) {
+        if (response?.restored) {
+          runStatus.value = '已停止并恢复运行前状态';
+          runDetail.value = '';
+        } else if (response?.restoreError) {
+          runStatus.value = `已停止，但场景恢复失败：${response.restoreError}`;
+          runDetail.value = response.restoreError;
+        } else {
+          runStatus.value = statusText;
+        }
       } else {
         runStatus.value = statusText;
       }
-    } else {
-      runStatus.value = statusText;
     }
   } catch (error) {
     runStatus.value = `停止节点图失败：${error?.message || error}`;
@@ -1983,11 +2444,24 @@ async function stopNodeGraphRun(statusText = '已停止', restoreState = false) 
   } finally {
     startedRunForTarget = false;
     codeRunning.value = false;
+    runBusy.value = false;
     currentRunNodeId.value = '';
     setNodeGraphInputLocked(false);
     resetNodeRunLifecycle();
   }
 }
+async function stopForPanelClose() {
+  panelClosing = true;
+  if (!panelCloseStopPromise) {
+    // Closing can be reported by the title bar, pagehide, beforeunload and both
+    // parent/child unmount hooks. Keep one promise for the rest of this component
+    // lifetime so the backend stop and input unlock are never issued repeatedly.
+    panelCloseStopPromise = stopNodeGraphRun('\u8282\u70b9\u7a97\u53e3\u5df2\u5173\u95ed\uff0c\u8fd0\u884c\u5df2\u505c\u6b62', false, true);
+  }
+  return panelCloseStopPromise;
+}
+
+defineExpose({ stopForPanelClose });
 
 function normalizeGamePreviewStatus(payload = {}) {
   const status = payload?.data ?? payload ?? {};
@@ -2045,7 +2519,7 @@ async function refreshGamePreviewGuard() {
 }
 
 async function handleToggleRun() {
-  if (runBusy.value) return;
+  if (panelClosing || runBusy.value) return;
   runBusy.value = true;
   try {
     if (codeRunning.value) {
@@ -2059,6 +2533,7 @@ async function handleToggleRun() {
       return;
     }
     const preview = await refreshGamePreviewGuard();
+    if (panelClosing || !componentMounted) return;
     if (preview.active) {
       runStatus.value = globalPreviewRunLabel.value;
       resetNodeRunLifecycle();
@@ -2076,6 +2551,7 @@ async function handleToggleRun() {
     setNodeGraphInputLocked(false);
     refreshEmbeddedWorkspaceStates();
     await saveNow();
+    if (panelClosing || !componentMounted) return;
     let code;
     try {
       const snapshot = graphSnapshot();
@@ -2098,6 +2574,11 @@ async function handleToggleRun() {
         normalizedTargetType.value
       )
     );
+    if (panelClosing || !componentMounted) {
+      await scriptingService.stopScriptExecution(false).catch(() => {});
+      setNodeGraphInputLocked(false);
+      return;
+    }
     if (response?.outcome === 'preview_running') {
       // A global preview owns this target. Treat the race as an ownership handoff
       // instead of leaving a misleading node-graph execution error.
@@ -2132,31 +2613,193 @@ async function handleToggleRun() {
   }
 }
 
-function collectActorNames(value, output = new Set()) {
-  if (Array.isArray(value)) {
-    value.forEach((item) => collectActorNames(item, output));
-    return output;
-  }
-  if (!value || typeof value !== 'object') return output;
-  const candidate = value.actor_name ?? value.actorName ?? value.name ?? value.label;
-  const typeHint = String(value.actor_type ?? value.actorType ?? value.type ?? '').toLowerCase();
-  if (candidate && !['scene', 'folder', 'root'].includes(typeHint)) output.add(String(candidate));
-  Object.values(value).forEach((child) => {
-    if (child && typeof child === 'object') collectActorNames(child, output);
-  });
-  return output;
+function currentProjectNodeGraphRuntimeState() {
+  return {
+    ready: Boolean(componentMounted && unregisterProjectNodeGraphRuntimeHandler),
+    running: codeRunning.value,
+    busy: runBusy.value,
+    status: runStatus.value,
+    detail: runDetail.value,
+  };
 }
-async function refreshSceneActorOptions() {
-  const options = new Set();
-  if (props.actorName) options.add(String(props.actorName));
-  try {
-    const response = await sceneService.listActorTree(props.sceneName || '');
-    const payload = response?.data ?? response?.result ?? response;
-    collectActorNames(payload, options);
-  } catch (error) {
-    logError('刷新当前场景对象列表失败', error);
+function syncProjectNodeGraphRuntimeState() {
+  if (!isProjectTarget.value || !unregisterProjectNodeGraphRuntimeHandler) return;
+  publishProjectNodeGraphRuntimeState(currentProjectNodeGraphRuntimeState());
+}
+watch(
+  [codeRunning, runBusy, runStatus, runDetail],
+  syncProjectNodeGraphRuntimeState
+);
+
+function normalizeActorContextName(value) {
+  const text = String(value ?? '').trim();
+  try { return text.normalize('NFKC'); } catch (_) { return text; }
+}
+function actorContextNameKey(value) {
+  return normalizeActorContextName(value).toLocaleLowerCase('en-US');
+}
+function actorAliasesFromSceneItem(item = {}) {
+  const aliases = [];
+  ['alias', 'displayName', 'display_name', 'nativeName', 'native_name', 'label'].forEach((field) => {
+    const value = normalizeActorContextName(item?.[field]);
+    if (value) aliases.push(value);
+  });
+  ['aliases', 'displayNames', 'display_names', 'names'].forEach((field) => {
+    let values = item?.[field];
+    if (values && typeof values === 'object' && !Array.isArray(values)) values = Object.values(values);
+    if (!Array.isArray(values)) values = [values];
+    values.forEach((value) => {
+      const alias = normalizeActorContextName(value);
+      if (alias) aliases.push(alias);
+    });
+  });
+  return [...new Set(aliases)];
+}
+function actorRecordFromSceneItem(item = {}) {
+  if (!item || typeof item !== 'object') return null;
+  const name = normalizeActorContextName(item.name ?? item.actor_name ?? item.actorName);
+  if (!name) return null;
+  const type = String(item.type ?? item.actor_type ?? item.actorType ?? 'actor').trim() || 'actor';
+  if (['scene', 'folder', 'root'].includes(type.toLocaleLowerCase('en-US'))) return null;
+  const aliases = actorAliasesFromSceneItem(item).filter((alias) => actorContextNameKey(alias) !== actorContextNameKey(name));
+  const tags = Array.isArray(item.tags)
+    ? item.tags.map(normalizeActorContextName).filter(Boolean)
+    : [];
+  return { name, type, tags, aliases };
+}
+function actorContextRevision(sceneName, actors) {
+  return JSON.stringify({
+    sceneName: normalizeSceneReference(sceneName),
+    actors: actors.map((actor) => ({
+      name: actorContextNameKey(actor.name),
+      type: String(actor.type || '').toLocaleLowerCase('en-US'),
+      aliases: (actor.aliases || []).map(actorContextNameKey).sort(),
+    })),
+  });
+}
+async function persistResolvedActorIssues(actions = []) {
+  if (!actions.length) return;
+  publishCabbageAssistantContext(cabbageAssistant);
+  for (const action of actions) {
+    try {
+      await cabbageContextService.updateTask(action);
+    } catch (error) {
+      logError('Failed to resolve stale actor issue', error);
+    }
   }
-  window.__coronaBlocklyActorOptions = Array.from(options).sort((a, b) => a.localeCompare(b, 'zh-CN')).map((name) => [name, name]);
+}
+function reconcileSceneActorReferenceIssues() {
+  if (!sceneActorContext.available || !initialLoadComplete || !isProjectTarget.value) return [];
+  const snapshot = graphSnapshot();
+  const scope = normalizeProjectPath(activeProjectPath.value || readActiveProjectPath());
+  const actions = cabbageAssistant.reconcileActorReferenceIssues(
+    snapshot,
+    generatedProjectContext(),
+    reviewGraphRevision(snapshot, scope),
+  );
+  if (actions.length) void persistResolvedActorIssues(actions);
+  return actions;
+}
+async function refreshSceneActorOptions({ rescan = false } = {}) {
+  const refreshSequence = ++actorOptionsRefreshSequence;
+  const requestedSceneName = String(props.sceneName || '').trim();
+  try {
+    const response = await sceneService.listSceneTree(requestedSceneName);
+    if (response?.success === false || response?.status === 'error') {
+      throw new Error(response?.message || 'Scene tree query failed');
+    }
+    const payload = response?.data ?? response?.result ?? response;
+    if (!Array.isArray(payload?.actors)) throw new Error('Scene tree response has no actor list');
+    const actorsByName = new Map();
+    payload.actors.forEach((item) => {
+      const actor = actorRecordFromSceneItem(item);
+      if (actor) actorsByName.set(actorContextNameKey(actor.name), actor);
+    });
+    if (props.actorName) {
+      const name = normalizeActorContextName(props.actorName);
+      const key = actorContextNameKey(name);
+      if (name && !actorsByName.has(key)) actorsByName.set(key, { name, type: 'actor', tags: [], aliases: [] });
+    }
+    const actors = Array.from(actorsByName.values())
+      .sort((left, right) => left.name.localeCompare(right.name, 'zh-CN'));
+    if (!componentMounted || refreshSequence !== actorOptionsRefreshSequence) return false;
+
+    const revision = actorContextRevision(requestedSceneName, actors);
+    const changed = sceneActorContext.available !== true
+      || sceneActorContext.sceneName !== requestedSceneName
+      || sceneActorContext.revision !== revision;
+    sceneActorContext.sceneName = requestedSceneName;
+    sceneActorContext.available = true;
+    sceneActorContext.revision = revision;
+    sceneActorContext.actors = actors;
+    window.__coronaBlocklyActorOptions = actors.map((actor) => [actor.name, actor.name]);
+
+    reconcileSceneActorReferenceIssues();
+    if (changed) {
+      const projectContext = generatedProjectContext();
+      cabbageAssistant.updateProjectContext(projectContext);
+      publishCabbageProjectContext(projectContext, reviewScopeId(
+        normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+      ));
+      scheduleRememberedIssueCheck(80);
+      if (rescan) requestNodeGraphReview(0);
+    }
+    return changed;
+  } catch (error) {
+    if (componentMounted && refreshSequence === actorOptionsRefreshSequence) {
+      sceneActorContext.sceneName = requestedSceneName;
+      sceneActorContext.available = false;
+      sceneActorContext.revision = '';
+      sceneActorContext.actors = [];
+      window.__coronaBlocklyActorOptions = [];
+      const projectContext = generatedProjectContext();
+      cabbageAssistant.updateProjectContext(projectContext);
+      publishCabbageProjectContext(projectContext, reviewScopeId(
+        normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+      ));
+    }
+    logError('Failed to refresh scene actor options', error);
+    return false;
+  }
+}
+function scheduleSceneActorOptionsRefresh(delay = 120) {
+  if (!componentMounted) return;
+  if (actorOptionsRefreshTimer) window.clearTimeout(actorOptionsRefreshTimer);
+  actorOptionsRefreshTimer = window.setTimeout(async () => {
+    actorOptionsRefreshTimer = null;
+    await refreshSceneActorOptions({ rescan: true });
+  }, Math.max(0, Number(delay) || 0));
+}
+function normalizeSceneReference(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\\/g, '/')
+    .replace(/^\.\//, '')
+    .replace(/\/+/g, '/')
+    .toLocaleLowerCase('en-US');
+}
+function sceneReferencesMatch(left, right) {
+  const normalizedLeft = normalizeSceneReference(left);
+  const normalizedRight = normalizeSceneReference(right);
+  if (!normalizedLeft || !normalizedRight) return true;
+  if (normalizedLeft === normalizedRight) return true;
+  const leftFile = normalizedLeft.split('/').pop();
+  const rightFile = normalizedRight.split('/').pop();
+  return Boolean(leftFile && rightFile && leftFile === rightFile);
+}
+function onNodeGraphActorChanged(payload, maybeSceneId) {
+  const changedScene = typeof payload === 'object'
+    ? payload?.scene ?? payload?.sceneName ?? maybeSceneId ?? ''
+    : maybeSceneId ?? '';
+  if (!sceneReferencesMatch(changedScene, props.sceneName)) return;
+  scheduleSceneActorOptionsRefresh(80);
+}
+function onNodeGraphSceneTreeChanged(payload) {
+  const changedScene = typeof payload === 'string'
+    ? payload
+    : payload?.scene ?? payload?.sceneName ?? '';
+  if (!sceneReferencesMatch(changedScene, props.sceneName)) return;
+  scheduleSceneActorOptionsRefresh(80);
 }
 function updateCanvasSize() {
   const r = canvasRef.value?.getBoundingClientRect?.();
@@ -2172,6 +2815,11 @@ async function onActiveProjectChanged(event) {
     clearTimeout(saveTimer);
     saveTimer = null;
   }
+  if (preWarningTimer) {
+    clearTimeout(preWarningTimer);
+    preWarningTimer = null;
+  }
+  cabbageAssistant.clearPreWarning();
   activeProjectPath.value = nextProjectPath;
   loadedProjectPath = '';
   targetEnabledByKey.clear();
@@ -2191,24 +2839,46 @@ function onProjectStorageChanged(event) {
 
 watch(
   () => [props.sceneName, props.actorName, props.targetType],
-  async (_n, old) => {
+  async (next, old) => {
+    if (!componentMounted || !old) return;
+
+    const nextTargetType = next?.[2] === 'model' ? 'actor' : next?.[2] || 'actor';
+    const oldTargetType = old?.[2] === 'model' ? 'actor' : old?.[2] || 'actor';
+    const sceneChanged = String(next?.[0] || '') !== String(old?.[0] || '');
+    const targetChanged = nextTargetType !== oldTargetType
+      || (nextTargetType !== 'project' && (
+        sceneChanged || String(next?.[1] || '') !== String(old?.[1] || '')
+      ));
+
+    // The project node graph does not change when MainPage reports the active scene.
+    // Only refresh object choices; reloading the whole graph here used to duplicate the
+    // expensive Blockly initialization every time the node window was opened.
+    if (!targetChanged) {
+      if (sceneChanged && initialLoadComplete && !isLoading) {
+        await refreshSceneActorOptions();
+        if (componentMounted) reconcileSceneActorReferenceIssues();
+      }
+      return;
+    }
+
     const oldTarget = {
-      targetType: old?.[2] || 'actor',
+      targetType: oldTargetType,
       sceneName: old?.[0] || '',
       actorName: old?.[1] || '',
     };
-    if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('已停止');
+    if (startedRunForTarget || codeRunning.value) await stopNodeGraphRun('\u5df2\u505c\u6b62');
+    if (!componentMounted) return;
     clearExternalDrag();
     cancelMacroPointerDrag();
     if ((oldTarget.targetType === 'project' || oldTarget.actorName) && !isLoading) await saveNow(oldTarget);
+    if (!componentMounted) return;
     runStatus.value = '';
     currentRunNodeId.value = '';
     runWarnings.value = [];
     syncGeneratedNodeGraphConsumer();
     await refreshSceneActorOptions();
-    await loadGraphForCurrentTarget();
-  },
-  { immediate: true }
+    if (componentMounted) await loadGraphForCurrentTarget();
+  }
 );
 function registerNodeGraphFlusher() {
   const flushers = window.__coronaNodeGraphFlushers instanceof Set
@@ -2233,12 +2903,74 @@ function unregisterNodeGraphFlusher() {
     delete window.__coronaNodeGraphFlushers;
   }
 }
-onMounted(() => {
+onMounted(async () => {
   componentMounted = true;
   activeProjectPath.value = readActiveProjectPath() || activeProjectPath.value;
+
+  // The node graph runs in its own CEF page and therefore owns a separate Pinia
+  // instance. Hydrate it before the first actor scan so it cannot broadcast an
+  // empty task list over the main page's already-loaded world context.
+  const currentCabbageScopeId = () => reviewScopeId(
+    normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
+  );
+  const cachedCabbageContext = readCabbageAssistantContext(currentCabbageScopeId());
+  if (cachedCabbageContext) cabbageAssistant.hydrateContext(cachedCabbageContext);
+  unsubscribeCabbageContext = subscribeCabbageAssistantContext(
+    (snapshot) => {
+      if (componentMounted) cabbageAssistant.hydrateContext(snapshot);
+    },
+    { projectScopeId: currentCabbageScopeId, emitCurrent: true },
+  );
+
   window.addEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.addEventListener('storage', onProjectStorageChanged);
+  window.addEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
+
+  // Establish the visible layout before waiting for bridge subscriptions and data loads,
+  // so the native floating surface paints immediately instead of appearing frozen.
+  loadLayout();
+  resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
+  if (workspaceRootRef.value) resizeObserver.observe(workspaceRootRef.value);
+  resizeEmbeddedWorkspaces();
   syncGeneratedNodeGraphConsumer();
+
+  // Event subscription is useful for later object updates, but it must not block the
+  // first graph paint. Some native bridge shutdown/startup transitions can make an
+  // event registration noticeably slower than loading the saved graph itself.
+  Promise.allSettled([
+    editorApi.events.onActorChanged(onNodeGraphActorChanged),
+    editorApi.events.onSceneTreeChanged(onNodeGraphSceneTreeChanged),
+  ]).then((subscriptionResults) => {
+    const [actorSubscription, sceneTreeSubscription] = subscriptionResults;
+    if (actorSubscription.status === 'fulfilled') {
+      if (componentMounted) actorChangedCallbackToken = actorSubscription.value;
+      else editorApi.off(actorSubscription.value).catch(() => {});
+    } else {
+      logError('Failed to subscribe to actor changes', actorSubscription.reason);
+    }
+    if (sceneTreeSubscription.status === 'fulfilled') {
+      if (componentMounted) sceneTreeChangedCallbackToken = sceneTreeSubscription.value;
+      else editorApi.off(sceneTreeSubscription.value).catch(() => {});
+    } else {
+      logError('Failed to subscribe to scene tree changes', sceneTreeSubscription.reason);
+    }
+  });
+
+  // Actor choices are needed by object-reference dropdowns, so finish the first scan
+  // before hydrating Blockly. Unlike the event subscriptions above, this request is on
+  // the critical path and is guarded against a panel that was closed while awaiting it.
+  await refreshSceneActorOptions();
+  if (!componentMounted) return;
+
+  // Initial graph data used to be loaded once by the immediate watcher and again by
+  // onMounted. Keep a single load after the actor scan has completed.
+  await loadGraphForCurrentTarget();
+  if (!componentMounted) return;
+  if (sceneActorContext.sceneName !== String(props.sceneName || '').trim()) {
+    await refreshSceneActorOptions();
+    if (!componentMounted) return;
+  }
+
   if (isProjectTarget.value) {
     stopNodeGraphReview = startNodeGraphReview({
       getWorkspace: () => ({
@@ -2249,12 +2981,7 @@ onMounted(() => {
       }),
       getRevisionScope: () => normalizeProjectPath(activeProjectPath.value || readActiveProjectPath()),
       getProjectContext: () => ({
-        sceneName: props.sceneName || 'default',
-        actors: (window.__coronaBlocklyActorOptions || []).map(([name]) => ({
-          name: String(name || ''),
-          type: 'actor',
-          tags: [],
-        })).filter((actor) => actor.name),
+        ...generatedProjectContext(),
         assistanceProfile: currentAssistanceProfile(),
         optimizationHintsEnabled: optimizationHintsEnabled(),
       }),
@@ -2274,18 +3001,40 @@ onMounted(() => {
   registerNodeGraphFlusher();
   if (isProjectTarget.value) {
     unregisterProjectNodeGraphSaveHandler = registerProjectNodeGraphSaveHandler(saveNow);
+    unregisterProjectNodeGraphRuntimeHandler = registerProjectNodeGraphRuntimeHandler({
+      toggle: handleToggleRun,
+      getState: currentProjectNodeGraphRuntimeState,
+    });
+    syncProjectNodeGraphRuntimeState();
   }
-  loadLayout();
-  resizeObserver = new ResizeObserver(resizeEmbeddedWorkspaces);
-  if (workspaceRootRef.value) resizeObserver.observe(workspaceRootRef.value);
-  resizeEmbeddedWorkspaces();
 });
 onBeforeUnmount(() => {
   componentMounted = false;
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onProjectStorageChanged);
+  window.removeEventListener('cabbage-guidance-prepare', handleGuidancePrepare);
+  unsubscribeCabbageContext?.();
+  unsubscribeCabbageContext = null;
+  actorOptionsRefreshSequence += 1;
+  graphLoadSequence += 1;
+  if (actorOptionsRefreshTimer) window.clearTimeout(actorOptionsRefreshTimer);
+  actorOptionsRefreshTimer = null;
+  if (actorChangedCallbackToken) {
+    editorApi.off(actorChangedCallbackToken).catch((error) => {
+      logError('Failed to unsubscribe from actor changes', error);
+    });
+    actorChangedCallbackToken = null;
+  }
+  if (sceneTreeChangedCallbackToken) {
+    editorApi.off(sceneTreeChangedCallbackToken).catch((error) => {
+      logError('Failed to unsubscribe from scene tree changes', error);
+    });
+    sceneTreeChangedCallbackToken = null;
+  }
   stopNodeGraphReview?.();
   stopNodeGraphReview = null;
+  unregisterProjectNodeGraphRuntimeHandler?.();
+  unregisterProjectNodeGraphRuntimeHandler = null;
   unregisterProjectNodeGraphSaveHandler?.();
   unregisterProjectNodeGraphSaveHandler = null;
   unregisterAiNodeGraphConsumer?.();
@@ -2304,6 +3053,8 @@ onBeforeUnmount(() => {
   unregisterNodeGraphFlusher();
   if (saveTimer) clearTimeout(saveTimer);
   saveTimer = null;
+  if (preWarningTimer) window.clearTimeout(preWarningTimer);
+  preWarningTimer = null;
   if (initialLoadComplete && graphDirty) saveNow(null, { force: true });
   resizeObserver?.disconnect?.();
   if (resizeFrame) window.cancelAnimationFrame(resizeFrame);
@@ -2312,7 +3063,7 @@ onBeforeUnmount(() => {
   clearExternalDrag();
   cancelMacroPointerDrag();
   endCanvasPan();
-  if (startedRunForTarget || codeRunning.value) scriptingService.stopScriptExecution(false).catch(() => {});
+  stopForPanelClose().catch(() => {});
   setNodeGraphInputLocked(false);
   window.removeEventListener('mousemove', onDragMove);
   window.removeEventListener('mouseup', stopNodeDrag);
@@ -2329,9 +3080,9 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  color: #dbe7f3;
-  background: radial-gradient(circle at 28% 0, #1f2f46 0, #111923 42%, #0a0f15 100%);
-  border: 1px solid #273244;
+  color: #f2ead5;
+  background: radial-gradient(circle at 28% 0, #2b230f 0, #15130d 42%, #080806 100%);
+  border: 1px solid #30281c;
   border-radius: 12px;
 }
 .node-graph-workspace.fullscreen {
@@ -2349,7 +3100,7 @@ onBeforeUnmount(() => {
   position: fixed;
   inset: 0;
   z-index: -1;
-  background: rgba(2, 6, 12, 0.82);
+  background: rgba(8, 8, 6, 0.86);
 }
 .ng-toolbar {
   position: relative;
@@ -2360,8 +3111,8 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   gap: 12px;
   padding: 0 10px;
-  border-bottom: 1px solid #273244;
-  background: rgba(26, 34, 45, 0.96);
+  border-bottom: 1px solid #30281c;
+  background: rgba(25, 23, 17, 0.96);
 }
 .ng-title {
   min-width: 0;
@@ -2373,18 +3124,18 @@ onBeforeUnmount(() => {
 .ng-badge {
   padding: 4px 9px;
   border-radius: 999px;
-  background: #2563eb;
+  background: #8c6f36;
   color: #fff;
   font-weight: 800;
 }
 .ng-subtitle {
-  color: #cbd5e1;
+  color: #e9dfc5;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 .ng-save {
-  color: #94a3b8;
+  color: #b9ad8f;
 }
 .ng-modes {
   display: flex;
@@ -2398,26 +3149,26 @@ onBeforeUnmount(() => {
   right: 8px;
   z-index: 20;
   min-width: 72px;
-  border-color: #38bdf8 !important;
-  color: #bae6fd !important;
+  border-color: #e5c77f !important;
+  color: #fff3c8 !important;
 }
 .fullscreen-toggle.active {
-  background: #0369a1 !important;
+  background: #6f5524 !important;
   color: #fff !important;
 }
 .ng-run {
   height: 28px;
   min-width: 58px;
   padding: 0 13px;
-  border: 1px solid #22c55e;
+  border: 1px solid #d8b86c;
   border-radius: 8px;
-  background: #166534;
-  color: #f0fdf4;
+  background: #665025;
+  color: #fff7dc;
   font-weight: 800;
   cursor: pointer;
 }
 .ng-run:hover:not(:disabled) {
-  background: #15803d;
+  background: #8c6f36;
 }
 .ng-run.running {
   border-color: #fb7185;
@@ -2430,7 +3181,7 @@ onBeforeUnmount(() => {
 .ng-run-status {
   max-width: 240px;
   overflow: hidden;
-  color: #cbd5e1;
+  color: #e9dfc5;
   font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -2439,15 +3190,15 @@ onBeforeUnmount(() => {
   height: 28px;
   padding: 0 12px;
   border-radius: 8px;
-  border: 1px solid #334155;
-  background: #121922;
-  color: #cbd5e1;
+  border: 1px solid #4a3d1d;
+  background: #15130d;
+  color: #e9dfc5;
   cursor: pointer;
   font-size: 12px;
 }
 .ng-mode.active {
-  background: #2563eb;
-  border-color: #60a5fa;
+  background: #8c6f36;
+  border-color: #d8b86c;
   color: #fff;
 }
 .ng-mode.delete.active {
@@ -2458,7 +3209,7 @@ onBeforeUnmount(() => {
   height: 100%;
   display: grid;
   place-items: center;
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 12px;
 }
 .ng-body {
@@ -2532,8 +3283,8 @@ onBeforeUnmount(() => {
 }
 .ng-panel {
   min-height: 0;
-  border: 1px solid #273244;
-  background: rgba(16, 23, 33, 0.94);
+  border: 1px solid #30281c;
+  background: rgba(21, 19, 13, 0.96);
   border-radius: 12px;
   overflow: hidden;
 }
@@ -2553,7 +3304,7 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: space-between;
   margin: 2px 0 8px;
-  color: #f8fafc;
+  color: #fff7dc;
   font-size: 13px;
   font-weight: 800;
 }
@@ -2561,7 +3312,7 @@ onBeforeUnmount(() => {
   margin-top: 14px;
 }
 .ng-section-title small {
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 10px;
   font-weight: 500;
 }
@@ -2572,12 +3323,12 @@ onBeforeUnmount(() => {
   padding: 9px;
   margin-bottom: 8px;
   border-radius: 10px;
-  border: 1px solid #2b3748;
-  background: #17202b;
+  border: 1px solid #3f3018;
+  background: #191711;
   cursor: grab;
 }
 .ng-tool-card.macro {
-  border-color: rgba(96, 165, 250, 0.55);
+  border-color: rgba(216, 184, 108, 0.55);
 }
 .ng-tool-icon,
 .ng-mini {
@@ -2586,7 +3337,7 @@ onBeforeUnmount(() => {
   flex: 0 0 auto;
   color: #fff;
   font-weight: 900;
-  background: #2563eb;
+  background: #8c6f36;
 }
 .ng-tool-icon {
   width: 30px;
@@ -2596,20 +3347,20 @@ onBeforeUnmount(() => {
 .ng-tool-name {
   font-size: 13px;
   font-weight: 800;
-  color: #f8fafc;
+  color: #fff7dc;
 }
 .ng-tool-desc {
   margin-top: 3px;
   font-size: 11px;
   line-height: 1.35;
-  color: #94a3b8;
+  color: #b9ad8f;
 }
 .ng-cat {
   margin-bottom: 7px;
-  border: 1px solid #263244;
+  border: 1px solid #30281c;
   border-radius: 10px;
   overflow: hidden;
-  background: #111923;
+  background: #15130d;
 }
 .ng-cat summary {
   display: flex;
@@ -2628,11 +3379,11 @@ onBeforeUnmount(() => {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: #60a5fa;
+  background: #d8b86c;
 }
 .ng-count {
   margin-left: auto;
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 10px;
 }
 .ng-block-list {
@@ -2646,9 +3397,9 @@ onBeforeUnmount(() => {
   gap: 7px;
   align-items: center;
   text-align: left;
-  border: 1px solid #334155;
-  background: #192331;
-  color: #e5edf7;
+  border: 1px solid #4a3d1d;
+  background: #211d12;
+  color: #fff3c8;
   border-radius: 9px;
   padding: 6px;
   cursor: grab;
@@ -2658,7 +3409,7 @@ onBeforeUnmount(() => {
   height: 24px;
   border-radius: 7px;
   font-size: 11px;
-  background: #64748b;
+  background: #9d9278;
 }
 .ng-block-chip b {
   display: block;
@@ -2668,7 +3419,7 @@ onBeforeUnmount(() => {
 .ng-block-chip small {
   display: block;
   margin-top: 1px;
-  color: #8ca0b7;
+  color: #b9ad8f;
   font-size: 9px;
   word-break: break-all;
 }
@@ -2676,7 +3427,7 @@ onBeforeUnmount(() => {
   position: relative;
   overflow: hidden;
   cursor: grab;
-  background: #0d131b;
+  background: #0b0a08;
   transition: box-shadow 120ms ease, border-color 120ms ease;
 }
 .ng-canvas.panning {
@@ -2684,19 +3435,19 @@ onBeforeUnmount(() => {
   user-select: none;
 }
 .ng-canvas.drop-active {
-  border-color: #60a5fa;
-  box-shadow: inset 0 0 0 3px rgba(96, 165, 250, 0.25);
+  border-color: #d8b86c;
+  box-shadow: inset 0 0 0 3px rgba(216, 184, 108, 0.25);
 }
 .ng-drag-ghost {
   position: fixed;
   z-index: 10000;
   max-width: 220px;
   padding: 8px 12px;
-  border: 1px solid rgba(147, 197, 253, 0.8);
+  border: 1px solid rgba(229, 199, 127, 0.8);
   border-radius: 9px;
-  background: rgba(30, 64, 175, 0.88);
+  background: rgba(75, 57, 28, 0.92);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
-  color: #eff6ff;
+  color: #fff7dc;
   font-size: 12px;
   font-weight: 800;
   pointer-events: none;
@@ -2712,8 +3463,8 @@ onBeforeUnmount(() => {
   inset: 0;
   pointer-events: none;
   background-image:
-    linear-gradient(rgba(148, 163, 184, 0.08) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(148, 163, 184, 0.08) 1px, transparent 1px);
+    linear-gradient(rgba(216, 184, 108, 0.08) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(216, 184, 108, 0.08) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 .ng-canvas-head {
@@ -2733,14 +3484,14 @@ onBeforeUnmount(() => {
 }
 .ng-canvas-head span {
   display: block;
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 11px;
   margin-top: 2px;
 }
 .ng-canvas-hint {
   display: block;
   margin-top: 3px;
-  color: #7f8ea3;
+  color: #a99c7d;
   font-size: 11px;
   font-weight: 500;
 }
@@ -2754,28 +3505,28 @@ onBeforeUnmount(() => {
   margin-top: 0 !important;
   min-width: 42px;
   text-align: center;
-  color: #dbeafe !important;
+  color: #fff3c8 !important;
 }
 .ng-zoom-reset {
   height: 26px;
   padding: 0 9px;
-  border: 1px solid #3b4b64;
+  border: 1px solid #665025;
   border-radius: 7px;
-  background: #172033;
-  color: #dbeafe;
+  background: #191711;
+  color: #fff3c8;
   font-size: 11px;
   cursor: pointer;
 }
 .ng-zoom-reset:hover {
-  border-color: #60a5fa;
+  border-color: #d8b86c;
 }
 .ng-pill {
   max-width: 44%;
   padding: 4px 8px;
   border-radius: 999px;
-  border: 1px solid #34435a;
-  background: #172033;
-  color: #cbd5e1 !important;
+  border: 1px solid #55431f;
+  background: #191711;
+  color: #e9dfc5 !important;
   font-size: 11px !important;
 }
 .ng-edges {
@@ -2793,9 +3544,9 @@ onBeforeUnmount(() => {
 }
 .ng-edge-line {
   fill: none;
-  stroke: #60a5fa;
+  stroke: #d8b86c;
   stroke-width: 2.4;
-  filter: drop-shadow(0 0 5px rgba(96, 165, 250, 0.55));
+  filter: drop-shadow(0 0 5px rgba(216, 184, 108, 0.55));
   pointer-events: none;
 }
 .ng-edge-line.selected {
@@ -2804,7 +3555,7 @@ onBeforeUnmount(() => {
   filter: drop-shadow(0 0 4px rgba(250, 204, 21, 0.45));
 }
 .ng-edge-hit:hover + .ng-edge-line {
-  stroke: #93c5fd;
+  stroke: #e9dfc5;
   stroke-width: 3;
 }
 .ng-edge-preview {
@@ -2824,8 +3575,8 @@ onBeforeUnmount(() => {
   z-index: 3;
   padding: 10px 11px;
   border-radius: 14px;
-  border: 1px solid #3b82f6;
-  background: linear-gradient(180deg, #1f2937, #111827);
+  border: 1px solid #b8924a;
+  background: linear-gradient(180deg, #242016, #11100d);
   box-shadow: 0 12px 22px rgba(0, 0, 0, 0.35);
   cursor: grab;
   user-select: none;
@@ -2841,7 +3592,7 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 .ng-node.type-start {
-  border-color: #22c55e;
+  border-color: #d8b86c;
 }
 .ng-node.type-end {
   border-color: #fb7185;
@@ -2855,16 +3606,16 @@ onBeforeUnmount(() => {
   width: 9px;
   height: 9px;
   border-radius: 50%;
-  background: #60a5fa;
+  background: #d8b86c;
 }
 .ng-node-type,
 .ng-node-name {
   min-width: 0;
   width: 100%;
-  border: 1px solid #334155;
+  border: 1px solid #4a3d1d;
   border-radius: 7px;
-  background: #0f172a;
-  color: #e5edf7;
+  background: #0f0e0a;
+  color: #fff3c8;
   font-size: 11px;
   padding: 4px 6px;
 }
@@ -2875,11 +3626,11 @@ onBeforeUnmount(() => {
   margin-top: 8px;
   font-size: 13px;
   font-weight: 900;
-  color: #f8fafc;
+  color: #fff7dc;
 }
 .ng-node-hint {
   margin-top: 7px;
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 10px;
 }
 .ng-node.running {
@@ -2892,18 +3643,18 @@ onBeforeUnmount(() => {
 .ng-node-type-badge {
   flex: 0 0 auto;
   padding: 3px 7px;
-  border: 1px solid rgba(96, 165, 250, 0.48);
+  border: 1px solid rgba(216, 184, 108, 0.48);
   border-radius: 999px;
-  background: rgba(37, 99, 235, 0.16);
-  color: #bfdbfe;
+  background: rgba(216, 184, 108, 0.16);
+  color: #f2ead5;
   font-size: 10px;
   font-weight: 800;
   line-height: 1.2;
 }
 .type-start .ng-node-type-badge {
-  border-color: rgba(34, 197, 94, 0.5);
-  background: rgba(34, 197, 94, 0.14);
-  color: #bbf7d0;
+  border-color: rgba(216, 184, 108, 0.5);
+  background: rgba(216, 184, 108, 0.14);
+  color: #f2ead5;
 }
 .type-end .ng-node-type-badge {
   border-color: rgba(251, 113, 133, 0.5);
@@ -2914,7 +3665,7 @@ onBeforeUnmount(() => {
   min-width: 0;
   flex: 1 1 auto;
   overflow: hidden;
-  color: #f8fafc;
+  color: #fff7dc;
   font-size: 13px;
   font-weight: 900;
   line-height: 1.35;
@@ -2939,8 +3690,8 @@ onBeforeUnmount(() => {
   cursor: not-allowed;
 }
 .ng-port.pending {
-  background: #22c55e;
-  box-shadow: 0 0 0 5px rgba(34, 197, 94, 0.25);
+  background: #d8b86c;
+  box-shadow: 0 0 0 5px rgba(216, 184, 108, 0.25);
 }
 .ng-port.connection-target:not(.occupied) {
   animation: ng-port-pulse 1s ease-in-out infinite;
@@ -2992,7 +3743,7 @@ onBeforeUnmount(() => {
   grid-template-rows: minmax(120px, var(--variables-height)) 6px minmax(360px, 1fr);
   gap: 0;
   padding: 8px;
-  background: rgba(15, 23, 42, 0.9);
+  background: rgba(17, 16, 13, 0.94);
 }
 .ng-vars,
 .ng-editor {
@@ -3013,12 +3764,12 @@ onBeforeUnmount(() => {
   gap: 7px;
   padding: 9px;
   margin-bottom: 4px;
-  border: 1px solid #334155;
+  border: 1px solid #4a3d1d;
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.82);
+  background: rgba(17, 16, 13, 0.88);
 }
 .ng-property-label {
-  color: #cbd5e1;
+  color: #e9dfc5;
   font-size: 11px;
   font-weight: 800;
 }
@@ -3031,15 +3782,15 @@ onBeforeUnmount(() => {
   min-width: 0;
   height: 30px;
   padding: 0 5px;
-  border: 1px solid #3b4b64;
+  border: 1px solid #665025;
   border-radius: 7px;
-  background: #172033;
-  color: #cbd5e1;
+  background: #191711;
+  color: #e9dfc5;
   cursor: pointer;
   font-size: 11px;
   font-weight: 700;
 }
-.ng-type-tabs button:hover { border-color: #60a5fa; }
+.ng-type-tabs button:hover { border-color: #d8b86c; }
 .ng-type-tabs button.active {
   border-color: #facc15;
   background: rgba(161, 98, 7, 0.34);
@@ -3057,11 +3808,11 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 30px;
   padding: 0 9px;
-  border: 1px solid #3b4b64;
+  border: 1px solid #665025;
   border-radius: 7px;
   outline: none;
-  background: #0f172a;
-  color: #f8fafc;
+  background: #0f0e0a;
+  color: #fff7dc;
   font-size: 12px;
 }
 .ng-name-row input:focus {
@@ -3069,21 +3820,21 @@ onBeforeUnmount(() => {
   box-shadow: 0 0 0 2px rgba(250, 204, 21, 0.12);
 }
 .ng-name-row span {
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 10px;
   font-variant-numeric: tabular-nums;
 }
 .ng-edge-meta {
   display: grid;
   gap: 3px;
-  color: #94a3b8;
+  color: #b9ad8f;
   font-size: 10px;
 }
 .ng-condition-note {
   padding: 6px 7px;
   border-radius: 7px;
-  background: rgba(30, 41, 59, 0.72);
-  color: #cbd5e1;
+  background: rgba(36, 32, 22, 0.76);
+  color: #e9dfc5;
   font-size: 10px;
   line-height: 1.4;
 }
@@ -3092,8 +3843,8 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   border-radius: 10px;
-  border: 1px dashed rgba(148, 163, 184, 0.35);
-  color: #94a3b8;
+  border: 1px dashed rgba(216, 184, 108, 0.28);
+  color: #b9ad8f;
   font-size: 12px;
   text-align: center;
   padding: 16px;
@@ -3102,14 +3853,14 @@ onBeforeUnmount(() => {
 .ng-splitter {
   position: relative;
   z-index: 20;
-  background: rgba(51, 65, 85, 0.5);
+  background: rgba(74, 61, 29, 0.52);
   transition: background 120ms ease;
   touch-action: none;
   user-select: none;
 }
 .ng-splitter:hover,
 .ng-splitter:active {
-  background: #60a5fa;
+  background: #d8b86c;
 }
 .ng-splitter.vertical {
   cursor: col-resize;
@@ -3128,11 +3879,11 @@ onBeforeUnmount(() => {
   width: min(620px, calc(100% - 24px));
   max-height: 45%;
   padding: 10px;
-  border: 1px solid #475569;
+  border: 1px solid #746137;
   border-radius: 10px;
-  background: rgba(15, 23, 42, 0.98);
+  background: rgba(8, 8, 6, 0.98);
   box-shadow: 0 16px 35px rgba(0, 0, 0, 0.45);
-  color: #e2e8f0;
+  color: #f2ead5;
 }
 .ng-run-detail-head {
   display: flex;
@@ -3141,11 +3892,11 @@ onBeforeUnmount(() => {
   margin-bottom: 7px;
 }
 .ng-run-detail-head button {
-  border: 1px solid #475569;
+  border: 1px solid #746137;
   border-radius: 6px;
   padding: 3px 9px;
-  background: #1e293b;
-  color: #dbeafe;
+  background: #242016;
+  color: #fff3c8;
   cursor: pointer;
 }
 .ng-run-detail pre {

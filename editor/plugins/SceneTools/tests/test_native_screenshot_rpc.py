@@ -4164,6 +4164,29 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         )
         self.assertNotIn("ProjectLauncher.vue", router_source)
 
+    def test_frontend_merge_preserves_archive_guards_and_ui_workflows(self):
+        repo_root = self._repo_root()
+        frontend = repo_root / "editor" / "Frontend" / "src" / "views"
+        new_game = (frontend / "layout" / "NewGame.vue").read_text(encoding="utf-8")
+        recent_games = (frontend / "layout" / "RecentGames.vue").read_text(encoding="utf-8")
+        object_panel = (frontend / "sidebar" / "Object.vue").read_text(encoding="utf-8")
+
+        for source in (new_game, recent_games, object_panel):
+            self.assertNotIn("<<<<<<<", source)
+            self.assertNotIn("=======", source)
+            self.assertNotIn(">>>>>>>", source)
+
+        self.assertIn(':disabled="creating || !archiveReady"', new_game)
+        self.assertIn("waitForPythonProjectActivation", new_game)
+        self.assertIn("openResult?.status === 'service_initializing'", new_game)
+        self.assertIn("lanchat.openRoom", new_game)
+        self.assertIn("selectedProject && archiveReady", recent_games)
+        self.assertIn("@click=\"openSelectedProject\"", recent_games)
+        self.assertIn("bg-[#d8b86c]", recent_games)
+        self.assertIn("actor.loadStatus === 'loaded'", object_panel)
+        self.assertIn("collapsedSections.physics", object_panel)
+        self.assertIn(".placeholder-warning", object_panel)
+
     def test_recent_project_entries_mark_legacy_projects_for_recent_games(self):
         source = self._handler_source()
         start = source.index("nlohmann::json recent_projects_native()")

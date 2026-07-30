@@ -157,14 +157,17 @@ function panelIdFromRoute() {
 }
 
 async function onToggleFloat() {
-  // Native 根据当前 detach_state 在主窗口 floating 与 SDL secondary window 之间切换。
   const panelId = panelIdFromRoute();
+  if (!panelId) return;
   try {
+    // createPanelTab starts as a draggable floating surface inside the main editor.
+    // Native code keeps the same tab alive while toggling it between that surface and
+    // a detachable OS window, so the panel state and editor contents are preserved.
     await appService.togglePanelWindowMode({ panelId });
   } catch (e) {
-    console.error('[DockTitleBar] redock failed:', e);
+    console.error('[DockTitleBar] toggle window mode failed:', e);
   }
-  emit('toggleFloat', false);
+  emit('toggleFloat');
 }
 
 function onClose() {
@@ -180,9 +183,9 @@ function onClose() {
   width: 100%;
   min-height: 32px;
   padding: 0 6px 0 10px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
-  background: linear-gradient(180deg, rgba(37, 41, 37, 0.72) 0%, rgba(29, 33, 30, 0.64) 100%);
-  color: #e7ece3;
+  border-bottom: 1px solid rgba(216, 184, 108, 0.28);
+  background: linear-gradient(180deg, rgba(35, 30, 17, 0.98) 0%, rgba(14, 13, 9, 0.98) 100%);
+  color: #f2ead5;
   cursor: default;
   user-select: none;
 }
@@ -192,8 +195,8 @@ function onClose() {
   height: 16px;
   margin-right: 8px;
   border-radius: 999px;
-  background: #8aa66a;
-  box-shadow: 0 0 10px rgba(138, 166, 106, 0.28);
+  background: #d8b86c;
+  box-shadow: 0 0 10px rgba(216, 184, 108, 0.28);
   flex: 0 0 auto;
 }
 
@@ -225,7 +228,7 @@ function onClose() {
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 4px;
   background: rgba(255, 255, 255, 0.06);
-  color: #cbd6c5;
+  color: #d7cba9;
   font-size: 13px;
   line-height: 1;
   transition:
@@ -236,8 +239,8 @@ function onClose() {
 }
 
 .titlebar-button:hover {
-  background: rgba(138, 166, 106, 0.18);
-  border-color: rgba(138, 166, 106, 0.36);
+  background: rgba(216, 184, 108, 0.18);
+  border-color: rgba(216, 184, 108, 0.36);
   color: #ffffff;
 }
 
@@ -246,7 +249,7 @@ function onClose() {
 }
 
 .titlebar-button:focus-visible {
-  outline: 2px solid rgba(138, 166, 106, 0.7);
+  outline: 2px solid rgba(216, 184, 108, 0.7);
   outline-offset: 1px;
 }
 

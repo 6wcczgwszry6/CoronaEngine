@@ -1,107 +1,230 @@
 <template>
-  <Teleport to="body">
-    <div
-      class="cabbage-review-root"
-      @mousedown.stop
-      @pointerdown.stop
-      @click.stop
-      @wheel.stop
-    >
-      <button
-        type="button"
-        class="cabbage-button"
-        :class="{ active: chatOpen }"
-        :title="chatOpen ? '关闭包菜答疑' : '打开包菜答疑'"
-        :aria-pressed="chatOpen"
-        @click="toggleChat"
-      >
-        <img src="@/assets/cabbage.png" alt="包菜答疑" />
-        <span v-if="tasks.length" class="cabbage-badge">{{ tasks.length > 99 ? '99+' : tasks.length }}</span>
-      </button>
+  <div
+    class="cabbage-review-root"
+    :class="{ resident: props.resident }"
+    @mousedown.stop
+    @pointerdown.stop
+    @click.stop
+    @wheel.stop
+  >
+    <section class="task-board" :aria-label="t('cabbageReview.title')">
+      <header class="task-board-header">
+        <span>{{ t('cabbageReview.title') }}</span>
+        <div class="task-header-actions">
+          <button type="button" class="history-button" :class="{ active: historyVisible }" @click="toggleHistory">
+            {{ historyVisible ? t('cabbageReview.backToTasks') : t('cabbageReview.history') }}
+          </button>
+          <span class="task-count" :class="{ empty: visibleTasks.length === 0 }">{{ visibleTasks.length }}</span>
+        </div>
+      </header>
 
-      <transition name="task-board">
-        <section v-if="assistant.ephemeralTip" class="optimization-tip" aria-live="polite">
-          <strong>{{ assistant.ephemeralTip.title }}</strong>
-          <p>{{ assistant.ephemeralTip.message }}</p>
-        </section>
-      </transition>
-
-      <transition name="task-board">
-        <section v-if="tasks.length" class="task-board" aria-label="包菜向你扔的屎">
-          <header class="task-board-header">
-            <span>包菜向你扔的屎</span>
-            <span class="task-count">{{ tasks.length }}</span>
-          </header>
-          <div class="task-list">
-            <article v-for="task in tasks" :key="task.taskKey || task.issueKey" class="task-item">
-              <button
-                type="button"
-                class="task-title"
-                :class="{ selected: assistant.selectedTaskKey === (task.taskKey || task.issueKey) }"
-                @click="toggleTask(task)"
+      <div v-if="visibleTasks.length" class="task-list">
+        <article
+          v-for="(task, index) in visibleTasks"
+          :key="rowKey(task, index)"
+          class="task-item"
+          :class="{
+            completed: historyVisible,
+            'pre-warning': task.type === 'pre-warning',
+            'optimization-opinion': task.type === 'optimization-tip',
+          }"
+        >
+          <button
+            type="button"
+            class="task-summary"
+            :class="{ selected: assistant.selectedTaskKey === taskKey(task) }"
+            @click="toggleTask(task, index)"
+          >
+            <span class="task-summary-topline">
+              <span
+                class="task-discipline"
+                :class="disciplineClass(task)"
               >
-                <span class="task-title-text">{{ task.title }}</span>
-                <span class="task-chevron" :class="{ expanded: expandedKeys.has(task.taskKey || task.issueKey) }">⌄</span>
-              </button>
-              <div v-if="expandedKeys.has(task.taskKey || task.issueKey)" class="task-detail">
-                <p v-if="task.message">{{ task.message }}</p>
-                <div v-if="task.suggestion" class="task-suggestion">
-                  <strong>{{ task.type === 'tutorial' ? '这样完成' : '这样修改' }}</strong>
-                  <p>{{ task.suggestion }}</p>
-                </div>
-                <button type="button" class="task-discuss" @click="openChat(task)">和包菜继续讨论</button>
-              </div>
-            </article>
-          </div>
-        </section>
-      </transition>
+                {{ disciplineLabel(task) }}
+              </span>
+              <span class="task-title-text">{{ task.title }}</span>
+              <span v-if="historyVisible" class="task-completed-badge">{{ t('cabbageReview.completed') }}</span>
+              <span class="task-chevron" :class="{ expanded: expandedKeys.has(rowKey(task, index)) }">&#8964;</span>
+            </span>
+            <span class="task-introduction">{{ taskDescription(task) }}</span>
+          </button>
 
-    </div>
-  </Teleport>
+          <div v-if="expandedKeys.has(rowKey(task, index))" class="task-detail">
+            <div class="task-suggestion">
+              <strong>{{ t('cabbageReview.howToComplete') }}</strong>
+              <p>{{ completionText(task) }}</p>
+            </div>
+            <div class="task-actions">
+              <button type="button" class="showcase-button" @click="showcase({ ...task, sourceType: task.type })">
+                {{ t('cabbageReview.showcase') }}
+              </button>
+              <button type="button" class="task-discuss" @click="openChat(task)">
+                {{ t('cabbageReview.continueDiscussion') }}
+              </button>
+            </div>
+          </div>
+        </article>
+      </div>
+
+      <div v-else class="task-empty" aria-live="polite">
+        <span class="task-empty-icon">&#10003;</span>
+        <span>{{ historyVisible ? t('cabbageReview.emptyHistory') : t('cabbageReview.emptyActive') }}</span>
+      </div>
+    </section>
+  </div>
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, reactive, watch } from 'vue';
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { useDockStore } from '@/stores/dockStore.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
-import { openFloatingPanel, toggleFloatingPanel } from '@/utils/panelWindows.js';
+import { closeFloatingPanel } from '@/utils/panelWindows.js';
 import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
+import { guidanceService } from '@/services/cabbageGuidanceService.js';
 
 const props = defineProps({
   tasks: { type: Array, default: () => [] },
   attentionToken: { type: Number, default: 0 },
+  resident: { type: Boolean, default: false },
 });
 
+const { t } = useI18n();
 const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
-const chatOpen = computed(() => Boolean(dockStore.panels.CabbageChatPanel?.open));
+const historyVisible = ref(false);
+const preWarningTask = computed(() => {
+  const warning = assistant.preWarning;
+  if (!warning) return null;
+  return {
+    ...warning,
+    taskKey: String(warning.taskKey || warning.warningKey || `pre-warning:${warning.code || 'issue'}`),
+    issueKey: String(warning.taskKey || warning.warningKey || `pre-warning:${warning.code || 'issue'}`),
+    type: 'pre-warning',
+    discipline: 'hint',
+    status: 'active',
+    transient: true,
+    suggestion: String(warning.suggestion || warning.message || ''),
+  };
+});
+const optimizationTask = computed(() => {
+  const tip = assistant.ephemeralTip;
+  if (!tip) return null;
+  const key = String(tip.taskKey || `optimization:${tip.graphRevision || 'graph'}:${tip.tipKey || 'tip'}`);
+  return {
+    ...tip,
+    taskKey: key,
+    issueKey: key,
+    type: 'optimization-tip',
+    discipline: 'opinion',
+    status: 'active',
+    transient: true,
+    suggestion: String(tip.suggestion || tip.message || ''),
+  };
+});
+const visibleTasks = computed(() => {
+  if (historyVisible.value) return assistant.completedTasks;
+  return [preWarningTask.value, optimizationTask.value, ...props.tasks].filter(Boolean);
+});
 const taskKey = (task) => String(task?.taskKey || task?.issueKey || '');
 let optimizationTimer = null;
+let preWarningTimer = null;
+
+function completionTimestamp(task) {
+  return Math.max(
+    Number(task?.completedAt) || 0,
+    Number(task?.resolvedAt) || 0,
+    Number(task?.updatedAt) || 0
+  );
+}
+
+function rowKey(task, index = 0) {
+  const key = taskKey(task) || `task_${index}`;
+  return historyVisible.value ? `history:${key}:${completionTimestamp(task)}:${index}` : `active:${key}`;
+}
+
+function disciplineClass(task) {
+  if (task?.discipline === 'hint') return 'hint';
+  if (task?.discipline === 'opinion') return 'opinion';
+  return task?.discipline === 'art' ? 'art' : 'programming';
+}
+
+function disciplineLabel(task) {
+  if (task?.discipline === 'hint') return t('cabbageReview.disciplineHint');
+  if (task?.discipline === 'opinion') return t('cabbageReview.disciplineOpinion');
+  return task?.discipline === 'art'
+    ? t('cabbageReview.disciplineArt')
+    : t('cabbageReview.disciplineProgramming');
+}
+
+function taskDescription(task) {
+  return String(task?.message || task?.completionCriteria || t('cabbageReview.descriptionFallback'));
+}
+
+function completionText(task) {
+  return String(task?.suggestion || task?.completionCriteria || task?.message || t('cabbageReview.completionFallback'));
+}
 
 function clearOptimizationTimer() {
   if (optimizationTimer) window.clearTimeout(optimizationTimer);
   optimizationTimer = null;
 }
 
-function toggleTask(task) {
-  const key = taskKey(task);
-  if (!key) return;
-  assistant.selectTask(key);
-  publishCabbageAssistantContext(assistant);
-  if (expandedKeys.has(key)) expandedKeys.delete(key);
-  else expandedKeys.add(key);
+function clearPreWarningTimer() {
+  if (preWarningTimer) window.clearTimeout(preWarningTimer);
+  preWarningTimer = null;
 }
 
-async function toggleChat() {
-  publishCabbageAssistantContext(assistant);
-  await toggleFloatingPanel(dockStore, 'CabbageChatPanel');
+function showcase(source) {
+  void guidanceService.start(source);
+}
+
+function toggleHistory() {
+  historyVisible.value = !historyVisible.value;
+  expandedKeys.clear();
+}
+
+function toggleTask(task, index) {
+  const logicalKey = taskKey(task);
+  const displayKey = rowKey(task, index);
+  if (!logicalKey) return;
+  assistant.selectTask(logicalKey);
+  if (task?.transient !== true) publishCabbageAssistantContext(assistant);
+  if (expandedKeys.has(displayKey)) expandedKeys.delete(displayKey);
+  else expandedKeys.add(displayKey);
 }
 
 async function openChat(task) {
   assistant.selectTask(taskKey(task));
-  publishCabbageAssistantContext(assistant);
-  await openFloatingPanel(dockStore, 'CabbageChatPanel');
+  if (task?.transient !== true) publishCabbageAssistantContext(assistant);
+
+  if (props.resident) {
+    window.dispatchEvent(new CustomEvent('cabbage-chat-focus-request', {
+      detail: { taskKey: taskKey(task) },
+    }));
+    return;
+  }
+
+  const panelId = 'CabbageChatPanel';
+  const panel = dockStore.panels[panelId];
+  if (!panel) return;
+
+  if (panel.open && panel.mode === 'external') {
+    await closeFloatingPanel(dockStore, panelId);
+  }
+
+  dockStore.popIn(panelId);
+  dockStore.setDockZone(panelId, 'right');
+  dockStore.openPanel(panelId);
+
+  const rightIds = dockStore.panelsByZone('right')
+    .map((item) => item.id)
+    .filter((id) => id !== panelId);
+  const aiTalkIndex = rightIds.indexOf('AITalkBar');
+  const beforeId = aiTalkIndex >= 0 ? (rightIds[aiTalkIndex + 1] || null) : null;
+  dockStore.movePanel(panelId, 'right', beforeId);
+  window.dispatchEvent(new Event('resize'));
 }
 
 watch(
@@ -115,10 +238,19 @@ watch(
   { immediate: true }
 );
 
-onBeforeUnmount(clearOptimizationTimer);
+watch(
+  () => assistant.preWarning?.expiresAt || 0,
+  (expiresAt) => {
+    clearPreWarningTimer();
+    if (!expiresAt) return;
+    const remaining = Math.max(0, Number(expiresAt) - Date.now());
+    preWarningTimer = window.setTimeout(() => assistant.clearPreWarning(), remaining);
+  },
+  { immediate: true }
+);
 
 watch(
-  () => props.tasks.map((task) => taskKey(task)),
+  () => visibleTasks.value.map((task, index) => rowKey(task, index)),
   (keys) => {
     const alive = new Set(keys);
     for (const key of Array.from(expandedKeys)) {
@@ -126,134 +258,217 @@ watch(
     }
   }
 );
+
+watch(
+  () => `${assistant.projectScopeId}:${assistant.worldId}`,
+  () => {
+    historyVisible.value = false;
+    expandedKeys.clear();
+  }
+);
+
+onBeforeUnmount(() => {
+  clearOptimizationTimer();
+  clearPreWarningTimer();
+  void guidanceService.stop();
+});
 </script>
 
 <style scoped>
 .cabbage-review-root {
-  position: fixed;
-  right: 18px;
-  top: 50%;
-  z-index: 2147483645;
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 2147482500;
   display: flex;
-  width: min(310px, calc(100vw - 36px));
-  max-height: calc(100vh - 128px);
+  width: min(418px, calc(100% - 24px));
+  max-height: min(470px, calc(100% - 92px));
   flex-direction: column;
-  align-items: center;
-  gap: 12px;
-  transform: translateY(-50%);
+  align-items: stretch;
+  gap: 9px;
   pointer-events: none;
 }
-.cabbage-review-root > * {
-  pointer-events: auto;
-}
-.optimization-tip {
+.cabbage-review-root > * { pointer-events: auto; }
+.cabbage-review-root.resident {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  z-index: auto;
   width: 100%;
-  box-sizing: border-box;
-  border: 1px solid #607255;
-  border-radius: 8px;
-  background: #2b3229;
-  color: #e7eee3;
-  box-shadow: 0 14px 38px rgba(0, 0, 0, .5);
-  padding: 11px 12px;
-  line-height: 1.55;
+  max-height: min(470px, 46vh);
+  min-height: 0;
+  flex: 0 1 470px;
 }
-.optimization-tip strong { display: block; color: #c6ddaf; font-size: 13px; }
-.optimization-tip p { margin: 5px 0 0; color: #cbd4c7; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.cabbage-review-root.resident .task-board { max-height: 100%; }
 .task-board {
   position: relative;
   width: 100%;
-  max-height: min(520px, calc(100vh - 222px));
+  max-height: min(470px, calc(100% - 70px));
   box-sizing: border-box;
   display: flex;
-  flex: 0 1 auto;
+  flex: 1 1 auto;
   flex-direction: column;
   overflow: hidden;
-  border: 1px solid #4a554b;
-  border-left: 3px solid #789665;
+  border: 1px solid #55431f;
+  border-left: 3px solid #b8924a;
   border-radius: 9px;
-  background: #232824;
-  color: #e5e9e4;
-  box-shadow: 0 18px 46px rgba(0, 0, 0, .62), 0 0 0 1px rgba(120, 150, 101, .08);
+  background: #11100d;
+  color: #f2ead5;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, .62), 0 0 0 1px rgba(216, 184, 108, .08);
 }
 .task-board-header {
   display: flex;
+  flex: 0 0 auto;
   align-items: center;
   justify-content: space-between;
-  min-height: 42px;
+  min-height: 46px;
   box-sizing: border-box;
-  padding: 10px 12px 10px 13px;
-  border-bottom: 1px solid #465047;
-  background: #303730;
-  color: #dce6d7;
+  padding: 9px 10px 9px 13px;
+  border-bottom: 1px solid #3f3018;
+  background: #211d12;
+  color: #f2ead5;
   font-size: 14px;
   font-weight: 700;
   letter-spacing: .02em;
 }
+.task-header-actions { display: flex; align-items: center; gap: 8px; }
+.history-button {
+  border: 1px solid #665025;
+  border-radius: 5px;
+  background: #302713;
+  color: #e5c77f;
+  padding: 5px 9px;
+  font-size: 11px;
+  transition: background .14s ease, border-color .14s ease, color .14s ease;
+}
+.history-button:hover, .history-button.active { border-color: #d8b86c; background: #57421f; color: #fff7dc; }
 .task-count {
   min-width: 22px;
   height: 22px;
   display: grid;
   place-items: center;
   border-radius: 999px;
-  background: #7d5d24;
+  background: #9a7736;
   color: #fff3c8;
+  font-size: 11px;
+}
+.task-count.empty { background: #3f3018; color: #b9ad8f; }
+.task-empty {
+  display: flex;
+  min-height: 78px;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 12px;
+  color: #9d9278;
+  font-size: 12px;
+  text-align: center;
+}
+.task-empty-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid #665025;
+  border-radius: 50%;
+  color: #d8b86c;
   font-size: 11px;
 }
 .task-list {
   min-height: 0;
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 8px;
+  padding: 9px;
   scrollbar-width: thin;
-  scrollbar-color: #59655b #252a26;
+  scrollbar-color: #8c6f36 #0b0a08;
 }
 .task-list::-webkit-scrollbar { width: 7px; }
-.task-list::-webkit-scrollbar-track { background: #252a26; }
-.task-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #59655b; }
-.task-item + .task-item { margin-top: 5px; }
-.task-title {
+.task-list::-webkit-scrollbar-track { background: #0b0a08; }
+.task-list::-webkit-scrollbar-thumb { border-radius: 999px; background: #8c6f36; }
+.task-item + .task-item { margin-top: 7px; }
+.task-item {
+  overflow: hidden;
+  border: 1px solid #3f3018;
+  border-radius: 7px;
+  background: #15130d;
+  transition: border-color .14s ease, background .14s ease;
+}
+.task-item:hover, .task-item:has(.task-summary.selected) { border-color: #d8b86c; background: #1d190f; }
+.task-item.completed { border-color: #51462b; }
+.task-summary {
   width: 100%;
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  border: 1px solid #3e4540;
-  border-radius: 6px;
-  background: #2b302c;
+  display: block;
+  border: 0;
+  background: transparent;
   color: #e5e7eb;
-  padding: 9px 10px;
+  padding: 10px 11px;
   text-align: left;
+}
+.task-summary-topline { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.task-discipline, .task-completed-badge {
+  flex: 0 0 auto;
+  border: 1px solid;
+  border-radius: 999px;
+  padding: 2px 6px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.task-discipline.programming { border-color: #6d7f9d; background: #1a2433; color: #b9d2ff; }
+.task-discipline.art { border-color: #8d674f; background: #312018; color: #f0c4a4; }
+.task-discipline.hint { border-color: #b74747; background: #3a1717; color: #ffb4aa; }
+.task-discipline.opinion { border-color: #4f8a72; background: #13271f; color: #a9e7c9; }
+.task-item.pre-warning { border-color: #7f3030; background: #211010; }
+.task-item.pre-warning:hover, .task-item.pre-warning:has(.task-summary.selected) { border-color: #cf5f52; background: #2a1312; }
+.task-item.optimization-opinion { border-color: #315f4c; background: #101d18; }
+.task-item.optimization-opinion:hover, .task-item.optimization-opinion:has(.task-summary.selected) { border-color: #57977c; background: #14271f; }
+.task-completed-badge { border-color: #637b42; background: #1c2913; color: #c8e6a1; }
+.task-title-text { min-width: 0; flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; font-size: 13px; font-weight: 700; }
+.task-chevron { flex: 0 0 auto; color: #9ca3af; transform: rotate(0deg); transition: transform .14s ease; }
+.task-chevron.expanded { transform: rotate(180deg); }
+.task-introduction {
+  display: block;
+  margin-top: 8px;
+  color: #bdb49d;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.task-detail {
+  margin: 0 8px 8px;
+  border-top: 1px solid #3f3018;
+  background: #0f0e0a;
+  padding: 10px;
+  color: #c9bea0;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.task-detail p { margin: 5px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.task-suggestion { border-left: 2px solid #d8b86c; padding-left: 8px; }
+.task-suggestion strong { color: #e5c77f; font-size: 11px; }
+.task-actions { margin-top: 11px; display: flex; justify-content: flex-end; gap: 7px; }
+.showcase-button, .task-discuss {
+  border: 1px solid #665025;
+  border-radius: 5px;
+  color: #fff7dc;
+  padding: 5px 9px;
+  font-size: 11px;
   transition: background .14s ease, border-color .14s ease;
 }
-.task-title:hover, .task-title.selected { border-color: #718663; background: #343c32; }
-.task-title-text { min-width:0; flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; font-size:13px; font-weight:600; }
-.task-chevron { color:#9ca3af; transform:rotate(0deg); transition:transform .14s ease; }
-.task-chevron.expanded { transform:rotate(180deg); }
-.task-detail { margin:-1px 5px 0; border:1px solid #3e4540; border-top:0; border-radius:0 0 6px 6px; background:#202421; padding:10px; color:#cbd2c9; font-size:12px; line-height:1.65; }
-.task-detail p { white-space:pre-wrap; overflow-wrap:anywhere; }
-.task-suggestion { margin-top:8px; border-left:2px solid #83a36b; padding-left:8px; }
-.task-suggestion strong { color:#aaca92; font-size:11px; }
-.task-discuss { margin-top:9px; border-radius:5px; background:#526847; color:#eef8e8; padding:5px 9px; font-size:11px; }
-.cabbage-button {
-  position: relative;
-  width: 68px;
-  height: 68px;
-  flex: 0 0 auto;
-  overflow: visible;
-  border: 2px solid rgba(110, 231, 183, .72);
-  border-radius: 50%;
-  background: #b8de93;
-  box-shadow: 0 10px 32px rgba(16, 185, 129, .32);
-  transition: transform .16s ease, border-color .16s ease;
-}
-.cabbage-button:hover, .cabbage-button.active { transform:scale(1.05); border-color:#d1fae5; }
-.cabbage-button img { width:100%; height:100%; border-radius:50%; object-fit:cover; }
-.cabbage-badge { position:absolute; right:-3px; top:-4px; min-width:22px; height:22px; display:grid; place-items:center; border:2px solid #1b211c; border-radius:999px; background:#e89a2e; color:white; padding:0 4px; font-size:10px; font-weight:700; }
-.task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin:center bottom; }
-.task-board-enter-from, .task-board-leave-to { opacity:0; transform:translateY(8px) scale(.98); }
+.showcase-button { flex: 0 0 auto; background: #6d5226; }
+.showcase-button:hover { border-color: #d8b86c; background: #8c6f36; }
+.task-discuss { background: #4b391c; }
+.task-discuss:hover { border-color: #b8924a; background: #624b25; }
+.task-board-enter-active, .task-board-leave-active { transition: opacity .15s ease, transform .15s ease; transform-origin: center bottom; }
+.task-board-enter-from, .task-board-leave-to { opacity: 0; transform: translateY(8px) scale(.98); }
 
-@media (max-height: 620px) {
-  .cabbage-review-root { max-height: calc(100vh - 88px); }
-  .task-board { max-height: calc(100vh - 180px); }
+@media (max-width: 720px) {
+  .cabbage-review-root { width: min(418px, calc(100% - 24px)); }
+}
+@media (max-height: 680px) {
+  .cabbage-review-root { max-height: calc(100% - 68px); }
+  .cabbage-review-root.resident { max-height: min(400px, 44vh); flex-basis: 400px; }
+  .task-board { max-height: 100%; }
 }
 </style>
-

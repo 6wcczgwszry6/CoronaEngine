@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import os
 import socket
 import threading
 import time
+import unicodedata
 import uuid
 import urllib.error
 import urllib.request
@@ -37,6 +39,24 @@ class NodeGraphReviewService:
     CONTRACT_FILENAME = "CoronaBlocksDocument.internal-ai-contract.xml"
     MAX_TASKS = 32
     MAX_CACHE_ENTRIES = 32
+    ISSUE_PATTERN_FIELDS = (
+        "blockType", "workspaceRole", "relationType",
+        "missingInput", "objectRequirement", "edgeId",
+    )
+    ISSUE_CODE_ALIASES = {"dangling_edge": "invalid_edge_endpoint"}
+    FACT_REQUIRED_ISSUE_CODES = {
+        "missing_actor_target",
+        "actor_target_not_found",
+        "missing_required_input",
+    }
+    ACTOR_NAME_FIELDS = (
+        "name", "actor_name", "actorName", "alias", "displayName",
+        "display_name", "nativeName", "native_name",
+    )
+    ACTOR_ALIAS_FIELDS = ("aliases", "displayNames", "display_names", "names")
+    OPTIONAL_FIELD_ALIASES = {
+        "OBSTACLE_TAG": ("obstacle_tag", "obstacletag", "obstacle tag", "障碍标签"),
+    }
 
     # Only these fields identify an existing scene actor. TAG, variable names,
     # cooldown names and spawn names are intentionally excluded.
@@ -375,34 +395,53 @@ class NodeGraphReviewService:
 
     @classmethod
     def _resolve_settings(cls) -> DeepSeekSettings:
-        provider: Any = None
-        raw_provider: dict[str, Any] = {}
-        try:
-            from Quasar.ai_service.entrance import get_ai_entrance
+        def lookup_editor_provider() -> tuple[Any, dict[str, Any]]:
+            provider: Any = None
+            raw_provider: dict[str, Any] = {}
+            try:
+                from Quasar.ai_service.entrance import get_ai_entrance
 
-            collector = get_ai_entrance().collector
-            providers = getattr(collector.AIConfig, "providers", {}) or {}
-            provider = providers.get("deepseek") if hasattr(providers, "get") else None
-            if provider is None:
-                raw = getattr(collector, "AI_SETTINGS", {})
-                candidate = (
-                    (raw.get("providers") or {}).get("deepseek")
-                    if isinstance(raw, dict)
-                    else None
+                collector = get_ai_entrance().collector
+                providers = getattr(collector.AIConfig, "providers", {}) or {}
+                provider = providers.get("deepseek") if hasattr(providers, "get") else None
+                if provider is None:
+                    raw = getattr(collector, "AI_SETTINGS", {})
+                    candidate = (
+                        (raw.get("providers") or {}).get("deepseek")
+                        if isinstance(raw, dict)
+                        else None
+                    )
+                    if isinstance(candidate, dict):
+                        raw_provider = candidate
+            except Exception as exc:
+                logger.debug(
+                    "DeepSeek editor configuration lookup failed: %s",
+                    type(exc).__name__,
                 )
-                if isinstance(candidate, dict):
-                    raw_provider = candidate
-        except Exception as exc:
-            logger.debug(
-                "DeepSeek editor configuration lookup failed: %s",
-                type(exc).__name__,
-            )
+            return provider, raw_provider
+
+        provider, raw_provider = lookup_editor_provider()
 
         def read(name: str) -> str:
             value = getattr(provider, name, "") if provider is not None else ""
             return str(value or raw_provider.get(name, "") or "").strip()
 
         editor_key = read("api_key")
+        if not editor_key:
+            # The node review/generation services can be used before the LAN-chat
+            # worker finishes its warm-up. Load the editor-owned settings lazily so
+            # the first Cabbage generation request does not incorrectly fall back to
+            # an empty environment configuration.
+            try:
+                importlib.import_module("..utils.ai_setting", package=__package__)
+            except Exception as exc:
+                logger.debug(
+                    "DeepSeek editor settings lazy-load failed: %s",
+                    type(exc).__name__,
+                )
+            provider, raw_provider = lookup_editor_provider()
+            editor_key = read("api_key")
+
         editor_model = read("model")
         if editor_key:
             return DeepSeekSettings(
@@ -490,9 +529,9 @@ class NodeGraphReviewService:
             raise ValueError("DeepSeek 审查结果必须是 JSON 对象")
         return value
 
-    @staticmethod
+    @classmethod
     def _validate_model_result(
-        result: dict[str, Any], request: dict[str, Any]
+        cls, result: dict[str, Any], request: dict[str, Any]
     ) -> None:
         if not isinstance(result.get("hasProblems"), bool):
             raise ValueError("DeepSeek 审查结果缺少 hasProblems")
@@ -530,20 +569,30 @@ class NodeGraphReviewService:
             for node in request["workspace"]["nodes"]
             if isinstance(node, dict)
         }
-        block_ids = {
-            str(block.get("id"))
-            for block in NodeGraphReviewService._walk_blocks(request["workspace"])
+        blocks_by_id = {
+            str(block.get("id")): block
+            for block in cls._walk_blocks(request["workspace"])
             if block.get("id")
         }
+        block_ids = set(blocks_by_id)
+        edge_ids = {
+            str(edge.get("id"))
+            for edge in request["workspace"].get("edges", [])
+            if isinstance(edge, dict) and edge.get("id")
+        }
+        facts = cls._collect_local_facts(request["workspace"], project_context)
         normalized: list[dict[str, Any]] = []
         for item in issues[:6]:
             if not isinstance(item, dict):
                 continue
             node_id = str(item.get("nodeId") or "")
             block_id = str(item.get("blockId") or "")
+            edge_id = str(item.get("edgeId") or "")
             if node_id and node_id not in node_ids:
                 continue
             if block_id and block_id not in block_ids:
+                continue
+            if edge_id and edge_id not in edge_ids:
                 continue
             try:
                 confidence = max(
@@ -554,17 +603,55 @@ class NodeGraphReviewService:
             if confidence < 0.8:
                 continue
             code = str(item.get("code") or "logic_issue")[:80]
+            code = cls.ISSUE_CODE_ALIASES.get(code, code)
+            matching_fact = next((fact for fact in facts if (
+                cls.ISSUE_CODE_ALIASES.get(str(fact.get("code") or ""), str(fact.get("code") or "")) == code
+                and (not node_id or not fact.get("nodeId") or str(fact.get("nodeId")) == node_id)
+                and (not block_id or not fact.get("blockId") or str(fact.get("blockId")) == block_id)
+                and (not edge_id or not fact.get("edgeId") or str(fact.get("edgeId")) == edge_id)
+            )), None)
+            # Object existence and required-input errors are deterministic. DeepSeek
+            # may explain them, but it cannot create them without a matching local fact.
+            if code in cls.FACT_REQUIRED_ISSUE_CODES and not matching_fact:
+                continue
+            actual_block = blocks_by_id.get(block_id) or {}
+            if cls._issue_reports_legal_optional_empty_field(item, actual_block):
+                continue
+            if not edge_id and matching_fact and str(matching_fact.get("edgeId") or "") in edge_ids:
+                edge_id = str(matching_fact.get("edgeId") or "")
+            raw_pattern = item.get("pattern") if isinstance(item.get("pattern"), dict) else {}
+            pattern = cls._normalize_issue_pattern(raw_pattern)
+            if actual_block.get("type"):
+                pattern["blockType"] = str(actual_block.get("type"))[:180]
+            if matching_fact:
+                if matching_fact.get("blockType"):
+                    pattern["blockType"] = str(matching_fact.get("blockType"))[:180]
+                if matching_fact.get("field"):
+                    pattern["missingInput"] = str(matching_fact.get("field"))[:180]
+            if code in {"missing_actor_target", "actor_target_not_found"}:
+                pattern["objectRequirement"] = "scene_actor"
+            if code in {"invalid_visible_condition_count", "non_boolean_condition"}:
+                pattern["workspaceRole"] = "condition"
+                pattern["relationType"] = "transition"
+            elif code == "invalid_edge_endpoint":
+                pattern["relationType"] = "transition"
+            elif code == "start_node_count":
+                pattern["workspaceRole"] = "node_graph"
+            if edge_id:
+                pattern["edgeId"] = edge_id
             title = str(item.get("title") or "节点逻辑需要调整").strip()[:80]
             message = str(item.get("message") or result["summary"]).strip()[:500]
             suggestion = str(item.get("suggestion") or result["summary"]).strip()[:500]
             normalized.append(
                 {
-                    "issueKey": f"{code}|{node_id}|{block_id}",
+                    "issueKey": f"{code}|{node_id}|{block_id}" + (f"|{edge_id}" if edge_id else ""),
                     "severity": str(item.get("severity") or "warning")[:16],
                     "confidence": confidence,
                     "nodeId": node_id,
                     "blockId": block_id,
+                    "edgeId": edge_id,
                     "code": code,
+                    "pattern": pattern,
                     "title": title,
                     "message": message,
                     "suggestion": suggestion,
@@ -577,6 +664,46 @@ class NodeGraphReviewService:
             result["optimizationTip"] = normalized_tip
             return
         result["issues"] = normalized
+
+    @classmethod
+    def _issue_reports_legal_optional_empty_field(
+        cls, item: dict[str, Any], block: dict[str, Any]
+    ) -> bool:
+        block_type = str(block.get("type") or "")
+        contract = cls._catalog_index().get(block_type) or {}
+        fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
+        searchable = " ".join(
+            str(item.get(key) or "")
+            for key in ("code", "title", "message", "suggestion")
+        ).casefold()
+        pattern = item.get("pattern") if isinstance(item.get("pattern"), dict) else {}
+        missing_input = str(pattern.get("missingInput") or "").strip()
+        for field_contract in contract.get("fields") or []:
+            field_name = str(field_contract.get("name") or "").strip()
+            if not field_name or field_contract.get("required") is not False:
+                continue
+            value = fields.get(field_name)
+            if value not in (None, ""):
+                continue
+            aliases = {field_name.casefold(), field_name.replace("_", "").casefold()}
+            aliases.update(cls.OPTIONAL_FIELD_ALIASES.get(field_name, ()))
+            mentioned = missing_input.casefold() == field_name.casefold() or any(
+                str(alias).casefold() in searchable for alias in aliases if alias
+            )
+            if mentioned:
+                return True
+        return False
+
+    @classmethod
+    def _normalize_issue_pattern(cls, raw: Any) -> dict[str, str]:
+        if not isinstance(raw, dict):
+            return {}
+        normalized: dict[str, str] = {}
+        for field in cls.ISSUE_PATTERN_FIELDS:
+            value = str(raw.get(field) or "").strip()[:180]
+            if value:
+                normalized[field] = value
+        return normalized
 
     @staticmethod
     def _walk_blocks(value: Any) -> Iterable[dict[str, Any]]:
@@ -595,12 +722,38 @@ class NodeGraphReviewService:
             value = value.get("name") or value.get("value") or value.get("id") or ""
         if value is None:
             return ""
-        return str(value).strip()
+        return unicodedata.normalize("NFKC", str(value)).strip()
+
+    @classmethod
+    def _actor_name_key(cls, value: Any) -> str:
+        return cls._normalize_actor_name(value).casefold()
+
+    @classmethod
+    def _actor_names_from_context(cls, actor: Any) -> set[str]:
+        if not isinstance(actor, dict):
+            name = cls._normalize_actor_name(actor)
+            return {name} if name else set()
+        names: set[str] = set()
+        for field in cls.ACTOR_NAME_FIELDS:
+            name = cls._normalize_actor_name(actor.get(field))
+            if name:
+                names.add(name)
+        for field in cls.ACTOR_ALIAS_FIELDS:
+            aliases = actor.get(field)
+            if isinstance(aliases, dict):
+                aliases = list(aliases.values())
+            if not isinstance(aliases, (list, tuple, set)):
+                aliases = [aliases]
+            for alias in aliases:
+                name = cls._normalize_actor_name(alias)
+                if name:
+                    names.add(name)
+        return names
 
     @classmethod
     def _is_missing_actor_name(cls, value: Any) -> bool:
-        name = cls._normalize_actor_name(value)
-        return name.casefold() in {item.casefold() for item in cls.ACTOR_PLACEHOLDERS}
+        name = cls._actor_name_key(value)
+        return name in {cls._actor_name_key(item) for item in cls.ACTOR_PLACEHOLDERS}
 
     @classmethod
     def _connected_actor_reference(
@@ -800,12 +953,18 @@ class NodeGraphReviewService:
                     }
                 )
 
-        actors_value = (project_context or {}).get("actors")
-        actor_context_available = isinstance(actors_value, list)
+        context = project_context or {}
+        actors_value = context.get("actors")
+        availability_flag = context.get("actorContextAvailable")
+        actor_context_available = (
+            availability_flag is True
+            or (availability_flag is None and isinstance(actors_value, list))
+        )
         known_actors = {
-            str(actor.get("name") or "").strip()
+            cls._actor_name_key(name)
             for actor in (actors_value or [])
-            if isinstance(actor, dict) and str(actor.get("name") or "").strip()
+            for name in cls._actor_names_from_context(actor)
+            if cls._actor_name_key(name)
         }
 
         scoped_blocks: list[tuple[str, dict[str, Any]]] = []
@@ -855,7 +1014,11 @@ class NodeGraphReviewService:
                             "suggestion": "在该对象参数中选择当前场景里的目标物体",
                         }
                     )
-                elif state == "resolved" and actor_context_available and actor_name not in known_actors:
+                elif (
+                    state == "resolved"
+                    and actor_context_available
+                    and cls._actor_name_key(actor_name) not in known_actors
+                ):
                     facts.append(
                         {
                             "code": "actor_target_not_found",
@@ -910,8 +1073,19 @@ class NodeGraphReviewService:
                         "name": str(item.get("name") or ""),
                         "kind": str(item.get("kind") or ""),
                         "check": str(item.get("check") or ""),
+                        "required": str(item.get("required") or "true").strip().casefold() != "false",
+                        "emptyMeaning": str(item.get("emptyMeaning") or ""),
                     }
                     for item in element.findall("Input")
+                ],
+                "fields": [
+                    {
+                        "name": str(item.get("name") or ""),
+                        "kind": str(item.get("kind") or ""),
+                        "required": str(item.get("required") or "true").strip().casefold() != "false",
+                        "emptyMeaning": str(item.get("emptyMeaning") or ""),
+                    }
+                    for item in element.findall("Field")
                 ],
             }
         return index
@@ -1010,8 +1184,12 @@ class NodeGraphReviewService:
             "不要因为 Demo 简单就建议增加功能。\n"
             "本地事实是确定性线索，必须优先核对。发现真实问题时 hasProblems=true；"
             "没有真实问题时 hasProblems=false。不要把布局位置、节点数量少或缺少额外玩法当成错误。"
-            "若需要操作具体物体，但对象字段为空、仍是占位值或引用不存在，必须指出缺少对象目标，"
-            "并使用 missing_actor_target 或 actor_target_not_found 等稳定 code。"
+            "对象相关错误只能在本地确定性事实明确给出时返回：对象字段为空或占位时使用 "
+            "missing_actor_target，引用的名称在可靠场景对象列表中不存在时使用 actor_target_not_found；"
+            "不得只凭模型猜测对象不存在。"
+            "积木合同中 required=false 的字段允许为空，不能作为 missing_required_input；"
+            "其中 object_third_person_move 和 object_first_person_move 的 OBSTACLE_TAG 为空表示关闭标签障碍检测，"
+            "不得要求用户虚构或补填障碍标签。"
             "issues 中的 nodeId 和 blockId 必须引用输入中真实存在的 ID；无法定位时可留空，不能编造。\n"
             + score_instruction
             + "\n"
