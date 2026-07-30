@@ -26,7 +26,7 @@ def reimport():
         if registry is None:
             raise registry_errors[-1]
 
-        registered = registry.register_python_script_services()
+        registered = registry.register_remaining_python_script_services()
         logger.info("Registered Python script services: %s", ", ".join(registered))
     except Exception as e:
         logger.error("注册 Python 脚本服务失败: %s", e, exc_info=True)

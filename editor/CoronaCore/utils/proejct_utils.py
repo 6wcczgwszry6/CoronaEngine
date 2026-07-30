@@ -283,7 +283,7 @@ def auto_save(func: Callable) -> Callable:
                 try:
                     self.save_data()
                 except Exception:
-                    pass
+                    logger.exception("Automatic scene save failed")
                 finally:
                     with _save_timers_lock:
                         current = _save_timers.get(obj_key)

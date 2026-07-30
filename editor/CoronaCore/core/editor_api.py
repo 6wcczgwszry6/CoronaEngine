@@ -365,8 +365,11 @@ class _MainApi(_DynamicApiNamespace):
         super().__init__("main")
 
     @staticmethod
-    def scene_save(scene_name):
-        return _invoke_manifest_cpp_api("main.scene_save", [scene_name])
+    def scene_save(scene_name, snapshot=None):
+        args = [scene_name]
+        if snapshot is not None:
+            args.append(snapshot)
+        return _invoke_manifest_cpp_api("main.scene_save", args)
 
 
 class CoronaEditorApi(metaclass=_CoronaEditorApiMeta):

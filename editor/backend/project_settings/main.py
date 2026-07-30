@@ -4,6 +4,7 @@ import configparser
 import logging
 import datetime
 from CoronaCore.core.corona_editor import CoronaEditor
+from CoronaCore.core.editor_api import CoronaEditorApi
 from CoronaCore.utils.file_handler import FileHandler
 from utils.settings import settings_manager
 
@@ -24,18 +25,22 @@ class ProjectSettings:
         try:
             # 直接调用 settings_manager 的方法
             full_info = settings_manager.get_active_project_info()
-            # 提取 Project 节
-            project_info = full_info.get('Project', {})
+            portable = full_info.get('format', {}).get('type') == 'corona_scene_folder'
+            project_info = full_info.get('scene' if portable else 'Project', {})
 
             # 确保必需字段存在
-            defaults = {
+            portable_defaults = {
                 'name': 'project',
-                'mode': '3d',
-                'entrance_scene': '',
                 'core_version': '1.0.0',
                 'create_time': '',
                 'last_opened': ''
             }
+            legacy_defaults = {
+                **portable_defaults,
+                'mode': '3d',
+                'entrance_scene': '',
+            }
+            defaults = portable_defaults if portable else legacy_defaults
             for key, default_value in defaults.items():
                 if key not in project_info or not project_info[key]:
                     project_info[key] = default_value
@@ -61,20 +66,50 @@ class ProjectSettings:
             if config is None:
                 # 如果内存中没有，尝试从文件加载（正常情况下应该存在）
                 import configparser
-                ini_path = os.path.join(settings_manager.active_project_path, "project.ini")
+                ini_path = settings_manager._project_config_path(
+                    settings_manager.active_project_path)
                 config = configparser.ConfigParser()
-                if os.path.exists(ini_path):
+                if ini_path and os.path.exists(ini_path):
                     config.read(ini_path, encoding='utf-8')
                 settings_manager.active_project_config = config
 
-            if not config.has_section('Project'):
-                config.add_section('Project')
+            portable = config.get('format', 'type', fallback='') == 'corona_scene_folder'
+            if not portable:
+                return {
+                    "success": False,
+                    "error": "旧项目为只读；请先另存为便携场景",
+                    "diagnostics": [{
+                        "code": "legacy_read_only",
+                        "message": "Legacy projects are read-only",
+                        "path": str(settings_manager.active_project_path),
+                        "actor": "",
+                        "field": "",
+                    }],
+                }
+            section = 'scene' if portable else 'Project'
+            if not config.has_section(section):
+                config.add_section(section)
 
             # 更新允许修改的字段
-            allowed_keys = ['name', 'mode', 'entrance_scene', 'core_version']
+            allowed_keys = ['name', 'core_version'] if portable else [
+                'name', 'mode', 'entrance_scene', 'core_version']
             for key in allowed_keys:
                 if key in settings and settings[key]:
-                    config.set('Project', key, str(settings[key]))
+                    config.set(section, key, str(settings[key]))
+
+            if portable:
+                snapshot = {
+                    key: str(settings[key])
+                    for key in ('name', 'core_version')
+                    if key in settings and settings[key]
+                }
+                result = CoronaEditorApi.main.scene_save('scene.ini', snapshot)
+                if isinstance(result, dict) and not result.get('ok', False):
+                    return {
+                        "success": False,
+                        "error": result.get('message', '保存失败'),
+                        "diagnostics": result.get('diagnostics', []),
+                    }
 
             # 调用 settings_manager 的方法写入文件并更新 last_opened
             success = settings_manager.save_active_project_info()

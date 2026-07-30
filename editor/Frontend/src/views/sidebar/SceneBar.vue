@@ -406,6 +406,15 @@
               <span class="text-xs text-[#e0e0e0] truncate flex-1" :title="scene.name">
                 {{ scene.name }}
               </span>
+              <button
+                v-if="scene.load_status && scene.load_status !== 'loaded'"
+                class="text-[10px] text-[#f0c674] mr-1"
+                :title="scene.load_error?.message || '资源加载失败，点击重新绑定'"
+                data-testid="actor-load-warning"
+                @click.stop="RebindActorResource(scene)"
+              >
+                ⚠ 重新绑定
+              </button>
               <span
                 v-if="scene.vision_proxy"
                 class="text-[10px] text-[#e5c77f] mr-1 hidden group-hover:inline"
@@ -1241,9 +1250,45 @@ const ToggleVisible = async (scene) => {
 
 const SaveScene = async () => {
   try {
-    await projectService.sceneSave(currentSceneName.value);
+    const unresolvedCount = sceneImages.value.filter(
+      (item) => item.load_status && item.load_status !== 'loaded',
+    ).length;
+    if (unresolvedCount > 0 && !window.confirm(
+      `当前场景仍有 ${unresolvedCount} 个资源未解决。存档会保留原资源引用和对象数据，是否仍然保存？`,
+    )) return;
+    const result = await projectService.sceneSave(currentSceneName.value);
+    const saved = result?.data ?? result;
+    if (saved?.unresolved_actor_count > 0) {
+      logWarn(`Scene saved with ${saved.unresolved_actor_count} unresolved actors`);
+    }
   } catch (e) {
     logError('Failed to save scene', e);
+  }
+};
+
+const RebindActorResource = async (scene) => {
+  try {
+    const selected = await sceneService.selectModelFileDialog(
+      currentSceneName.value,
+      scene.name,
+      'model',
+    );
+    const path = selected?.data ?? selected;
+    if (!path) return;
+    const result = await sceneService.rebindActorResource(
+      currentSceneName.value,
+      scene.actor_guid,
+      path,
+    );
+    const rebound = result?.data ?? result;
+    if (!rebound?.ok) {
+      const message = rebound?.diagnostics?.[0]?.message || '资源重新绑定失败';
+      window.alert(message);
+      return;
+    }
+    await OnInitObjTree();
+  } catch (e) {
+    logError('Failed to rebind actor resource', e);
   }
 };
 
@@ -1620,6 +1665,7 @@ const OnInitObjTree = async () => {
         data.actors.forEach((item) => {
           sceneImages.value.push({
             name: item.name,
+            actor_guid: item.actor_guid || '',
             path: item.path,
             type: item.type || 'obj',
             visible: item.visible !== false,
@@ -1627,6 +1673,8 @@ const OnInitObjTree = async () => {
             audioResourceId: item.audio_resource_id || '',
             vision_proxy: item.vision_proxy === true,
             vision_binding: item.vision_binding || null,
+            load_status: item.load_status || 'loaded',
+            load_error: item.load_error || null,
           });
         });
       }

@@ -51,6 +51,14 @@ def _create_lanchat_scene_composer():
     return SceneComposer(scene_name="Scene/default.scene")
 
 
+def initialize_script_service():
+    from Quasar.ai_tools.warmup import warmup_all
+    from .utils.load_local_ai_setting import load_ai_setting
+
+    load_ai_setting()
+    warmup_all()
+
+
 install_f5_runtime_provider_env_defaults()
 
 

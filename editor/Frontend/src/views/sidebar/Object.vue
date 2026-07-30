@@ -25,6 +25,23 @@
         </button>
       </header>
 
+      <div
+        v-if="actor.loadStatus !== 'loaded'"
+        data-testid="actor-placeholder-warning"
+        class="placeholder-warning"
+      >
+        <strong>资源未加载，当前显示为占位项</strong>
+        <span>{{ actor.loadError?.message || actor.loadError || '模型资源不可用' }}</span>
+        <button
+          type="button"
+          class="inline-button"
+          :disabled="placeholderRebinding"
+          @click="rebindPlaceholderResource"
+        >
+          {{ placeholderRebinding ? '重新绑定中…' : '重新绑定资源' }}
+        </button>
+      </div>
+
       <section class="property-section" data-assistant-title="对象名称" data-assistant-description="修改后可用新的对象名称在节点积木中准确引用这个模型。">
         <div class="section-title">模型</div>
         <div class="property-row">
@@ -91,7 +108,7 @@
         </div>
       </section>
 
-      <section class="property-section" data-assistant-title="碰撞设置" data-assistant-description="选择模型参与碰撞检测时使用的形状。">
+      <section v-if="actor.loadStatus === 'loaded'" class="property-section" data-assistant-title="碰撞设置" data-assistant-description="选择模型参与碰撞检测时使用的形状。">
         <div class="section-title">碰撞</div>
         <div class="property-row">
           <label for="actor-collision">碰撞形状</label>
@@ -114,7 +131,13 @@
         </div>
       </section>
 
-      <section class="property-section property-section-collapsible" data-guidance="object-physics" data-assistant-title="物理设置" data-assistant-description="控制模型是否参与物理模拟，以及质量、弹性、阻尼和轴向锁定。">
+      <section
+        v-if="actor.loadStatus === 'loaded'"
+        class="property-section property-section-collapsible"
+        data-guidance="object-physics"
+        data-assistant-title="物理设置"
+        data-assistant-description="控制模型是否参与物理模拟，以及质量、弹性、阻尼和轴向锁定。"
+      >
         <button
           type="button"
           class="section-toggle"
@@ -193,6 +216,7 @@ const saving = ref(false);
 const aliasDraft = ref('');
 const aliasSaving = ref(false);
 const aliasError = ref('');
+const placeholderRebinding = ref(false);
 let selectionToken = null;
 let transformToken = null;
 let loadSequence = 0;
@@ -213,6 +237,9 @@ const actor = reactive({
   name: '',
   type: '',
   handle: 0,
+  actorGuid: '',
+  loadStatus: 'loaded',
+  loadError: '',
   modelPath: '',
   followCamera: false,
   transform: {
@@ -297,6 +324,9 @@ async function loadActor(sceneName, actorName) {
     actor.name = String(data.name || actorName);
     actor.type = String(data.actor_type || data.type || 'model');
     actor.handle = Number(data.handle || 0);
+    actor.actorGuid = String(data.actor_guid || '');
+    actor.loadStatus = String(data.load_status || 'loaded');
+    actor.loadError = data.load_error || '';
     actor.modelPath = String(data.model || data.path || data.file || '');
     actor.followCamera = readFollowCamera(data);
     const geometry = data.geometry || {};
@@ -463,6 +493,39 @@ async function selectModelFile() {
     if (path) actor.modelPath = String(path);
   } catch (error) {
     logError('选择模型资源失败', error);
+  }
+}
+
+async function rebindPlaceholderResource() {
+  if (!selectedActorName.value || !actor.actorGuid || placeholderRebinding.value) return;
+  placeholderRebinding.value = true;
+  try {
+    const selected = unwrap(
+      await sceneService.selectModelFileDialog(
+        selectedSceneName.value,
+        selectedActorName.value,
+        'model'
+      )
+    );
+    const path = typeof selected === 'string'
+      ? selected
+      : selected?.path || selected?.data || '';
+    if (!path) return;
+    const result = unwrap(
+      await sceneService.rebindActorResource(
+        selectedSceneName.value,
+        actor.actorGuid,
+        path
+      )
+    );
+    if (!result || result.status === 'error' || result.ok === false) {
+      throw new Error(result?.message || '重新绑定资源失败');
+    }
+    await loadActor(selectedSceneName.value, selectedActorName.value);
+  } catch (error) {
+    logError('重新绑定占位资源失败', error);
+  } finally {
+    placeholderRebinding.value = false;
   }
 }
 
@@ -698,6 +761,9 @@ onUnmounted(() => {
 .object-heading { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-bottom:10px; padding:10px 11px; border:1px solid rgba(216,184,108,.28); border-radius:7px; background:#15130d; }
 .object-heading h2 { margin:2px 0 0; color:#f2ead5; font-size:15px; overflow-wrap:anywhere; }
 .object-type { color:#d6b66b; font-size:10px; text-transform:uppercase; }
+.placeholder-warning { display:grid; gap:6px; margin-bottom:8px; padding:9px 10px; border:1px solid rgba(217,119,6,.7); border-radius:7px; background:rgba(69,26,3,.55); color:#fde68a; font-size:10px; }
+.placeholder-warning span { overflow-wrap:anywhere; color:#fcd34d; opacity:.82; }
+.placeholder-warning button { justify-self:start; }
 .save-button,.inline-button { border:1px solid rgba(216,184,108,.28); border-radius:5px; background:#211d12; color:#e9dfc5; padding:5px 9px; font-size:11px; transition:background .15s ease,border-color .15s ease; }
 .save-button:hover:not(:disabled),.inline-button:hover:not(:disabled) { border-color:#D8B86C; background:#2b230f; color:#fff7dc; }
 .save-button { border-color:#b8924a; background:#4b391c; color:#fff7dc; }

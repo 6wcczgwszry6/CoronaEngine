@@ -406,7 +406,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version", source)
         self.assertIn("EDITOR_API_METHOD1_WRAPPED(SceneTools, list_actor_tree", source)
         self.assertIn(
-            "EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneNameParam",
+            "EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneSaveParams",
             source,
         )
         self.assertIn("cef/cef_editor_api.cpp", cmake)
@@ -622,7 +622,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn('_invoke_manifest_cpp_api("project.get_app_version", [])', api_source)
         self.assertIn('_invoke_manifest_cpp_api("scene.list_actor_tree", [scene_name])', api_source)
         self.assertIn('_invoke_manifest_cpp_api("scene.select_actor", [scene_name, actor_type, actor_name])', api_source)
-        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", [scene_name])', api_source)
+        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", args)', api_source)
         self.assertIn("class _EventsApi", api_source)
         self.assertIn(
             'return _register_manifest_editor_api_event_callback("events.on_actor_changed", callback)',
@@ -755,7 +755,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         for snippet in (
             'EDITOR_API_METHOD0_WRAPPED(ProjectLauncher, get_app_version, "project.getAppVersion", "project.get_app_version", EditorApiValueType::String)',
             'EDITOR_API_METHOD1_WRAPPED(SceneTools, list_actor_tree, "scene.listActorTree", "scene.list_actor_tree", "scene_name", EditorApiValueType::String, EditorApiValueType::Array)',
-            'EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneNameParam, "main.sceneSave", "main.scene_save", EditorApiValueType::Object)',
+            'EDITOR_API_METHOD_SCHEMA_WRAPPED(MainView, scene_save, kSceneSaveParams, "main.sceneSave", "main.scene_save", EditorApiValueType::Object)',
             '{"SceneTools.actorChanged", EditorApiValueType::Object, all_callers(), "events.onActorChanged", "events.on_actor_changed"}',
             '{"ProjectLauncher.projectOpened", EditorApiValueType::Object, all_callers(), "events.onProjectOpened", "events.on_project_opened"}',
         ):
@@ -1146,8 +1146,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
         self.assertIn("editorApi.sceneTools.selectActor(sceneId, type, actorName)", main_page_source)
         self.assertIn("editorApi.sceneTools.selectActor(currentSceneName.value, scene.type || 'actor', scene.name)", scene_bar_source)
-        self.assertIn("editorApi.events.onActorSelectionChanged(onActorSelectionChangedEvent)", object_source)
-        self.assertIn("editorApi.off(actorSelectionChangedCallbackToken)", object_source)
+        self.assertIn("editorApi.events.onActorSelectionChanged(handleSelection)", object_source)
+        self.assertIn("editorApi.off(selectionToken)", object_source)
         for source_name, frontend_source in (
             ("MainPage", main_page_source),
             ("SceneBar", scene_bar_source),
@@ -1206,8 +1206,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source + bridge_source + python_api_source + corona_editor_source)
 
-        self.assertIn("editorApi.events.onActorTransformUpdated(onActorTransformUpdatedEvent)", object_source)
-        self.assertIn("editorApi.off(actorTransformUpdatedCallbackToken)", object_source)
+        self.assertIn("editorApi.events.onActorTransformUpdated(handleTransform)", object_source)
+        self.assertIn("editorApi.off(transformToken)", object_source)
         self.assertNotIn("coronaEventBus.on('transform-update'", object_source)
         self.assertNotIn("coronaEventBus.off('transform-update'", object_source)
         self.assertNotIn("event === 'transform-update'", event_bus_source)
@@ -1688,10 +1688,10 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         body = handler_source[start:end]
 
         self.assertIn('emit_editor_api_event("ProjectLauncher.projectOpened"', body)
-        self.assertIn('{"path", path_to_utf8(opened)}', body)
+        self.assertIn('{"path", state.project_path}', body)
         self.assertLess(
             body.find('emit_editor_api_event("ProjectLauncher.projectOpened"'),
-            body.find('return native_success({{"ok", true}'),
+            body.rfind('return native_success({'),
         )
 
     def test_lanchat_event_is_defined_and_emitted_by_cpp_callback_registry(self):
@@ -2308,8 +2308,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "ProjectLauncher.create_project": ("kObjectPayloadParam", "EditorApiValueType::String"),
             "ProjectLauncher.create_world_project": ("kObjectPayloadParam", "EditorApiValueType::Object"),
             "ProjectLauncher.get_default_project_path": ("kNoParams", "EditorApiValueType::String"),
+            "ProjectLauncher.get_project_load_status": ("kNoParams", "EditorApiValueType::Object"),
             "ProjectLauncher.get_recent_projects": ("kNoParams", "EditorApiValueType::Array"),
-            "ProjectLauncher.open_project": ("kPathParam", "EditorApiValueType::Object"),
+            "ProjectLauncher.open_project": ("kOpenProjectParams", "EditorApiValueType::Object"),
             "ProjectLauncher.open_project_file": ("kNoParams", "EditorApiValueType::Object"),
             "ProjectLauncher.set_project_mode": ("kObjectPayloadParam", "EditorApiValueType::Boolean"),
         }
@@ -2333,9 +2334,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "createProject: (projectData) =>\n    editorApi.project.createProject",
             "createWorldProject: (worldData) =>\n    editorApi.project.createWorldProject",
             "createMultiplayerProject: (projectData) =>\n    editorApi.project.createMultiplayerProject",
-            "openProject: async (projectPath) => {",
-            "const result = await editorApi.project.openProject(projectPath)",
-            "await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath)",
+            "getProjectLoadStatus: () => editorApi.project.getProjectLoadStatus()",
+            "openProject: async (projectPath, options = {}) => {",
+            "const result = await editorApi.project.openProject(projectPath, { load_policy: loadPolicy })",
             "setProjectMode: (mode, settings) =>\n    editorApi.project.setProjectMode",
             "getRecentProjects: () => editorApi.project.getRecentProjects()",
         ):
@@ -2891,7 +2892,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "MainView.import_resource_file": ("kMainViewImportResourceFileParams", "EditorApiValueType::Object"),
             "MainView.on_init": ("kPathOptionalParam", "EditorApiValueType::Object"),
             "MainView.run_project": ("kPathOptionalParam", "EditorApiValueType::Object"),
-            "MainView.scene_save": ("kSceneNameParam", "EditorApiValueType::Object"),
+            "MainView.scene_save": ("kSceneSaveParams", "EditorApiValueType::Object"),
             "MainView.update_view_tool_state": ("kMainViewUpdateViewToolStateParams", "EditorApiValueType::Object"),
         }
         for api_name, (params_name, return_type) in expected.items():
@@ -2946,7 +2947,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertGreater(end, start)
         main_section = python_api_source[start:end]
 
-        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", [scene_name])', main_section)
+        self.assertIn('_invoke_manifest_cpp_api("main.scene_save", args)', main_section)
         self.assertNotIn("MainView.", main_section)
 
     def test_editor_api_events_validate_payload_and_cleanup_cef_callbacks(self):
@@ -3082,13 +3083,16 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn('"vision_document"', source)
 
         start = source.find("std::filesystem::path create_vision_project_native")
-        end = source.find("std::filesystem::path copy_existing_project_to_data_native", start)
+        end = source.find("std::filesystem::path open_project_native", start)
         self.assertGreaterEqual(start, 0)
         self.assertGreater(end, start)
         create_body = source[start:end]
         self.assertIn("create_embedded_vision_document", create_body)
         self.assertIn("persist_vision_proxy_actors_from_document", create_body)
         self.assertIn("replace_ini_section_from_map", create_body)
+        self.assertIn("create_scene_folder", create_body)
+        self.assertIn("scene.ini", create_body)
+        self.assertNotIn("create_project_from_template_native", create_body)
         self.assertNotIn('"source_path"', create_body)
 
     def test_embedded_vision_source_loads_from_memory_without_runtime_json(self):
@@ -3483,16 +3487,16 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
 
-    def test_opening_runtime_project_does_not_duplicate_it(self):
+    def test_opening_legacy_project_is_read_only_and_does_not_duplicate_it(self):
         source = self._handler_source()
-        start = source.find("std::filesystem::path copy_existing_project_to_data_native")
-        end = source.find("std::filesystem::path open_project_native", start)
+        start = source.find("std::filesystem::path open_project_native")
+        end = source.find("nlohmann::json recent_projects_native", start)
         self.assertGreaterEqual(start, 0)
         self.assertGreater(end, start)
-        copy_body = source[start:end]
-        self.assertIn("absolute_normalized_path(runtime_data_dir())", copy_body)
-        self.assertIn("is_path_within(data_dir, source_dir)", copy_body)
-        self.assertIn("return source_dir", copy_body)
+        open_body = source[start:end]
+        self.assertNotIn("copy_existing_project_to_data_native", open_body)
+        self.assertIn("project_dir = candidate", open_body)
+        self.assertIn("project_dir = raw_path.parent_path()", open_body)
 
     def test_project_launcher_business_logic_is_native(self):
         source = self._handler_source()
@@ -3504,7 +3508,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             '"open_project"',
             "create_vision_project_native",
             "create_embedded_vision_document",
-            "copy_existing_project_to_data_native",
+            "prepare_archive_load",
+            "materialize_scene_snapshot",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
@@ -3524,7 +3529,7 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             api_source,
         )
         self.assertIn(
-            "EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kPathParam, EditorApiValueType::Object)",
+            "EDITOR_API_METHOD_SCHEMA(ProjectLauncher, open_project, kOpenProjectParams, EditorApiValueType::Object)",
             api_source,
         )
         self.assertIn(
@@ -3588,16 +3593,22 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
     def test_project_launcher_open_project_returns_resolved_project_path(self):
         source = self._handler_source()
-        self.assertIn("std::filesystem::path open_project_native", source)
-        self.assertIn("return project_dir;", source)
 
         start = source.find('{"open_project", [](const NativeRequest& request, const NativeContext&)')
         end = source.find('{"set_project_mode"', start)
         self.assertGreaterEqual(start, 0)
         self.assertGreater(end, start)
         handler = source[start:end]
-        self.assertIn("const auto opened = open_project_native", handler)
-        self.assertIn('{"path", path_to_utf8(opened)}', handler)
+        self.assertIn("auto prepared = prepare_archive_load(path, load_policy)", handler)
+        self.assertIn("materialize_scene_snapshot_into_state(", handler)
+        materialize_start = source.index("NativeEditorScene& materialize_scene_snapshot_into_state")
+        materialize_end = source.index("NativeResult invoke_project_archive_parser", materialize_start)
+        self.assertIn(
+            "state.project_path = path_to_utf8(scene.project_root)",
+            source[materialize_start:materialize_end],
+        )
+        self.assertIn('{"path", state.project_path}', handler)
+        self.assertNotIn("open_project_native", handler)
 
     def test_project_launcher_frontend_caches_resolved_project_path(self):
         repo_root = pathlib.Path(__file__).resolve().parents[4]
@@ -3687,10 +3698,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("self.vision_document", source)
         self.assertIn("_encode_vision_document(vision_document)", source)
         self.assertIn("zlib.compressobj(level=0)", source)
-        self.assertIn("self.file_data['vision']['storage'] = 'embedded'", source)
-        self.assertIn("self.file_data['vision_document']['data']", source)
-        self.assertIn("if vision_storage == 'project_sidecar' and vision_source_id:", source)
-        self.assertIn("self.file_data['vision']['source_id']", source)
+        self.assertIn("'vision_document': {", source)
+        self.assertIn("'data': _encode_vision_document(vision_document)", source)
+        self.assertIn("'source_id': getattr(self, 'vision_source_id', '')", source)
         self.assertNotIn("self.file_data['vision']['source_path']", source)
 
     def test_recent_games_import_awaits_open_project_and_catches_errors(self):
@@ -3799,7 +3809,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn("enum class CollisionShape", hub_source)
         self.assertIn("CollisionShape collision_shape{CollisionShape::Box}", hub_source)
         self.assertIn(".mechanics.collision_type", api_source)
-        self.assertIn('item["collision"] = actor.mechanics ? collision_shape_name(', api_source)
+        self.assertIn('? collision_shape_name(*actor.mechanics)', api_source)
+        self.assertIn(': actor.persisted_collision_type', api_source)
         self.assertIn("set_collision_shape", api_source)
         self.assertIn("const normalizeCollisionType", object_source)
         self.assertIn("actor.collision = normalizeCollisionType(", object_source)
@@ -3837,6 +3848,454 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         on_move_start = actor_source.index("    def on_move(self):")
         on_move_end = actor_source.index("\n    def enable_collision_callback", on_move_start)
         self.assertNotIn("self.save_data()", actor_source[on_move_start:on_move_end])
+
+    def test_portable_scene_folder_is_wired_through_project_and_frontend_apis(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        api_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_api.cpp"
+        ).read_text(encoding="utf-8")
+        bridge_source = (
+            repo_root / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
+        ).read_text(encoding="utf-8")
+        launcher_source = (
+            repo_root / "editor" / "plugins" / "ProjectLauncher" / "main.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('#include "scene_folder.h"', handler_source)
+        self.assertIn('detect_scene_folder(project_dir)', handler_source)
+        self.assertIn('{"migrate_legacy_scene"', handler_source)
+        self.assertIn('migrate_legacy_scene({source_path, target_path, scene_name})', handler_source)
+        self.assertIn('ProjectLauncher, choose_portable_scene_target', api_source)
+        self.assertIn('ProjectLauncher, migrate_legacy_scene', api_source)
+        self.assertIn("project.choosePortableSceneTarget", bridge_source)
+        self.assertIn("project.migrateLegacyScene", bridge_source)
+        self.assertIn("def choose_portable_scene_target", launcher_source)
+        self.assertIn("*.ini *.scene *.json", launcher_source)
+        open_start = handler_source.index("std::filesystem::path open_project_native")
+        open_end = handler_source.index("nlohmann::json recent_projects_native", open_start)
+        open_body = handler_source[open_start:open_end]
+        self.assertIn('ext == ".scene"', open_body)
+        self.assertIn('candidate / "project.ini"', open_body)
+        self.assertNotIn("copy_existing_project_to_data_native", open_body)
+        self.assertIn("project_dir = raw_path.parent_path()", open_body)
+        self.assertIn("Legacy projects are read-only", handler_source)
+
+    def test_new_project_creation_uses_portable_scene_folder_without_mode(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        create_start = handler_source.index('{"create_project"')
+        create_end = handler_source.index('{"create_world_project"', create_start)
+        create_body = handler_source[create_start:create_end]
+        self.assertIn("create_scene_folder(target, name)", create_body)
+        self.assertNotIn('data.value("mode"', create_body)
+        self.assertNotIn("create_project_from_template_native", create_body)
+        portable_info_start = handler_source.index("if (const auto portable = detect_scene_folder(project_root))")
+        portable_info_end = handler_source.index("const auto project_ini", portable_info_start)
+        self.assertNotIn('{"mode"', handler_source[portable_info_start:portable_info_end])
+
+    def test_world_creation_updates_default_save_location_for_portable_migration(self):
+        handler_source = self._handler_source()
+        start = handler_source.index('{"create_world_project"')
+        end = handler_source.index('{"create_multiplayer_project"', start)
+        world_body = handler_source[start:end]
+        self.assertIn(
+            'update_editor_settings_section("General", {{"default_path", path_to_utf8(base_dir)}})',
+            world_body,
+        )
+
+    def test_legacy_project_template_does_not_reference_missing_scene_script(self):
+        repo_root = self._repo_root()
+        template_source = (
+            repo_root / "editor" / "CoronaCore" / "demo" / "project" / "Scene" / "default.scene"
+        ).read_text(encoding="utf-8")
+        self.assertIn("[scripts]\npath =\n", template_source)
+        self.assertNotIn("Scripts/scene_script.py", template_source)
+
+    def test_archive_open_is_python_parsed_and_cpp_materialized(self):
+        source = self._handler_source()
+        self.assertIn("invoke_project_archive_parser", source)
+        self.assertIn('parser_request.module = "ProjectArchive"', source)
+        self.assertIn('parser_request.function = "parse"', source)
+        self.assertIn("validate_archive_snapshot", source)
+        self.assertIn("validate_snapshot_float3", source)
+        self.assertIn("Duplicate actor_guid in ArchiveSnapshot", source)
+        self.assertIn("asset_path must be absolute", source)
+        self.assertIn("materialize_scene_snapshot", source)
+        self.assertIn("ActorLoadStatus", source)
+        self.assertIn("UNSUPPORTED_RESOURCE_TYPE", source)
+        self.assertIn('item.actor_type != "audio"', source)
+        self.assertIn("actor.persisted_snapshot.value(", source)
+        self.assertIn('"persisted_fields", nlohmann::json::object()', source)
+        self.assertIn("actor.load_status != ActorLoadStatus::Loaded", source)
+        self.assertIn("allow_missing", source)
+        self.assertIn('{"rebind_actor_resource"', source)
+        self.assertIn("load_status = ActorLoadStatus::Loaded", source)
+        self.assertIn('"decision_required"', source)
+        self.assertNotIn("std::unique_ptr<NativeEditorScene> load_native_scene(", source)
+
+    def test_archive_load_materializes_only_after_target_scene_is_committed(self):
+        source = self._handler_source()
+        prepare_start = source.index("PreparedArchiveLoad prepare_archive_load")
+        prepare_end = source.index("NativeEditorScene* ensure_native_editor_scene", prepare_start)
+        prepare_body = source[prepare_start:prepare_end]
+        struct_start = source.index("struct PreparedArchiveLoad")
+        struct_end = source.index("};", struct_start)
+        prepared_struct = source[struct_start:struct_end]
+
+        self.assertNotIn("materialize_scene_snapshot(", prepare_body)
+        self.assertNotIn("std::unique_ptr<NativeEditorScene> scene", prepared_struct)
+        self.assertIn("materialize_scene_snapshot_into_state", source)
+        self.assertIn("state.scene = std::make_unique<NativeEditorScene>()", source)
+        self.assertNotIn("state.scene = std::move(prepared.scene)", source)
+
+    def test_project_resource_loading_is_non_blocking_and_reported_to_frontend(self):
+        source = self._handler_source()
+        api_source = self._editor_api_source()
+        bridge_source = self._frontend_bridge_source()
+        main_page = (
+            self._repo_root()
+            / "editor"
+            / "Frontend"
+            / "src"
+            / "views"
+            / "layout"
+            / "MainPage.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('{"get_project_load_status"', source)
+        self.assertIn(
+            "EDITOR_API_METHOD_SCHEMA(ProjectLauncher, get_project_load_status, "
+            "kNoParams, EditorApiValueType::Object)",
+            api_source,
+        )
+        self.assertIn("getProjectLoadStatus: () =>", bridge_source)
+        self.assertIn("projectResourceLoadStatus", main_page)
+        self.assertIn("pollProjectResourceLoadStatus", main_page)
+
+    def test_project_resource_load_status_counts_audio_without_geometry_as_ready(self):
+        source = self._handler_source()
+        start = source.index("nlohmann::json project_resource_load_status()")
+        end = source.index("nlohmann::json camera_to_json", start)
+        handler = source[start:end]
+
+        audio_check = handler.index('actor.actor_type == "audio"')
+        geometry_failure_check = handler.index("!actor.geometry")
+        self.assertLess(audio_check, geometry_failure_check)
+
+    def test_project_launcher_dialogs_are_native_and_archive_startup_is_nonblocking(self):
+        repo_root = self._repo_root()
+        source = self._handler_source()
+        registry_source = (
+            repo_root / "editor" / "backend" / "registry.py"
+        ).read_text(encoding="utf-8")
+        recent_games_source = (
+            repo_root
+            / "editor"
+            / "Frontend"
+            / "src"
+            / "views"
+            / "layout"
+            / "RecentGames.vue"
+        ).read_text(encoding="utf-8")
+        new_game_source = (
+            repo_root
+            / "editor"
+            / "Frontend"
+            / "src"
+            / "views"
+            / "layout"
+            / "NewGame.vue"
+        ).read_text(encoding="utf-8")
+        editor_main_source = (
+            repo_root / "editor" / "main.py"
+        ).read_text(encoding="utf-8")
+        launcher_start = source.index(
+            "void register_project_launcher_api_handlers"
+        )
+        launcher_end = source.index(
+            "void register_main_view_api_handlers",
+            launcher_start,
+        )
+        launcher_body = source[launcher_start:launcher_end]
+
+        self.assertIn("LAZY_PYTHON_SCRIPT_SERVICES", registry_source)
+        self.assertIn('"AITool"', registry_source)
+        self.assertIn("LazyPythonScriptService", registry_source)
+        self.assertIn("open_project_file_native()", launcher_body)
+        self.assertIn('{"browse_folder"', launcher_body)
+        self.assertNotIn('{"open_project_file", script_method}', launcher_body)
+        self.assertNotIn('{"browse_folder", script_method}', launcher_body)
+        self.assertNotIn(
+            '{"choose_portable_scene_target", script_method}',
+            launcher_body,
+        )
+        self.assertIn('"archive_service_ready"', source)
+        self.assertIn('"service_initializing"', launcher_body)
+        self.assertIn("存档服务正在初始化", recent_games_source)
+        self.assertIn("存档服务正在初始化", new_game_source)
+        self.assertNotIn("warmup_all", editor_main_source)
+        self.assertNotIn("plugins.AITool", editor_main_source)
+        self.assertIn(
+            "register_core_python_script_services()",
+            editor_main_source,
+        )
+        core_registration = editor_main_source.index(
+            "register_core_python_script_services()"
+        )
+        dispatcher_registration = editor_main_source.index(
+            "editor.register_script_dispatcher()"
+        )
+        remaining_registration = editor_main_source.index("reimport()")
+        self.assertLess(core_registration, dispatcher_registration)
+        self.assertLess(dispatcher_registration, remaining_registration)
+
+    def test_main_on_init_only_reads_committed_native_scene(self):
+        source = self._handler_source()
+        start = source.index('static const NativeMethodTable methods = {', source.index("void register_main_view_api_handlers"))
+        end = source.index('};', start)
+        methods = source[start:end]
+        on_init_start = methods.index('{"on_init"')
+        on_init_end = methods.index('{"run_project"', on_init_start)
+        on_init = methods[on_init_start:on_init_end]
+        self.assertIn("auto& state = native_editor_state()", on_init)
+        self.assertIn("state.scene", on_init)
+        self.assertNotIn("ensure_native_editor_scene", on_init)
+
+    def test_frontend_handles_degraded_archive_without_duplicate_reload(self):
+        repo_root = self._repo_root()
+        bridge = self._frontend_bridge_source()
+        recent = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
+        ).read_text(encoding="utf-8")
+        scene_bar = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "SceneBar.vue"
+        ).read_text(encoding="utf-8")
+        object_panel = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "Object.vue"
+        ).read_text(encoding="utf-8")
+        open_start = bridge.index("openProject: async")
+        open_end = bridge.index("// 设置项目模式", open_start)
+        open_body = bridge[open_start:open_end]
+        self.assertIn("options = {}", open_body)
+        self.assertIn("load_policy", open_body)
+        self.assertIn("openProject: (projectPath, options = {})", bridge)
+        self.assertIn("[projectPath, options]", bridge)
+        self.assertNotIn("editorApi.main.onInit", open_body)
+        self.assertNotIn("reloadScene", open_body)
+        self.assertIn("__coronaNodeGraphFlushSave", open_body)
+        self.assertIn("corona-active-project-changed", open_body)
+        self.assertIn("decision_required", recent)
+        self.assertIn("loadPolicy: 'degraded'", recent)
+        self.assertIn('data-testid="actor-load-warning"', scene_bar)
+        self.assertIn("rebindActorResource", scene_bar)
+        self.assertIn("unresolved_actor_count", scene_bar)
+        self.assertIn('data-testid="actor-placeholder-warning"', object_panel)
+        self.assertIn("rebindPlaceholderResource", object_panel)
+
+    def test_archive_materialization_preserves_runtime_actor_metadata(self):
+        source = self._handler_source()
+        materialize_start = source.index("NativeEditorActor native_actor_from_snapshot")
+        materialize_end = source.index(
+            "void append_actor_materialization_diagnostic", materialize_start
+        )
+        materialize = source[materialize_start:materialize_end]
+        actor_json_start = source.index("nlohmann::json actor_to_json")
+        actor_json_end = source.index("nlohmann::json scene_to_json", actor_json_start)
+        actor_json = source[actor_json_start:actor_json_end]
+
+        for field in (
+            "runtime_entity_id",
+            "asset_id",
+            "model_ref",
+            "entity_type",
+            "semantic_role",
+            "source_plan_id",
+            "source_batch_id",
+            "source_scene_version",
+            "actor_version",
+        ):
+            self.assertIn(field, materialize)
+            self.assertIn(field, actor_json)
+
+    def test_legacy_scene_migration_has_prompt_and_permanent_file_manager_action(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        recent_games_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
+        ).read_text(encoding="utf-8")
+        file_manager_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "sidebar" / "FileManager.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('prepared.snapshot.value("project", nlohmann::json::object())', handler_source)
+        self.assertIn('.value("legacy", false)', handler_source)
+        self.assertIn("corona.legacyMigrationPrompted", recent_games_source)
+        self.assertIn("另存为便携场景", recent_games_source)
+        self.assertIn("migrateLegacyScene", recent_games_source)
+        self.assertIn("migrateLegacyScene", file_manager_source)
+        self.assertIn("另存为便携场景", file_manager_source)
+
+    def test_recent_project_card_exposes_legacy_migration_action(self):
+        repo_root = self._repo_root()
+        recent_games_source = (
+            repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "RecentGames.vue"
+        ).read_text(encoding="utf-8")
+        self.assertIn("migrateLegacyProject", recent_games_source)
+        self.assertIn("另存为便携场景", recent_games_source)
+        self.assertIn("proj.legacy", recent_games_source)
+        self.assertIn("@click.stop=\"migrateLegacyProject(proj)\"", recent_games_source)
+        self.assertIn("便携场景", recent_games_source)
+        self.assertIn("旧格式", recent_games_source)
+
+    def test_project_launcher_route_and_component_are_removed_after_recent_games_unification(self):
+        repo_root = self._repo_root()
+        router_source = (repo_root / "editor" / "Frontend" / "src" / "router" / "index.js").read_text(
+            encoding="utf-8"
+        )
+        self.assertFalse(
+            (repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue").exists()
+        )
+        self.assertNotIn("ProjectLauncher.vue", router_source)
+
+    def test_frontend_merge_preserves_archive_guards_and_ui_workflows(self):
+        repo_root = self._repo_root()
+        frontend = repo_root / "editor" / "Frontend" / "src" / "views"
+        new_game = (frontend / "layout" / "NewGame.vue").read_text(encoding="utf-8")
+        recent_games = (frontend / "layout" / "RecentGames.vue").read_text(encoding="utf-8")
+        object_panel = (frontend / "sidebar" / "Object.vue").read_text(encoding="utf-8")
+
+        for source in (new_game, recent_games, object_panel):
+            self.assertNotIn("<<<<<<<", source)
+            self.assertNotIn("=======", source)
+            self.assertNotIn(">>>>>>>", source)
+
+        self.assertIn(':disabled="creating || !archiveReady"', new_game)
+        self.assertIn("waitForPythonProjectActivation", new_game)
+        self.assertIn("openResult?.status === 'service_initializing'", new_game)
+        self.assertIn("lanchat.openRoom", new_game)
+        self.assertIn("selectedProject && archiveReady", recent_games)
+        self.assertIn("@click=\"openSelectedProject\"", recent_games)
+        self.assertIn("bg-[#d8b86c]", recent_games)
+        self.assertIn("actor.loadStatus === 'loaded'", object_panel)
+        self.assertIn("collapsedSections.physics", object_panel)
+        self.assertIn(".placeholder-warning", object_panel)
+
+    def test_recent_project_entries_mark_legacy_projects_for_recent_games(self):
+        source = self._handler_source()
+        start = source.index("nlohmann::json recent_projects_native()")
+        end = source.index("nlohmann::json active_project_info_json()", start)
+        recent_body = source[start:end]
+        self.assertIn('{"legacy", exists && !portable}', recent_body)
+
+    def test_project_settings_does_not_write_project_section_into_portable_scene(self):
+        repo_root = self._repo_root()
+        settings_source = (
+            repo_root / "editor" / "backend" / "project_settings" / "main.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("portable = config.get('format', 'type'", settings_source)
+        self.assertIn("section = 'scene' if portable else 'Project'", settings_source)
+        self.assertIn("allowed_keys = ['name', 'core_version'] if portable", settings_source)
+        self.assertIn("portable_defaults = {", settings_source)
+        self.assertIn("legacy_defaults = {", settings_source)
+        self.assertIn("defaults = portable_defaults if portable else legacy_defaults", settings_source)
+
+    def test_python_scene_save_preserves_portable_scene_metadata_without_base_section(self):
+        repo_root = self._repo_root()
+        scene_source = (
+            repo_root / "editor" / "CoronaCore" / "core" / "entities" / "scene.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("def _is_portable_scene_folder", scene_source)
+        save_start = scene_source.index("    def save_data(self):")
+        save_end = scene_source.index("    @auto_save\n    def set_script", save_start)
+        save_body = scene_source[save_start:save_end]
+        self.assertIn("if self._is_portable_scene_folder():", save_body)
+        self.assertIn("CoronaEditorApi.main.scene_save", save_body)
+        self.assertLess(save_body.index("CoronaEditorApi.main.scene_save"),
+                        save_body.index("with open(data_path"))
+
+    def test_portable_scene_has_one_native_transactional_save_path(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        scene_source = (
+            repo_root / "editor" / "CoronaCore" / "core" / "entities" / "scene.py"
+        ).read_text(encoding="utf-8")
+        autosave_source = (
+            repo_root / "editor" / "CoronaCore" / "utils" / "proejct_utils.py"
+        ).read_text(encoding="utf-8")
+        settings_source = (
+            repo_root / "editor" / "utils" / "settings.py"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("SceneDocumentStore document_store", handler_source)
+        self.assertIn("document_store.replace_sections", handler_source)
+        self.assertIn('sections["scene"] = {"[scene]"}', handler_source)
+        self.assertIn('scene_metadata["name"] = scene.name', handler_source)
+        save_start = scene_source.index("    def save_data(self):")
+        save_end = scene_source.index("    @auto_save\n    def set_script", save_start)
+        save_body = scene_source[save_start:save_end]
+        self.assertIn("CoronaEditorApi.main.scene_save", save_body)
+        self.assertIn("Portable scene saves are owned by the native scene store", save_body)
+        self.assertIn("if isinstance(result, dict) and not result.get('ok', False):", save_body)
+        self.assertIn("logger.exception", autosave_source)
+        self.assertIn("if portable:", settings_source)
+        self.assertIn("Portable scene metadata is saved by the native scene store", settings_source)
+
+        project_settings_source = (
+            repo_root / "editor" / "backend" / "project_settings" / "main.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("CoronaEditorApi.main.scene_save('scene.ini', snapshot)",
+                      project_settings_source)
+
+    def test_portable_scene_validation_import_and_cleanup_apis_are_exposed(self):
+        repo_root = self._repo_root()
+        api_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_api.cpp"
+        ).read_text(encoding="utf-8")
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        bridge_source = (
+            repo_root / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
+        ).read_text(encoding="utf-8")
+        for native_name, wrapper in (
+            ("validate_portable_scene", "project.validatePortableScene"),
+            ("import_portable_asset", "project.importPortableAsset"),
+            ("cleanup_portable_scene_assets", "project.cleanupPortableSceneAssets"),
+        ):
+            self.assertIn(f"ProjectLauncher, {native_name}", api_source)
+            self.assertIn(f'{{"{native_name}"', handler_source)
+            self.assertIn(wrapper, bridge_source)
+
+    def test_duplicate_native_actor_check_happens_before_portable_asset_import(self):
+        repo_root = self._repo_root()
+        handler_source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        start = handler_source.index("NativeResult create_native_editor_actor")
+        end = handler_source.index("NativeResult remove_native_editor_actor", start)
+        body = handler_source[start:end]
+        self.assertLess(body.index("skip_if_exists"), body.index("portable_store.emplace"))
+
+    def test_scene_save_returns_structured_portable_validation_diagnostics(self):
+        repo_root = self._repo_root()
+        source = (
+            repo_root / "src" / "systems" / "ui" / "cef" / "cef_editor_native_api_handlers.cpp"
+        ).read_text(encoding="utf-8")
+        start = source.index('{"scene_save"')
+        end = source.index('{"update_view_tool_state"', start)
+        body = source[start:end]
+        self.assertIn("PortableSceneValidationError", body)
+        self.assertIn('{"diagnostics", error.diagnostics()}', body)
+        self.assertIn('{"ok", false}', body)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,14 @@
       <div class="text-[10px] text-gray-400 truncate flex-1">
         <span class="text-[#d8b86c] font-bold">{{ projectName }}</span>
       </div>
+      <button
+        v-if="legacyProject"
+        class="px-2 py-1 text-[10px] rounded bg-[#84a65b] hover:bg-[#95b86c]"
+        title="另存为便携场景"
+        @click="migrateLegacyScene"
+      >
+        另存为便携场景
+      </button>
     </div>
 
     <div class="flex-1 overflow-y-auto custom-scrollbar p-2">
@@ -129,7 +137,7 @@
 
 <script setup>
 import { ref, onMounted, nextTick } from 'vue';
-import { fileService } from '@/utils/bridge';
+import { fileService, projectLauncherService } from '@/utils/bridge';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import FileTreeNode from '@/components/ui/FileTreeNode.vue';
@@ -139,6 +147,7 @@ const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const projectName = ref('Corona Project');
 const fileTree = ref({ children: [] });
 const loading = ref(false);
+const legacyProject = ref(window.localStorage?.getItem('corona.activeProjectLegacy') === 'true');
 const contextMenu = ref({ show: false, x: 0, y: 0, item: null });
 const dialog = ref({
   show: false,
@@ -148,6 +157,31 @@ const dialog = ref({
   type: '', // 'newFolder', 'newScene', 'newActor', 'rename'
   targetPath: '',
 });
+
+const migrateLegacyScene = async () => {
+  const sourcePath = window.localStorage?.getItem('corona.activeProjectPath') || '';
+  if (!sourcePath) return;
+  const selected = await projectLauncherService.choosePortableSceneTarget();
+  const targetPath = selected?.data ?? selected;
+  if (!targetPath) return;
+  const result = await projectLauncherService.migrateLegacyScene({
+    sourcePath,
+    targetPath,
+    sceneName: projectName.value || 'PortableScene',
+  });
+  const migrated = result?.data ?? result;
+  if (!migrated?.ok) {
+    const details = (migrated?.diagnostics || [])
+      .map((item) => `${item.actor || 'scene'}: ${item.path} — ${item.message}`)
+      .join('\n');
+    window.alert(`迁移失败：\n${details}`);
+    return;
+  }
+  legacyProject.value = false;
+  window.localStorage?.setItem('corona.activeProjectLegacy', 'false');
+  window.localStorage?.setItem('corona.activeProjectPath', migrated.path);
+  await loadFileTree();
+};
 
 // 加载文件树
 const loadFileTree = async () => {

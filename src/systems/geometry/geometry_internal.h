@@ -3,19 +3,24 @@
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/actor_cache.h>
 #include <corona/systems/geometry/geometry_system.h>
+#include <corona/resource/types/scene.h>
 #include "shadow_lod_state.h"
 
 #include <oneapi/tbb/task_group.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <filesystem>
 #include <future>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <thread>
 #include <unordered_map>
 #include <vector>
 
@@ -82,6 +87,39 @@ inline void world_aabb_from_local_bounds(const Corona::ModelTransform& transform
 }  // namespace Corona::Systems::GeometryInternal
 
 namespace Corona::Systems {
+
+// ============================================================================
+// LOD 磁盘缓存记录 — 与 Resource::LODLevel 字段一一对应
+// ============================================================================
+// 当 reconcile_cpu_residency 清空 CPU 窗口外的 LOD 级时，其顶点/索引/骨骼权重
+// 数据被移入此结构体，随后序列化为二进制 blob 写入磁盘缓存。恢复时反序列化回填。
+// ============================================================================
+
+struct LodDiskRecord {
+    std::vector<Resource::Vertex>       vertices;         // 顶点位置+法线+UV，32B/顶点 (packed)
+    std::vector<std::uint16_t>          indices;          // 三角形索引，2B/索引
+    std::vector<Resource::BoneWeights>  bone_weights;     // 蒙皮骨骼权重，32B/顶点（非蒙皮网格为空）
+    float error             = 0.0f;  // meshopt 归一化几何误差
+    float screen_threshold  = 0.0f;  // 屏幕占比切换阈值（legacy 回退用）
+    float geometric_error   = 0.0f;  // 物体空间几何误差（LOD 选级主判据）
+};
+
+// ============================================================================
+// 异步写入队列元素
+// ============================================================================
+// 几何线程在 reconcile_cpu_residency 中构造此任务并入队（std::move 移交数据所有权，
+// 不拷贝），后台 worker 线程出队后序列化 + 写入 CacheManager。model_id/mesh_index/
+// lod_level 仅用于日志，不参与缓存 key（key 由 make_lod_disk_key 单独生成）。
+// ============================================================================
+
+struct LodDiskWriteTask {
+    std::string    key;           // 磁盘缓存 key（make_lod_disk_key 生成）
+    LodDiskRecord  record;        // 序列化前的 LOD 数据（持有 vector 所有权）
+    std::uint64_t  model_id   = 0;  // 仅日志
+    std::uint32_t  mesh_index = 0;  // 仅日志
+    int            lod_level  = 0;  // 仅日志
+    int            retry_count = 0; // 写盘失败重试计数（>0 表示已重试）
+};
 
 struct GeometrySystem::Impl {
     using Payload = std::uintptr_t;
@@ -155,6 +193,8 @@ struct GeometrySystem::Impl {
         //   (3) 距离基于几何 AABB 而非轴心，相机环绕几何中心时距离恒定 → 不再无谓跳级。
         ktm::fvec3 local_aabb_min{0.0f, 0.0f, 0.0f};
         ktm::fvec3 local_aabb_max{0.0f, 0.0f, 0.0f};
+
+        bool lod_spatially_evicted = false;  // 被空间淘汰强制 LOD0
     };
 
     mutable std::shared_mutex          lod_cache_mutex;
@@ -244,8 +284,9 @@ struct GeometrySystem::Impl {
     //   ε = 2·budget_px·tan(fov/2)/height_px
     // 主相机用本预算 + 自身 fov/分辨率换算 ε；选级判据 geometric_error·scale / d ≤ ε，
     // 全方向有定义（相机背后物体同样选级），故未来 GI 观察者可复用同一路径。
-    // 1.5px：误差小于约 1.5 像素即视觉无感，可安全切粗级。
-    static constexpr float kLodPixelErrorBudget = 1.5f;
+    // 默认 1.5px：显存充裕时误差小于约 1.5 像素即视觉无感，可安全切粗级。
+    // 显存承压时由 compute_pixel_budget_from_pressure() 动态放宽，趋粗 LOD 自然降显存。
+    static constexpr float kLodDefaultPixelBudget = 1.5f;
 
     // ========================================
     // LRU ActorCache（M3 生产化）
@@ -260,6 +301,79 @@ struct GeometrySystem::Impl {
 
     /// 初始化 ActorCache（延迟到首次 evict/restore 时）
     void ensure_actor_cache();
+
+    // ========================================
+    // LOD 磁盘缓存 — 异步写入
+    // ========================================
+    //
+    // 当 reconcile_cpu_residency 清空 CPU 窗口外的 lod_levels 时，数据被移入
+    // LodDiskWriteTask 并入队；后台 worker 线程序列化后通过 CacheManager 写入磁盘。
+    // 窗口内恢复时从 CacheManager 回读并反序列化回填 lod_levels。
+    //
+    // 锁层次（严格顺序，禁止反向获取）：
+    //   1. ResourceManager 内部锁（acquire_write<Scene> / acquire_read<Scene>）
+    //   2. CacheManager::mtx_（lod_disk_cache->put / get / erase）
+    //   3. lod_disk_write_mutex（队列锁）
+    //
+    // 淘汰回调仅做诊断日志，不得访问 ResourceManager、SharedDataHub 或任何需外部锁
+    // 的资源。回调触发时对应的 Scene::lod_levels 已被 std::move 清空（RAM 已释放），
+    // 磁盘副本被 LRU 淘汰后该级数据即不可恢复：GPU 侧无法再重建该级缓冲，
+    // 渲染继续使用已驻留的级（通常 LOD0），直到模型重新导入。
+
+    /// 两级 LRU 磁盘缓存（内存 128MB + 磁盘 512MB），直接使用 CacheManager
+    std::unique_ptr<Corona::Cache::CacheManager> lod_disk_cache;
+
+    // 全局默认 lod_evict_distance（reconcile 中读取，无 scene context）。
+    // 初始化为与 SceneVisibilityConfig 默认值一致的计算结果：
+    // (preload=50 + effective_unload=max(80, 50*1.2)=80) * 0.5 = 65.0
+    // set_visibility_config / set_distance_config 调用时会同步更新。
+    float lod_evict_distance = 65.0f;
+
+    // 淘汰/恢复每帧限制
+    static constexpr size_t kMaxLodSpatialEvictPerFrame  = 16;
+    static constexpr size_t kMaxLodSpatialRestorePerFrame = 16;
+
+    /// 保证 ensure_lod_disk_cache() 只初始化一次（线程安全）
+    std::once_flag                                lod_disk_cache_once;
+
+    // ---- 异步写入队列 ----
+
+    /// 待写入队列容量上限，超出则本帧跳过 evict（数据保留在 lod_levels 下周期重试）
+    static constexpr size_t kMaxPendingLodDiskWrites = 32;
+
+    /// 写盘失败最大重试次数（仅瞬时错误如磁盘满可恢复；超大 blob 不重试）
+    static constexpr int kMaxLodDiskWriteRetries = 3;
+
+    /// 待写入任务双端队列：几何线程 push，worker 线程 pop
+    std::deque<LodDiskWriteTask>    pending_lod_disk_writes;
+
+    /// 保护 pending_lod_disk_writes 的互斥锁
+    std::mutex                      lod_disk_write_mutex;
+
+    /// 通知 worker 线程有新任务入队
+    std::condition_variable         lod_disk_write_cv;
+
+    /// worker 当前正在落盘的 key（受 lod_disk_write_mutex 保护，空 = 无在写任务）。
+    /// restore 侧据此识别"任务已出队但 blob 尚未写完"的窗口，此时跳过磁盘回读，
+    /// 避免命中同 key 的陈旧 blob；下个评估周期自然从磁盘命中。
+    std::string                     lod_disk_write_inflight_key;
+
+    /// 后台序列化+写盘线程（独立线程，避免阻塞几何帧循环）
+    std::unique_ptr<std::thread>    lod_disk_worker;
+
+    /// worker 线程运行标志（shutdown 时设为 false 通知退出）
+    std::atomic<bool>               lod_disk_worker_running{false};
+
+    /// 延迟初始化磁盘缓存 + 启动 worker 线程
+    ///（reconcile_cpu_residency 入口、Scene 写锁之外调用；call_once 幂等）
+    void ensure_lod_disk_cache();
+
+    /// worker 线程主循环：等待任务 → 序列化 → 写盘
+    void lod_disk_writer_loop();
+
+    /// 处理单个写入任务：序列化 + 容量检查 + 写入 CacheManager
+    /// @return true 写入成功；false 失败（超大项或 put 错误），调用方决定重试/丢弃
+    bool write_one_lod_record(const LodDiskWriteTask& task);
 
     /// actor_handle → 最后一次快照时间（用于防抖）
     std::unordered_map<Payload, std::chrono::steady_clock::time_point> last_snapshot_time;
@@ -319,6 +433,33 @@ struct GeometrySystem::Impl {
 
     /// VRAM 预算（字节），0 = 不限制（默认）。P0 仅用于 over/need_free 计算，不淘汰。
     std::size_t vram_budget_bytes = 0;
+
+    // ========================================
+    // LOD 级 LRU — 延迟 Cap 机制
+    // ========================================
+    // 在 reconcile_lod_residency 末尾根据 VRAM 压力计算：对远处 geometry 的 demand
+    // 施加下限（cap），迫使其选更粗 LOD，释放显存。cap 在下一帧 reconcile 中生效，
+    // 一帧延迟有意为之——VRAM 压力变化缓慢（数百帧尺度），无需拆分主循环。
+    //
+    // Key = lod_key (make_lod_key 生成), Value = min_allowed_demand（下限；
+    // demand 只能 ≥ 此值，即只能比此更粗）。空 map 表示无压力、无限制。
+    std::unordered_map<uint64_t, int> lod_budget_caps;
+
+    // 水位常量：soft(75%) 触发降级，hard(85%) 开启加速模式（每步 +2 级）。
+    // 两个比例的分母均为 compute_memory_report().vram.budget_bytes（已做
+    // min(物理VRAM, vram_budget_bytes) 封顶），不是裸 vram_budget_bytes。
+    static constexpr float kLodBudgetSoftRatio = 0.75f;
+    static constexpr float kLodBudgetHardRatio = 0.85f;
+
+    // 单帧最多降级 mesh 数：防止 VRAM 突然承压时全场景同步 pop，
+    // 将降级分散到多帧平滑过渡。
+    static constexpr std::size_t kMaxDegradedPerFrame = 64;
+
+    // 诊断计数器（在 update() ~1Hz 块重置并输出）
+    std::uint64_t diag_lod_budget_checks   = 0;  // enforce_lod_budget 调用次数
+    std::uint64_t diag_lod_budget_degraded = 0;  // 本秒内被强制降级的 entry 数
+    std::uint64_t diag_lod_budget_entries  = 0;  // 本秒内收集的 candidate entries 数
+    std::uint64_t diag_lod_budget_est_vram = 0;  // 估算的 LOD mesh 总 VRAM（字节）
 
     // ========================================
     // 满载淘汰水位（容量取自 SDL 系统内存 / Horizon 显存，非固定 MB）
