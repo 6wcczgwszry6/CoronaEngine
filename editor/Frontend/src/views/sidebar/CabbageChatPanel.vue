@@ -93,7 +93,6 @@
         v-model="input"
         rows="3"
         maxlength="2000"
-        placeholder="可以答疑，也可以让包菜生成、制作或编辑游戏节点逻辑…"
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="composer-actions">
@@ -834,10 +833,6 @@ onBeforeUnmount(() => {
     border-color 140ms ease,
     box-shadow 140ms ease,
     background-color 140ms ease;
-}
-
-.chat-composer textarea::placeholder {
-  color: #9d9278;
 }
 
 .chat-composer textarea:hover {

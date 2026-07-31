@@ -9,8 +9,6 @@
     <div class="ng-toolbar">
       <div class="ng-title">
         <span class="ng-badge">节点</span>
-        <span class="ng-subtitle">{{ targetLabel }}</span>
-        <span class="ng-save">{{ saveLabel }}</span>
       </div>
       <div class="ng-modes">
         <button
@@ -58,7 +56,7 @@
         </div>
         <div class="ng-section-title mt">
           {{ paletteWorkspaceRole === 'condition' ? '返回值积木' : '微观积木' }}
-          <small>{{ paletteWorkspaceRole === 'condition' ? '用于组合跳转条件' : 'Blockly 原生形状' }}</small>
+          <small v-if="paletteWorkspaceRole === 'condition'">用于组合跳转条件</small>
         </div>
         <BlocklyToolboxPalette
           ref="paletteRef"
@@ -89,7 +87,6 @@
             <small class="ng-canvas-hint">空白处按住拖动画布 · 中键拖动 · 滚轮缩放</small>
           </div>
           <div class="ng-canvas-actions">
-            <span class="ng-pill">{{ nodes.length }} 节点 / {{ edges.length }} 连线</span>
             <span class="ng-zoom-value">{{ zoomText }}</span>
             <button type="button" class="ng-zoom-reset" @click.stop="resetZoom">恢复 100%</button>
           </div>
@@ -201,7 +198,6 @@
         <section class="ng-vars">
           <div class="ng-section-title">
             全局变量池
-            <small>变量和列表在节点图启动时初始化</small>
           </div>
           <MiniBlocklyWorkspace
             ref="variablesBlocklyRef"
@@ -653,13 +649,6 @@ const isProjectTarget = computed(() => normalizedTargetType.value === 'project')
 const targetReady = computed(() => isProjectTarget.value || Boolean(props.actorName));
 const targetKey = computed(
   () => `${projectStorageScope.value}:${normalizedTargetType.value}:${isProjectTarget.value ? '' : props.sceneName || ''}:${isProjectTarget.value ? '' : props.actorName || ''}`
-);
-const targetLabel = computed(() =>
-  isProjectTarget.value
-    ? '节点'
-    : props.actorName
-      ? `${props.actorName} [${props.sceneName || '未命名场景'}]`
-      : '未选择目标'
 );
 const nodes = computed(() => graph.nodes),
   edges = computed(() => graph.edges);
@@ -3077,15 +3066,6 @@ onBeforeUnmount(() => {
   color: #fff;
   font-weight: 800;
 }
-.ng-subtitle {
-  color: #e9dfc5;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-.ng-save {
-  color: #b9ad8f;
-}
 .ng-modes {
   flex: 0 0 auto;
   display: flex;
@@ -3457,15 +3437,6 @@ onBeforeUnmount(() => {
 }
 .ng-zoom-reset:hover {
   border-color: #d8b86c;
-}
-.ng-pill {
-  max-width: 44%;
-  padding: 4px 8px;
-  border-radius: 999px;
-  border: 1px solid #55431f;
-  background: #191711;
-  color: #e9dfc5 !important;
-  font-size: 11px !important;
 }
 .ng-edges {
   position: absolute;
