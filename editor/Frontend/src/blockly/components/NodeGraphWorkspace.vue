@@ -3258,14 +3258,24 @@ onBeforeUnmount(() => {
   background: #8c6f36;
 }
 .ng-tool-icon {
-  width: 30px;
+  width: auto;
+  min-width: 30px;
   height: 30px;
+  padding: 0 7px;
   border-radius: 9px;
+  white-space: nowrap;
+}
+.ng-tool-card > div:last-child {
+  min-width: 0;
 }
 .ng-tool-name {
   font-size: 13px;
   font-weight: 800;
   color: #fff7dc;
+}
+.ng-tool-name,
+.ng-tool-desc {
+  overflow-wrap: anywhere;
 }
 .ng-tool-desc {
   margin-top: 3px;

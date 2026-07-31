@@ -446,6 +446,8 @@ async function initBlockly() {
   loadingLabel.value = '加载积木工作区...';
   try {
     BlocklyLib = await import('blockly/core');
+    const { installCustomBlockLocalization } = await import('@/blockly/i18n/customBlockLocalization.js');
+    installCustomBlockLocalization(BlocklyLib);
     blocklyCN = await import('blockly/msg/zh-hans');
     blocklyEN = await import('blockly/msg/en');
     applyBlocklyLocale();

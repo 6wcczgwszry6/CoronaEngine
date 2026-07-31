@@ -503,6 +503,8 @@ function startPollTimer() {
 const loadBlocklyModules = async () => {
   try {
     BlocklyLib = await import('blockly/core');
+    const { installCustomBlockLocalization } = await import('@/blockly/i18n/customBlockLocalization.js');
+    installCustomBlockLocalization(BlocklyLib);
     blocklyCN = await import('blockly/msg/zh-hans');
     blocklyEN = await import('blockly/msg/en');
     return true;

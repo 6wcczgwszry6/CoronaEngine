@@ -1,6 +1,7 @@
 import { LOCALE_CHANGED_EVENT, LOCALE_STORAGE_KEY } from './index.js';
 import enUS from './messages/en-US.js';
 import zhCN from './messages/zh-CN.js';
+import { CUSTOM_BLOCK_TRANSLATIONS } from './customBlockTranslations.js';
 
 function buildLocaleTextTranslations(source, target, translations = {}) {
   for (const [key, sourceValue] of Object.entries(source || {})) {
@@ -831,6 +832,7 @@ const RUNTIME_DOM_TEXT_TRANSLATIONS = {
   'coronaBridge.actorTransform 不可用': 'coronaBridge.actorTransform Is Unavailable',
 };
 const CUSTOM_BLOCK_TEXT_TRANSLATIONS = {
+  ...CUSTOM_BLOCK_TRANSLATIONS,
   无广播: 'No broadcasts',
   '新建广播...': 'New broadcast...',
   当游戏开始时: 'When the game starts',
@@ -918,8 +920,7 @@ function buildPatternTranslations(translations) {
 const DOM_PATTERN_TRANSLATIONS = buildPatternTranslations(DOM_TEXT_TRANSLATIONS);
 
 function translateEnglishText(text) {
-  const exact = DOM_TEXT_TRANSLATIONS[text];
-  if (exact) return exact;
+  if (Object.hasOwn(DOM_TEXT_TRANSLATIONS, text)) return DOM_TEXT_TRANSLATIONS[text];
 
   for (const pattern of DOM_PATTERN_TRANSLATIONS) {
     const match = text.match(pattern.regex);
