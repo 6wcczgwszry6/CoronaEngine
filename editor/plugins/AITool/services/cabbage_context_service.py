@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 
 
 class CabbageContextService:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
     CONTEXT_DIR = "CabbageAssistant"
     CONTEXT_FILE = "context.json"
     MAX_RECENT_EVENTS = 200
@@ -119,164 +119,684 @@ class CabbageContextService:
         "run_succeeded": "runSuccesses",
         "run_failed": "runFailures",
     }
-    TUTORIAL_TASKS = (
+    TUTORIAL_CHAPTERS = tuple([
         {
-            "taskKey": "tutorial.import_model",
-            "type": "tutorial",
-            "track": "scene",
-            "order": 1,
-            "title": "导入一个物体",
-            "titleEn": "Import an Object",
-            "message": "先把一个模型加入当前世界，后续才能练习摆放和属性调整。",
-            "messageEn": "Add a model to the current world first so you can practice placement and property adjustments.",
-            "suggestion": "打开场景管理，使用导入或添加模型功能，把一个模型放入场景。",
-            "suggestionEn": "Open Scene Manager and use Import or Add Model to place a model in the scene.",
-            "completionCriteria": "成功导入模型，或场景中新建一个模型对象。",
-            "completionCriteriaEn": "A model is imported successfully or a new model object appears in the scene.",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse."
         },
         {
-            "taskKey": "tutorial.transform_model",
-            "type": "tutorial",
-            "track": "scene",
-            "order": 2,
-            "title": "调整一个物体",
-            "titleEn": "Adjust an Object",
-            "message": "修改模型的变换参数，观察它在场景中的位置、朝向或大小变化。",
-            "messageEn": "Edit a model transform and observe changes to its position, orientation, or size.",
-            "suggestion": "选中一个模型，在对象 Dock 的“变换”区域修改位置、旋转或缩放中的任意参数。",
-            "suggestionEn": "Select a model and change any Position, Rotation, or Scale value in the Transform section of the Object dock.",
-            "completionCriteria": "成功保存一次位置、旋转或缩放修改。",
-            "completionCriteriaEn": "A position, rotation, or scale change is saved successfully.",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely."
         },
         {
-            "taskKey": "tutorial.adjust_lighting",
-            "type": "tutorial",
-            "track": "scene",
-            "order": 3,
-            "title": "调整场景光照",
-            "titleEn": "Adjust Scene Lighting",
-            "message": "尝试改变光照状态或方向，观察模型明暗和场景氛围的变化。",
-            "messageEn": "Change the lighting state or direction and observe the model shading and scene atmosphere.",
-            "suggestion": "在场景管理中切换光照，或调整光照方向后确认效果。",
-            "suggestionEn": "Toggle lighting in Scene Manager or adjust its direction, then confirm the result.",
-            "completionCriteria": "成功修改光照启用状态或光照方向。",
-            "completionCriteriaEn": "The lighting enabled state or direction is changed successfully.",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks."
         },
         {
-            "taskKey": "tutorial.adjust_physics",
-            "type": "tutorial",
-            "track": "scene",
-            "order": 4,
-            "title": "调整物理属性",
-            "titleEn": "Adjust Physics Properties",
-            "message": "给模型设置物理效果，让它能够参与重力、碰撞或反弹。",
-            "messageEn": "Configure physics so the model can respond to gravity, collisions, or bouncing.",
-            "suggestion": "选中一个模型，启用物理或修改质量、弹性、阻尼、锁轴中的任意一项。",
-            "suggestionEn": "Select a model, then enable physics or change mass, restitution, damping, or an axis lock.",
-            "completionCriteria": "成功修改一次模型物理属性。",
-            "completionCriteriaEn": "A model physics property is changed successfully.",
+                "chapterKey": "chapter_preview",
+                "chapterOrder": 4,
+                "chapterTitle": "\u7ec8\u7ae0\uff1a\u8fd0\u884c\u4f60\u7684\u4e16\u754c",
+                "chapterTitleEn": "Final Chapter: Run Your World",
+                "chapterSummary": "\u542f\u52a8\u5e76\u7ed3\u675f\u9879\u76ee\u9884\u89c8\uff0c\u786e\u8ba4\u4e16\u754c\u80fd\u5b8c\u6574\u6062\u590d\u3002",
+                "chapterSummaryEn": "Start and stop project preview, confirming that the world restores cleanly."
+        }
+])
+    TUTORIAL_TASKS = tuple([
+        {
+                "taskKey": "tutorial.basics.viewport_focus",
+                "type": "tutorial",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse.",
+                "chapterTaskOrder": 1,
+                "globalOrder": 1,
+                "order": 1,
+                "title": "\u805a\u7126 3D \u4e3b\u89c6\u53e3",
+                "titleEn": "Focus the 3D Viewport",
+                "message": "\u70b9\u51fb\u4e00\u6b21 3D \u4e3b\u89c6\u53e3\uff0c\u8ba9\u5b83\u63a5\u6536\u952e\u76d8\u548c\u9f20\u6807\u8f93\u5165\u3002",
+                "messageEn": "Click the 3D viewport once so it receives keyboard and mouse input.",
+                "suggestion": "\u70b9\u51fb\u4e2d\u592e\u663e\u793a\u573a\u666f\u7684\u533a\u57df\u3002",
+                "suggestionEn": "Click the central area where the scene is displayed.",
+                "completionCriteria": "\u4e3b\u89c6\u53e3\u83b7\u5f97\u8f93\u5165\u7126\u70b9\u3002",
+                "completionCriteriaEn": "The main viewport receives input focus.",
+                "guidanceIntent": "focus_viewport"
         },
         {
-            "taskKey": "tutorial.create_node",
-            "type": "tutorial",
-            "track": "node",
-            "order": 1,
-            "title": "创建一个节点",
-            "titleEn": "Create a Node",
-            "message": "先建立一个新的状态节点，为后续的积木逻辑和流程跳转准备容器。",
-            "messageEn": "Create a new state node as a container for later block logic and flow transitions.",
-            "suggestion": "在节点 Dock 中拖入一个状态节点，并把它放到画布中。",
-            "suggestionEn": "Drag a state node from the Nodes dock onto the canvas.",
-            "completionCriteria": "成功创建一个新的状态节点。",
-            "completionCriteriaEn": "A new state node is created successfully.",
+                "taskKey": "tutorial.basics.camera_forward_back",
+                "type": "tutorial",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse.",
+                "chapterTaskOrder": 2,
+                "globalOrder": 2,
+                "order": 2,
+                "title": "\u524d\u540e\u79fb\u52a8\u6444\u50cf\u673a",
+                "titleEn": "Move the Camera Forward or Backward",
+                "message": "\u6309 W \u6216 S\uff0c\u8ba9\u6444\u50cf\u673a\u5b9e\u9645\u5411\u524d\u6216\u5411\u540e\u79fb\u52a8\u3002",
+                "messageEn": "Press W or S and make the camera actually move forward or backward.",
+                "suggestion": "\u6309\u4f4f W \u6216 S \u7247\u523b\uff0c\u76f4\u5230\u753b\u9762\u4f4d\u7f6e\u53d1\u751f\u53d8\u5316\u3002",
+                "suggestionEn": "Hold W or S briefly until the view position changes.",
+                "completionCriteria": "\u68c0\u6d4b\u5230 W/S \u5bfc\u81f4\u6444\u50cf\u673a\u5b9e\u9645\u4f4d\u79fb\u3002",
+                "completionCriteriaEn": "W or S causes a measurable camera translation.",
+                "guidanceIntent": "move_camera_forward_back"
         },
         {
-            "taskKey": "tutorial.move_node",
-            "type": "tutorial",
-            "track": "node",
-            "order": 2,
-            "title": "拖拽一个节点",
-            "titleEn": "Move a Node",
-            "message": "整理节点位置，让状态流程更容易阅读和连接。",
-            "messageEn": "Rearrange a node so the state flow is easier to read and connect.",
-            "suggestion": "在节点 Dock 的画布中拖动任意节点，并把它放到新的位置。",
-            "suggestionEn": "Drag any node on the Nodes dock canvas and place it at a new position.",
-            "completionCriteria": "节点位置产生一次有效变化。",
-            "completionCriteriaEn": "A node position changes successfully.",
+                "taskKey": "tutorial.basics.camera_left_right",
+                "type": "tutorial",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse.",
+                "chapterTaskOrder": 3,
+                "globalOrder": 3,
+                "order": 3,
+                "title": "\u5de6\u53f3\u79fb\u52a8\u6444\u50cf\u673a",
+                "titleEn": "Move the Camera Left or Right",
+                "message": "\u6309 A \u6216 D\uff0c\u8ba9\u6444\u50cf\u673a\u5b9e\u9645\u5411\u5de6\u6216\u5411\u53f3\u79fb\u52a8\u3002",
+                "messageEn": "Press A or D and make the camera actually move left or right.",
+                "suggestion": "\u6309\u4f4f A \u6216 D \u7247\u523b\uff0c\u89c2\u5bdf\u753b\u9762\u6a2a\u5411\u53d8\u5316\u3002",
+                "suggestionEn": "Hold A or D briefly and watch the view shift sideways.",
+                "completionCriteria": "\u68c0\u6d4b\u5230 A/D \u5bfc\u81f4\u6444\u50cf\u673a\u5b9e\u9645\u4f4d\u79fb\u3002",
+                "completionCriteriaEn": "A or D causes a measurable camera translation.",
+                "guidanceIntent": "move_camera_left_right"
         },
         {
-            "taskKey": "tutorial.connect_nodes",
-            "type": "tutorial",
-            "track": "node",
-            "order": 3,
-            "title": "连接两个节点",
-            "titleEn": "Connect Two Nodes",
-            "message": "建立两个不同状态之间的跳转路径，让流程能够从一个节点进入另一个节点。",
-            "messageEn": "Create a transition path between two states so the flow can move from one node to another.",
-            "suggestion": "依次点击两个不同节点的端口，创建一条有效连线。",
-            "suggestionEn": "Connect the ports of two different nodes to create a valid edge.",
-            "completionCriteria": "两个不同节点之间成功新增一条连线。",
-            "completionCriteriaEn": "A new connection is created successfully between two different nodes.",
+                "taskKey": "tutorial.basics.camera_up_down",
+                "type": "tutorial",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse.",
+                "chapterTaskOrder": 4,
+                "globalOrder": 4,
+                "order": 4,
+                "title": "\u4e0a\u4e0b\u79fb\u52a8\u6444\u50cf\u673a",
+                "titleEn": "Move the Camera Up or Down",
+                "message": "\u6309 Q \u6216 E\uff0c\u8ba9\u6444\u50cf\u673a\u5b9e\u9645\u5411\u4e0b\u6216\u5411\u4e0a\u79fb\u52a8\u3002",
+                "messageEn": "Press Q or E and make the camera actually move down or up.",
+                "suggestion": "\u6309\u4f4f Q \u6216 E \u7247\u523b\uff0c\u89c2\u5bdf\u9ad8\u5ea6\u53d8\u5316\u3002",
+                "suggestionEn": "Hold Q or E briefly and watch the camera height change.",
+                "completionCriteria": "\u68c0\u6d4b\u5230 Q/E \u5bfc\u81f4\u6444\u50cf\u673a\u5b9e\u9645\u4f4d\u79fb\u3002",
+                "completionCriteriaEn": "Q or E causes a measurable camera translation.",
+                "guidanceIntent": "move_camera_up_down"
         },
         {
-            "taskKey": "tutorial.drag_block",
-            "type": "tutorial",
-            "track": "node",
-            "order": 4,
-            "title": "向节点拖入一个积木",
-            "titleEn": "Drag a Block into a Node",
-            "message": "把一个积木放进节点工作区，开始为当前状态添加实际行为。",
-            "messageEn": "Place a block in the node workspace to add behavior to the current state.",
-            "suggestion": "从左侧积木列表拖动一个积木，并放入当前节点的积木区域。",
-            "suggestionEn": "Drag a block from the left toolbox into the current node block area.",
-            "completionCriteria": "通过拖拽方式成功创建一个积木。",
-            "completionCriteriaEn": "A block is created successfully by dragging it into the workspace.",
+                "taskKey": "tutorial.basics.camera_rotate",
+                "type": "tutorial",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse.",
+                "chapterTaskOrder": 5,
+                "globalOrder": 5,
+                "order": 5,
+                "title": "\u8f6c\u52a8\u6444\u50cf\u673a\u89c6\u89d2",
+                "titleEn": "Rotate the Camera View",
+                "message": "\u5728\u89c6\u53e3\u4e2d\u6309\u4f4f\u9f20\u6807\u53f3\u952e\u5e76\u62d6\u52a8\uff0c\u5b9e\u9645\u8f6c\u52a8\u6444\u50cf\u673a\u89c6\u89d2\u3002",
+                "messageEn": "Hold the right mouse button in the viewport and drag to actually rotate the camera.",
+                "suggestion": "\u5728\u4e3b\u89c6\u53e3\u5185\u53f3\u952e\u6309\u4f4f\u540e\u6c34\u5e73\u6216\u5782\u76f4\u62d6\u52a8\u3002",
+                "suggestionEn": "Hold the right mouse button inside the main viewport and drag horizontally or vertically.",
+                "completionCriteria": "\u68c0\u6d4b\u5230\u53f3\u952e\u62d6\u52a8\u5bfc\u81f4\u6444\u50cf\u673a\u671d\u5411\u53d8\u5316\u3002",
+                "completionCriteriaEn": "A right-mouse drag causes a measurable camera rotation.",
+                "guidanceIntent": "rotate_camera"
         },
         {
-            "taskKey": "tutorial.edit_block_parameter",
-            "type": "tutorial",
-            "track": "node",
-            "order": 5,
-            "title": "修改一个积木参数",
-            "titleEn": "Edit a Block Parameter",
-            "message": "调整积木字段，让同一个功能使用你需要的按键、数值、对象或条件。",
-            "messageEn": "Edit a block field to use the key, value, object, or condition you need.",
-            "suggestion": "修改任意积木中的下拉项、文本或数值字段。",
-            "suggestionEn": "Change a dropdown, text, or numeric field in any block.",
-            "completionCriteria": "积木的一个字段值发生有效变化。",
-            "completionCriteriaEn": "A block field value changes successfully.",
+                "taskKey": "tutorial.basics.camera_wheel",
+                "type": "tutorial",
+                "chapterKey": "chapter_viewport",
+                "chapterOrder": 1,
+                "chapterTitle": "\u7b2c\u4e00\u7ae0\uff1a\u7b2c\u4e00\u6b21\u770b\u89c1\u4e16\u754c",
+                "chapterTitleEn": "Chapter 1: See the World for the First Time",
+                "chapterSummary": "\u805a\u7126\u4e3b\u89c6\u53e3\uff0c\u7528\u952e\u76d8\u548c\u9f20\u6807\u5b66\u4f1a\u79fb\u52a8\u3001\u65cb\u8f6c\u6444\u50cf\u673a\u3002",
+                "chapterSummaryEn": "Focus the viewport and learn to move the camera with the keyboard and mouse.",
+                "chapterTaskOrder": 6,
+                "globalOrder": 6,
+                "order": 6,
+                "title": "\u7528\u6eda\u8f6e\u79fb\u52a8\u6444\u50cf\u673a",
+                "titleEn": "Move the Camera with the Wheel",
+                "message": "\u6eda\u52a8\u9f20\u6807\u6eda\u8f6e\uff0c\u8ba9\u6444\u50cf\u673a\u5b9e\u9645\u524d\u8fdb\u6216\u540e\u9000\u3002",
+                "messageEn": "Scroll the mouse wheel and make the camera actually move forward or backward.",
+                "suggestion": "\u5c06\u9f20\u6807\u653e\u5728\u4e3b\u89c6\u53e3\u4e0a\uff0c\u5411\u4e0a\u6216\u5411\u4e0b\u6eda\u52a8\u3002",
+                "suggestionEn": "Place the pointer over the main viewport and scroll up or down.",
+                "completionCriteria": "\u6eda\u8f6e\u5bfc\u81f4\u6444\u50cf\u673a\u4ea7\u751f\u5b9e\u9645\u4f4d\u79fb\u3002",
+                "completionCriteriaEn": "The wheel causes a measurable camera translation.",
+                "guidanceIntent": "move_camera_wheel"
         },
         {
-            "taskKey": "tutorial.set_transition_condition",
-            "type": "tutorial",
-            "track": "node",
-            "order": 6,
-            "title": "设置一个跳转条件",
-            "titleEn": "Set a Transition Condition",
-            "message": "给节点连线添加 Boolean 条件，控制流程在什么情况下进入下一个状态。",
-            "messageEn": "Add a Boolean condition to a node connection to control when the flow enters the next state.",
-            "suggestion": "选中一条节点连线，在条件工作区放入能够返回 Boolean 的积木。",
-            "suggestionEn": "Select a node connection and place a Boolean-returning block in the condition workspace.",
-            "completionCriteria": "跳转条件工作区成功加入一个条件积木。",
-            "completionCriteriaEn": "A condition block is added successfully to the transition condition workspace.",
+                "taskKey": "tutorial.basics.open_scene_manager",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 1,
+                "globalOrder": 7,
+                "order": 7,
+                "title": "\u6253\u5f00\u573a\u666f\u7ba1\u7406",
+                "titleEn": "Open Scene Manager",
+                "message": "\u70b9\u51fb\u201c\u573a\u666f\u7ba1\u7406\u201d\u5feb\u6377\u6309\u94ae\uff0c\u6253\u5f00\u573a\u666f\u7ba1\u7406\u7a97\u53e3\u3002",
+                "messageEn": "Click the Scene Manager shortcut to open the Scene Manager window.",
+                "suggestion": "\u8bf7\u4eb2\u81ea\u70b9\u51fb\u5feb\u6377\u6309\u94ae\uff1b\u64cd\u4f5c\u5c55\u793a\u81ea\u52a8\u6253\u5f00\u4e0d\u4f1a\u5b8c\u6210\u4efb\u52a1\u3002",
+                "suggestionEn": "Click the shortcut yourself; a panel opened automatically by guidance does not complete this task.",
+                "completionCriteria": "\u7528\u6237\u6765\u6e90\u7684 SceneTools panel_opened \u4e8b\u4ef6\u3002",
+                "completionCriteriaEn": "A user-sourced SceneTools panel_opened event is received.",
+                "guidanceIntent": "open_scene_manager"
         },
         {
-            "taskKey": "tutorial.run_node_graph",
-            "type": "tutorial",
-            "track": "node",
-            "order": 7,
-            "title": "运行一次节点逻辑",
-            "titleEn": "Run the Node Logic",
-            "message": "点击运行当前节点图，开始验证节点、连线和积木的执行效果。",
-            "messageEn": "Run the current node graph to verify how its nodes, connections, and blocks execute.",
-            "suggestion": "直接点击节点 Dock 中的运行按钮；节点会实时保存，不需要额外执行保存操作。",
-            "suggestionEn": "Click Run in the Nodes dock. The graph saves automatically, so no separate save action is required.",
-            "completionCriteria": "节点逻辑成功发起一次运行。",
-            "completionCriteriaEn": "The node logic starts running successfully.",
+                "taskKey": "tutorial.basics.import_model",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 2,
+                "globalOrder": 8,
+                "order": 8,
+                "title": "\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b",
+                "titleEn": "Import a Model",
+                "message": "\u901a\u8fc7\u573a\u666f\u7ba1\u7406\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\uff0c\u5e76\u5c06\u5b83\u7ed1\u5b9a\u4e3a\u6559\u7a0b\u6a21\u578b\u3002",
+                "messageEn": "Import a model through Scene Manager and bind it as the tutorial model.",
+                "suggestion": "\u5728\u573a\u666f\u7ba1\u7406\u4e2d\u9009\u62e9\u4e00\u4e2a\u6a21\u578b\u8d44\u6e90\u5e76\u5bfc\u5165\u5f53\u524d\u573a\u666f\u3002",
+                "suggestionEn": "Choose a model asset in Scene Manager and import it into the current scene.",
+                "completionCriteria": "\u6a21\u578b\u5bfc\u5165\u6210\u529f\uff0c\u5e76\u8bb0\u5f55\u5176\u573a\u666f\u548c\u5bf9\u8c61 ID\u3002",
+                "completionCriteriaEn": "The model imports successfully and its scene and actor IDs are recorded.",
+                "guidanceIntent": "import_model"
         },
-    )
-    RETIRED_TUTORIAL_TASK_KEYS = {"tutorial.rotate_model"}
-
+        {
+                "taskKey": "tutorial.basics.select_model",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 3,
+                "globalOrder": 9,
+                "order": 9,
+                "title": "\u9009\u4e2d\u6559\u7a0b\u6a21\u578b",
+                "titleEn": "Select the Tutorial Model",
+                "message": "\u5728\u573a\u666f\u6811\u6216\u89c6\u53e3\u4e2d\u4e3b\u52a8\u9009\u4e2d\u521a\u5bfc\u5165\u7684\u6a21\u578b\u3002",
+                "messageEn": "Actively select the model you just imported in the scene tree or viewport.",
+                "suggestion": "\u70b9\u51fb\u573a\u666f\u6811\u4e2d\u521a\u521a\u5bfc\u5165\u7684\u6a21\u578b\u540d\u79f0\u3002",
+                "suggestionEn": "Click the newly imported model name in the scene tree.",
+                "completionCriteria": "\u7528\u6237\u9009\u4e2d\u7684\u5bf9\u8c61\u4e0e\u6559\u7a0b\u7ed1\u5b9a\u6a21\u578b\u4e00\u81f4\u3002",
+                "completionCriteriaEn": "The user-selected actor matches the bound tutorial model.",
+                "guidanceIntent": "select_model"
+        },
+        {
+                "taskKey": "tutorial.basics.set_position_x",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 4,
+                "globalOrder": 10,
+                "order": 10,
+                "title": "\u5c06\u4f4d\u7f6e X \u8bbe\u4e3a 1",
+                "titleEn": "Set Position X to 1",
+                "message": "\u5c06\u6559\u7a0b\u6a21\u578b\u7684\u4f4d\u7f6e X \u8bbe\u7f6e\u4e3a 1\u3002",
+                "messageEn": "Set the tutorial model's Position X to 1.",
+                "suggestion": "\u5728\u5bf9\u8c61\u5c5e\u6027\u7684\u53d8\u6362\u533a\u57df\uff0c\u628a\u4f4d\u7f6e X \u8f93\u5165\u4e3a 1\u3002",
+                "suggestionEn": "In the Transform section of Object Properties, enter 1 for Position X.",
+                "completionCriteria": "\u7ed1\u5b9a\u6a21\u578b\u7684\u4f4d\u7f6e X \u4e3a 1\uff0c\u5bb9\u5dee \u00b10.01\u3002",
+                "completionCriteriaEn": "The bound model's Position X is 1 within \u00b10.01.",
+                "guidanceIntent": "set_position_x"
+        },
+        {
+                "taskKey": "tutorial.basics.set_rotation_y",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 5,
+                "globalOrder": 11,
+                "order": 11,
+                "title": "\u5c06\u65cb\u8f6c Y \u8bbe\u4e3a 45",
+                "titleEn": "Set Rotation Y to 45",
+                "message": "\u5c06\u6559\u7a0b\u6a21\u578b\u7684\u65cb\u8f6c Y \u8bbe\u7f6e\u4e3a 45 \u5ea6\u3002",
+                "messageEn": "Set the tutorial model's Rotation Y to 45 degrees.",
+                "suggestion": "\u5728\u53d8\u6362\u533a\u57df\uff0c\u628a\u65cb\u8f6c Y \u8f93\u5165\u4e3a 45\u3002",
+                "suggestionEn": "In the Transform section, enter 45 for Rotation Y.",
+                "completionCriteria": "\u7ed1\u5b9a\u6a21\u578b\u7684\u65cb\u8f6c Y \u4e3a 45\u00b0\uff0c\u5bb9\u5dee \u00b10.1\u00b0\u3002",
+                "completionCriteriaEn": "The bound model's Rotation Y is 45\u00b0 within \u00b10.1\u00b0.",
+                "guidanceIntent": "set_rotation_y"
+        },
+        {
+                "taskKey": "tutorial.basics.set_scale_x",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 6,
+                "globalOrder": 12,
+                "order": 12,
+                "title": "\u5c06\u7f29\u653e X \u8bbe\u4e3a 1.5",
+                "titleEn": "Set Scale X to 1.5",
+                "message": "\u5c06\u6559\u7a0b\u6a21\u578b\u7684\u7f29\u653e X \u8bbe\u7f6e\u4e3a 1.5\u3002",
+                "messageEn": "Set the tutorial model's Scale X to 1.5.",
+                "suggestion": "\u5728\u53d8\u6362\u533a\u57df\uff0c\u628a\u7f29\u653e X \u8f93\u5165\u4e3a 1.5\u3002",
+                "suggestionEn": "In the Transform section, enter 1.5 for Scale X.",
+                "completionCriteria": "\u7ed1\u5b9a\u6a21\u578b\u7684\u7f29\u653e X \u4e3a 1.5\uff0c\u5bb9\u5dee \u00b10.01\u3002",
+                "completionCriteriaEn": "The bound model's Scale X is 1.5 within \u00b10.01.",
+                "guidanceIntent": "set_scale_x"
+        },
+        {
+                "taskKey": "tutorial.basics.enable_physics",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 7,
+                "globalOrder": 13,
+                "order": 13,
+                "title": "\u5f00\u542f\u7269\u7406\u6a21\u62df",
+                "titleEn": "Enable Physics Simulation",
+                "message": "\u786e\u4fdd\u6559\u7a0b\u6a21\u578b\u7684\u201c\u7269\u7406\u6a21\u62df\u201d\u5904\u4e8e\u542f\u7528\u72b6\u6001\u3002",
+                "messageEn": "Make sure Physics Simulation is enabled for the tutorial model.",
+                "suggestion": "\u5728\u5bf9\u8c61\u7269\u7406\u5c5e\u6027\u4e2d\u6253\u5f00\u201c\u7269\u7406\u6a21\u62df\u201d\u5f00\u5173\u3002",
+                "suggestionEn": "Turn on the Physics Simulation switch in the object's physics properties.",
+                "completionCriteria": "\u7ed1\u5b9a\u6a21\u578b\u6536\u5230 SetPhysicsEnabled=true\u3002",
+                "completionCriteriaEn": "The bound model receives SetPhysicsEnabled=true.",
+                "guidanceIntent": "enable_physics"
+        },
+        {
+                "taskKey": "tutorial.basics.set_mass",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 8,
+                "globalOrder": 14,
+                "order": 14,
+                "title": "\u5c06\u8d28\u91cf\u8bbe\u4e3a 10",
+                "titleEn": "Set Mass to 10",
+                "message": "\u5c06\u6559\u7a0b\u6a21\u578b\u7684\u8d28\u91cf\u8bbe\u7f6e\u4e3a 10\u3002",
+                "messageEn": "Set the tutorial model's mass to 10.",
+                "suggestion": "\u5728\u7269\u7406\u5c5e\u6027\u4e2d\u627e\u5230\u8d28\u91cf\uff0c\u8f93\u5165 10\u3002",
+                "suggestionEn": "Find Mass in the physics properties and enter 10.",
+                "completionCriteria": "\u7ed1\u5b9a\u6a21\u578b\u7684\u8d28\u91cf\u4e3a 10\uff0c\u5bb9\u5dee \u00b10.01\u3002",
+                "completionCriteriaEn": "The bound model's mass is 10 within \u00b10.01.",
+                "guidanceIntent": "set_mass"
+        },
+        {
+                "taskKey": "tutorial.basics.set_light_x",
+                "type": "tutorial",
+                "chapterKey": "chapter_scene",
+                "chapterOrder": 2,
+                "chapterTitle": "\u7b2c\u4e8c\u7ae0\uff1a\u628a\u7269\u4f53\u653e\u8fdb\u4e16\u754c",
+                "chapterTitleEn": "Chapter 2: Put an Object into the World",
+                "chapterSummary": "\u6253\u5f00\u573a\u666f\u7ba1\u7406\uff0c\u5bfc\u5165\u4e00\u4e2a\u6a21\u578b\u5e76\u7cbe\u786e\u8c03\u6574\u5b83\u7684\u5c5e\u6027\u3002",
+                "chapterSummaryEn": "Open Scene Manager, import a tutorial model, and adjust it precisely.",
+                "chapterTaskOrder": 9,
+                "globalOrder": 15,
+                "order": 15,
+                "title": "\u5c06\u5149\u7167\u65b9\u5411 X \u8bbe\u4e3a 0.5",
+                "titleEn": "Set Light Direction X to 0.5",
+                "message": "\u5c06\u573a\u666f\u5149\u7167\u65b9\u5411 X \u8bbe\u7f6e\u4e3a 0.5\u3002",
+                "messageEn": "Set Scene Light Direction X to 0.5.",
+                "suggestion": "\u5728\u573a\u666f\u7ba1\u7406\u7684\u5149\u7167\u8bbe\u7f6e\u4e2d\uff0c\u628a\u65b9\u5411 X \u8f93\u5165\u4e3a 0.5\u3002",
+                "suggestionEn": "In Scene Manager's lighting settings, enter 0.5 for Direction X.",
+                "completionCriteria": "\u5f53\u524d\u573a\u666f\u5149\u7167\u65b9\u5411 X \u4e3a 0.5\uff0c\u5bb9\u5dee \u00b10.01\u3002",
+                "completionCriteriaEn": "The current scene's Light Direction X is 0.5 within \u00b10.01.",
+                "guidanceIntent": "set_light_x"
+        },
+        {
+                "taskKey": "tutorial.basics.open_nodes",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 1,
+                "globalOrder": 16,
+                "order": 16,
+                "title": "\u6253\u5f00\u8282\u70b9\u7a97\u53e3",
+                "titleEn": "Open the Nodes Window",
+                "message": "\u70b9\u51fb\u201c\u8282\u70b9\u201d\u5feb\u6377\u6309\u94ae\uff0c\u6253\u5f00\u8282\u70b9\u7a97\u53e3\u3002",
+                "messageEn": "Click the Nodes shortcut to open the Nodes window.",
+                "suggestion": "\u8bf7\u4eb2\u81ea\u70b9\u51fb\u8282\u70b9\u5feb\u6377\u6309\u94ae\u3002",
+                "suggestionEn": "Click the Nodes shortcut yourself.",
+                "completionCriteria": "\u7528\u6237\u6765\u6e90\u7684 NodeGraphPanel panel_opened \u4e8b\u4ef6\u3002",
+                "completionCriteriaEn": "A user-sourced NodeGraphPanel panel_opened event is received.",
+                "guidanceIntent": "open_nodes"
+        },
+        {
+                "taskKey": "tutorial.basics.confirm_start_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 2,
+                "globalOrder": 17,
+                "order": 17,
+                "title": "\u521b\u5efa\u6216\u786e\u8ba4\u5f00\u59cb\u8282\u70b9",
+                "titleEn": "Create or Confirm a Start Node",
+                "message": "\u521b\u5efa\u6216\u786e\u8ba4\u4e00\u4e2a\u201c\u5f00\u59cb\u8282\u70b9\u201d\uff1b\u5df2\u6709\u552f\u4e00\u5f00\u59cb\u8282\u70b9\u65f6\u53ef\u76f4\u63a5\u70b9\u51fb\u786e\u8ba4\u3002",
+                "messageEn": "Create or confirm a Start node; if one unique Start node already exists, click it to confirm.",
+                "suggestion": "\u82e5\u753b\u5e03\u4e0a\u5df2\u6709\u5f00\u59cb\u8282\u70b9\uff0c\u70b9\u51fb\u5b83\uff1b\u5426\u5219\u62d6\u5165\u7b2c\u4e00\u4e2a\u8282\u70b9\u3002",
+                "suggestionEn": "If a Start node already exists, click it; otherwise drag the first node onto the canvas.",
+                "completionCriteria": "\u7ed1\u5b9a\u552f\u4e00\u7684\u5f00\u59cb\u8282\u70b9 ID\u3002",
+                "completionCriteriaEn": "The unique Start node ID is bound.",
+                "guidanceIntent": "confirm_start_node"
+        },
+        {
+                "taskKey": "tutorial.basics.create_custom_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 3,
+                "globalOrder": 18,
+                "order": 18,
+                "title": "\u521b\u5efa\u81ea\u5b9a\u4e49\u8282\u70b9",
+                "titleEn": "Create a Custom Node",
+                "message": "\u518d\u62d6\u5165\u4e00\u4e2a\u8282\u70b9\uff0c\u5e76\u786e\u8ba4\u5176\u7c7b\u578b\u4e3a\u201c\u81ea\u5b9a\u4e49\u8282\u70b9\u201d\u3002",
+                "messageEn": "Drag in another node and confirm that its type is Custom Node.",
+                "suggestion": "\u4ece\u5de5\u5177\u533a\u518d\u62d6\u4e00\u4e2a\u8282\u70b9\u5230\u753b\u5e03\u3002",
+                "suggestionEn": "Drag one more node from the toolbox onto the canvas.",
+                "completionCriteria": "\u65b0\u5efa\u8282\u70b9\u7c7b\u578b\u4e3a custom\uff0c\u5e76\u7ed1\u5b9a\u5176 ID\u3002",
+                "completionCriteriaEn": "A new node of type custom is created and its ID is bound.",
+                "guidanceIntent": "create_custom_node"
+        },
+        {
+                "taskKey": "tutorial.basics.move_custom_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 4,
+                "globalOrder": 19,
+                "order": 19,
+                "title": "\u79fb\u52a8\u81ea\u5b9a\u4e49\u8282\u70b9",
+                "titleEn": "Move the Custom Node",
+                "message": "\u6309\u4f4f\u521a\u521b\u5efa\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\uff0c\u5c06\u5b83\u62d6\u5230\u65b0\u7684\u4f4d\u7f6e\u3002",
+                "messageEn": "Hold the Custom node you just created and drag it to a new position.",
+                "suggestion": "\u62d6\u52a8\u8282\u70b9\u6807\u9898\u533a\uff0c\u8ba9\u5b83\u79bb\u5f00\u539f\u4f4d\u7f6e\u3002",
+                "suggestionEn": "Drag the node header so it leaves its original position.",
+                "completionCriteria": "\u7ed1\u5b9a\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\u4ea7\u751f\u5b9e\u9645\u4f4d\u79fb\u3002",
+                "completionCriteriaEn": "The bound Custom node has a measurable position change.",
+                "guidanceIntent": "move_custom_node"
+        },
+        {
+                "taskKey": "tutorial.basics.connect_nodes",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 5,
+                "globalOrder": 20,
+                "order": 20,
+                "title": "\u8fde\u63a5\u4e24\u4e2a\u8282\u70b9",
+                "titleEn": "Connect the Two Nodes",
+                "message": "\u5c06\u5f00\u59cb\u8282\u70b9\u8fde\u63a5\u5230\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
+                "messageEn": "Connect the Start node to the Custom node.",
+                "suggestion": "\u4ece\u5f00\u59cb\u8282\u70b9\u7684\u8f93\u51fa\u7aef\u53e3\u62d6\u5230\u81ea\u5b9a\u4e49\u8282\u70b9\u7684\u8f93\u5165\u7aef\u53e3\u3002",
+                "suggestionEn": "Drag from the Start node's output port to the Custom node's input port.",
+                "completionCriteria": "\u8fde\u7ebf\u6e90\u548c\u76ee\u6807\u5206\u522b\u5339\u914d\u7ed1\u5b9a\u7684\u5f00\u59cb\u4e0e\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
+                "completionCriteriaEn": "The connection source and target match the bound Start and Custom nodes.",
+                "guidanceIntent": "connect_nodes"
+        },
+        {
+                "taskKey": "tutorial.basics.open_custom_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 6,
+                "globalOrder": 21,
+                "order": 21,
+                "title": "\u6253\u5f00\u81ea\u5b9a\u4e49\u8282\u70b9",
+                "titleEn": "Open the Custom Node",
+                "message": "\u70b9\u51fb\u81ea\u5b9a\u4e49\u8282\u70b9\uff0c\u6253\u5f00\u5b83\u7684\u5185\u90e8\u79ef\u6728\u7f16\u8f91\u533a\u3002",
+                "messageEn": "Click the Custom node to open its internal block editor.",
+                "suggestion": "\u5355\u51fb\u521a\u8fde\u63a5\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
+                "suggestionEn": "Click the Custom node you just connected.",
+                "completionCriteria": "\u9009\u4e2d\u7684\u8282\u70b9 ID \u4e0e\u7ed1\u5b9a\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\u4e00\u81f4\u3002",
+                "completionCriteriaEn": "The selected node ID matches the bound Custom node.",
+                "guidanceIntent": "open_custom_node"
+        },
+        {
+                "taskKey": "tutorial.basics.add_when_enter",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 7,
+                "globalOrder": 22,
+                "order": 22,
+                "title": "\u6dfb\u52a0\u8fdb\u5165\u8282\u70b9\u4e8b\u4ef6",
+                "titleEn": "Add the Node Enter Event",
+                "message": "\u5c06\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728 node_when_enter \u62d6\u5165\u8be5\u8282\u70b9\u3002",
+                "messageEn": "Drag the node_when_enter block into this node.",
+                "suggestion": "\u5728\u79ef\u6728\u5de5\u5177\u7bb1\u4e2d\u627e\u5230\u4e8b\u4ef6\u79ef\u6728\u5e76\u62d6\u5165\u3002",
+                "suggestionEn": "Find the event block in the block toolbox and drag it in.",
+                "completionCriteria": "\u7ed1\u5b9a\u81ea\u5b9a\u4e49\u8282\u70b9\u4e2d\u65b0\u589e node_when_enter\u3002",
+                "completionCriteriaEn": "node_when_enter is added to the bound Custom node.",
+                "guidanceIntent": "add_when_enter"
+        },
+        {
+                "taskKey": "tutorial.basics.add_wait",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 8,
+                "globalOrder": 23,
+                "order": 23,
+                "title": "\u8fde\u63a5\u7b49\u5f85\u79ef\u6728",
+                "titleEn": "Connect a Wait Block",
+                "message": "\u5c06\u201c\u7b49\u5f85\u201d\u79ef\u6728 control_wait \u62d6\u5165\uff0c\u5e76\u8fde\u63a5\u5230\u8fdb\u5165\u4e8b\u4ef6\u4e0b\u65b9\u3002",
+                "messageEn": "Drag in control_wait and connect it below the enter event.",
+                "suggestion": "\u62d6\u5165\u201c\u7b49\u5f85\u201d\u79ef\u6728\uff0c\u5c06\u9876\u90e8\u8fde\u63a5\u53e3\u5438\u9644\u5230 node_when_enter \u7684\u8bed\u53e5\u533a\u3002",
+                "suggestionEn": "Drag in Wait and snap its connector into the statement area of node_when_enter.",
+                "completionCriteria": "control_wait \u5df2\u8fde\u63a5\uff0c\u4e14\u7236\u79ef\u6728\u4e3a node_when_enter\u3002",
+                "completionCriteriaEn": "control_wait is connected with node_when_enter as its parent.",
+                "guidanceIntent": "add_wait"
+        },
+        {
+                "taskKey": "tutorial.basics.set_wait_seconds",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 9,
+                "globalOrder": 24,
+                "order": 24,
+                "title": "\u5c06\u7b49\u5f85\u65f6\u95f4\u8bbe\u4e3a 2 \u79d2",
+                "titleEn": "Set Wait Time to 2 Seconds",
+                "message": "\u5c06\u7b49\u5f85\u79ef\u6728\u7684 SECONDS \u53c2\u6570\u4fee\u6539\u4e3a 2\u3002",
+                "messageEn": "Change the Wait block's SECONDS parameter to 2.",
+                "suggestion": "\u70b9\u51fb\u201c\u7b49\u5f85\u201d\u79ef\u6728\u4e2d\u7684\u6570\u5b57\u8f93\u5165\u6846\uff0c\u8f93\u5165 2\u3002",
+                "suggestionEn": "Click the number field in Wait and enter 2.",
+                "completionCriteria": "\u7ed1\u5b9a control_wait \u7684 SECONDS \u4e3a 2\uff0c\u5bb9\u5dee \u00b10.01\u3002",
+                "completionCriteriaEn": "The bound control_wait has SECONDS=2 within \u00b10.01.",
+                "guidanceIntent": "set_wait_seconds"
+        },
+        {
+                "taskKey": "tutorial.basics.select_edge",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 10,
+                "globalOrder": 25,
+                "order": 25,
+                "title": "\u6253\u5f00\u8fde\u7ebf\u6761\u4ef6\u533a",
+                "titleEn": "Open the Connection Condition Area",
+                "message": "\u70b9\u51fb\u5f00\u59cb\u8282\u70b9\u4e0e\u81ea\u5b9a\u4e49\u8282\u70b9\u4e4b\u95f4\u7684\u8fde\u7ebf\u3002",
+                "messageEn": "Click the connection between the Start and Custom nodes.",
+                "suggestion": "\u70b9\u51fb\u4e24\u4e2a\u8282\u70b9\u4e4b\u95f4\u7684\u7ebf\u6216\u6761\u4ef6\u6807\u7b7e\u3002",
+                "suggestionEn": "Click the line or condition label between the two nodes.",
+                "completionCriteria": "\u9009\u4e2d\u7684\u8fde\u7ebf ID \u4e0e\u6559\u7a0b\u7ed1\u5b9a\u8fde\u7ebf\u4e00\u81f4\u3002",
+                "completionCriteriaEn": "The selected edge ID matches the bound tutorial connection.",
+                "guidanceIntent": "select_edge"
+        },
+        {
+                "taskKey": "tutorial.basics.add_true_condition",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 11,
+                "globalOrder": 26,
+                "order": 26,
+                "title": "\u6dfb\u52a0\u771f\u503c\u6761\u4ef6",
+                "titleEn": "Add a TRUE Condition",
+                "message": "\u5728\u6761\u4ef6\u7f16\u8f91\u533a\u62d6\u5165 logic_boolean\uff0c\u5e76\u786e\u4fdd\u503c\u4e3a\u201c\u771f/TRUE\u201d\u3002",
+                "messageEn": "Drag logic_boolean into the condition area and make sure it is TRUE.",
+                "suggestion": "\u4ece\u201c\u503c\u201d\u5206\u7c7b\u62d6\u5165\u5e03\u5c14\u503c\u79ef\u6728\uff0c\u5e76\u5c06\u4e0b\u62c9\u503c\u8bbe\u4e3a\u771f\u3002",
+                "suggestionEn": "Drag a Boolean value block from Values and set it to TRUE.",
+                "completionCriteria": "\u7ed1\u5b9a\u8fde\u7ebf\u7684\u6761\u4ef6\u533a\u6709\u4e00\u4e2a\u9876\u5c42 TRUE \u5e03\u5c14\u79ef\u6728\u3002",
+                "completionCriteriaEn": "The bound connection condition has one top-level Boolean set to TRUE.",
+                "guidanceIntent": "add_true_condition"
+        },
+        {
+                "taskKey": "tutorial.basics.run_graph",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks.",
+                "chapterTaskOrder": 12,
+                "globalOrder": 27,
+                "order": 27,
+                "title": "\u8fd0\u884c\u8282\u70b9\u56fe",
+                "titleEn": "Run the Node Graph",
+                "message": "\u70b9\u51fb\u201c\u8fd0\u884c\u201d\uff0c\u7b49\u5f85\u8282\u70b9\u56fe\u771f\u6b63\u8fd4\u56de\u6210\u529f\u3002",
+                "messageEn": "Click Run and wait for the node graph to report success.",
+                "suggestion": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u53f3\u4e0a\u89d2\u7684\u201c\u8fd0\u884c\u201d\u3002",
+                "suggestionEn": "Click Run in the upper-right corner of the Nodes window.",
+                "completionCriteria": "\u6536\u5230 run_succeeded\u3002",
+                "completionCriteriaEn": "run_succeeded is received.",
+                "guidanceIntent": "run_node_graph"
+        },
+        {
+                "taskKey": "tutorial.basics.start_preview",
+                "type": "tutorial",
+                "chapterKey": "chapter_preview",
+                "chapterOrder": 4,
+                "chapterTitle": "\u7ec8\u7ae0\uff1a\u8fd0\u884c\u4f60\u7684\u4e16\u754c",
+                "chapterTitleEn": "Final Chapter: Run Your World",
+                "chapterSummary": "\u542f\u52a8\u5e76\u7ed3\u675f\u9879\u76ee\u9884\u89c8\uff0c\u786e\u8ba4\u4e16\u754c\u80fd\u5b8c\u6574\u6062\u590d\u3002",
+                "chapterSummaryEn": "Start and stop project preview, confirming that the world restores cleanly.",
+                "chapterTaskOrder": 1,
+                "globalOrder": 28,
+                "order": 28,
+                "title": "\u5f00\u59cb\u9879\u76ee\u9884\u89c8",
+                "titleEn": "Start Project Preview",
+                "message": "\u70b9\u51fb\u201c\u5f00\u59cb\u9884\u89c8\u201d\uff0c\u7b49\u5f85\u9879\u76ee\u771f\u6b63\u8fdb\u5165 running \u72b6\u6001\u3002",
+                "messageEn": "Click Start Preview and wait for the project to enter the running state.",
+                "suggestion": "\u70b9\u51fb\u4e3b\u89c6\u53e3\u4e0a\u65b9\u7684\u201c\u5f00\u59cb\u9884\u89c8\u201d\u3002",
+                "suggestionEn": "Click Start Preview above the main viewport.",
+                "completionCriteria": "\u9879\u76ee\u9884\u89c8\u72b6\u6001\u53d8\u4e3a running\u3002",
+                "completionCriteriaEn": "Project preview reaches running.",
+                "guidanceIntent": "start_preview"
+        },
+        {
+                "taskKey": "tutorial.basics.stop_preview",
+                "type": "tutorial",
+                "chapterKey": "chapter_preview",
+                "chapterOrder": 4,
+                "chapterTitle": "\u7ec8\u7ae0\uff1a\u8fd0\u884c\u4f60\u7684\u4e16\u754c",
+                "chapterTitleEn": "Final Chapter: Run Your World",
+                "chapterSummary": "\u542f\u52a8\u5e76\u7ed3\u675f\u9879\u76ee\u9884\u89c8\uff0c\u786e\u8ba4\u4e16\u754c\u80fd\u5b8c\u6574\u6062\u590d\u3002",
+                "chapterSummaryEn": "Start and stop project preview, confirming that the world restores cleanly.",
+                "chapterTaskOrder": 2,
+                "globalOrder": 29,
+                "order": 29,
+                "title": "\u7ed3\u675f\u9879\u76ee\u9884\u89c8",
+                "titleEn": "Stop Project Preview",
+                "message": "\u70b9\u51fb\u201c\u7ed3\u675f\u9884\u89c8\u201d\uff0c\u7b49\u5f85\u9884\u89c8\u5b8c\u5168\u505c\u6b62\u5e76\u6210\u529f\u6062\u590d\u573a\u666f\u3002",
+                "messageEn": "Click Stop Preview and wait until preview stops and the scene is restored.",
+                "suggestion": "\u70b9\u51fb\u201c\u7ed3\u675f\u9884\u89c8\u201d\uff0c\u4fdd\u6301\u7f16\u8f91\u5668\u6253\u5f00\u3002",
+                "suggestionEn": "Click Stop Preview and keep the editor open.",
+                "completionCriteria": "\u9884\u89c8\u5b8c\u5168\u505c\u6b62\uff0c\u573a\u666f\u6062\u590d\u6210\u529f\u4e14\u65e0\u9519\u8bef\u3002",
+                "completionCriteriaEn": "Preview fully stops and its scene restoration succeeds.",
+                "guidanceIntent": "stop_preview"
+        }
+])
+    RETIRED_TUTORIAL_TASK_KEYS = {'tutorial.import_model', 'tutorial.transform_model', 'tutorial.adjust_lighting', 'tutorial.adjust_physics', 'tutorial.create_node', 'tutorial.move_node', 'tutorial.connect_nodes', 'tutorial.drag_block', 'tutorial.edit_block_parameter', 'tutorial.set_transition_condition', 'tutorial.run_node_graph', 'tutorial.rotate_model'}
+    TUTORIAL_TOTAL_TASKS = 29
+    TUTORIAL_VALUE_TOLERANCE = 0.01
+    TUTORIAL_ROTATION_TOLERANCE = 0.1
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="CabbageAssistant")
@@ -291,6 +811,19 @@ class CabbageContextService:
     @staticmethod
     def _clone(value: Any) -> Any:
         return json.loads(json.dumps(value, ensure_ascii=False))
+
+    @classmethod
+    def _merge_baseline(cls, current: Any, incoming: Any) -> dict[str, Any]:
+        """Merge later baseline sections without overwriting the first captured value."""
+        result = cls._clone(current) if isinstance(current, dict) else {}
+        if not isinstance(incoming, dict):
+            return result
+        for key, value in incoming.items():
+            if key not in result:
+                result[key] = cls._clone(value)
+            elif isinstance(result.get(key), dict) and isinstance(value, dict):
+                result[key] = cls._merge_baseline(result[key], value)
+        return result
 
     @staticmethod
     def _now_ms() -> int:
@@ -432,13 +965,17 @@ class CabbageContextService:
 
     @classmethod
     def _ensure_tutorial_slots_locked(cls, context: dict[str, Any], now: int) -> None:
-        """Keep one visible scene task and one visible node task; queue the rest."""
+        """Keep exactly one basic tutorial task active and all later steps queued."""
         templates = cls._tutorial_templates()
         history_keys = {
             str(task.get("taskKey") or "")
             for task in context.get("taskHistory") or []
             if isinstance(task, dict) and task.get("type") == "tutorial"
         }
+        session = context.get("tutorialSession") if isinstance(context.get("tutorialSession"), dict) else {}
+        session_status = str(session.get("status") or "active")
+        tutorial_finished = session_status in {"restoring", "completed", "restore_failed"}
+
         normalized_tasks: list[dict[str, Any]] = []
         for raw in context.get("activeTasks") or []:
             if not isinstance(raw, dict):
@@ -447,27 +984,20 @@ class CabbageContextService:
             template = templates.get(task_key)
             if task_key in cls.RETIRED_TUTORIAL_TASK_KEYS:
                 continue
-            if not template or raw.get("type") != "tutorial":
+            if raw.get("type") != "tutorial":
                 normalized_tasks.append(raw)
                 continue
-            if task_key in history_keys:
+            if not template or task_key in history_keys or tutorial_finished:
                 continue
             task = dict(raw)
-            task.update({
-                "type": "tutorial",
-                "track": template["track"],
-                "order": template["order"],
-                "title": template["title"],
-                "titleEn": template["titleEn"],
-                "message": template["message"],
-                "messageEn": template["messageEn"],
-                "suggestion": template["suggestion"],
-                "suggestionEn": template["suggestionEn"],
-                "completionCriteria": template["completionCriteria"],
-                "completionCriteriaEn": template["completionCriteriaEn"],
-            })
+            task.update(template)
+            task.pop("track", None)
+            task.pop("discipline", None)
             normalized_tasks.append(task)
         context["activeTasks"] = normalized_tasks
+
+        if tutorial_finished:
+            return
 
         existing_keys = {
             str(task.get("taskKey") or "")
@@ -488,25 +1018,72 @@ class CabbageContextService:
             })
             context["activeTasks"].append(task)
 
-        for track in ("scene", "node"):
-            track_tasks = sorted(
-                (
-                    task for task in context["activeTasks"]
-                    if isinstance(task, dict)
-                    and task.get("type") == "tutorial"
-                    and task.get("track") == track
-                ),
-                key=lambda task: int(task.get("order") or 0),
-            )
-            if not track_tasks:
-                continue
-            visible = [task for task in track_tasks if task.get("status") in {"active", "pending"}]
-            selected = visible[0] if visible else track_tasks[0]
-            for task in track_tasks:
-                next_status = "active" if task is selected else "queued"
-                if task.get("status") != next_status:
-                    task["status"] = next_status
-                    task["updatedAt"] = now
+        tutorial_tasks = sorted(
+            (
+                task for task in context["activeTasks"]
+                if isinstance(task, dict) and task.get("type") == "tutorial"
+            ),
+            key=lambda task: int(task.get("globalOrder") or task.get("order") or 0),
+        )
+        selected = tutorial_tasks[0] if tutorial_tasks else None
+        for task in tutorial_tasks:
+            next_status = "active" if task is selected else "queued"
+            if task.get("status") != next_status:
+                task["status"] = next_status
+                task["updatedAt"] = now
+
+    @classmethod
+    def _default_tutorial_session(cls, now: int) -> dict[str, Any]:
+        return {
+            "sessionId": f"tutorial_{uuid.uuid4().hex}",
+            "status": "active",
+            "startedAt": now,
+            "restoredAt": 0,
+            "bindings": {
+                "sceneName": "",
+                "modelActorName": "",
+                "modelActorId": "",
+                "modelResourcePath": "",
+                "startNodeId": "",
+                "startNodeCreatedByTutorial": False,
+                "customNodeId": "",
+                "edgeId": "",
+                "whenEnterBlockId": "",
+                "waitBlockId": "",
+                "conditionBlockId": "",
+            },
+            "baseline": {},
+            "modificationLog": [],
+            "lastRestoreError": "",
+            "completionNoticeExpiresAt": 0,
+        }
+
+    @classmethod
+    def _normalize_tutorial_session(cls, raw: Any, now: int) -> dict[str, Any]:
+        default = cls._default_tutorial_session(now)
+        if not isinstance(raw, dict):
+            return default
+        session = dict(default)
+        session["sessionId"] = str(raw.get("sessionId") or default["sessionId"])[:180]
+        status = str(raw.get("status") or "active")
+        session["status"] = status if status in {"active", "restoring", "completed", "restore_failed"} else "active"
+        for key in ("startedAt", "restoredAt", "completionNoticeExpiresAt"):
+            session[key] = max(0, int(raw.get(key) or 0))
+        if not session["startedAt"]:
+            session["startedAt"] = now
+        session["lastRestoreError"] = str(raw.get("lastRestoreError") or "")[:2000]
+        raw_bindings = raw.get("bindings") if isinstance(raw.get("bindings"), dict) else {}
+        bindings = dict(default["bindings"])
+        for key in bindings:
+            if key == "startNodeCreatedByTutorial":
+                bindings[key] = bool(raw_bindings.get(key))
+            else:
+                bindings[key] = str(raw_bindings.get(key) or "")[:500]
+        session["bindings"] = bindings
+        session["baseline"] = cls._clone(raw.get("baseline")) if isinstance(raw.get("baseline"), dict) else {}
+        raw_log = raw.get("modificationLog") if isinstance(raw.get("modificationLog"), list) else []
+        session["modificationLog"] = [cls._clone(item) for item in raw_log if isinstance(item, dict)][-200:]
+        return session
 
     @classmethod
     def _default_context(cls, project_path: Path) -> dict[str, Any]:
@@ -542,6 +1119,7 @@ class CabbageContextService:
                 "positionChanged": False,
                 "scaleChanged": False,
             },
+            "tutorialSession": cls._default_tutorial_session(now),
             "worldGoal": {
                 "prompt": "",
                 "mode": "story",
@@ -599,6 +1177,7 @@ class CabbageContextService:
             if isinstance(value.get(key), dict):
                 merged.update(value[key])
             value[key] = merged
+        value["tutorialSession"] = cls._normalize_tutorial_session(value.get("tutorialSession"), cls._now_ms())
         if not isinstance(value.get("goalSignalCounts"), dict):
             value["goalSignalCounts"] = {}
         value["goalSignalCounts"] = {
@@ -764,16 +1343,17 @@ class CabbageContextService:
     @classmethod
     def _normalize_event(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
-            raise ValueError("包菜操作事件格式不正确")
+            raise ValueError("\u5305\u83dc\u64cd\u4f5c\u4e8b\u4ef6\u683c\u5f0f\u4e0d\u6b63\u786e")
         event_type = str(payload.get("type") or "").strip()[:80]
         if not event_type:
-            raise ValueError("包菜操作事件缺少 type")
+            raise ValueError("\u5305\u83dc\u64cd\u4f5c\u4e8b\u4ef6\u7f3a\u5c11 type")
         details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
         safe_details: dict[str, Any] = {}
         for key, raw in details.items():
             name = str(key)[:80]
             if isinstance(raw, (str, int, float, bool)) or raw is None:
-                safe_details[name] = raw if not isinstance(raw, str) else raw[:500]
+                limit = 50000 if name in {"baselineJson", "modificationJson"} else 2000 if name in {"error", "restoreError"} else 500
+                safe_details[name] = raw if not isinstance(raw, str) else raw[:limit]
         return {
             "eventId": str(payload.get("eventId") or f"event_{uuid.uuid4().hex}"),
             "type": event_type,
@@ -798,52 +1378,235 @@ class CabbageContextService:
         context["taskHistory"].append(task)
         return True
 
+    @staticmethod
+    def _detail_text(details: dict[str, Any], *keys: str) -> str:
+        for key in keys:
+            value = str(details.get(key) or "").strip()
+            if value:
+                return value
+        return ""
+
+    @staticmethod
+    def _detail_number(details: dict[str, Any], *keys: str) -> float | None:
+        for key in keys:
+            raw = details.get(key)
+            try:
+                if raw is not None and str(raw).strip() != "":
+                    return float(raw)
+            except (TypeError, ValueError):
+                continue
+        return None
+
+    @staticmethod
+    def _detail_bool(details: dict[str, Any], *keys: str) -> bool | None:
+        for key in keys:
+            raw = details.get(key)
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, (int, float)):
+                return bool(raw)
+            text = str(raw or "").strip().lower()
+            if text in {"true", "1", "yes", "on", "enabled", "running", "stopped"}:
+                return True
+            if text in {"false", "0", "no", "off", "disabled", ""}:
+                return False
+        return None
+
+    @classmethod
+    def _active_tutorial_task(cls, context: dict[str, Any]) -> dict[str, Any] | None:
+        tasks = [
+            task for task in context.get("activeTasks") or []
+            if isinstance(task, dict) and task.get("type") == "tutorial" and task.get("status") == "active"
+        ]
+        if not tasks:
+            return None
+        return min(tasks, key=lambda task: int(task.get("globalOrder") or task.get("order") or 0))
+
+    @classmethod
+    def _append_tutorial_modification(
+        cls, session: dict[str, Any], operation: str, event: dict[str, Any], **details: Any,
+    ) -> None:
+        entry = {
+            "operation": operation,
+            "timestamp": int(event.get("timestamp") or cls._now_ms()),
+            **{key: value for key, value in details.items() if value not in (None, "")},
+        }
+        log = session.setdefault("modificationLog", [])
+        if entry not in log[-10:]:
+            log.append(entry)
+        session["modificationLog"] = log[-200:]
+
     @classmethod
     def _apply_tutorial_progress(cls, context: dict[str, Any], event: dict[str, Any]) -> list[str]:
-        if not event["success"]:
+        event_type = str(event.get("type") or "")
+        details = event.get("details") if isinstance(event.get("details"), dict) else {}
+        now = int(event.get("timestamp") or cls._now_ms())
+        session = context.setdefault("tutorialSession", cls._default_tutorial_session(now))
+        bindings = session.setdefault("bindings", cls._default_tutorial_session(now)["bindings"])
+
+        # Session lifecycle events are accepted independently of the current tutorial step.
+        if event_type == "tutorial_baseline_captured" and event.get("success"):
+            baseline_json = str(details.get("baselineJson") or "")
+            if baseline_json:
+                try:
+                    baseline = json.loads(baseline_json)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    baseline = None
+                if isinstance(baseline, dict):
+                    session["baseline"] = cls._merge_baseline(session.get("baseline"), baseline)
             return []
-        event_type = event["type"]
-        now = event["timestamp"]
-        completed: list[str] = []
-        if event_type in {"model_imported", "actor_created"}:
-            if cls._complete_task_locked(context, "tutorial.import_model", now):
-                completed.append("tutorial.import_model")
-        if event_type in {"transform_position", "transform_rotation", "transform_scale"}:
-            if cls._complete_task_locked(context, "tutorial.transform_model", now):
-                completed.append("tutorial.transform_model")
-        if event_type == "lighting_changed":
-            if cls._complete_task_locked(context, "tutorial.adjust_lighting", now):
-                completed.append("tutorial.adjust_lighting")
-        if event_type == "physics_changed":
-            if cls._complete_task_locked(context, "tutorial.adjust_physics", now):
-                completed.append("tutorial.adjust_physics")
-        if event_type == "node_created":
-            if cls._complete_task_locked(context, "tutorial.create_node", now):
-                completed.append("tutorial.create_node")
-        if event_type == "node_moved":
-            if cls._complete_task_locked(context, "tutorial.move_node", now):
-                completed.append("tutorial.move_node")
-        if event_type == "node_connected":
-            source_node_id = str((event.get("details") or {}).get("sourceNodeId") or "")
-            target_node_id = str((event.get("details") or {}).get("targetNodeId") or "")
-            if source_node_id and target_node_id and source_node_id != target_node_id:
-                if cls._complete_task_locked(context, "tutorial.connect_nodes", now):
-                    completed.append("tutorial.connect_nodes")
-        if event_type == "block_added":
-            details = event.get("details") or {}
-            if details.get("interaction") == "drag":
-                if cls._complete_task_locked(context, "tutorial.drag_block", now):
-                    completed.append("tutorial.drag_block")
-            if details.get("workspaceRole") == "condition":
-                if cls._complete_task_locked(context, "tutorial.set_transition_condition", now):
-                    completed.append("tutorial.set_transition_condition")
-        if event_type == "block_parameter_changed":
-            if cls._complete_task_locked(context, "tutorial.edit_block_parameter", now):
-                completed.append("tutorial.edit_block_parameter")
-        if event_type in {"run_started", "run_succeeded"}:
-            if cls._complete_task_locked(context, "tutorial.run_node_graph", now):
-                completed.append("tutorial.run_node_graph")
-        return completed
+        if event_type == "tutorial_completion_notice_dismissed":
+            if session.get("status") == "completed":
+                session["completionNoticeExpiresAt"] = 0
+            return []
+        if event_type == "tutorial_restore_retry_requested":
+            if session.get("status") == "restore_failed":
+                session["status"] = "restoring"
+                session["lastRestoreError"] = ""
+            return []
+        if event_type == "tutorial_restore_failed":
+            session["status"] = "restore_failed"
+            session["lastRestoreError"] = cls._detail_text(details, "error", "restoreError")[:2000]
+            session["completionNoticeExpiresAt"] = 0
+            return []
+        if event_type == "tutorial_restore_succeeded" and event.get("success"):
+            session["status"] = "completed"
+            session["restoredAt"] = now
+            session["lastRestoreError"] = ""
+            session["completionNoticeExpiresAt"] = now + 15000
+            session["modificationLog"] = []
+            return []
+
+        if not event.get("success") or session.get("status") != "active":
+            return []
+        task = cls._active_tutorial_task(context)
+        if not task:
+            return []
+        task_key = str(task.get("taskKey") or "")
+        matched = False
+
+        actor_name = cls._detail_text(details, "actorName", "objectName", "modelActorName")
+        actor_id = cls._detail_text(details, "actorId", "objectId", "modelActorId")
+        bound_actor_name = str(bindings.get("modelActorName") or "")
+        bound_actor_id = str(bindings.get("modelActorId") or "")
+        actor_matches = bool((bound_actor_id and actor_id == bound_actor_id) or (bound_actor_name and actor_name == bound_actor_name))
+        node_id = cls._detail_text(details, "nodeId")
+        edge_id = cls._detail_text(details, "edgeId")
+        block_id = cls._detail_text(details, "blockId")
+        axis = cls._detail_text(details, "axis").lower()
+        value = cls._detail_number(details, "value", "newValue")
+
+        if task_key == "tutorial.basics.viewport_focus":
+            matched = event_type == "viewport_focused"
+        elif task_key == "tutorial.basics.camera_forward_back":
+            delta = cls._detail_number(details, "actualDelta", "distance", "delta")
+            matched = event_type == "camera_moved" and str(details.get("axisGroup") or "") == "forward_back" and str(details.get("key") or "").upper() in {"W", "S"} and abs(delta or 0) > 1e-6
+        elif task_key == "tutorial.basics.camera_left_right":
+            delta = cls._detail_number(details, "actualDelta", "distance", "delta")
+            matched = event_type == "camera_moved" and str(details.get("axisGroup") or "") == "left_right" and str(details.get("key") or "").upper() in {"A", "D"} and abs(delta or 0) > 1e-6
+        elif task_key == "tutorial.basics.camera_up_down":
+            delta = cls._detail_number(details, "actualDelta", "distance", "delta")
+            matched = event_type == "camera_moved" and str(details.get("axisGroup") or "") == "up_down" and str(details.get("key") or "").upper() in {"Q", "E"} and abs(delta or 0) > 1e-6
+        elif task_key == "tutorial.basics.camera_rotate":
+            delta = cls._detail_number(details, "actualDelta", "rotationDelta", "delta")
+            matched = event_type == "camera_rotated" and details.get("interaction") == "right_mouse_drag" and abs(delta or 0) > 1e-6
+        elif task_key == "tutorial.basics.camera_wheel":
+            delta = cls._detail_number(details, "actualDelta", "distance", "delta")
+            matched = event_type == "camera_moved" and details.get("interaction") == "wheel" and abs(delta or 0) > 1e-6
+        elif task_key == "tutorial.basics.open_scene_manager":
+            matched = event_type == "panel_opened" and details.get("panelId") == "SceneTools" and details.get("source") == "user"
+        elif task_key == "tutorial.basics.import_model":
+            matched = event_type == "model_imported" and bool(actor_name or actor_id)
+            if matched:
+                bindings["sceneName"] = cls._detail_text(details, "sceneName")
+                bindings["modelActorName"] = actor_name
+                bindings["modelActorId"] = actor_id
+                bindings["modelResourcePath"] = cls._detail_text(details, "resourcePath")
+                cls._append_tutorial_modification(session, "model_imported", event, sceneName=bindings["sceneName"], actorName=actor_name, actorId=actor_id, resourcePath=bindings["modelResourcePath"])
+        elif task_key == "tutorial.basics.select_model":
+            matched = event_type == "actor_selected" and actor_matches and details.get("source") in {None, "", "user", "scene_tree", "viewport"}
+        elif task_key == "tutorial.basics.set_position_x":
+            matched = event_type == "transform_position" and actor_matches and axis == "x" and value is not None and abs(value - 1.0) <= cls.TUTORIAL_VALUE_TOLERANCE
+        elif task_key == "tutorial.basics.set_rotation_y":
+            matched = event_type == "transform_rotation" and actor_matches and axis == "y" and value is not None and abs(value - 45.0) <= cls.TUTORIAL_ROTATION_TOLERANCE
+        elif task_key == "tutorial.basics.set_scale_x":
+            matched = event_type == "transform_scale" and actor_matches and axis == "x" and value is not None and abs(value - 1.5) <= cls.TUTORIAL_VALUE_TOLERANCE
+        elif task_key == "tutorial.basics.enable_physics":
+            enabled = cls._detail_bool(details, "value", "newValue", "enabled")
+            matched = event_type == "physics_changed" and actor_matches and details.get("operation") == "SetPhysicsEnabled" and enabled is True
+        elif task_key == "tutorial.basics.set_mass":
+            matched = event_type == "physics_changed" and actor_matches and details.get("operation") == "SetMass" and value is not None and abs(value - 10.0) <= cls.TUTORIAL_VALUE_TOLERANCE
+        elif task_key == "tutorial.basics.set_light_x":
+            matched = event_type == "lighting_changed" and axis == "x" and value is not None and abs(value - 0.5) <= cls.TUTORIAL_VALUE_TOLERANCE
+            if matched:
+                cls._append_tutorial_modification(session, "lighting_changed", event, sceneName=cls._detail_text(details, "sceneName"), axis=axis, value=value)
+        elif task_key == "tutorial.basics.open_nodes":
+            matched = event_type == "panel_opened" and details.get("panelId") == "NodeGraphPanel" and details.get("source") == "user"
+        elif task_key == "tutorial.basics.confirm_start_node":
+            node_type = str(details.get("nodeType") or "").lower()
+            unique_start = cls._detail_bool(details, "uniqueStart") is True or int(cls._detail_number(details, "startNodeCount") or 0) == 1
+            matched = event_type in {"node_created", "node_selected"} and node_type == "start" and bool(node_id) and unique_start
+            if matched:
+                bindings["startNodeId"] = node_id
+                created = event_type == "node_created"
+                bindings["startNodeCreatedByTutorial"] = created
+                if created:
+                    cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="start")
+        elif task_key == "tutorial.basics.create_custom_node":
+            matched = event_type == "node_created" and str(details.get("nodeType") or "").lower() == "custom" and bool(node_id)
+            if matched:
+                bindings["customNodeId"] = node_id
+                cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="custom")
+        elif task_key == "tutorial.basics.move_custom_node":
+            delta = cls._detail_number(details, "actualDelta", "distance", "delta")
+            matched = event_type == "node_moved" and node_id == bindings.get("customNodeId") and (delta is None or abs(delta) > 1e-6)
+        elif task_key == "tutorial.basics.connect_nodes":
+            source_id = cls._detail_text(details, "sourceNodeId")
+            target_id = cls._detail_text(details, "targetNodeId")
+            matched = event_type == "node_connected" and source_id == bindings.get("startNodeId") and target_id == bindings.get("customNodeId") and bool(edge_id)
+            if matched:
+                bindings["edgeId"] = edge_id
+                cls._append_tutorial_modification(session, "edge_created", event, edgeId=edge_id, sourceNodeId=source_id, targetNodeId=target_id)
+        elif task_key == "tutorial.basics.open_custom_node":
+            matched = event_type == "node_selected" and node_id == bindings.get("customNodeId") and details.get("source") in {None, "", "user"}
+        elif task_key == "tutorial.basics.add_when_enter":
+            matched = event_type == "block_added" and node_id == bindings.get("customNodeId") and details.get("blockType") == "node_when_enter" and bool(block_id)
+            if matched:
+                bindings["whenEnterBlockId"] = block_id
+                cls._append_tutorial_modification(session, "block_created", event, nodeId=node_id, blockId=block_id, blockType="node_when_enter")
+        elif task_key == "tutorial.basics.add_wait":
+            matched = event_type in {"block_added", "block_connected"} and node_id == bindings.get("customNodeId") and details.get("blockType") == "control_wait" and details.get("parentBlockType") == "node_when_enter" and cls._detail_bool(details, "connected") is True and bool(block_id)
+            if matched:
+                bindings["waitBlockId"] = block_id
+                cls._append_tutorial_modification(session, "block_created", event, nodeId=node_id, blockId=block_id, blockType="control_wait")
+        elif task_key == "tutorial.basics.set_wait_seconds":
+            new_value = cls._detail_number(details, "newValue", "value")
+            matched = event_type == "block_parameter_changed" and block_id == bindings.get("waitBlockId") and details.get("blockType") == "control_wait" and str(details.get("fieldName") or "").upper() == "SECONDS" and new_value is not None and abs(new_value - 2.0) <= cls.TUTORIAL_VALUE_TOLERANCE
+        elif task_key == "tutorial.basics.select_edge":
+            matched = event_type == "edge_selected" and edge_id == bindings.get("edgeId") and details.get("source") in {None, "", "user"}
+        elif task_key == "tutorial.basics.add_true_condition":
+            bool_value = cls._detail_bool(details, "newValue", "value")
+            matched = event_type in {"block_added", "block_connected", "block_parameter_changed"} and edge_id == bindings.get("edgeId") and details.get("workspaceRole") == "condition" and details.get("blockType") == "logic_boolean" and bool_value is True and bool(block_id)
+            if matched:
+                bindings["conditionBlockId"] = block_id
+                cls._append_tutorial_modification(session, "block_created", event, edgeId=edge_id, blockId=block_id, blockType="logic_boolean")
+        elif task_key == "tutorial.basics.run_graph":
+            matched = event_type == "run_succeeded"
+        elif task_key == "tutorial.basics.start_preview":
+            matched = event_type == "preview_started" and str(details.get("status") or "running") == "running"
+        elif task_key == "tutorial.basics.stop_preview":
+            stopped = str(details.get("status") or "stopped") == "stopped"
+            restored = cls._detail_bool(details, "restored", "sceneRestored") is True
+            restore_error = cls._detail_text(details, "restoreError", "error")
+            matched = event_type == "preview_stopped" and stopped and restored and not restore_error
+
+        if not matched or not cls._complete_task_locked(context, task_key, now):
+            return []
+        if task_key == "tutorial.basics.stop_preview":
+            session["status"] = "restoring"
+            session["lastRestoreError"] = ""
+            session["completionNoticeExpiresAt"] = 0
+        return [task_key]
 
     @classmethod
     def _goal_signals_for_event(cls, event: dict[str, Any]) -> set[str]:

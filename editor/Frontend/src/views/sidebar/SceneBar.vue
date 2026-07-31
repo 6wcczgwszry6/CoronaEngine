@@ -355,10 +355,11 @@
           </div>
 
           <!-- 对象列表 -->
-          <div v-show="actorsExpanded" class="pl-2 pb-8">
+          <div v-show="actorsExpanded" class="pl-2 pb-8" data-guidance="scene-actor-list">
             <div
               v-for="scene in sceneImages"
               :key="scene.name"
+              :data-actor-name="scene.name"
               class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c]"
               :class="{ 'bg-[#4b391c]/60': selectedItem === scene.name }"
               @click="onActorRowClick(scene, $event)"
@@ -973,6 +974,18 @@ const SelectActor = (scene) => {
   if (isMediaItem(scene) && !isAudioActor(scene)) return;
   // 通知积木编辑器当前选中的物体
   setActorContext(currentSceneName.value, scene.name);
+  void cabbageContextService.recordEvent({
+    type: 'actor_selected',
+    category: 'scene',
+    success: true,
+    details: {
+      sceneName: currentSceneName.value,
+      actorName: String(scene.name || ''),
+      actorId: String(scene.handle || scene.id || scene.actor_id || ''),
+      actorType: String(scene.type || 'actor'),
+      source: 'scene_tree',
+    },
+  });
   editorApi.sceneTools.selectActor(currentSceneName.value, scene.type || 'actor', scene.name).catch((error) => {
     logError('Failed to publish actor selection', error);
   });
@@ -1406,7 +1419,9 @@ const createActorFromSelectedFile = async (payload, actorType, logLabel) => {
       details: {
         sceneName: currentSceneName.value,
         actorName: String(actor?.name || ''),
+        actorId: String(actor?.handle || actor?.id || actor?.actor_id || ''),
         actorType: 'model',
+        resourcePath: String(selectedPath || ''),
       },
     });
   }

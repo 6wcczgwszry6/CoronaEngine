@@ -113,59 +113,6 @@ function normalizeSteps(raw) {
     .slice(0, 8);
 }
 
-const ART_COMPLETION_SIGNALS = new Set([
-  'model_imported',
-  'object_transformed',
-  'lighting_adjusted',
-  'physics_adjusted',
-]);
-
-const PROGRAMMING_COMPLETION_SIGNALS = new Set([
-  'node_created',
-  'node_moved',
-  'nodes_connected',
-  'block_added',
-  'block_parameter_changed',
-  'transition_condition_set',
-  'node_graph_run',
-  'run_succeeded',
-]);
-
-const ART_GUIDANCE_INTENTS = new Set([
-  'import_model',
-  'transform_model',
-  'adjust_lighting',
-  'adjust_physics',
-]);
-
-function inferTaskDiscipline(raw = {}, type = '') {
-  const explicit = String(raw.discipline || '')
-    .trim()
-    .toLowerCase();
-  if (['programming', 'art'].includes(explicit)) return explicit;
-  if (type === 'node-issue') return 'programming';
-
-  const track = String(raw.track || '')
-    .trim()
-    .toLowerCase();
-  if (['scene', 'art'].includes(track)) return 'art';
-  if (['node', 'programming'].includes(track)) return 'programming';
-
-  const phase = String(raw.phase || '')
-    .trim()
-    .toLowerCase();
-  if (phase === 'scene-polish') return 'art';
-  if (phase === 'node-logic') return 'programming';
-
-  const completionSignal = String(raw.completionSignal || '').trim();
-  if (ART_COMPLETION_SIGNALS.has(completionSignal)) return 'art';
-  if (PROGRAMMING_COMPLETION_SIGNALS.has(completionSignal)) return 'programming';
-
-  const guidanceIntent = String(raw.guidanceIntent || '').trim();
-  if (ART_GUIDANCE_INTENTS.has(guidanceIntent)) return 'art';
-  return 'programming';
-}
-
 function walkBlocks(value, result = []) {
   if (Array.isArray(value)) {
     value.forEach((item) => walkBlocks(item, result));
@@ -345,9 +292,15 @@ function normalizeTask(raw, graphRevision = '', now = Date.now()) {
     taskKey,
     issueKey: taskKey,
     type,
-    discipline: inferTaskDiscipline(raw, type),
-    track: type !== 'node-issue' ? String(raw.track || '').slice(0, 40) : '',
     order: Number(raw.order) || 0,
+    globalOrder: Number(raw.globalOrder || raw.order) || 0,
+    chapterKey: String(raw.chapterKey || '').slice(0, 80),
+    chapterOrder: Number(raw.chapterOrder) || 0,
+    chapterTaskOrder: Number(raw.chapterTaskOrder) || 0,
+    chapterTitle: String(raw.chapterTitle || '').slice(0, 160),
+    chapterTitleEn: normalizeEnglishTaskField(raw.chapterTitleEn, raw.chapterTitle).slice(0, 160),
+    chapterSummary: String(raw.chapterSummary || '').slice(0, 500),
+    chapterSummaryEn: normalizeEnglishTaskField(raw.chapterSummaryEn, raw.chapterSummary).slice(0, 500),
     status: String(raw.status || (type === 'node-issue' ? 'candidate' : 'pending')),
     code: String(raw.code || taskKey),
     severity: String(raw.severity || 'warning'),
@@ -444,6 +397,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     worldGoal: {},
     goalTaskPlan: {},
     goalSignalCounts: {},
+    tutorialSession: {},
     activeTasks: [],
     taskHistory: [],
     recentOperationEvents: [],
@@ -533,6 +487,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.worldGoal = {};
       this.goalTaskPlan = {};
       this.goalSignalCounts = {};
+      this.tutorialSession = {};
       this.activeTasks = [];
       this.taskHistory = [];
       this.recentOperationEvents = [];
@@ -595,6 +550,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.worldGoal = clone(context.worldGoal || {}, {});
       this.goalTaskPlan = clone(context.goalTaskPlan || {}, {});
       this.goalSignalCounts = clone(context.goalSignalCounts || {}, {});
+      this.tutorialSession = clone(context.tutorialSession || {}, {});
       this.activeTasks = (Array.isArray(context.activeTasks) ? context.activeTasks : [])
         .map((task) =>
           normalizeTask(task, this.graphRevision, Number(task?.updatedAt) || Date.now())
@@ -826,7 +782,6 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         taskKey,
         issueKey: taskKey,
         type: 'optimization-tip',
-        discipline: 'opinion',
         status: 'active',
         transient: true,
         tipKey,
@@ -877,7 +832,6 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
         taskKey,
         issueKey: taskKey,
         type: 'pre-warning',
-        discipline: 'hint',
         status: 'active',
         transient: true,
         code,

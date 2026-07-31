@@ -336,6 +336,21 @@ function selectCategory(name) {
   renderPaletteBlocks();
 }
 
+async function focusBlockType(blockType) {
+  const type = String(blockType || '');
+  if (!type) return false;
+  const category = categories.value.find((item) => item.blocks.some((blockItem) => blockItem.type === type));
+  if (!category) return false;
+  activeCategoryName.value = category.name;
+  renderPaletteBlocks();
+  await nextTick();
+  await new Promise((resolve) => window.requestAnimationFrame(() => window.requestAnimationFrame(resolve)));
+  const block = workspace?.getAllBlocks?.(false).find((item) => item.type === type);
+  const root = block?.getSvgRoot?.();
+  root?.scrollIntoView?.({ block: 'center', inline: 'nearest', behavior: 'smooth' });
+  return Boolean(root);
+}
+
 function resizeBlockly() {
   if (!workspace || !BlocklyLib) return;
   try {
@@ -396,6 +411,8 @@ function renderPaletteBlocks() {
         preparePaletteBlock(block, category);
         block.initSvg();
         block.render();
+        block.getSvgRoot?.()?.setAttribute('data-block-type', String(block.type || ''));
+        block.getSvgRoot?.()?.setAttribute('data-block-palette', props.workspaceRole);
         block.moveBy(16, provisionalY);
         renderedBlocks.push(block);
         provisionalY += 72;
@@ -606,7 +623,7 @@ onBeforeUnmount(() => {
   workspace = null;
 });
 
-defineExpose({ resizeBlockly });
+defineExpose({ focusBlockType, resizeBlockly });
 </script>
 
 <style scoped>

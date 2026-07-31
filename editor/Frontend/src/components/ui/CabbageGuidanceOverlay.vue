@@ -1,11 +1,11 @@
-﻿<template>
+<template>
   <Teleport to="body">
     <div
       v-if="guidance.state.active"
       class="guidance-overlay"
       role="dialog"
       aria-modal="true"
-      :aria-label="guidance.state.guidance?.title || '操作展示'"
+      :aria-label="guidance.state.guidance?.title || t('cabbageGuidance.title')"
       @mousedown.stop
       @pointerdown.stop
       @click.stop
@@ -14,18 +14,18 @@
       <div v-if="highlightStyle" class="guidance-highlight" :style="highlightStyle"></div>
       <section class="guidance-card">
         <div class="guidance-card-head">
-          <strong>{{ guidance.state.guidance?.title || '操作展示' }}</strong>
+          <strong>{{ guidance.state.guidance?.title || t('cabbageGuidance.title') }}</strong>
           <span>{{ guidance.state.stepIndex + 1 }} / {{ guidance.state.guidance?.steps?.length || 1 }}</span>
         </div>
-        <p>{{ step?.text || '请查看高亮区域。' }}</p>
+        <p>{{ localizedStepText }}</p>
         <div class="guidance-actions">
-          <button type="button" :disabled="guidance.state.stepIndex <= 0" @click="guidance.previous()">上一步</button>
+          <button type="button" :disabled="guidance.state.stepIndex <= 0" @click="guidance.previous()">{{ t('cabbageGuidance.previous') }}</button>
           <button type="button" class="primary" @click="guidance.next()">
-            {{ isLast ? '完成' : '下一步' }}
+            {{ isLast ? t('cabbageGuidance.complete') : t('cabbageGuidance.next') }}
           </button>
-          <button type="button" @click="guidance.stop()">停止</button>
+          <button type="button" @click="guidance.stop()">{{ t('cabbageGuidance.stop') }}</button>
         </div>
-        <small>仅演示操作位置，不会修改当前世界。按 Esc 可退出。</small>
+        <small>{{ t('cabbageGuidance.safeNotice') }}</small>
       </section>
     </div>
   </Teleport>
@@ -33,10 +33,16 @@
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { guidanceService as guidance } from '@/services/cabbageGuidanceService.js';
 
+const { t, locale } = useI18n();
 const step = computed(() => guidance.state.guidance?.steps?.[guidance.state.stepIndex] || null);
-const isLast = computed(() => guidance.state.stepIndex >= (guidance.state.guidance?.steps?.length || 1) - 1);
+const localizedStepText = computed(() => {
+  const current = step.value || {};
+  if (locale.value === 'en-US') return current.textEn || current.text || t('cabbageGuidance.fallbackText');
+  return current.text || current.textEn || t('cabbageGuidance.fallbackText');
+});const isLast = computed(() => guidance.state.stepIndex >= (guidance.state.guidance?.steps?.length || 1) - 1);
 const rect = computed(() => guidance.state.targetRect);
 
 const highlightStyle = computed(() => {

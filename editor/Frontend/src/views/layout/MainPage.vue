@@ -293,6 +293,7 @@
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
             : 'border-green-500/50 text-green-200 bg-green-700/20 hover:bg-green-600/30'"
           :disabled="previewRunning || previewBusy"
+          data-guidance="preview-start"
           title="开始项目预览"
           @click="handleStartGamePreview"
         >
@@ -304,6 +305,7 @@
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
             : 'border-red-500/50 text-red-200 bg-red-700/20 hover:bg-red-600/30'"
           :disabled="!previewRunning || previewBusy"
+          data-guidance="preview-stop"
           title="结束项目预览"
           @click="handleStopGamePreview"
         >
@@ -322,6 +324,8 @@
       :class="{ 'viewport-cursor-hidden': nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' }"
       :style="nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
       data-viewport-pick-surface
+      data-guidance="main-viewport"
+      @focus="handleViewportFocus"
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
@@ -365,7 +369,8 @@
               type="number"
               step="0.1"
               :disabled="!sceneLightSettings.enabled || sceneLightBusy"
-              @change="updateSceneLight"
+              :data-guidance="axis === 'x' ? 'scene-light-x' : undefined"
+              @change="updateSceneLight(axis)"
             />
           </label>
         </div>
@@ -493,8 +498,9 @@
           pending: dockShortcutPending.has(shortcut.id),
         }"
         :aria-busy="dockShortcutPending.has(shortcut.id)"
+        :data-guidance="shortcut.id === 'SceneTools' ? 'scene-shortcut' : 'node-shortcut'"
         :title="`${isShortcutOpen(shortcut.id) ? '关闭' : '打开'}${shortcut.label}`"
-        @click.stop="toggleDockShortcut(shortcut.id)"
+        @click.stop="toggleDockShortcut(shortcut.id, { source: 'user' })"
       >
         <span class="dock-shortcut-icon">{{ shortcut.icon }}</span>
         <span>{{ shortcut.label }}</span>
@@ -563,7 +569,9 @@ import {
 } from '@/services/cabbageAssistantContextService.js';
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 import { cancelActiveNodeGraphGeneration } from '@/services/nodeGraphGenerationService.js';
-import { setActorContext } from '@/blockly/composables/useActorContext.js';
+import { clearActorContext, getActorContext, setActorContext } from '@/blockly/composables/useActorContext.js';
+import { guidanceService } from '@/services/cabbageGuidanceService.js';
+import { closeTutorialSessionChannel, requestTutorialRestore } from '@/services/cabbageTutorialSessionService.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
@@ -613,11 +621,20 @@ const detachResidentCabbageChat = async () => {
   }
 };
 
-const toggleDockShortcut = async (id) => {
+const recordPanelOpened = (id, source = 'user') => cabbageContextService.recordEvent({
+  type: 'panel_opened',
+  category: 'panel',
+  success: true,
+  details: { panelId: id, source },
+});
+
+const toggleDockShortcut = async (id, { source = 'user' } = {}) => {
+  const wasOpen = Boolean(dockStore.panels[id]?.open);
   if (id === 'NodeGraphPanel') {
     dockShortcutPending.add(id);
     try {
       await toggleFloatingPanel(dockStore, id);
+      if (!wasOpen && dockStore.panels[id]?.open) void recordPanelOpened(id, source);
     } finally {
       dockShortcutPending.delete(id);
     }
@@ -636,6 +653,7 @@ const toggleDockShortcut = async (id) => {
     return;
   }
   openDockedPanel(id);
+  if (!wasOpen && dockStore.panels[id]?.open) void recordPanelOpened(id, source);
 };
 const handleNodeGraphPanelOpenRequest = async () => {
   // AI generation must use the same centered in-editor floating surface as the
@@ -721,6 +739,17 @@ const mouseRotate = reactive({
   active: false,
   lastX: 0,
   lastY: 0,
+  startForward: null,
+  moved: false,
+});
+const cameraMovementGestures = new Map();
+const movementAxisGroups = Object.freeze({
+  w: 'forward_back',
+  s: 'forward_back',
+  a: 'left_right',
+  d: 'left_right',
+  q: 'up_down',
+  e: 'up_down',
 });
 
 const MAX_CAMERA_VIEWPORT_RENDER_PIXELS = 1920 * 1080;
@@ -988,6 +1017,9 @@ const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
 const previewDetails = ref({});
+let tutorialPreviewObservedRunning = false;
+let tutorialBaselineCaptureSessionId = '';
+let tutorialRestoreInProgress = false;
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
@@ -1422,7 +1454,7 @@ const syncSceneCameraBinding = async (sceneId, { preservePose = false } = {}) =>
   }
 };
 
-const updateSceneLight = async () => {
+const updateSceneLight = async (axis = '') => {
   if (sceneLightBusy.value) return false;
   const sceneId = cameraBindingState.value.sceneId
     || tabs.value[activeTab.value]?.id
@@ -1439,7 +1471,12 @@ const updateSceneLight = async () => {
       type: 'lighting_changed',
       category: 'lighting',
       success: true,
-      details: { sceneName: sceneId },
+      details: {
+        sceneName: sceneId,
+        axis: String(axis || '').toLowerCase(),
+        value: axis ? Number(direction[axis]) || 0 : undefined,
+        source: 'property_panel',
+      },
     });
     return true;
   } catch (error) {
@@ -1503,6 +1540,10 @@ const sendScratchPointerEvent = (type, event, pickedActor = '') => {
     pickedActor || ''
   ).catch(() => {});
 };
+const vectorDistance = (left = [], right = []) => Math.sqrt(
+  left.reduce((sum, value, index) => sum + ((Number(value) || 0) - (Number(right[index]) || 0)) ** 2, 0)
+);
+
 const handleWheel = (event) => {
   sendScratchPointerEvent('wheel', event);
   if (isGamePreviewInputLocked()) return;
@@ -1514,8 +1555,27 @@ const handleWheel = (event) => {
     event.preventDefault();
     return;
   }
+  const before = [...cameraState.value.position];
   const direction = event.deltaY > 0 ? 'backward' : 'forward';
   handleCameraMove(direction);
+  const actualDelta = vectorDistance(before, cameraState.value.position);
+  if (actualDelta > 1e-6) {
+    void cabbageContextService.recordEvent({
+      type: 'camera_moved',
+      category: 'camera',
+      success: true,
+      details: { interaction: 'wheel', actualDelta },
+    });
+  }
+};
+
+const handleViewportFocus = () => {
+  void cabbageContextService.recordEvent({
+    type: 'viewport_focused',
+    category: 'viewport',
+    success: true,
+    details: { source: 'user' },
+  });
 };
 
 const focusViewportInput = () => {
@@ -1554,6 +1614,9 @@ const handleKeyDown = (event) => {
   if (movementKeys[key] !== undefined) {
     event.preventDefault();
     if (!movementKeys[key]) {
+      if (movementAxisGroups[key]) {
+        cameraMovementGestures.set(key, [...cameraState.value.position]);
+      }
       // A project/scene reload recreates native cameras and invalidates their old
       // handles. Refresh once when a new movement gesture starts instead of
       // continuing to publish WASD/QE updates to a released camera.
@@ -1582,6 +1645,20 @@ const handleKeyUp = (event) => {
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
     movementKeys[key] = false;
+    const gestureStart = cameraMovementGestures.get(key);
+    cameraMovementGestures.delete(key);
+    const axisGroup = movementAxisGroups[key];
+    if (gestureStart && axisGroup) {
+      const actualDelta = vectorDistance(gestureStart, cameraState.value.position);
+      if (actualDelta > 1e-6) {
+        void cabbageContextService.recordEvent({
+          type: 'camera_moved',
+          category: 'camera',
+          success: true,
+          details: { key: key.toUpperCase(), axisGroup, actualDelta },
+        });
+      }
+    }
     if (!hasActiveMovementKeys()) {
       stopMoveLoop();
       scheduleCameraUpdate();
@@ -1631,7 +1708,10 @@ const resetRealtimeCameraInput = () => {
     movementKeys[key] = false;
   });
   stopMoveLoop();
+  cameraMovementGestures.clear();
   mouseRotate.active = false;
+  mouseRotate.startForward = null;
+  mouseRotate.moved = false;
 };
 
 const setEditorCameraInputLock = (reason, locked) => {
@@ -1980,6 +2060,8 @@ const onMouseDown = (event) => {
     mouseRotate.active = true;
     mouseRotate.lastX = event.clientX;
     mouseRotate.lastY = event.clientY;
+    mouseRotate.startForward = [...cameraState.value.forward];
+    mouseRotate.moved = false;
     event.preventDefault();
     return;
   }
@@ -2000,6 +2082,7 @@ const onMouseMove = (event) => {
 
   if (dx === 0 && dy === 0) return;
   handleMouseRotate(dx, dy);
+  mouseRotate.moved = true;
   scheduleCameraUpdate();
 };
 
@@ -2010,6 +2093,19 @@ const onMouseUp = (event) => {
   }
   if (event.button === 2 && mouseRotate.active) {
     mouseRotate.active = false;
+    const actualDelta = mouseRotate.startForward
+      ? vectorDistance(mouseRotate.startForward, cameraState.value.forward)
+      : 0;
+    if (mouseRotate.moved && actualDelta > 1e-6) {
+      void cabbageContextService.recordEvent({
+        type: 'camera_rotated',
+        category: 'camera',
+        success: true,
+        details: { interaction: 'right_mouse_drag', actualDelta },
+      });
+    }
+    mouseRotate.startForward = null;
+    mouseRotate.moved = false;
     if (!sendCameraUpdateFast()) {
       const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
       syncSceneCameraBinding(sceneId);
@@ -2285,7 +2381,10 @@ const normalizePreviewDetails = (payload = {}) => ({
   hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
   restoreStatus: payload.restoreStatus ?? payload.restore_status ?? 'idle',
   restoreError: payload.restoreError ?? payload.restore_error ?? '',
-  restored: Boolean(payload.restored),
+  restored: Boolean(
+    payload.restored
+    ?? ['restored', 'completed', 'success'].includes(String(payload.restoreStatus ?? payload.restore_status ?? '').toLowerCase())
+  ),
   stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
   workerActive: Boolean(payload.workerActive ?? payload.worker_active),
   errors: Array.isArray(payload.errors) ? payload.errors : [],
@@ -2315,6 +2414,28 @@ const applyPreviewStatus = (payload = {}) => {
   else if (state === 'error') previewStatusText.value = details.restoreError ? `场景恢复失败：${details.restoreError}` : (details.errors[0] || details.message || '预览出错');
   else previewStatusText.value = details.startedCount === 0 && details.warnings.length ? '没有可运行脚本' : '';
   publishGamePreviewStatus(details);
+  if (state === 'running' && !tutorialPreviewObservedRunning) {
+    tutorialPreviewObservedRunning = true;
+    void cabbageContextService.recordEvent({
+      type: 'preview_started',
+      category: 'preview',
+      success: true,
+      details: { status: 'running' },
+    });
+  } else if (
+    state === 'stopped'
+    && tutorialPreviewObservedRunning
+    && details.restored
+    && !details.restoreError
+  ) {
+    tutorialPreviewObservedRunning = false;
+    void cabbageContextService.recordEvent({
+      type: 'preview_stopped',
+      category: 'preview',
+      success: true,
+      details: { status: 'stopped', restored: true, restoreError: '' },
+    });
+  }
   return details;
 };
 
@@ -2763,6 +2884,207 @@ const onSceneRenamedEvent = (payload) => renameSceneTab(payload?.old_path, paylo
 const pendingPanelRedocks = new Map();
 const PANEL_REDOCK_TTL_MS = 5000;
 
+const cloneTutorialValue = (value, fallback = {}) => {
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (_) {
+    return fallback;
+  }
+};
+
+const captureTutorialBaseline = async (session = {}) => {
+  const sessionId = String(session.sessionId || '');
+  if (!sessionId || tutorialBaselineCaptureSessionId === sessionId) {
+    return;
+  }
+  tutorialBaselineCaptureSessionId = sessionId;
+  const actorContext = getActorContext();
+  const baseline = {
+    capturedAt: Date.now(),
+    cameraState: cloneTutorialValue(cameraState.value, {}),
+    cameraBindingState: cloneTutorialValue(cameraBindingState.value, {}),
+    viewportFocused: document.activeElement === viewportPickSurfaceRef.value,
+    actorContext: cloneTutorialValue(actorContext, {}),
+    activeSceneId: tabs.value[activeTab.value]?.id || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME,
+    activeTab: activeTab.value,
+    sceneLight: {
+      enabled: Boolean(sceneLightSettings.enabled),
+      direction: cloneTutorialValue(sceneLightSettings.direction, { x: 1, y: 1, z: 1 }),
+    },
+    panels: cloneTutorialValue(dockStore.panels, {}),
+  };
+  try {
+    await cabbageContextService.recordEvent({
+      type: 'tutorial_baseline_captured',
+      category: 'tutorial',
+      success: true,
+      details: { baselineJson: JSON.stringify(baseline) },
+    });
+  } catch (error) {
+    tutorialBaselineCaptureSessionId = '';
+    logError('Failed to capture tutorial baseline', error);
+  }
+};
+
+const sceneTreeContainsActor = (value, actorName) => {
+  if (Array.isArray(value)) return value.some((item) => sceneTreeContainsActor(item, actorName));
+  if (!value || typeof value !== 'object') return false;
+  if (String(value.name || value.actorName || value.actor_name || '') === actorName) return true;
+  return Object.values(value).some((item) => sceneTreeContainsActor(item, actorName));
+};
+
+const removeTutorialActor = async (bindings = {}) => {
+  const sceneName = String(bindings.sceneName || '');
+  const actorName = String(bindings.modelActorName || '');
+  if (!sceneName || !actorName) return;
+  try {
+    const treeResult = await sceneService.listSceneTree(sceneName);
+    const tree = treeResult?.data ?? treeResult;
+    if (!sceneTreeContainsActor(tree, actorName)) return;
+  } catch (_) {
+    // Fall through to the idempotent remove call when the tree cannot be queried.
+  }
+  try {
+    await sceneService.removeActor(sceneName, actorName);
+  } catch (error) {
+    const message = String(error?.message || error).toLowerCase();
+    const missingActorTokens = [
+      'not found',
+      'does not exist',
+      String.fromCodePoint(0x4e0d, 0x5b58, 0x5728),
+      String.fromCodePoint(0x672a, 0x627e, 0x5230),
+    ];
+    if (!missingActorTokens.some((token) => message.includes(token))) {
+      throw error;
+    }
+  }
+};
+
+const restoreTutorialPanels = async (savedPanels = {}) => {
+  for (const [panelId, saved] of Object.entries(savedPanels || {})) {
+    const panel = dockStore.panels[panelId];
+    if (!panel || !saved || typeof saved !== 'object') continue;
+    if (panel.mode === 'external' && saved.mode !== 'external') {
+      await closeFloatingPanel(dockStore, panelId);
+    }
+    panel.dockZone = String(saved.dockZone || panel.dockZone || '');
+    panel.order = Number(saved.order) || 0;
+    if (Number(saved.width) > 0) panel.width = Number(saved.width);
+    if (Number(saved.height) > 0) panel.height = Number(saved.height);
+    if (!saved.open) {
+      if (panel.mode === 'external') await closeFloatingPanel(dockStore, panelId);
+      else dockStore.closePanel(panelId);
+    } else if (saved.mode === 'external' && isFloatingPanel(panelId)) {
+      if (!(panel.open && panel.mode === 'external')) {
+        dockStore.closePanel(panelId);
+        await openFloatingPanel(dockStore, panelId);
+      }
+    } else {
+      dockStore.popIn(panelId);
+      dockStore.openPanel(panelId);
+    }
+  }
+  window.dispatchEvent(new Event('resize'));
+};
+
+const restoreTutorialSession = async (session = {}) => {
+  if (tutorialRestoreInProgress || String(session.status || '') !== 'restoring') return;
+  tutorialRestoreInProgress = true;
+  const expectedSessionId = String(session.sessionId || '');
+  try {
+    await guidanceService.stop({ restorePanelState: false });
+    if (previewRunning.value || previewDetails.value?.hasSnapshot || previewDetails.value?.stopPending) {
+      const stopped = await handleStopGamePreview();
+      if (!stopped || stopped.restoreError) throw new Error(stopped?.restoreError || 'Preview did not stop cleanly');
+    }
+
+    const bindings = cloneTutorialValue(session.bindings, {});
+    const baseline = cloneTutorialValue(session.baseline, {});
+    await removeTutorialActor(bindings);
+
+    if (baseline.nodeGraph || bindings.customNodeId || bindings.edgeId || bindings.startNodeCreatedByTutorial) {
+      if (!dockStore.panels.NodeGraphPanel?.open) {
+        await openFloatingPanel(dockStore, 'NodeGraphPanel');
+      }
+      await requestTutorialRestore('node_graph', {
+        sessionId: expectedSessionId,
+        bindings,
+        modificationLog: session.modificationLog || [],
+        baseline: baseline.nodeGraph || {},
+      }, { timeoutMs: 12000 });
+    }
+
+    const light = baseline.sceneLight || {};
+    const sceneId = String(baseline.activeSceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME);
+    const direction = light.direction || { x: 1, y: 1, z: 1 };
+    await sceneService.sunDirection(sceneId, light.enabled !== false, [
+      Number(direction.x) || 0,
+      Number(direction.y) || 0,
+      Number(direction.z) || 0,
+    ]);
+    sceneLightSettings.enabled = light.enabled !== false;
+    sceneLightSettings.direction.x = Number(direction.x) || 0;
+    sceneLightSettings.direction.y = Number(direction.y) || 0;
+    sceneLightSettings.direction.z = Number(direction.z) || 0;
+
+    if (baseline.cameraState?.position) {
+      cameraState.value = cloneTutorialValue(baseline.cameraState, cameraState.value);
+      if (baseline.cameraBindingState) {
+        cameraBindingState.value = cloneTutorialValue(baseline.cameraBindingState, cameraBindingState.value);
+      }
+      scheduleCameraUpdate();
+    }
+    if (Number.isInteger(Number(baseline.activeTab))) {
+      activeTab.value = Math.max(0, Math.min(Number(baseline.activeTab), Math.max(0, tabs.value.length - 1)));
+    }
+    if (baseline.actorContext?.actor) {
+      setActorContext(baseline.actorContext.scene || sceneId, baseline.actorContext.actor);
+    } else {
+      clearActorContext();
+    }
+
+    await projectService.sceneSave(sceneId);
+    await restoreTutorialPanels(baseline.panels || {});
+    if (baseline.viewportFocused) focusViewportInput();
+    await syncSceneCameraBinding(sceneId, { preservePose: true });
+    scheduleCameraUpdate();
+
+    if (String(cabbageAssistant.tutorialSession?.sessionId || '') !== expectedSessionId) return;
+    await cabbageContextService.recordEvent({
+      type: 'tutorial_restore_succeeded',
+      category: 'tutorial',
+      success: true,
+      details: { sessionId: expectedSessionId },
+    });
+  } catch (error) {
+    logError('Failed to restore tutorial state', error);
+    if (String(cabbageAssistant.tutorialSession?.sessionId || '') === expectedSessionId) {
+      await cabbageContextService.recordEvent({
+        type: 'tutorial_restore_failed',
+        category: 'tutorial',
+        success: false,
+        details: { sessionId: expectedSessionId, error: String(error?.message || error) },
+      });
+    }
+  } finally {
+    tutorialRestoreInProgress = false;
+  }
+};
+
+watch(
+  () => cabbageAssistant.tutorialSession,
+  (session) => {
+    const activeTutorial = cabbageAssistant.activeTasks.some(
+      (task) => task.type === 'tutorial' && task.status === 'active' && String(task.taskKey || '').startsWith('tutorial.basics.')
+    );
+    if (session?.status === 'active' && activeTutorial && !session.baseline?.cameraState) {
+      void captureTutorialBaseline(session);
+    }
+    if (session?.status === 'restoring') void restoreTutorialSession(session);
+  },
+  { deep: true, immediate: true }
+);
+
 const handlePanelRedockRequest = (payload) => {
   const panelId = payload?.panelId;
   if (!panelId || !dockStore.panels[panelId]) return;
@@ -2933,6 +3255,7 @@ onUnmounted(() => {
   void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
+  closeTutorialSessionChannel();
   coronaEventBus.off('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   for (const timer of pendingPanelRedocks.values()) window.clearTimeout(timer);

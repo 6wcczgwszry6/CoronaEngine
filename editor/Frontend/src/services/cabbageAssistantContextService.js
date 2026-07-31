@@ -72,7 +72,7 @@ function normalizeSnapshot(value) {
   const taskHistory = (Array.isArray(context.taskHistory) ? context.taskHistory : []).map(normalizeTask).filter(Boolean);
   const selectedTaskKey = String(value.selectedTaskKey || context.selectedTaskKey || '');
   return {
-    schemaVersion: 1,
+    schemaVersion: Number(context.schemaVersion) || 2,
     worldId: String(context.worldId || ''),
     projectScopeId: String(value.projectScopeId || context.projectScopeId || currentScopeId()),
     graphRevision: String(value.graphRevision || context.graphRevision || ''),
@@ -85,6 +85,7 @@ function normalizeSnapshot(value) {
     worldGoal: clone(context.worldGoal || {}, {}),
     goalTaskPlan: clone(context.goalTaskPlan || {}, {}),
     goalSignalCounts: clone(context.goalSignalCounts || {}, {}),
+    tutorialSession: clone(context.tutorialSession || {}, {}),
     activeTasks,
     taskHistory,
     chatMessages: clone(context.chatMessages || [], []),

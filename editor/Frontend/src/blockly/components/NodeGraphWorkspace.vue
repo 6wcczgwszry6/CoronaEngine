@@ -44,6 +44,7 @@
         </div>
         <div
           class="ng-tool-card macro"
+          data-guidance="node-state-tool"
           draggable="true"
           @pointerdown.left="beginMacroPointerDrag($event, 'state')"
           @dragstart="startMacroDrag($event, 'state')"
@@ -209,6 +210,7 @@
             @reject="onWorkspaceReject"
             @block-added="onBlockAdded"
             @block-changed="onBlockChanged"
+            @block-connected="onBlockConnected"
           />
         </section>
         <div class="ng-splitter horizontal" title="拖动调整全局变量池高度" @pointerdown="beginLayoutResize($event, 'variables')"></div>
@@ -225,6 +227,7 @@
                 :key="option.value"
                 type="button"
                 :class="{ active: selectedNode.nodeType === option.value }"
+                :data-guidance="option.value === 'custom' ? 'node-type-custom' : undefined"
                 @click="setSelectedNodeType(option.value)"
               >
                 {{ option.label }}
@@ -273,6 +276,7 @@
             @reject="onWorkspaceReject"
             @block-added="onBlockAdded"
             @block-changed="onBlockChanged"
+            @block-connected="onBlockConnected"
           />
           <div v-else class="ng-editor-empty">选择节点或连线后可编辑内部积木</div>
         </section>
@@ -323,6 +327,7 @@ import {
   registerProjectNodeGraphRuntimeHandler,
   registerProjectNodeGraphSaveHandler,
 } from '@/services/nodeGraphRuntimeService.js';
+import { registerTutorialRestorer } from '@/services/cabbageTutorialSessionService.js';
 
 const props = defineProps({
   actorName: { type: String, default: '' },
@@ -509,6 +514,8 @@ let isLoading = false,
   unsubscribeCabbageContext = null,
   unregisterProjectNodeGraphSaveHandler = null,
   unregisterProjectNodeGraphRuntimeHandler = null,
+  unregisterTutorialRestorer = null,
+  tutorialNodeGraphBaselineSessionId = '',
   loadedProjectPath = '',
   componentMounted = false,
   initialLoadComplete = false,
@@ -749,7 +756,12 @@ function addMacroNodeAt(macroType, clientX, clientY) {
     type: 'node_created',
     category: 'node',
     success: true,
-    details: { nodeId: String(node.id || ''), nodeType: String(node.nodeType || '') },
+    details: {
+      nodeId: String(node.id || ''),
+      nodeType: String(node.nodeType || ''),
+      startNodeCount: graph.nodes.filter((item) => item.nodeType === 'start').length,
+      uniqueStart: graph.nodes.filter((item) => item.nodeType === 'start').length === 1,
+    },
   });
   scheduleSave();
   scheduleRememberedIssueCheck();
@@ -1130,7 +1142,8 @@ function syncActiveBeforeSelection(nextKind, nextId) {
   )
     refreshEmbeddedWorkspaceStates();
 }
-function selectNode(node) {
+function selectNode(node, { source = 'user' } = {}) {
+  if (!node) return;
   const isConnecting = Boolean(pendingPort.value);
   syncActiveBeforeSelection('node', node.id);
   selectedKind.value = 'node';
@@ -1139,9 +1152,23 @@ function selectNode(node) {
     pendingPort.value = null;
     connectionPointer.active = false;
   }
+  const startNodeCount = graph.nodes.filter((item) => item.nodeType === 'start').length;
+  void cabbageContextService.recordEvent({
+    type: 'node_selected',
+    category: 'node',
+    success: true,
+    details: {
+      nodeId: String(node.id || ''),
+      nodeType: String(node.nodeType || ''),
+      startNodeCount,
+      uniqueStart: startNodeCount === 1,
+      source,
+    },
+  });
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
-function selectEdge(edge, { allowDelete = true } = {}) {
+function selectEdge(edge, { allowDelete = true, source = 'user' } = {}) {
+  if (!edge) return;
   if (allowDelete && mode.value === 'delete') {
     deleteEdge(edge.id);
     return;
@@ -1151,6 +1178,12 @@ function selectEdge(edge, { allowDelete = true } = {}) {
   selectedId.value = edge.id;
   pendingPort.value = null;
   connectionPointer.active = false;
+  void cabbageContextService.recordEvent({
+    type: 'edge_selected',
+    category: 'node',
+    success: true,
+    details: { edgeId: String(edge.id || ''), source },
+  });
   nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
 }
 function handleEdgeClick(edge) {
@@ -1212,7 +1245,7 @@ function focusWorldPointIfNeeded(worldX, worldY) {
 
 function focusGuidanceNode(node) {
   if (!node) return false;
-  selectNode(node);
+  selectNode(node, { source: 'guidance' });
   focusWorldPointIfNeeded(
     (Number(node.x) || 0) + NODE_WIDTH / 2,
     (Number(node.y) || 0) + nodeHeight(node) / 2
@@ -1222,7 +1255,7 @@ function focusGuidanceNode(node) {
 
 function focusGuidanceEdge(edge) {
   if (!edge) return false;
-  selectEdge(edge, { allowDelete: false });
+  selectEdge(edge, { allowDelete: false, source: 'guidance' });
   const source = graph.nodes.find((node) => node.id === edge.source?.nodeId);
   const target = graph.nodes.find((node) => node.id === edge.target?.nodeId);
   if (source && target) {
@@ -1252,6 +1285,11 @@ function handleGuidancePrepare(event) {
   const blockId = String(detail.blockId || '');
   if (blockId) {
     void focusGuidanceBlock(blockId);
+    return;
+  }
+  const blockType = String(detail.blockType || '');
+  if (blockType) {
+    void paletteRef.value?.focusBlockType?.(blockType);
     return;
   }
   const edgeId = String(detail.edgeId || '');
@@ -1400,6 +1438,10 @@ function stopNodeDrag() {
         details: {
           nodeId: String(finished.node.id || ''),
           nodeType: String(finished.node.nodeType || ''),
+          actualDelta: Math.hypot(
+            (Number(finished.node.x) || 0) - finished.startX,
+            (Number(finished.node.y) || 0) - finished.startY,
+          ),
         },
       });
     }
@@ -1592,6 +1634,12 @@ function onBlockAdded(payload = {}) {
       blockType: String(payload.blockType || ''),
       workspaceRole: String(payload.workspaceRole || paletteWorkspaceRole.value || ''),
       interaction: String(payload.interaction || ''),
+      parentBlockType: String(payload.parentBlockType || ''),
+      connected: payload.connected === true,
+      fieldName: String(payload.fieldName || ''),
+      oldValue: payload.oldValue ?? '',
+      newValue: payload.newValue ?? payload.value ?? '',
+      value: payload.value ?? payload.newValue ?? '',
     },
   });
 }
@@ -1609,6 +1657,31 @@ function onBlockChanged(payload = {}) {
       blockType: String(payload.blockType || ''),
       fieldName: String(payload.fieldName || ''),
       workspaceRole: String(payload.workspaceRole || paletteWorkspaceRole.value || ''),
+      parentBlockType: String(payload.parentBlockType || ''),
+      connected: payload.connected === true,
+      oldValue: payload.oldValue ?? '',
+      newValue: payload.newValue ?? payload.value ?? '',
+      value: payload.value ?? payload.newValue ?? '',
+    },
+  });
+}
+
+function onBlockConnected(payload = {}) {
+  scheduleRememberedIssueCheck();
+  void cabbageContextService.recordEvent({
+    type: 'block_connected',
+    category: 'node',
+    success: true,
+    details: {
+      nodeId: selectedNode.value?.id || '',
+      edgeId: selectedEdge.value?.id || '',
+      blockId: String(payload.blockId || ''),
+      blockType: String(payload.blockType || ''),
+      parentBlockType: String(payload.parentBlockType || ''),
+      connected: payload.connected === true,
+      workspaceRole: String(payload.workspaceRole || paletteWorkspaceRole.value || ''),
+      newValue: payload.newValue ?? payload.value ?? '',
+      value: payload.value ?? payload.newValue ?? '',
     },
   });
 }
@@ -2093,9 +2166,10 @@ async function loadGraphForCurrentTarget() {
   } finally {
     loadCancelled = !componentMounted || loadSequence !== graphLoadSequence;
     if (!loadCancelled) {
-      isLoading = false;
       initialLoadComplete = true;
       graphDirty = false;
+      await captureTutorialNodeGraphBaseline({ allowLoading: true });
+      isLoading = false;
       await loadEmbeddedWorkspaceStates();
       loadCancelled = !componentMounted || loadSequence !== graphLoadSequence;
       if (!loadCancelled) {
@@ -2818,6 +2892,125 @@ watch(
     if (componentMounted) await loadGraphForCurrentTarget();
   }
 );
+function tutorialNodeGraphBaselineSnapshot() {
+  const selectionExists = (
+    selectedKind.value === 'node' && graph.nodes.some((node) => String(node.id) === String(selectedId.value))
+  ) || (
+    selectedKind.value === 'edge' && graph.edges.some((edge) => String(edge.id) === String(selectedId.value))
+  );
+  return {
+    capturedAt: Date.now(),
+    targetKey: String(targetKey.value || ''),
+    nodeIds: graph.nodes.map((node) => String(node.id || '')).filter(Boolean),
+    edgeIds: graph.edges.map((edge) => String(edge.id || '')).filter(Boolean),
+    startNodeIds: graph.nodes
+      .filter((node) => String(node.nodeType || '').toLowerCase() === 'start')
+      .map((node) => String(node.id || ''))
+      .filter(Boolean),
+    selectedKind: selectionExists ? String(selectedKind.value || '') : '',
+    selectedId: selectionExists ? String(selectedId.value || '') : '',
+  };
+}
+
+async function captureTutorialNodeGraphBaseline({ allowLoading = false } = {}) {
+  const session = cabbageAssistant.tutorialSession || {};
+  const sessionId = String(session.sessionId || '');
+  if (!sessionId || String(session.status || '') !== 'active') return false;
+  if (session.baseline?.nodeGraph && typeof session.baseline.nodeGraph === 'object') {
+    tutorialNodeGraphBaselineSessionId = sessionId;
+    return true;
+  }
+  if (tutorialNodeGraphBaselineSessionId === sessionId) return true;
+  if (!componentMounted || !targetReady.value || (!allowLoading && (isLoading || !initialLoadComplete))) return false;
+
+  tutorialNodeGraphBaselineSessionId = sessionId;
+  try {
+    await cabbageContextService.recordEvent({
+      type: 'tutorial_baseline_captured',
+      category: 'tutorial',
+      success: true,
+      details: {
+        baselineJson: JSON.stringify({ nodeGraph: tutorialNodeGraphBaselineSnapshot() }),
+      },
+    });
+    return true;
+  } catch (error) {
+    tutorialNodeGraphBaselineSessionId = '';
+    logError('Failed to capture tutorial node graph baseline', error);
+    return false;
+  }
+}
+
+function restoreTutorialNodeGraphSelection(baseline = {}) {
+  const kind = String(baseline.selectedKind || '');
+  const id = String(baseline.selectedId || '');
+  if (kind === 'node' && graph.nodes.some((node) => String(node.id) === id)) {
+    selectedKind.value = 'node';
+    selectedId.value = id;
+  } else if (kind === 'edge' && graph.edges.some((edge) => String(edge.id) === id)) {
+    selectedKind.value = 'edge';
+    selectedId.value = id;
+  } else {
+    selectedKind.value = '';
+    selectedId.value = '';
+  }
+  pendingPort.value = null;
+  connectionPointer.active = false;
+}
+
+async function restoreTutorialNodeGraph(payload = {}) {
+  if (String(payload.operation || '').toLowerCase() === 'capture') {
+    return { success: true, nodeGraph: tutorialNodeGraphBaselineSnapshot() };
+  }
+
+  const session = payload.session && typeof payload.session === 'object' ? payload.session : payload;
+  const bindings = session?.bindings && typeof session.bindings === 'object' ? session.bindings : {};
+  const baseline = session?.baseline && typeof session.baseline === 'object' ? session.baseline : {};
+  const modificationLog = Array.isArray(session?.modificationLog) ? session.modificationLog : [];
+  const baselineTargetKey = String(baseline.targetKey || '');
+  if (baselineTargetKey && baselineTargetKey !== String(targetKey.value || '')) {
+    throw new Error('Tutorial node graph target changed before restoration');
+  }
+
+  const baselineNodeIds = new Set((Array.isArray(baseline.nodeIds) ? baseline.nodeIds : []).map(String));
+  const baselineEdgeIds = new Set((Array.isArray(baseline.edgeIds) ? baseline.edgeIds : []).map(String));
+  const tutorialNodeIds = new Set();
+  const tutorialEdgeIds = new Set();
+  if (bindings.customNodeId) tutorialNodeIds.add(String(bindings.customNodeId));
+  if (bindings.startNodeCreatedByTutorial && bindings.startNodeId) tutorialNodeIds.add(String(bindings.startNodeId));
+  if (bindings.edgeId) tutorialEdgeIds.add(String(bindings.edgeId));
+  for (const entry of modificationLog) {
+    if (!entry || typeof entry !== 'object') continue;
+    if (entry.operation === 'node_created' && entry.nodeId) tutorialNodeIds.add(String(entry.nodeId));
+    if (entry.operation === 'edge_created' && entry.edgeId) tutorialEdgeIds.add(String(entry.edgeId));
+  }
+
+  const removedEdgeIds = [];
+  const removedNodeIds = [];
+  for (const edgeId of tutorialEdgeIds) {
+    if (baselineEdgeIds.has(edgeId) || !graph.edges.some((edge) => String(edge.id) === edgeId)) continue;
+    deleteEdge(edgeId);
+    removedEdgeIds.push(edgeId);
+  }
+  for (const nodeId of tutorialNodeIds) {
+    if (baselineNodeIds.has(nodeId) || !graph.nodes.some((node) => String(node.id) === nodeId)) continue;
+    deleteNode(nodeId);
+    removedNodeIds.push(nodeId);
+  }
+
+  if (saveTimer) {
+    window.clearTimeout(saveTimer);
+    saveTimer = null;
+  }
+  restoreTutorialNodeGraphSelection(baseline);
+  await nextTick();
+  await loadEmbeddedWorkspaceStates();
+  graphDirty = removedEdgeIds.length > 0 || removedNodeIds.length > 0;
+  const saved = await saveNow(null, { force: true });
+  if (saved === false) throw new Error('Failed to save the restored tutorial node graph');
+  return { success: true, removedNodeIds, removedEdgeIds };
+}
+
 function registerNodeGraphFlusher() {
   const flushers = window.__coronaNodeGraphFlushers instanceof Set
     ? window.__coronaNodeGraphFlushers
@@ -2843,6 +3036,7 @@ function unregisterNodeGraphFlusher() {
 }
 onMounted(async () => {
   componentMounted = true;
+  unregisterTutorialRestorer = registerTutorialRestorer('node_graph', restoreTutorialNodeGraph);
   activeProjectPath.value = readActiveProjectPath() || activeProjectPath.value;
 
   // The node graph runs in its own CEF page and therefore owns a separate Pinia
@@ -2855,7 +3049,10 @@ onMounted(async () => {
   if (cachedCabbageContext) cabbageAssistant.hydrateContext(cachedCabbageContext);
   unsubscribeCabbageContext = subscribeCabbageAssistantContext(
     (snapshot) => {
-      if (componentMounted) cabbageAssistant.hydrateContext(snapshot);
+      if (componentMounted) {
+        cabbageAssistant.hydrateContext(snapshot);
+        void captureTutorialNodeGraphBaseline();
+      }
     },
     { projectScopeId: currentCabbageScopeId, emitCurrent: true },
   );
@@ -2904,6 +3101,7 @@ onMounted(async () => {
   // onMounted. Keep a single load after the actor scan has completed.
   await loadGraphForCurrentTarget();
   if (!componentMounted) return;
+  await captureTutorialNodeGraphBaseline();
   if (sceneActorContext.sceneName !== String(props.sceneName || '').trim()) {
     await refreshSceneActorOptions();
     if (!componentMounted) return;
@@ -2948,6 +3146,8 @@ onMounted(async () => {
 });
 onBeforeUnmount(() => {
   componentMounted = false;
+  unregisterTutorialRestorer?.();
+  unregisterTutorialRestorer = null;
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onProjectStorageChanged);
   window.removeEventListener('cabbage-guidance-prepare', handleGuidancePrepare);

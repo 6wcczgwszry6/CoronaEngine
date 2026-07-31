@@ -14,16 +14,30 @@ const PANEL_ZONES = Object.freeze({
 });
 
 const SELECTOR_KEYS = Object.freeze({
+  'main-viewport': '[data-guidance="main-viewport"]',
+  'scene-shortcut': '[data-guidance="scene-shortcut"]',
+  'node-shortcut': '[data-guidance="node-shortcut"]',
   'scene-import-model': '[data-guidance="scene-import-model"]',
+  'scene-actor-list': '[data-guidance="scene-actor-list"]',
   'scene-lighting': '[data-guidance="scene-lighting"]',
+  'scene-light-x': '[data-guidance="scene-light-x"]',
+  'preview-start': '[data-guidance="preview-start"]',
+  'preview-stop': '[data-guidance="preview-stop"]',
   'settings-viewport': '[data-guidance="settings-viewport"]',
   'settings-viewport-ui': '[data-guidance="settings-viewport-ui"]',
   'settings-camera-speed': '[data-guidance="settings-camera-speed"]',
   'settings-grid': '[data-guidance="settings-grid"]',
   'object-transform': '[data-guidance="object-transform"]',
+  'object-position-x': '[data-guidance="object-position-x"]',
+  'object-rotation-y': '[data-guidance="object-rotation-y"]',
+  'object-scale-x': '[data-guidance="object-scale-x"]',
   'object-physics': '[data-guidance="object-physics"]',
+  'object-physics-enabled': '[data-guidance="object-physics-enabled"]',
+  'object-physics-mass': '[data-guidance="object-physics-mass"]',
   'node-run': '[data-guidance="node-run"]',
   'node-toolbox': '[data-guidance="node-toolbox"]',
+  'node-state-tool': '[data-guidance="node-state-tool"]',
+  'node-type-custom': '[data-guidance="node-type-custom"]',
   'node-canvas': '[data-guidance="node-canvas"]',
   'node-blockly-editor': '[data-guidance="node-blockly-editor"]',
   'node-transition-condition': '[data-guidance="node-transition-condition"]',
@@ -69,8 +83,10 @@ function targetSelector(target = {}) {
   if (target.kind === 'selector' || target.kind === 'region') {
     return SELECTOR_KEYS[String(target.selectorKey || '')] || '';
   }
+  if (target.kind === 'actor' && target.actorName) return `[data-actor-name="${safeId(target.actorName)}"]`;
   if (target.kind === 'node' && target.nodeId) return `[data-node-id="${safeId(target.nodeId)}"]`;
   if (target.kind === 'edge' && target.edgeId) return `[data-edge-id="${safeId(target.edgeId)}"]`;
+  if (target.kind === 'block-type' && target.blockType) return `[data-block-type="${safeId(target.blockType)}"]`;
   if (target.kind === 'port' && target.nodeId) {
     const side = target.portSide ? `[data-port-side="${safeId(target.portSide)}"]` : '';
     const index = Number.isFinite(Number(target.portIndex))
@@ -83,8 +99,9 @@ function targetSelector(target = {}) {
 }
 
 function fallbackSelector(target = {}) {
+  if (target.kind === 'actor') return SELECTOR_KEYS['scene-actor-list'];
   if (['node', 'edge', 'port'].includes(target.kind)) return SELECTOR_KEYS['node-canvas'];
-  if (target.kind === 'block') return SELECTOR_KEYS['node-blockly-editor'];
+  if (['block', 'block-type'].includes(target.kind)) return SELECTOR_KEYS['node-blockly-editor'];
   return '';
 }
 
@@ -258,7 +275,7 @@ function stepFor(selectorKey, action, text, extra = {}) {
   };
 }
 
-const TUTORIAL_GUIDANCE = Object.freeze({
+const LEGACY_TUTORIAL_GUIDANCE = Object.freeze({
   'tutorial.import_model': {
     panelId: 'SceneTools',
     steps: [stepFor('scene-import-model', 'click', '打开场景管理中的导入入口，再选择要导入的模型。')],
@@ -309,6 +326,107 @@ const TUTORIAL_GUIDANCE = Object.freeze({
   },
 });
 
+
+function taskGuidanceText(source, fallback) {
+  return String(source?.guidanceText || source?.suggestion || source?.completionCriteria || source?.message || fallback || '');
+}
+
+function targetFromBinding(bindings, key, fallback) {
+  const value = String(bindings?.[key] || '');
+  if (!value) return fallback;
+  if (key === 'modelActorName') return { kind: 'actor', actorName: value };
+  if (key === 'edgeId') return { kind: 'edge', edgeId: value };
+  if (key.endsWith('BlockId')) return { kind: 'block', blockId: value };
+  return { kind: 'node', nodeId: value };
+}
+
+function tutorialStep(source, target, action, fallback, extra = {}) {
+  const text = taskGuidanceText(source, fallback);
+  return { target, action, text, textEn: text, ...extra };
+}
+
+function basicGuidance(panelId, target, action, fallback, extra = {}) {
+  return (source) => ({ panelId, steps: [tutorialStep(source, target, action, fallback, extra)] });
+}
+
+const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
+  focus_viewport: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'main-viewport' }, 'click', 'Click the 3D viewport once.'),
+  move_camera_forward_back: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'main-viewport' }, 'key', 'Focus the viewport, then press W or S until the camera moves.'),
+  move_camera_left_right: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'main-viewport' }, 'key', 'Focus the viewport, then press A or D until the camera moves.'),
+  move_camera_up_down: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'main-viewport' }, 'key', 'Focus the viewport, then press Q or E until the camera moves.'),
+  rotate_camera: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'main-viewport' }, 'drag', 'Hold the right mouse button in the viewport and drag until the camera rotates.'),
+  move_camera_wheel: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'main-viewport' }, 'wheel', 'Scroll the mouse wheel over the viewport until the camera moves.'),
+  open_scene_manager: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'scene-shortcut' }, 'click', 'Click the Scene Manager shortcut yourself.'),
+  import_model: basicGuidance('SceneTools', { kind: 'selector', selectorKey: 'scene-import-model' }, 'click', 'Import a model and wait for it to appear in the scene.'),
+  select_model: (source) => ({ panelId: 'SceneTools', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'modelActorName', { kind: 'selector', selectorKey: 'scene-actor-list' }),
+    'click',
+    'Select the tutorial model in the scene tree or viewport.'
+  )] }),
+  set_position_x: basicGuidance('SceneDatas', { kind: 'selector', selectorKey: 'object-position-x' }, 'input', 'Set Position X to 1.'),
+  set_rotation_y: basicGuidance('SceneDatas', { kind: 'selector', selectorKey: 'object-rotation-y' }, 'input', 'Set Rotation Y to 45.'),
+  set_scale_x: basicGuidance('SceneDatas', { kind: 'selector', selectorKey: 'object-scale-x' }, 'input', 'Set Scale X to 1.5.'),
+  enable_physics: basicGuidance('SceneDatas', { kind: 'selector', selectorKey: 'object-physics-enabled' }, 'click', 'Enable Physics Simulation.'),
+  set_mass: basicGuidance('SceneDatas', { kind: 'selector', selectorKey: 'object-physics-mass' }, 'input', 'Set Mass to 10.'),
+  set_light_x: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'scene-light-x' }, 'input', 'Set Scene Lighting Direction X to 0.5.'),
+  open_nodes: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'node-shortcut' }, 'click', 'Click the Nodes shortcut yourself.'),
+  confirm_start_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'startNodeId', { kind: 'selector', selectorKey: 'node-state-tool' }),
+    'click',
+    'Click the existing start node, or drag in a State Node if none exists.'
+  )] }),
+  create_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-canvas' },
+    'drag',
+    'Drag the State Node tool into the node canvas.',
+    { fromTarget: { kind: 'selector', selectorKey: 'node-state-tool' } }
+  )] }),
+  move_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'customNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
+    'drag',
+    'Drag the tutorial custom node to a new position.'
+  )] }),
+  connect_nodes: (source) => {
+    const startNodeId = String(source.bindings?.startNodeId || '');
+    const customNodeId = String(source.bindings?.customNodeId || '');
+    const target = startNodeId && customNodeId
+      ? { kind: 'port', nodeId: customNodeId, portSide: 'input', portIndex: 0 }
+      : { kind: 'selector', selectorKey: 'node-canvas' };
+    const extra = startNodeId && customNodeId
+      ? { fromTarget: { kind: 'port', nodeId: startNodeId, portSide: 'output', portIndex: 0 } }
+      : {};
+    return { panelId: 'NodeGraphPanel', steps: [tutorialStep(source, target, 'connect', 'Connect the start node output to the custom node input.', extra)] };
+  },
+  open_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'customNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
+    'click',
+    'Click the tutorial custom node to open its internal block editor.'
+  )] }),
+  add_when_enter: basicGuidance('NodeGraphPanel', { kind: 'block-type', blockType: 'node_when_enter' }, 'drag', 'Drag node_when_enter into the custom node workspace.'),
+  add_wait: basicGuidance('NodeGraphPanel', { kind: 'block-type', blockType: 'control_wait' }, 'drag', 'Drag control_wait below node_when_enter and connect it.'),
+  set_wait_seconds: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'waitBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+    'input',
+    'Set the Wait block SECONDS field to 2.'
+  )] }),
+  select_edge: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'edgeId', { kind: 'selector', selectorKey: 'node-canvas' }),
+    'click',
+    'Click the edge between the start and custom nodes.'
+  )] }),
+  add_true_condition: basicGuidance('NodeGraphPanel', { kind: 'block-type', blockType: 'logic_boolean' }, 'drag', 'Drag logic_boolean into the condition workspace and set it to TRUE.'),
+  run_node_graph: basicGuidance('NodeGraphPanel', { kind: 'selector', selectorKey: 'node-run' }, 'click', 'Click Run and wait for run_succeeded.'),
+  start_preview: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'preview-start' }, 'click', 'Click Start Preview and wait for running.'),
+  stop_preview: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'preview-stop' }, 'click', 'Click Stop Preview and wait for the scene to restore.'),
+});
+
 const ISSUE_GUIDANCE = Object.freeze({
   missing_actor_target: { selectorKey: 'node-blockly-editor', action: 'connect', text: '定位到对应操作积木，把“对象[]”积木接到对象输入口并选择场景中的目标物体。' },
   actor_target_not_found: { selectorKey: 'node-blockly-editor', action: 'click', text: '定位到对象引用积木，改为当前场景中真实存在的物体。' },
@@ -323,17 +441,17 @@ const ISSUE_GUIDANCE = Object.freeze({
 const CHAT_GUIDANCE = Object.freeze({
   connect_object_reference: ISSUE_GUIDANCE.missing_actor_target,
   select_existing_object: ISSUE_GUIDANCE.actor_target_not_found,
-  create_node: TUTORIAL_GUIDANCE['tutorial.create_node'].steps[0],
-  move_node: TUTORIAL_GUIDANCE['tutorial.move_node'].steps[0],
-  connect_nodes: TUTORIAL_GUIDANCE['tutorial.connect_nodes'].steps[0],
-  drag_block: TUTORIAL_GUIDANCE['tutorial.drag_block'].steps[0],
-  edit_block_parameter: TUTORIAL_GUIDANCE['tutorial.edit_block_parameter'].steps[0],
-  set_transition_condition: TUTORIAL_GUIDANCE['tutorial.set_transition_condition'].steps[0],
-  run_node_graph: TUTORIAL_GUIDANCE['tutorial.run_node_graph'].steps[0],
-  import_model: TUTORIAL_GUIDANCE['tutorial.import_model'].steps[0],
-  transform_model: TUTORIAL_GUIDANCE['tutorial.transform_model'].steps[0],
-  adjust_lighting: TUTORIAL_GUIDANCE['tutorial.adjust_lighting'].steps[0],
-  adjust_physics: TUTORIAL_GUIDANCE['tutorial.adjust_physics'].steps[0],
+  create_node: LEGACY_TUTORIAL_GUIDANCE['tutorial.create_node'].steps[0],
+  move_node: LEGACY_TUTORIAL_GUIDANCE['tutorial.move_node'].steps[0],
+  connect_nodes: LEGACY_TUTORIAL_GUIDANCE['tutorial.connect_nodes'].steps[0],
+  drag_block: LEGACY_TUTORIAL_GUIDANCE['tutorial.drag_block'].steps[0],
+  edit_block_parameter: LEGACY_TUTORIAL_GUIDANCE['tutorial.edit_block_parameter'].steps[0],
+  set_transition_condition: LEGACY_TUTORIAL_GUIDANCE['tutorial.set_transition_condition'].steps[0],
+  run_node_graph: LEGACY_TUTORIAL_GUIDANCE['tutorial.run_node_graph'].steps[0],
+  import_model: LEGACY_TUTORIAL_GUIDANCE['tutorial.import_model'].steps[0],
+  transform_model: LEGACY_TUTORIAL_GUIDANCE['tutorial.transform_model'].steps[0],
+  adjust_lighting: LEGACY_TUTORIAL_GUIDANCE['tutorial.adjust_lighting'].steps[0],
+  adjust_physics: LEGACY_TUTORIAL_GUIDANCE['tutorial.adjust_physics'].steps[0],
 });
 
 function guidanceForTask(source = {}) {
@@ -350,8 +468,11 @@ function guidanceForTask(source = {}) {
         : 'NodeGraphPanel';
     return { panelId, steps: [{ ...template }] };
   }
+  const intent = String(source.guidanceIntent || '');
+  const basicsFactory = BASICS_TUTORIAL_GUIDANCE[intent];
+  if (basicsFactory) return basicsFactory(source);
   const taskKey = String(source.taskKey || source.issueKey || '');
-  const tutorial = TUTORIAL_GUIDANCE[taskKey];
+  const tutorial = LEGACY_TUTORIAL_GUIDANCE[taskKey];
   if (tutorial) return { ...tutorial, steps: tutorial.steps.map((step) => ({ ...step })) };
 
   const issue = ISSUE_GUIDANCE[String(source.code || '')] || ISSUE_GUIDANCE.missing_required_input;
@@ -370,12 +491,13 @@ function guidanceForTask(source = {}) {
 
 function panelIdForTarget(target = {}) {
   const selectorKey = String(target.selectorKey || '');
-  if (selectorKey === 'scene-lighting') return 'MainPage';
+  if (['main-viewport', 'scene-shortcut', 'node-shortcut', 'scene-lighting', 'scene-light-x', 'preview-start', 'preview-stop'].includes(selectorKey)) return 'MainPage';
   if (selectorKey.startsWith('scene-')) return 'SceneTools';
   if (selectorKey.startsWith('settings-')) return 'EditorSettings';
   if (selectorKey.startsWith('object-')) return 'SceneDatas';
   if (selectorKey.startsWith('node-')) return 'NodeGraphPanel';
-  if (['node', 'block', 'edge', 'port'].includes(String(target.kind || ''))) {
+  if (target.kind === 'actor') return 'SceneTools';
+  if (['node', 'block', 'block-type', 'edge', 'port'].includes(String(target.kind || ''))) {
     return 'NodeGraphPanel';
   }
   return '';
@@ -447,6 +569,7 @@ async function showStep(index) {
       selectorKey: String(step?.target?.selectorKey || ''),
       nodeId: String(step?.target?.nodeId || ''),
       blockId: String(step?.target?.blockId || ''),
+      blockType: String(step?.target?.blockType || ''),
       edgeId: String(step?.target?.edgeId || ''),
       portSide: String(step?.target?.portSide || ''),
       portIndex: Number.isFinite(Number(step?.target?.portIndex)) ? Number(step.target.portIndex) : null,

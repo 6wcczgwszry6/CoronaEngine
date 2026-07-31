@@ -26,7 +26,7 @@ const props = defineProps({
   workspaceRole: { type: String, default: 'node' },
 });
 
-const emit = defineEmits(['change', 'ready', 'reject', 'block-added', 'block-changed']);
+const emit = defineEmits(['change', 'ready', 'reject', 'block-added', 'block-changed', 'block-connected']);
 
 const { t, locale } = useI18n();
 const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
@@ -61,6 +61,27 @@ const readyPromise = new Promise((resolve) => {
 });
 
 let blocksRegistered = false;
+
+
+function eventDetailsForBlock(block, extra = {}) {
+  const parent = block?.getParent?.() || block?.getPreviousBlock?.() || null;
+  const fields = {};
+  for (const input of block?.inputList || []) {
+    for (const field of input?.fieldRow || []) {
+      const name = field?.name;
+      if (name) fields[name] = field.getValue?.();
+    }
+  }
+  return {
+    blockId: String(block?.id || ''),
+    blockType: String(block?.type || ''),
+    parentBlockType: String(parent?.type || ''),
+    connected: Boolean(parent || block?.previousConnection?.targetConnection || block?.outputConnection?.targetConnection),
+    workspaceRole: props.workspaceRole,
+    ...fields,
+    ...extra,
+  };
+}
 
 function loadedBlockSummary() {
   const blocks = workspace?.getAllBlocks?.(false) || [];
@@ -412,12 +433,11 @@ function addBlock(blockType, clientX, clientY) {
     block.moveBy(Math.max(0, x), Math.max(0, y));
     workspace.setSelected?.(block);
     emitChange();
-    emit('block-added', {
-      blockId: String(block.id || ''),
-      blockType: String(block.type || blockType),
-      workspaceRole: props.workspaceRole,
+    emit('block-added', eventDetailsForBlock(block, {
       interaction: hasScreenPoint ? 'drag' : 'pick',
-    });
+      value: block.getFieldValue?.('BOOL') ?? block.getFieldValue?.('SECONDS') ?? '',
+      newValue: block.getFieldValue?.('BOOL') ?? block.getFieldValue?.('SECONDS') ?? '',
+    }));
     return true;
   } catch (e) {
     logError(`创建积木失败: ${blockType}`, e);
@@ -472,12 +492,17 @@ async function initBlockly() {
           event?.oldValue !== event?.newValue
         ) {
           const block = workspace?.getBlockById?.(event.blockId);
-          emit('block-changed', {
-            blockId: String(event.blockId || ''),
-            blockType: String(block?.type || ''),
+          emit('block-changed', eventDetailsForBlock(block, {
             fieldName: String(event.name || ''),
-            workspaceRole: props.workspaceRole,
-          });
+            oldValue: event.oldValue,
+            newValue: event.newValue,
+            value: event.newValue,
+          }));
+        }
+        const blockMoveType = BlocklyLib.Events?.BLOCK_MOVE || 'move';
+        if (event?.type === blockMoveType || event?.type === 'move') {
+          const block = workspace?.getBlockById?.(event.blockId);
+          if (block) emit('block-connected', eventDetailsForBlock(block, { interaction: 'connect' }));
         }
       }
       if (props.workspaceRole === 'condition') applyWorkspaceRoleVisualStyles();
