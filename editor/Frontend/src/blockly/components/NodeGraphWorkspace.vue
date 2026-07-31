@@ -3018,6 +3018,7 @@ onBeforeUnmount(() => {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  font-size: 17px;
   color: #f2ead5;
   background: radial-gradient(circle at 28% 0, #2b230f 0, #15130d 42%, #080806 100%);
   border: 1px solid #30281c;
@@ -3057,7 +3058,7 @@ onBeforeUnmount(() => {
   display: flex;
   align-items: center;
   gap: 8px;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ng-badge {
   padding: 4px 9px;
@@ -3100,7 +3101,7 @@ onBeforeUnmount(() => {
   max-width: 240px;
   overflow: hidden;
   color: #e9dfc5;
-  font-size: 11px;
+  font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -3112,7 +3113,7 @@ onBeforeUnmount(() => {
   background: #15130d;
   color: #e9dfc5;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ng-mode.active {
   background: #8c6f36;
@@ -3128,7 +3129,7 @@ onBeforeUnmount(() => {
   display: grid;
   place-items: center;
   color: #b9ad8f;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ng-body {
   min-height: 0;
@@ -3223,7 +3224,7 @@ onBeforeUnmount(() => {
   justify-content: space-between;
   margin: 2px 0 8px;
   color: #fff7dc;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 800;
 }
 .ng-section-title.mt {
@@ -3231,7 +3232,7 @@ onBeforeUnmount(() => {
 }
 .ng-section-title small {
   color: #b9ad8f;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 500;
 }
 .ng-tool-card {
@@ -3269,7 +3270,7 @@ onBeforeUnmount(() => {
   min-width: 0;
 }
 .ng-tool-name {
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 800;
   color: #fff7dc;
 }
@@ -3279,7 +3280,7 @@ onBeforeUnmount(() => {
 }
 .ng-tool-desc {
   margin-top: 3px;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.35;
   color: #b9ad8f;
 }
@@ -3297,7 +3298,7 @@ onBeforeUnmount(() => {
   padding: 8px;
   list-style: none;
   cursor: pointer;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
 }
 .ng-cat summary::-webkit-details-marker {
@@ -3312,7 +3313,7 @@ onBeforeUnmount(() => {
 .ng-count {
   margin-left: auto;
   color: #b9ad8f;
-  font-size: 10px;
+  font-size: 11px;
 }
 .ng-block-list {
   display: grid;
@@ -3336,19 +3337,19 @@ onBeforeUnmount(() => {
   width: 24px;
   height: 24px;
   border-radius: 7px;
-  font-size: 11px;
+  font-size: 12px;
   background: #9d9278;
 }
 .ng-block-chip b {
   display: block;
-  font-size: 11px;
+  font-size: 12px;
   line-height: 1.2;
 }
 .ng-block-chip small {
   display: block;
   margin-top: 1px;
   color: #b9ad8f;
-  font-size: 9px;
+  font-size: 10px;
   word-break: break-all;
 }
 .ng-canvas {
@@ -3376,7 +3377,7 @@ onBeforeUnmount(() => {
   background: rgba(75, 57, 28, 0.92);
   box-shadow: 0 10px 24px rgba(0, 0, 0, 0.35);
   color: #fff7dc;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 800;
   pointer-events: none;
   transform: translateZ(0);
@@ -3408,19 +3409,19 @@ onBeforeUnmount(() => {
 }
 .ng-canvas-head strong {
   display: block;
-  font-size: 14px;
+  font-size: 15px;
 }
 .ng-canvas-head span {
   display: block;
   color: #b9ad8f;
-  font-size: 11px;
+  font-size: 12px;
   margin-top: 2px;
 }
 .ng-canvas-hint {
   display: block;
   margin-top: 3px;
   color: #a99c7d;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 500;
 }
 .ng-canvas-actions {
@@ -3442,7 +3443,7 @@ onBeforeUnmount(() => {
   border-radius: 7px;
   background: #191711;
   color: #fff3c8;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 .ng-zoom-reset:hover {
@@ -3535,7 +3536,7 @@ onBeforeUnmount(() => {
   border-radius: 7px;
   background: #0f0e0a;
   color: #fff3c8;
-  font-size: 11px;
+  font-size: 12px;
   padding: 4px 6px;
 }
 .ng-node-name {
@@ -3543,14 +3544,14 @@ onBeforeUnmount(() => {
 }
 .ng-node-fixed-name {
   margin-top: 8px;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 900;
   color: #fff7dc;
 }
 .ng-node-hint {
   margin-top: 7px;
   color: #b9ad8f;
-  font-size: 10px;
+  font-size: 11px;
 }
 .ng-node.running {
   border-color: #facc15;
@@ -3566,7 +3567,7 @@ onBeforeUnmount(() => {
   border-radius: 999px;
   background: rgba(216, 184, 108, 0.16);
   color: #f2ead5;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 800;
   line-height: 1.2;
 }
@@ -3585,7 +3586,7 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   overflow: hidden;
   color: #fff7dc;
-  font-size: 13px;
+  font-size: 14px;
   font-weight: 900;
   line-height: 1.35;
   text-overflow: ellipsis;
@@ -3640,7 +3641,7 @@ onBeforeUnmount(() => {
   color: #281600;
   background: #facc15;
   border: 1px solid #fde68a;
-  font-size: 12px;
+  font-size: 13px;
   font-weight: 900;
   clip-path: polygon(13% 0, 87% 0, 100% 50%, 87% 100%, 13% 100%, 0 50%);
   cursor: pointer;
@@ -3689,7 +3690,7 @@ onBeforeUnmount(() => {
 }
 .ng-property-label {
   color: #e9dfc5;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 800;
 }
 .ng-type-tabs {
@@ -3706,7 +3707,7 @@ onBeforeUnmount(() => {
   background: #191711;
   color: #e9dfc5;
   cursor: pointer;
-  font-size: 11px;
+  font-size: 12px;
   font-weight: 700;
 }
 .ng-type-tabs button:hover { border-color: #d8b86c; }
@@ -3732,7 +3733,7 @@ onBeforeUnmount(() => {
   outline: none;
   background: #0f0e0a;
   color: #fff7dc;
-  font-size: 12px;
+  font-size: 13px;
 }
 .ng-name-row input:focus {
   border-color: #facc15;
@@ -3740,21 +3741,21 @@ onBeforeUnmount(() => {
 }
 .ng-name-row span {
   color: #b9ad8f;
-  font-size: 10px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 .ng-edge-meta {
   display: grid;
   gap: 3px;
   color: #b9ad8f;
-  font-size: 10px;
+  font-size: 11px;
 }
 .ng-condition-note {
   padding: 6px 7px;
   border-radius: 7px;
   background: rgba(36, 32, 22, 0.76);
   color: #e9dfc5;
-  font-size: 10px;
+  font-size: 11px;
   line-height: 1.4;
 }
 .ng-editor-empty {
@@ -3764,7 +3765,7 @@ onBeforeUnmount(() => {
   border-radius: 10px;
   border: 1px dashed rgba(216, 184, 108, 0.28);
   color: #b9ad8f;
-  font-size: 12px;
+  font-size: 13px;
   text-align: center;
   padding: 16px;
 }
@@ -3823,7 +3824,7 @@ onBeforeUnmount(() => {
   overflow: auto;
   margin: 0;
   color: #fecaca;
-  font: 11px/1.55 Consolas, monospace;
+  font: 12px/1.55 Consolas, monospace;
   white-space: pre-wrap;
   word-break: break-word;
 }

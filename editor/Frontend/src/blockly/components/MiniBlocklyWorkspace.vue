@@ -602,7 +602,7 @@ defineExpose({
   border-radius: 7px;
   color: #fecaca;
   background: rgba(127, 29, 29, 0.92);
-  font-size: 12px;
+  font-size: 13px;
   pointer-events: none;
 }
 
@@ -617,7 +617,7 @@ defineExpose({
   display: grid;
   place-items: center;
   color: #94a3b8;
-  font-size: 12px;
+  font-size: 13px;
   background: rgba(15, 23, 42, 0.72);
   z-index: 2;
 }

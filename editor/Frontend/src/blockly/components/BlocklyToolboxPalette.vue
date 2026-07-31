@@ -632,7 +632,7 @@ defineExpose({ resizeBlockly });
   border-radius: 8px;
   color: #cbd5e1;
   background: #111923;
-  font-size: 11px;
+  font-size: 12px;
   cursor: pointer;
 }
 
@@ -669,7 +669,7 @@ defineExpose({ resizeBlockly });
   display: grid;
   place-items: center;
   color: #94a3b8;
-  font-size: 12px;
+  font-size: 13px;
   background: rgba(15, 23, 42, 0.72);
   z-index: 3;
 }
