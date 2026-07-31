@@ -1,4 +1,5 @@
 import pathlib
+import re
 import sys
 import unittest
 
@@ -70,6 +71,60 @@ class NodeGraphReviewChatServiceTests(unittest.TestCase):
         self.assertIn("不要使用 Markdown 标题", prompt)
         self.assertIn("只使用‘1. 2. 3.’编号", prompt)
 
+
+    def test_english_locale_uses_english_plain_text_prompt(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["locale"] = "en-US"
+        payload["messages"] = [{"role": "user", "content": "How should I fix this node?"}]
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        prompt = NodeGraphReviewChatService._build_messages(request)[0]["content"]
+        self.assertEqual("en-US", request["locale"])
+        self.assertIn("Reply in clean English plain text", prompt)
+        self.assertIn("Do not use Markdown headings", prompt)
+        self.assertNotRegex(prompt, r"[\u3400-\u9fff]")
+
+    def test_english_guidance_steps_are_translated(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload.update({
+            "locale": "en-US",
+            "detailGuidanceRequested": True,
+            "selectedTaskKey": "tutorial.adjust_physics",
+            "tasks": [{
+                "taskKey": "tutorial.adjust_physics",
+                "type": "tutorial",
+                "title": "??????",
+                "titleEn": "Adjust Physics",
+            }],
+            "messages": [{"role": "user", "content": "Show me how to complete this task."}],
+        })
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        metadata = NodeGraphReviewChatService._guidance_metadata(request)
+        self.assertTrue(metadata["needsShowcase"])
+        self.assertGreaterEqual(len(metadata["steps"]), 3)
+        self.assertFalse(any(
+            re.search(r"[\u3400-\u9fff]", step)
+            for step in metadata["steps"]
+        ))
+
+    def test_task_english_fields_are_preserved_in_chat_context(self):
+        payload = self.payload({"score": 50, "updatedAt": 1})
+        payload["locale"] = "en-US"
+        payload["tasks"] = [{
+            "taskKey": "issue.one",
+            "type": "node-issue",
+            "title": "????",
+            "titleEn": "English Title",
+            "message": "????",
+            "messageEn": "English Cause",
+            "suggestion": "????",
+            "suggestionEn": "English Suggestion",
+            "completionCriteria": "????",
+            "completionCriteriaEn": "English Criteria",
+        }]
+        request = NodeGraphReviewChatService._normalize_payload(payload)
+        task = request["tasks"][0]
+        for field in ("titleEn", "messageEn", "suggestionEn", "completionCriteriaEn"):
+            self.assertTrue(task[field])
 
     def test_detail_request_for_object_reference_returns_safe_showcase(self):
         payload = self.payload({"score": 50, "updatedAt": 1})

@@ -4,14 +4,14 @@
   >
     <DockTitleBar
       v-if="!isDocked"
-      title="项目设置"
+      :title="t('projectSettings.title')"
       extraClass="bg-[#D8B86C]"
       routePath="/ProjectSettings"
       @close="closeFloat"
     />
 
     <div v-if="loading" class="flex-1 flex items-center justify-center text-[#d8b86c] text-sm">
-      加载中...
+      {{ t('common.loading') }}
     </div>
 
     <div v-else-if="errorMsg" class="flex-1 flex items-center justify-center text-red-400 text-sm">
@@ -21,18 +21,18 @@
     <div v-else class="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4 text-xs">
       <!-- 项目名称 -->
       <div class="flex flex-col gap-1">
-        <label class="text-gray-400">项目名称</label>
+        <label class="text-gray-400">{{ t('projectSettings.projectName') }}</label>
         <input
           v-model="form.name"
           type="text"
           class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#d8b86c] outline-none"
-          placeholder="项目名称"
+          :placeholder="t('projectSettings.projectName')"
         />
       </div>
 
       <!-- 项目模式 -->
       <div class="flex flex-col gap-1">
-        <label class="text-gray-400">项目模式</label>
+        <label class="text-gray-400">{{ t('projectSettings.projectMode') }}</label>
         <select
           v-model="form.mode"
           class="bg-[#1a1a1a] border border-[#333] rounded px-2 py-1.5 text-white focus:border-[#d8b86c] outline-none"
@@ -44,7 +44,7 @@
 
       <!-- 入口场景 -->
       <div class="flex flex-col gap-1">
-        <label class="text-gray-400">入口场景</label>
+        <label class="text-gray-400">{{ t('projectSettings.entryScene') }}</label>
         <div class="flex items-center gap-2">
           <input
             v-model="form.entrance_scene"
@@ -56,14 +56,14 @@
             class="px-3 py-1.5 bg-[#d8b86c] hover:bg-[#6f8d4b] rounded text-white"
             @click="handleBrowseScene"
           >
-            浏览...
+            {{ t('common.browse') }}
           </button>
         </div>
       </div>
 
       <!-- 核心版本 -->
       <div class="flex flex-col gap-1">
-        <label class="text-gray-400">核心版本</label>
+        <label class="text-gray-400">{{ t('projectSettings.coreVersion') }}</label>
         <input
           v-model="form.core_version"
           type="text"
@@ -75,11 +75,11 @@
       <!-- 只读信息 -->
       <div class="grid grid-cols-2 gap-3 pt-2 border-t border-[#333]">
         <div class="flex flex-col gap-1">
-          <label class="text-gray-400">创建时间</label>
+          <label class="text-gray-400">{{ t('projectSettings.createdAt') }}</label>
           <div class="text-gray-300 truncate">{{ form.create_time || '-' }}</div>
         </div>
         <div class="flex flex-col gap-1">
-          <label class="text-gray-400">最后打开</label>
+          <label class="text-gray-400">{{ t('projectSettings.lastOpened') }}</label>
           <div class="text-gray-300 truncate">{{ form.last_opened || '-' }}</div>
         </div>
       </div>
@@ -100,14 +100,14 @@
         :disabled="saving"
         @click="loadSettings"
       >
-        重置
+        {{ t('common.reset') }}
       </button>
       <button
         class="px-4 py-1.5 bg-[#d8b86c] hover:bg-[#6f8d4b] rounded text-xs text-white disabled:opacity-50"
         :disabled="saving"
         @click="handleSave"
       >
-        {{ saving ? '保存中...' : '保存' }}
+        {{ saving ? t('common.saving') : t('common.save') }}
       </button>
     </div>
   </div>
@@ -115,11 +115,13 @@
 
 <script setup>
 import { ref, onMounted } from 'vue';
+import { useI18n } from 'vue-i18n';
 import { projectSettingsService } from '@/utils/bridge';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
+const { t } = useI18n();
 
 const loading = ref(true);
 const saving = ref(false);
@@ -154,7 +156,7 @@ const loadSettings = async () => {
     if (res && res.success && res.data) {
       form.value = { ...form.value, ...res.data };
     } else {
-      errorMsg.value = (res && res.error) || '加载项目配置失败';
+      errorMsg.value = (res && res.error) || t('projectSettings.loadFailed');
     }
   } catch (e) {
     errorMsg.value = String(e);
@@ -174,9 +176,9 @@ const handleSave = async () => {
     };
     const res = await projectSettingsService.saveActiveProjectInfo(payload);
     if (res && res.success) {
-      setStatus('保存成功', true);
+      setStatus(t('projectSettings.saveSuccess'), true);
     } else {
-      setStatus((res && res.error) || '保存失败', false);
+      setStatus((res && res.error) || t('projectSettings.saveFailed'), false);
     }
   } catch (e) {
     setStatus(String(e), false);
@@ -199,7 +201,10 @@ const handleBrowseScene = async () => {
 };
 
 const closeFloat = () => {
-  if (closeDockPanel) { closeDockPanel(); return; }
+  if (closeDockPanel) {
+    closeDockPanel();
+    return;
+  }
   window.__settingsOpen = false;
 };
 

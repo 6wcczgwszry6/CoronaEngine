@@ -133,6 +133,7 @@ import { fileService } from '@/utils/bridge';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import FileTreeNode from '@/components/ui/FileTreeNode.vue';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
@@ -271,7 +272,7 @@ const handleRename = () => {
 const handleDelete = async () => {
   if (!contextMenu.value.item) return;
 
-  if (confirm(`确定要删除 "${contextMenu.value.item.name}" 吗？`)) {
+  if (confirm(translateUiText(`确定要删除 "${contextMenu.value.item.name}" 吗？`))) {
     const res = await fileService.deleteItem(contextMenu.value.item.path);
     if (res?.data) {
       await loadFileTree();
@@ -295,7 +296,7 @@ const handleOpenFile = (node) => {
 // 处理对话框确认
 const handleDialogConfirm = async () => {
   if (!dialog.value.value.trim()) {
-    alert('名称不能为空');
+    alert(translateUiText('名称不能为空'));
     return;
   }
 

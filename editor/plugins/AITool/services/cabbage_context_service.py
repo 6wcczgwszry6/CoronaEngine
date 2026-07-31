@@ -126,9 +126,13 @@ class CabbageContextService:
             "track": "scene",
             "order": 1,
             "title": "导入一个物体",
+            "titleEn": "Import an Object",
             "message": "先把一个模型加入当前世界，后续才能练习摆放和属性调整。",
+            "messageEn": "Add a model to the current world first so you can practice placement and property adjustments.",
             "suggestion": "打开场景管理，使用导入或添加模型功能，把一个模型放入场景。",
+            "suggestionEn": "Open Scene Manager and use Import or Add Model to place a model in the scene.",
             "completionCriteria": "成功导入模型，或场景中新建一个模型对象。",
+            "completionCriteriaEn": "A model is imported successfully or a new model object appears in the scene.",
         },
         {
             "taskKey": "tutorial.transform_model",
@@ -136,9 +140,13 @@ class CabbageContextService:
             "track": "scene",
             "order": 2,
             "title": "调整一个物体",
+            "titleEn": "Adjust an Object",
             "message": "修改模型的变换参数，观察它在场景中的位置、朝向或大小变化。",
+            "messageEn": "Edit a model transform and observe changes to its position, orientation, or size.",
             "suggestion": "选中一个模型，在对象 Dock 的“变换”区域修改位置、旋转或缩放中的任意参数。",
+            "suggestionEn": "Select a model and change any Position, Rotation, or Scale value in the Transform section of the Object dock.",
             "completionCriteria": "成功保存一次位置、旋转或缩放修改。",
+            "completionCriteriaEn": "A position, rotation, or scale change is saved successfully.",
         },
         {
             "taskKey": "tutorial.adjust_lighting",
@@ -146,9 +154,13 @@ class CabbageContextService:
             "track": "scene",
             "order": 3,
             "title": "调整场景光照",
+            "titleEn": "Adjust Scene Lighting",
             "message": "尝试改变光照状态或方向，观察模型明暗和场景氛围的变化。",
+            "messageEn": "Change the lighting state or direction and observe the model shading and scene atmosphere.",
             "suggestion": "在场景管理中切换光照，或调整光照方向后确认效果。",
+            "suggestionEn": "Toggle lighting in Scene Manager or adjust its direction, then confirm the result.",
             "completionCriteria": "成功修改光照启用状态或光照方向。",
+            "completionCriteriaEn": "The lighting enabled state or direction is changed successfully.",
         },
         {
             "taskKey": "tutorial.adjust_physics",
@@ -156,9 +168,13 @@ class CabbageContextService:
             "track": "scene",
             "order": 4,
             "title": "调整物理属性",
+            "titleEn": "Adjust Physics Properties",
             "message": "给模型设置物理效果，让它能够参与重力、碰撞或反弹。",
+            "messageEn": "Configure physics so the model can respond to gravity, collisions, or bouncing.",
             "suggestion": "选中一个模型，启用物理或修改质量、弹性、阻尼、锁轴中的任意一项。",
+            "suggestionEn": "Select a model, then enable physics or change mass, restitution, damping, or an axis lock.",
             "completionCriteria": "成功修改一次模型物理属性。",
+            "completionCriteriaEn": "A model physics property is changed successfully.",
         },
         {
             "taskKey": "tutorial.create_node",
@@ -166,9 +182,13 @@ class CabbageContextService:
             "track": "node",
             "order": 1,
             "title": "创建一个节点",
+            "titleEn": "Create a Node",
             "message": "先建立一个新的状态节点，为后续的积木逻辑和流程跳转准备容器。",
+            "messageEn": "Create a new state node as a container for later block logic and flow transitions.",
             "suggestion": "在节点 Dock 中拖入一个状态节点，并把它放到画布中。",
+            "suggestionEn": "Drag a state node from the Nodes dock onto the canvas.",
             "completionCriteria": "成功创建一个新的状态节点。",
+            "completionCriteriaEn": "A new state node is created successfully.",
         },
         {
             "taskKey": "tutorial.move_node",
@@ -176,9 +196,13 @@ class CabbageContextService:
             "track": "node",
             "order": 2,
             "title": "拖拽一个节点",
+            "titleEn": "Move a Node",
             "message": "整理节点位置，让状态流程更容易阅读和连接。",
+            "messageEn": "Rearrange a node so the state flow is easier to read and connect.",
             "suggestion": "在节点 Dock 的画布中拖动任意节点，并把它放到新的位置。",
+            "suggestionEn": "Drag any node on the Nodes dock canvas and place it at a new position.",
             "completionCriteria": "节点位置产生一次有效变化。",
+            "completionCriteriaEn": "A node position changes successfully.",
         },
         {
             "taskKey": "tutorial.connect_nodes",
@@ -186,9 +210,13 @@ class CabbageContextService:
             "track": "node",
             "order": 3,
             "title": "连接两个节点",
+            "titleEn": "Connect Two Nodes",
             "message": "建立两个不同状态之间的跳转路径，让流程能够从一个节点进入另一个节点。",
+            "messageEn": "Create a transition path between two states so the flow can move from one node to another.",
             "suggestion": "依次点击两个不同节点的端口，创建一条有效连线。",
+            "suggestionEn": "Connect the ports of two different nodes to create a valid edge.",
             "completionCriteria": "两个不同节点之间成功新增一条连线。",
+            "completionCriteriaEn": "A new connection is created successfully between two different nodes.",
         },
         {
             "taskKey": "tutorial.drag_block",
@@ -196,9 +224,13 @@ class CabbageContextService:
             "track": "node",
             "order": 4,
             "title": "向节点拖入一个积木",
+            "titleEn": "Drag a Block into a Node",
             "message": "把一个积木放进节点工作区，开始为当前状态添加实际行为。",
+            "messageEn": "Place a block in the node workspace to add behavior to the current state.",
             "suggestion": "从左侧积木列表拖动一个积木，并放入当前节点的积木区域。",
+            "suggestionEn": "Drag a block from the left toolbox into the current node block area.",
             "completionCriteria": "通过拖拽方式成功创建一个积木。",
+            "completionCriteriaEn": "A block is created successfully by dragging it into the workspace.",
         },
         {
             "taskKey": "tutorial.edit_block_parameter",
@@ -206,9 +238,13 @@ class CabbageContextService:
             "track": "node",
             "order": 5,
             "title": "修改一个积木参数",
+            "titleEn": "Edit a Block Parameter",
             "message": "调整积木字段，让同一个功能使用你需要的按键、数值、对象或条件。",
+            "messageEn": "Edit a block field to use the key, value, object, or condition you need.",
             "suggestion": "修改任意积木中的下拉项、文本或数值字段。",
+            "suggestionEn": "Change a dropdown, text, or numeric field in any block.",
             "completionCriteria": "积木的一个字段值发生有效变化。",
+            "completionCriteriaEn": "A block field value changes successfully.",
         },
         {
             "taskKey": "tutorial.set_transition_condition",
@@ -216,9 +252,13 @@ class CabbageContextService:
             "track": "node",
             "order": 6,
             "title": "设置一个跳转条件",
+            "titleEn": "Set a Transition Condition",
             "message": "给节点连线添加 Boolean 条件，控制流程在什么情况下进入下一个状态。",
+            "messageEn": "Add a Boolean condition to a node connection to control when the flow enters the next state.",
             "suggestion": "选中一条节点连线，在条件工作区放入能够返回 Boolean 的积木。",
+            "suggestionEn": "Select a node connection and place a Boolean-returning block in the condition workspace.",
             "completionCriteria": "跳转条件工作区成功加入一个条件积木。",
+            "completionCriteriaEn": "A condition block is added successfully to the transition condition workspace.",
         },
         {
             "taskKey": "tutorial.run_node_graph",
@@ -226,9 +266,13 @@ class CabbageContextService:
             "track": "node",
             "order": 7,
             "title": "运行一次节点逻辑",
+            "titleEn": "Run the Node Logic",
             "message": "点击运行当前节点图，开始验证节点、连线和积木的执行效果。",
+            "messageEn": "Run the current node graph to verify how its nodes, connections, and blocks execute.",
             "suggestion": "直接点击节点 Dock 中的运行按钮；节点会实时保存，不需要额外执行保存操作。",
+            "suggestionEn": "Click Run in the Nodes dock. The graph saves automatically, so no separate save action is required.",
             "completionCriteria": "节点逻辑成功发起一次运行。",
+            "completionCriteriaEn": "The node logic starts running successfully.",
         },
     )
     RETIRED_TUTORIAL_TASK_KEYS = {"tutorial.rotate_model"}
@@ -414,9 +458,13 @@ class CabbageContextService:
                 "track": template["track"],
                 "order": template["order"],
                 "title": template["title"],
+                "titleEn": template["titleEn"],
                 "message": template["message"],
+                "messageEn": template["messageEn"],
                 "suggestion": template["suggestion"],
+                "suggestionEn": template["suggestionEn"],
                 "completionCriteria": template["completionCriteria"],
+                "completionCriteriaEn": template["completionCriteriaEn"],
             })
             normalized_tasks.append(task)
         context["activeTasks"] = normalized_tasks
@@ -948,6 +996,15 @@ class CabbageContextService:
         now = cls._now_ms()
         raw_type = str(raw.get("type") or "node-issue")
         task_type = raw_type if raw_type in {"tutorial", "goal", "node-issue"} else "node-issue"
+
+        def english_field(name: str, source_name: str, fallback: str = "") -> str:
+            english = str(raw.get(name) or "").strip()
+            source = str(raw.get(source_name) or "").strip()
+            if not english:
+                return fallback
+            if english == source and any("\u3400" <= char <= "\u9fff" for char in english):
+                return fallback
+            return english
         task = {
             "taskKey": task_key,
             "issueKey": task_key,
@@ -963,9 +1020,17 @@ class CabbageContextService:
             "edgeId": str(raw.get("edgeId") or "")[:180],
             "pattern": cls._normalize_issue_pattern(raw.get("pattern")),
             "title": str(raw.get("title") or "节点逻辑需要调整").strip()[:160],
+            "titleEn": english_field(
+                "titleEn",
+                "title",
+                "Node Logic Needs Adjustment" if not raw.get("title") and task_type == "node-issue" else "",
+            )[:160],
             "message": str(raw.get("message") or "").strip()[:1600],
+            "messageEn": english_field("messageEn", "message")[:1600],
             "suggestion": str(raw.get("suggestion") or "").strip()[:1600],
+            "suggestionEn": english_field("suggestionEn", "suggestion")[:1600],
             "completionCriteria": str(raw.get("completionCriteria") or "").strip()[:800],
+            "completionCriteriaEn": english_field("completionCriteriaEn", "completionCriteria")[:800],
             "completionSignal": str(raw.get("completionSignal") or "").strip()[:80],
             "requiredCount": max(1, int(raw.get("requiredCount") or 1)),
             "phase": str(raw.get("phase") or "").strip()[:40],
@@ -1203,9 +1268,13 @@ class CabbageContextService:
                     "phase": "node-logic",
                     "effectId": "effect_01",
                     "title": "",
+                    "titleEn": "",
                     "message": "",
+                    "messageEn": "",
                     "suggestion": "",
+                    "suggestionEn": "",
                     "completionCriteria": "",
+                    "completionCriteriaEn": "",
                     "completionSignal": "block_added",
                     "requiredBlockTypes": [],
                 }
@@ -1227,6 +1296,8 @@ class CabbageContextService:
             "生成 6 到 10 个循序渐进的任务。目标是先让当前世界所需的节点玩法逻辑成立，再完成必要的场景内容和表现，而不是替用户生成一套节点积木。"
             "至少 5 个任务必须是 phase=node-logic，并且所有 node-logic 任务必须排在 scene-polish 前。"
             "每个任务只能对应一个可由 completionSignal 验证的操作目标；不要把光照和物理、导入和变换等不同完成信号合并在同一个任务中。"
+            "每个任务的 title、message、suggestion、completionCriteria 必须使用简体中文，"
+            "并同时提供语义一致、自然简洁的英文 titleEn、messageEn、suggestionEn、completionCriteriaEn。"
             "如果一个玩法效果需要多个积木，可以在同一个积木任务的 requiredBlockTypes 中列出，但标题、说明和完成条件必须与该单一任务目标一致。"
             "节点任务必须围绕当前 description 真正需要的效果组织；能力目录中的输入、移动、碰撞等只代表可选能力，不是必须加入世界的内容。"
             "禁止使用‘随便创建节点’‘任意拖入积木’这类脱离世界目标的通用教程。"
@@ -1440,6 +1511,10 @@ class CabbageContextService:
             message = str(raw.get("message") or "").strip()[:1600]
             suggestion = str(raw.get("suggestion") or "").strip()[:1600]
             criteria = str(raw.get("completionCriteria") or "").strip()[:800]
+            title_en = str(raw.get("titleEn") or title).strip()[:160]
+            message_en = str(raw.get("messageEn") or message).strip()[:1600]
+            suggestion_en = str(raw.get("suggestionEn") or suggestion).strip()[:1600]
+            criteria_en = str(raw.get("completionCriteriaEn") or criteria).strip()[:800]
             if not title or not message or not suggestion or not criteria:
                 raise ValueError("DeepSeek 生成的世界任务字段不完整")
             occurrences[signal] = occurrences.get(signal, 0) + 1
@@ -1456,9 +1531,13 @@ class CabbageContextService:
                 "severity": "info",
                 "confidence": 1.0,
                 "title": title,
+                "titleEn": title_en,
                 "message": message,
+                "messageEn": message_en,
                 "suggestion": suggestion,
+                "suggestionEn": suggestion_en,
                 "completionCriteria": criteria,
+                "completionCriteriaEn": criteria_en,
                 "completionSignal": signal,
                 "requiredCount": baseline.get(signal, 0) + occurrences[signal],
                 "requiredBlockTypes": required_block_types,
@@ -1518,9 +1597,15 @@ class CabbageContextService:
                     return {"success": True, "status": "completed", "context": self._clone(context)}
 
                 goal = context.get("worldGoal") if isinstance(context.get("worldGoal"), dict) else {}
+                goal_plan_tasks = [
+                    task for task in [*(context.get("activeTasks") or []), *(context.get("taskHistory") or [])]
+                    if isinstance(task, dict) and task.get("type") == "goal"
+                ]
                 has_goal_plan = any(
-                    isinstance(task, dict) and task.get("type") == "goal"
-                    for task in [*(context.get("activeTasks") or []), *(context.get("taskHistory") or [])]
+                    all(str(task.get(field) or "").strip() for field in (
+                        "titleEn", "messageEn", "suggestionEn", "completionCriteriaEn",
+                    ))
+                    for task in goal_plan_tasks
                 )
                 if (goal.get("status") == "ready"
                         and str(goal.get("prompt") or "") == prompt

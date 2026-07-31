@@ -585,8 +585,16 @@ class NodeGraphReviewService:
             tip_key = str(raw_tip.get("tipKey") or "").strip()[:120]
             title = str(raw_tip.get("title") or "").strip()[:80]
             message = str(raw_tip.get("message") or "").strip()[:360]
+            title_en = str(raw_tip.get("titleEn") or title).strip()[:80]
+            message_en = str(raw_tip.get("messageEn") or message).strip()[:360]
             if tip_key and title and message:
-                normalized_tip = {"tipKey": tip_key, "title": title, "message": message}
+                normalized_tip = {
+                    "tipKey": tip_key,
+                    "title": title,
+                    "titleEn": title_en,
+                    "message": message,
+                    "messageEn": message_en,
+                }
 
         summary = result.get("summary", "")
         if result["hasProblems"] and (
@@ -594,12 +602,19 @@ class NodeGraphReviewService:
         ):
             raise ValueError("DeepSeek 审查结果缺少可显示的 summary")
         result["summary"] = summary.strip()[:160] if isinstance(summary, str) else ""
+        summary_en = result.get("summaryEn", "")
+        result["summaryEn"] = (
+            summary_en.strip()[:160]
+            if isinstance(summary_en, str) and summary_en.strip()
+            else result["summary"]
+        )
 
         issues = result.get("issues", [])
         if not isinstance(issues, list):
             raise ValueError("DeepSeek issues 必须是数组")
         if not result["hasProblems"]:
             result["summary"] = ""
+            result["summaryEn"] = ""
             result["issues"] = []
             result["optimizationTip"] = normalized_tip
             return
@@ -683,6 +698,9 @@ class NodeGraphReviewService:
             title = str(item.get("title") or "节点逻辑需要调整").strip()[:80]
             message = str(item.get("message") or result["summary"]).strip()[:500]
             suggestion = str(item.get("suggestion") or result["summary"]).strip()[:500]
+            title_en = str(item.get("titleEn") or title).strip()[:80]
+            message_en = str(item.get("messageEn") or result["summaryEn"] or message).strip()[:500]
+            suggestion_en = str(item.get("suggestionEn") or result["summaryEn"] or suggestion).strip()[:500]
             normalized.append(
                 {
                     "issueKey": f"{code}|{node_id}|{block_id}" + (f"|{edge_id}" if edge_id else ""),
@@ -694,13 +712,17 @@ class NodeGraphReviewService:
                     "code": code,
                     "pattern": pattern,
                     "title": title,
+                    "titleEn": title_en,
                     "message": message,
+                    "messageEn": message_en,
                     "suggestion": suggestion,
+                    "suggestionEn": suggestion_en,
                 }
             )
         if result["hasProblems"] and not normalized:
             result["hasProblems"] = False
             result["summary"] = ""
+            result["summaryEn"] = ""
             result["issues"] = []
             result["optimizationTip"] = normalized_tip
             return
@@ -1213,7 +1235,7 @@ class NodeGraphReviewService:
 
         optimization_instruction = (
             "若确认当前节点逻辑没有错误，可以额外给出一条与现有逻辑直接相关的优化建议。"
-            "此时填写 optimizationTip={tipKey,title,message}，建议只能改善当前控制流、数据流、"
+            "此时填写 optimizationTip={tipKey,title,titleEn,message,messageEn}，建议只能改善当前控制流、数据流、"
             "对象引用、可读性或稳定性，不得要求用户添加额外玩法；没有可靠建议时返回 null。"
             if optimization_enabled
             else "本次不需要优化建议，optimizationTip 必须返回 null。"
@@ -1238,15 +1260,18 @@ class NodeGraphReviewService:
             + "\n"
             "不要在输出中显示内部评分，也不要给用户贴美术、程序、入门、熟悉或熟练标签。\n"
             "只返回一个 JSON 对象，不要 Markdown。无问题示例："
-            '{"hasProblems":false,"summary":"","issues":[],"optimizationTip":null}'
+            '{"hasProblems":false,"summary":"","summaryEn":"","issues":[],"optimizationTip":null}'
             "；若有可靠优化建议，可将 optimizationTip 替换为"
-            '{"tipKey":"stable_tip_key","title":"short title","message":"relevant suggestion"}。\n'
+            '{"tipKey":"stable_tip_key","title":"中文短标题","titleEn":"short English title",'
+            '"message":"中文建议","messageEn":"relevant English suggestion"}。\n'
             "有问题示例："
-            '{"hasProblems":true,"summary":"logic has a problem; fix it this way",'
+            '{"hasProblems":true,"summary":"中文问题总结","summaryEn":"English issue summary",'
             '"issues":[{"severity":"warning","confidence":0.95,"nodeId":"real node ID or empty",'
-            '"blockId":"real block ID or empty","code":"stable_issue_code","title":"short title",'
-            '"message":"cause","suggestion":"specific fix"}],"optimizationTip":null}。\n'
-            "summary 使用自然中文，总长度不超过 160 字；多个问题合并成一句总结。"
+            '"blockId":"real block ID or empty","code":"stable_issue_code","title":"中文短标题",'
+            '"titleEn":"short English title","message":"中文原因","messageEn":"English cause",'
+            '"suggestion":"中文修复建议","suggestionEn":"specific English fix"}],"optimizationTip":null}。\n'
+            "summary、title、message、suggestion 使用自然中文；summaryEn、titleEn、messageEn、suggestionEn "
+            "必须提供含义一致的自然英文。summary 和 summaryEn 各不超过 160 字符。"
             "issues 用于任务定位，内容必须与 summary 一致。\n"
             "本地确定性事实："
             + facts_json

@@ -25,16 +25,6 @@
           {{ codeRunning ? '停止' : '运行' }}
         </button>
         <span v-if="runStatus" class="ng-run-status" :title="runDetail || runStatus" @click="toggleRunDetail">{{ runStatus }}</span>
-        <button
-          type="button"
-          class="ng-mode fullscreen-toggle"
-          :class="{ active: isFullscreen }"
-          :disabled="fullscreenTransitionBusy"
-          :title="isFullscreen ? '退出全屏编辑（Esc）' : '全屏编辑节点图'"
-          @click.stop="toggleFullscreen"
-        >
-          {{ isFullscreen ? '退出全屏' : '全屏编辑' }}
-        </button>
         <button class="ng-mode" :class="{ active: mode === 'select' }" @click="setMode('select')">
           选择
         </button>
@@ -3097,23 +3087,12 @@ onBeforeUnmount(() => {
   color: #b9ad8f;
 }
 .ng-modes {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
-  padding-right: 82px;
-}
-.fullscreen-toggle {
-  position: absolute;
-  top: 7px;
-  right: 8px;
-  z-index: 20;
-  min-width: 72px;
-  border-color: #e5c77f !important;
-  color: #fff3c8 !important;
-}
-.fullscreen-toggle.active {
-  background: #6f5524 !important;
-  color: #fff !important;
+  margin-left: auto;
 }
 .ng-run {
   height: 28px;

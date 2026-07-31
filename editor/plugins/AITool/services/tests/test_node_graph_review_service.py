@@ -111,6 +111,36 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         NodeGraphReviewService._validate_model_result(result, request)
         self.assertEqual(["good"], [item["code"] for item in result["issues"]])
 
+    def test_review_result_preserves_bilingual_issue_fields(self):
+        workspace = graph(nodes=[{
+            "id": "start",
+            "nodeType": "start",
+            "workspace": {"blocks": {"blocks": [block("node_when_enter", "enter_1")]}},
+        }])
+        result = {
+            "hasProblems": True,
+            "summary": "\u4e2d\u6587\u603b\u7ed3",
+            "summaryEn": "English Summary",
+            "issues": [{
+                "nodeId": "start",
+                "blockId": "enter_1",
+                "code": "custom_logic_issue",
+                "confidence": 0.95,
+                "title": "\u4e2d\u6587\u6807\u9898",
+                "titleEn": "English Title",
+                "message": "\u4e2d\u6587\u539f\u56e0",
+                "messageEn": "English Cause",
+                "suggestion": "\u4e2d\u6587\u5efa\u8bae",
+                "suggestionEn": "English Suggestion",
+            }],
+        }
+        NodeGraphReviewService._validate_model_result(result, {"workspace": workspace})
+        issue = result["issues"][0]
+        self.assertEqual("English Summary", result["summaryEn"])
+        self.assertEqual("English Title", issue["titleEn"])
+        self.assertEqual("English Cause", issue["messageEn"])
+        self.assertEqual("English Suggestion", issue["suggestionEn"])
+
     def test_deepseek_request_uses_json_mode_and_current_model(self):
         settings = DeepSeekSettings(
             api_key="test-secret",
@@ -414,6 +444,9 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         prompt = NodeGraphReviewService._build_prompt(
             {"workspace": graph(), "projectContext": {}}, [], []
         )
+        self.assertIn("summaryEn", prompt)
+        self.assertIn("titleEn", prompt)
+        self.assertIn("suggestionEn", prompt)
         self.assertIn("不要评价玩法是否丰富", prompt)
         self.assertIn("不要因为 Demo 简单就建议增加功能", prompt)
         self.assertIn("没有真实问题时 hasProblems=false", prompt)

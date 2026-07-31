@@ -57,6 +57,62 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertIn("tutorial.connect_nodes", keys)
         self.assertIn("tutorial.drag_block", keys)
 
+    def test_tutorial_tasks_include_complete_english_copy(self):
+        context = self.service.load()["context"]
+        tutorials = [task for task in context["activeTasks"] if task.get("type") == "tutorial"]
+        self.assertTrue(tutorials)
+        for task in tutorials:
+            with self.subTest(task=task.get("taskKey")):
+                for field in ("titleEn", "messageEn", "suggestionEn", "completionCriteriaEn"):
+                    self.assertTrue(str(task.get(field) or "").strip())
+
+    def test_node_issue_task_preserves_english_fields(self):
+        response = self.service.update_task({
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "bilingual.issue",
+                "type": "node-issue",
+                "title": "\u4e2d\u6587\u6807\u9898",
+                "titleEn": "English Title",
+                "message": "\u4e2d\u6587\u539f\u56e0",
+                "messageEn": "English Cause",
+                "suggestion": "\u4e2d\u6587\u5efa\u8bae",
+                "suggestionEn": "English Suggestion",
+                "completionCriteria": "\u4e2d\u6587\u6807\u51c6",
+                "completionCriteriaEn": "English Criteria",
+            },
+        })
+        task = next(item for item in response["context"]["activeTasks"] if item["taskKey"] == "bilingual.issue")
+        self.assertEqual("English Title", task["titleEn"])
+        self.assertEqual("English Cause", task["messageEn"])
+        self.assertEqual("English Suggestion", task["suggestionEn"])
+        self.assertEqual("English Criteria", task["completionCriteriaEn"])
+
+    def test_node_issue_task_without_english_copy_keeps_english_fields_blank(self):
+        response = self.service.update_task({
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "legacy.chinese.issue",
+                "type": "node-issue",
+                "title": "\u4e2d\u6587\u6807\u9898",
+                "message": "\u4e2d\u6587\u539f\u56e0",
+                "messageEn": "\u4e2d\u6587\u539f\u56e0",
+                "suggestion": "\u4e2d\u6587\u5efa\u8bae",
+                "completionCriteria": "\u4e2d\u6587\u6807\u51c6",
+                "completionCriteriaEn": "\u4e2d\u6587\u6807\u51c6",
+            },
+        })
+        task = next(
+            item for item in response["context"]["activeTasks"]
+            if item["taskKey"] == "legacy.chinese.issue"
+        )
+        self.assertEqual("", task["titleEn"])
+        self.assertEqual("", task["messageEn"])
+        self.assertEqual("", task["suggestionEn"])
+        self.assertEqual("", task["completionCriteriaEn"])
+
     def test_new_world_shows_one_scene_task_and_one_node_task(self):
         context = self.service.load()["context"]
         self.assertEqual(
@@ -155,6 +211,27 @@ class CabbageContextServiceTests(unittest.TestCase):
                 })
                 self.assertIn(task_key, response["completedTaskKeys"])
                 self.assertIsNotNone(self.history_task(response["context"], task_key))
+
+    def test_existing_tutorial_tasks_receive_template_english_copy(self):
+        context = self.service._default_context(self.world)
+        legacy = next(
+            task for task in context["activeTasks"]
+            if task.get("taskKey") == "tutorial.create_node"
+        )
+        for field in ("titleEn", "messageEn", "suggestionEn", "completionCriteriaEn"):
+            legacy.pop(field, None)
+        context_path = self.service._context_path(self.world)
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+        loaded = self.service.load()["context"]
+        migrated = next(
+            task for task in loaded["activeTasks"]
+            if task.get("taskKey") == "tutorial.create_node"
+        )
+        template = self.service._tutorial_templates()["tutorial.create_node"]
+        for field in ("titleEn", "messageEn", "suggestionEn", "completionCriteriaEn"):
+            self.assertEqual(template[field], migrated[field])
 
     def test_retired_rotate_task_is_removed_from_existing_world(self):
         context = self.service._default_context(self.world)
@@ -441,9 +518,13 @@ class CabbageContextServiceTests(unittest.TestCase):
                     "phase": "node-logic",
                     "effectId": effect_id,
                     "title": f"goal step {index}",
+                    "titleEn": f"Goal Step {index}",
                     "message": f"build gameplay effect {effect_id}",
+                    "messageEn": f"Build gameplay effect {effect_id}",
                     "suggestion": f"finish the {effect_id} node logic",
+                    "suggestionEn": f"Finish the {effect_id} node logic",
                     "completionCriteria": f"signal {signal} is observed for the requested effect",
+                    "completionCriteriaEn": f"Signal {signal} is observed for the requested effect",
                     "completionSignal": signal,
                     "requiredBlockTypes": block_types,
                 }
@@ -479,6 +560,8 @@ class CabbageContextServiceTests(unittest.TestCase):
     def test_goal_plan_prompt_only_requests_personalized_guidance_tasks(self):
         description = "一间会随音乐改变颜色的抽象几何空间"
         prompt = self.service._goal_plan_prompt(description, "story")
+        self.assertIn("titleEn", prompt)
+        self.assertIn("completionCriteriaEn", prompt)
         self.assertIn("个性化搭建任务", prompt)
         self.assertIn("不能直接修改当前节点区", prompt)
         self.assertIn("不是替用户生成一套节点积木", prompt)
@@ -521,6 +604,17 @@ class CabbageContextServiceTests(unittest.TestCase):
                 self.assertIn(request_data, prompt)
                 self.assertIn("唯一的世界语义来源", prompt)
                 self.assertIn("只代表可选能力，不是必须加入世界的内容", prompt)
+
+    def test_normalized_goal_tasks_preserve_complete_english_copy(self):
+        context = self.service._default_context(self.world)
+        tasks = self.service._normalize_goal_plan_tasks(
+            self.goal_plan_payload(), context, self.service._now_ms(),
+        )
+        self.assertEqual(6, len(tasks))
+        for task in tasks:
+            with self.subTest(task=task.get("taskKey")):
+                for field in ("titleEn", "messageEn", "suggestionEn", "completionCriteriaEn"):
+                    self.assertTrue(str(task.get(field) or "").strip())
 
     def test_goal_plan_rejects_unknown_completion_signal(self):
         context = self.service._default_context(self.world)

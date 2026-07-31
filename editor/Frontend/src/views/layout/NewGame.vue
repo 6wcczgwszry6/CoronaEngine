@@ -103,6 +103,7 @@ import { useRouter } from 'vue-router';
 import { projectLauncherService, projectSettingsService } from '@/utils/bridge';
 import { initializeWorldTasks } from '@/services/cabbageAssistantContextService.js';
 import lanchat from '@/stores/lanchat.js';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const router = useRouter();
 
@@ -224,10 +225,10 @@ const handleCreate = async () => {
         return;
       }
     }
-    alert('创建失败');
+    alert(translateUiText('创建失败'));
   } catch (error) {
     console.error('创造世界失败:', error);
-    alert('创建失败: ' + (error?.message || error));
+    alert(translateUiText(`创建失败: ${error?.message || error}`));
   } finally {
     creating.value = false;
   }

@@ -42,7 +42,7 @@
               >
                 {{ disciplineLabel(task) }}
               </span>
-              <span class="task-title-text">{{ task.title }}</span>
+              <span class="task-title-text">{{ localizedTaskField(task, 'title') }}</span>
               <span v-if="historyVisible" class="task-completed-badge">{{ t('cabbageReview.completed') }}</span>
               <span class="task-chevron" :class="{ expanded: expandedKeys.has(rowKey(task, index)) }">&#8964;</span>
             </span>
@@ -82,6 +82,7 @@ import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { closeFloatingPanel } from '@/utils/panelWindows.js';
 import { publishCabbageAssistantContext } from '@/services/cabbageAssistantContextService.js';
 import { guidanceService } from '@/services/cabbageGuidanceService.js';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const props = defineProps({
   tasks: { type: Array, default: () => [] },
@@ -89,7 +90,7 @@ const props = defineProps({
   resident: { type: Boolean, default: false },
 });
 
-const { t } = useI18n();
+const { t, locale } = useI18n();
 const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
@@ -158,12 +159,24 @@ function disciplineLabel(task) {
     : t('cabbageReview.disciplineProgramming');
 }
 
+function localizedTaskField(task, field) {
+  const source = String(task?.[field] || '');
+  if (locale.value !== 'en-US') return source;
+  const english = String(task?.[`${field}En`] || '').trim();
+  return english || translateUiText(source);
+}
+
 function taskDescription(task) {
-  return String(task?.message || task?.completionCriteria || t('cabbageReview.descriptionFallback'));
+  return localizedTaskField(task, 'message')
+    || localizedTaskField(task, 'completionCriteria')
+    || t('cabbageReview.descriptionFallback');
 }
 
 function completionText(task) {
-  return String(task?.suggestion || task?.completionCriteria || task?.message || t('cabbageReview.completionFallback'));
+  return localizedTaskField(task, 'suggestion')
+    || localizedTaskField(task, 'completionCriteria')
+    || localizedTaskField(task, 'message')
+    || t('cabbageReview.completionFallback');
 }
 
 function clearOptimizationTimer() {

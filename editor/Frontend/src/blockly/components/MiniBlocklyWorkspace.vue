@@ -304,7 +304,9 @@ function hasBlock(blockId) {
 function hitTest(clientX, clientY) {
   const rect = blockdiv.value?.getBoundingClientRect?.();
   if (!rect) return false;
-  return clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom;
+  return (
+    clientX >= rect.left && clientX <= rect.right && clientY >= rect.top && clientY <= rect.bottom
+  );
 }
 
 function setDropActive(active, valid = true) {
@@ -325,7 +327,8 @@ function hasKnownNonBooleanOutput(block) {
 function inspectBlockAcceptance(block) {
   if (!block) return { accepted: false, message: '无法识别该积木' };
   if (props.workspaceRole === 'global') {
-    if (GLOBAL_ROOT_TYPES.has(block.type) || block.outputConnection) return { accepted: true, message: '' };
+    if (GLOBAL_ROOT_TYPES.has(block.type) || block.outputConnection)
+      return { accepted: true, message: '' };
     return { accepted: false, message: '此积木应放入节点内部编辑区' };
   }
   if (props.workspaceRole === 'condition' && !block.outputConnection) {
@@ -343,7 +346,9 @@ function canAcceptBlock(blockType) {
   } catch {
     return false;
   } finally {
-    try { probe?.dispose?.(false); } catch {}
+    try {
+      probe?.dispose?.(false);
+    } catch {}
   }
 }
 
@@ -354,9 +359,11 @@ function validateWorkspace() {
   if (props.workspaceRole === 'global') {
     for (const block of topBlocks) {
       if (!GLOBAL_ROOT_TYPES.has(block.type)) {
-        errors.push(block.outputConnection
-          ? '全局变量池中的返回值积木必须连接到初始化积木'
-          : '此积木应放入节点内部编辑区');
+        errors.push(
+          block.outputConnection
+            ? '全局变量池中的返回值积木必须连接到初始化积木'
+            : '此积木应放入节点内部编辑区'
+        );
       }
     }
   } else if (props.workspaceRole === 'condition') {
@@ -381,7 +388,9 @@ function addBlock(blockType, clientX, clientY) {
       block.dispose(false);
       validationMessage.value = acceptance.message;
       emit('reject', acceptance.message);
-      window.setTimeout(() => { if (validationMessage.value === acceptance.message) validationMessage.value = ''; }, 2400);
+      window.setTimeout(() => {
+        if (validationMessage.value === acceptance.message) validationMessage.value = '';
+      }, 2400);
       return false;
     }
     applyRoleVisualStyle(block);
@@ -392,8 +401,14 @@ function addBlock(blockType, clientX, clientY) {
     const metrics = workspace.getMetrics?.();
     const scale = workspace.scale || 1;
     const hasScreenPoint = Number.isFinite(clientX) && Number.isFinite(clientY) && rect;
-    const x = hasScreenPoint && metrics ? metrics.viewLeft + (clientX - rect.left) / scale : (metrics?.viewLeft || 0) + 24;
-    const y = hasScreenPoint && metrics ? metrics.viewTop + (clientY - rect.top) / scale : (metrics?.viewTop || 0) + 24;
+    const x =
+      hasScreenPoint && metrics
+        ? metrics.viewLeft + (clientX - rect.left) / scale
+        : (metrics?.viewLeft || 0) + 24;
+    const y =
+      hasScreenPoint && metrics
+        ? metrics.viewTop + (clientY - rect.top) / scale
+        : (metrics?.viewTop || 0) + 24;
     block.moveBy(Math.max(0, x), Math.max(0, y));
     workspace.setSelected?.(block);
     emitChange();
@@ -450,9 +465,9 @@ async function initBlockly() {
       if (!isLoadingWorkspace) {
         const blockChangeType = BlocklyLib.Events?.BLOCK_CHANGE || 'change';
         if (
-          (event?.type === blockChangeType || event?.type === 'change')
-          && event?.element === 'field'
-          && event?.oldValue !== event?.newValue
+          (event?.type === blockChangeType || event?.type === 'change') &&
+          event?.element === 'field' &&
+          event?.oldValue !== event?.newValue
         ) {
           const block = workspace?.getBlockById?.(event.blockId);
           emit('block-changed', {
@@ -507,7 +522,10 @@ watch(
 );
 
 watch(locale, () => {
+  if (!workspace || !BlocklyLib) return;
+  const state = getState();
   applyBlocklyLocale();
+  loadState(state);
 });
 
 onMounted(() => {
@@ -554,14 +572,17 @@ defineExpose({
   border-radius: 10px;
   background: #111827;
   border: 1px solid rgba(148, 163, 184, 0.25);
-  transition: border-color 120ms ease, box-shadow 120ms ease;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease;
 }
 
 .mini-blockly-shell.drop-active {
   border-color: #60a5fa;
-  box-shadow: inset 0 0 0 2px rgba(96, 165, 250, 0.28), 0 0 14px rgba(59, 130, 246, 0.22);
+  box-shadow:
+    inset 0 0 0 2px rgba(96, 165, 250, 0.28),
+    0 0 14px rgba(59, 130, 246, 0.22);
 }
-
 
 .mini-blockly-shell.drop-invalid {
   border-color: #ef4444;

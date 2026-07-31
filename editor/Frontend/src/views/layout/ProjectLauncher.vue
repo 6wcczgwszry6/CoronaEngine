@@ -136,6 +136,7 @@ import { ref, onMounted, watch } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService } from '@/utils/bridge';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const router = useRouter();
 
@@ -203,7 +204,7 @@ const handleCreateProject = async () => {
       // 打开项目
       await handleOpenProject(result.data);
     } else {
-      alert('创建失败: ' + result.message);
+      alert(translateUiText(`创建失败: ${result.message}`));
     }
   } catch (error) {
     console.error('创建项目异常:', error);
