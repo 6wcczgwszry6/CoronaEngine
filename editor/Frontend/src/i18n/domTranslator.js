@@ -471,6 +471,8 @@ const RUNTIME_DOM_TEXT_TRANSLATIONS = {
   'Blockly 原生形状': 'Native Blockly Shapes',
   已连接: 'Connected',
   拖动调整内部编辑区宽度: 'Drag to Resize the Inner Editor',
+  全局变量池: 'Global Variable Pool',
+  节点类型: 'Node Type',
   拖动调整全局变量池高度: 'Drag to Resize the Global Variable Pool',
   自定义节点: 'Custom Node',
   全屏编辑节点图失败: 'Failed to Open the Node Graph in Fullscreen',
@@ -925,7 +927,9 @@ function translateEnglishText(text) {
   for (const pattern of DOM_PATTERN_TRANSLATIONS) {
     const match = text.match(pattern.regex);
     if (!match) continue;
-    const values = Object.fromEntries(pattern.names.map((name, index) => [name, match[index + 1]]));
+    const values = Object.fromEntries(
+      pattern.names.map((name, index) => [name, translateEnglishText(match[index + 1])])
+    );
     return pattern.target.replace(/\{([^{}]+)\}/g, (placeholder, name) =>
       Object.hasOwn(values, name) ? values[name] : placeholder
     );
