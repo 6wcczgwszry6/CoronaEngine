@@ -321,6 +321,7 @@ import { editorApi, appService, projectSettingsService, scriptingService, sceneS
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 import { generatedNodeGraphRevision, registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
+import { actorContextNameKey, actorContextRevision, actorRecordsFromSceneTree, normalizeActorContextName } from '@/blockly/utils/actorContext.js';
 import { graphRevision as reviewGraphRevision, reviewScopeId, startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
@@ -2631,52 +2632,6 @@ watch(
   syncProjectNodeGraphRuntimeState
 );
 
-function normalizeActorContextName(value) {
-  const text = String(value ?? '').trim();
-  try { return text.normalize('NFKC'); } catch (_) { return text; }
-}
-function actorContextNameKey(value) {
-  return normalizeActorContextName(value).toLocaleLowerCase('en-US');
-}
-function actorAliasesFromSceneItem(item = {}) {
-  const aliases = [];
-  ['alias', 'displayName', 'display_name', 'nativeName', 'native_name', 'label'].forEach((field) => {
-    const value = normalizeActorContextName(item?.[field]);
-    if (value) aliases.push(value);
-  });
-  ['aliases', 'displayNames', 'display_names', 'names'].forEach((field) => {
-    let values = item?.[field];
-    if (values && typeof values === 'object' && !Array.isArray(values)) values = Object.values(values);
-    if (!Array.isArray(values)) values = [values];
-    values.forEach((value) => {
-      const alias = normalizeActorContextName(value);
-      if (alias) aliases.push(alias);
-    });
-  });
-  return [...new Set(aliases)];
-}
-function actorRecordFromSceneItem(item = {}) {
-  if (!item || typeof item !== 'object') return null;
-  const name = normalizeActorContextName(item.name ?? item.actor_name ?? item.actorName);
-  if (!name) return null;
-  const type = String(item.type ?? item.actor_type ?? item.actorType ?? 'actor').trim() || 'actor';
-  if (['scene', 'folder', 'root'].includes(type.toLocaleLowerCase('en-US'))) return null;
-  const aliases = actorAliasesFromSceneItem(item).filter((alias) => actorContextNameKey(alias) !== actorContextNameKey(name));
-  const tags = Array.isArray(item.tags)
-    ? item.tags.map(normalizeActorContextName).filter(Boolean)
-    : [];
-  return { name, type, tags, aliases };
-}
-function actorContextRevision(sceneName, actors) {
-  return JSON.stringify({
-    sceneName: normalizeSceneReference(sceneName),
-    actors: actors.map((actor) => ({
-      name: actorContextNameKey(actor.name),
-      type: String(actor.type || '').toLocaleLowerCase('en-US'),
-      aliases: (actor.aliases || []).map(actorContextNameKey).sort(),
-    })),
-  });
-}
 async function persistResolvedActorIssues(actions = []) {
   if (!actions.length) return;
   publishCabbageAssistantContext(cabbageAssistant);
@@ -2704,16 +2659,20 @@ async function refreshSceneActorOptions({ rescan = false } = {}) {
   const refreshSequence = ++actorOptionsRefreshSequence;
   const requestedSceneName = String(props.sceneName || '').trim();
   try {
-    const response = await sceneService.listSceneTree(requestedSceneName);
+    const response = await sceneService.listActorTree(requestedSceneName);
     if (response?.success === false || response?.status === 'error') {
-      throw new Error(response?.message || 'Scene tree query failed');
+      throw new Error(response?.message || 'Actor tree query failed');
     }
     const payload = response?.data ?? response?.result ?? response;
-    if (!Array.isArray(payload?.actors)) throw new Error('Scene tree response has no actor list');
+    const hasActorContainer = Array.isArray(payload) || (
+      payload
+      && typeof payload === 'object'
+      && ['actors', 'data', 'result', 'children', 'items'].some((field) => field in payload)
+    );
+    if (!hasActorContainer) throw new Error('Actor tree response has no actor list');
     const actorsByName = new Map();
-    payload.actors.forEach((item) => {
-      const actor = actorRecordFromSceneItem(item);
-      if (actor) actorsByName.set(actorContextNameKey(actor.name), actor);
+    actorRecordsFromSceneTree(payload).forEach((actor) => {
+      actorsByName.set(actorContextNameKey(actor.name), actor);
     });
     if (props.actorName) {
       const name = normalizeActorContextName(props.actorName);
