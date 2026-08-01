@@ -227,7 +227,11 @@
                 :key="option.value"
                 type="button"
                 :class="{ active: selectedNode.nodeType === option.value }"
-                :data-guidance="option.value === 'custom' ? 'node-type-custom' : undefined"
+                :data-guidance="option.value === 'custom'
+                  ? 'node-type-custom'
+                  : option.value === 'start'
+                    ? 'node-type-start'
+                    : undefined"
                 @click="setSelectedNodeType(option.value)"
               >
                 {{ option.label }}
@@ -516,6 +520,8 @@ let isLoading = false,
   unregisterProjectNodeGraphRuntimeHandler = null,
   unregisterTutorialRestorer = null,
   tutorialNodeGraphBaselineSessionId = '',
+  tutorialObservationTimer = null,
+  lastTutorialObservationSignature = '',
   loadedProjectPath = '',
   componentMounted = false,
   initialLoadComplete = false,
@@ -668,6 +674,15 @@ const selectedEdge = computed(() =>
 const paletteWorkspaceRole = computed(() =>
   selectedEdge.value ? 'condition' : selectedNode.value ? 'node' : 'global'
 );
+const activeNodeTutorialTask = computed(() =>
+  (cabbageAssistant.activeTasks || []).find((task) =>
+    task?.type === 'tutorial'
+    && task?.status === 'active'
+    && String(task?.taskKey || '').startsWith('tutorial.basics.')
+  ) || null
+);
+const activeNodeTutorialTaskKey = computed(() => String(activeNodeTutorialTask.value?.taskKey || ''));
+const tutorialNodeBindings = computed(() => cabbageAssistant.tutorialSession?.bindings || {});
 const nodeTypeOptions = [
   { value: 'start', label: '开始节点' },
   { value: 'end', label: '结束节点' },
@@ -751,7 +766,8 @@ function addMacroNodeAt(macroType, clientX, clientY) {
     workspace: {},
   };
   graph.nodes.push(node);
-  selectNode(node);
+  // Keep creation ahead of the automatic selection event. The tutorial advances one
+  // step at a time, so reversing these two events can make a fast drag look ignored.
   void cabbageContextService.recordEvent({
     type: 'node_created',
     category: 'node',
@@ -763,6 +779,8 @@ function addMacroNodeAt(macroType, clientX, clientY) {
       uniqueStart: graph.nodes.filter((item) => item.nodeType === 'start').length === 1,
     },
   });
+  selectNode(node);
+  scheduleTutorialNodeStateObservation();
   scheduleSave();
   scheduleRememberedIssueCheck();
   return true;
@@ -1165,7 +1183,10 @@ function selectNode(node, { source = 'user' } = {}) {
       source,
     },
   });
-  nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
+  nextTick(() => {
+    activeBlocklyRef.value?.resizeBlockly?.();
+    scheduleTutorialNodeStateObservation();
+  });
 }
 function selectEdge(edge, { allowDelete = true, source = 'user' } = {}) {
   if (!edge) return;
@@ -1184,7 +1205,10 @@ function selectEdge(edge, { allowDelete = true, source = 'user' } = {}) {
     success: true,
     details: { edgeId: String(edge.id || ''), source },
   });
-  nextTick(() => activeBlocklyRef.value?.resizeBlockly?.());
+  nextTick(() => {
+    activeBlocklyRef.value?.resizeBlockly?.();
+    scheduleTutorialNodeStateObservation();
+  });
 }
 function handleEdgeClick(edge) {
   if (mode.value === 'delete') {
@@ -1351,6 +1375,7 @@ function setSelectedNodeType(nextType) {
   if (nextType === 'start') node.name = '开始';
   else if (nextType === 'end') node.name = '结束';
   else node.name = String(node.customName || '').trim() || '自定义节点';
+  scheduleTutorialNodeStateObservation();
   scheduleSave();
   scheduleRememberedIssueCheck();
 }
@@ -1532,6 +1557,7 @@ function handlePortClick(node, p) {
   });
   pendingPort.value = null;
   connectionPointer.active = false;
+  scheduleTutorialNodeStateObservation();
   scheduleSave();
   scheduleRememberedIssueCheck();
 }
@@ -1623,6 +1649,7 @@ function conditionStyle(e) {
 }
 function onBlockAdded(payload = {}) {
   scheduleRememberedIssueCheck();
+  scheduleTutorialNodeStateObservation();
   void cabbageContextService.recordEvent({
     type: 'block_added',
     category: 'node',
@@ -1646,6 +1673,7 @@ function onBlockAdded(payload = {}) {
 
 function onBlockChanged(payload = {}) {
   scheduleRememberedIssueCheck();
+  scheduleTutorialNodeStateObservation();
   void cabbageContextService.recordEvent({
     type: 'block_parameter_changed',
     category: 'node',
@@ -1668,6 +1696,7 @@ function onBlockChanged(payload = {}) {
 
 function onBlockConnected(payload = {}) {
   scheduleRememberedIssueCheck();
+  scheduleTutorialNodeStateObservation();
   void cabbageContextService.recordEvent({
     type: 'block_connected',
     category: 'node',
@@ -1696,6 +1725,7 @@ function onActiveWorkspaceChange(s) {
   if (isLoading) return;
   if (selectedNode.value) selectedNode.value.workspace = s || {};
   if (selectedEdge.value) selectedEdge.value.conditionWorkspace = s || {};
+  scheduleTutorialNodeStateObservation();
   scheduleSave();
   scheduleRememberedIssueCheck();
 }
@@ -1743,19 +1773,244 @@ function canonicalJson(value) {
   try { return JSON.stringify(normalize(value)); } catch (_) { return ''; }
 }
 
-function serializedBlocksById(workspace = {}) {
-  const blocks = new Map();
-  const visit = (value) => {
+function serializedBlockRecordsById(workspace = {}) {
+  const records = new Map();
+  const seen = new Set();
+  const visit = (value, parentBlockType = '', connected = false) => {
     if (Array.isArray(value)) {
-      value.forEach(visit);
+      value.forEach((item) => visit(item, parentBlockType, connected));
       return;
     }
-    if (!value || typeof value !== 'object') return;
-    if (typeof value.type === 'string' && value.id) blocks.set(String(value.id), value);
-    Object.values(value).forEach(visit);
+    if (!value || typeof value !== 'object' || seen.has(value)) return;
+    seen.add(value);
+
+    const blockType = typeof value.type === 'string' ? value.type : '';
+    const blockId = blockType && value.id ? String(value.id) : '';
+    if (!blockId) {
+      Object.values(value).forEach((item) => visit(item, parentBlockType, connected));
+      return;
+    }
+
+    records.set(blockId, {
+      id: blockId,
+      blockType,
+      parentBlockType,
+      connected,
+      fields: value.fields && typeof value.fields === 'object' ? value.fields : {},
+      block: value,
+    });
+
+    const nested = [];
+    const inputs = value.inputs && typeof value.inputs === 'object' ? value.inputs : {};
+    Object.values(inputs).forEach((input) => {
+      if (!input || typeof input !== 'object') return;
+      if (input.block) nested.push(input.block);
+      else if (input.shadow) nested.push(input.shadow);
+    });
+    const nextBlock = value.next?.block || value.next?.shadow;
+    if (nextBlock) nested.push(nextBlock);
+    nested.forEach((item) => visit(item, blockType, true));
+
+    Object.entries(value).forEach(([key, item]) => {
+      if (['inputs', 'next', 'fields', 'type', 'id'].includes(key)) return;
+      visit(item, blockType, connected);
+    });
   };
   visit(workspace);
-  return blocks;
+  return records;
+}
+
+function serializedBlocksById(workspace = {}) {
+  return new Map(
+    [...serializedBlockRecordsById(workspace)].map(([blockId, record]) => [blockId, record.block])
+  );
+}
+
+function serializedBlockRecord(workspace, blockType, preferredId = '') {
+  const records = serializedBlockRecordsById(workspace);
+  if (preferredId) {
+    const preferred = records.get(String(preferredId));
+    if (preferred?.blockType === blockType) return preferred;
+  }
+  return [...records.values()].find((record) => record.blockType === blockType) || null;
+}
+
+function tutorialNodeStateObservationDetails() {
+  if (!componentMounted || isLoading || !initialLoadComplete) return null;
+  const taskKey = activeNodeTutorialTaskKey.value;
+  if (!taskKey.startsWith('tutorial.basics.')) return null;
+  const bindings = tutorialNodeBindings.value || {};
+  const baseline = cabbageAssistant.tutorialSession?.baseline?.nodeGraph;
+  const base = { observedTaskKey: taskKey, source: 'state_observation' };
+
+  if (taskKey === 'tutorial.basics.confirm_start_node') {
+    const startNodes = graph.nodes.filter((node) => String(node.nodeType || '').toLowerCase() === 'start');
+    if (startNodes.length !== 1) return null;
+    const nodeId = String(startNodes[0].id || '');
+    const hasBaseline = Boolean(baseline && typeof baseline === 'object');
+    const baselineNodeIds = new Set(
+      hasBaseline && Array.isArray(baseline.nodeIds) ? baseline.nodeIds.map(String) : []
+    );
+    return {
+      ...base,
+      nodeId,
+      nodeType: 'start',
+      startNodeCount: 1,
+      uniqueStart: true,
+      // Missing baseline data must never make a pre-existing user node look
+      // tutorial-created. The node can still satisfy the task, but restoration
+      // will conservatively keep it.
+      createdByTutorial: hasBaseline ? !baselineNodeIds.has(nodeId) : false,
+    };
+  }
+
+  if (taskKey === 'tutorial.basics.create_custom_node') {
+    if (!baseline || typeof baseline !== 'object') return null;
+    const baselineNodeIds = new Set((baseline.nodeIds || []).map(String));
+    const node = graph.nodes.find((item) =>
+      String(item.nodeType || '').toLowerCase() === 'custom'
+      && !baselineNodeIds.has(String(item.id || ''))
+    );
+    return node ? { ...base, nodeId: String(node.id || ''), nodeType: 'custom' } : null;
+  }
+
+  const startNodeId = String(bindings.startNodeId || '');
+  const customNodeId = String(bindings.customNodeId || '');
+  const edgeId = String(bindings.edgeId || '');
+  const customNode = graph.nodes.find((node) => String(node.id || '') === customNodeId);
+  const boundEdge = graph.edges.find((edge) => String(edge.id || '') === edgeId);
+
+  if (taskKey === 'tutorial.basics.connect_nodes') {
+    const edge = graph.edges.find((item) =>
+      String(item.source?.nodeId || '') === startNodeId
+      && String(item.target?.nodeId || '') === customNodeId
+      && String(item.source?.side || '') === 'right'
+      && String(item.target?.side || '') === 'left'
+    );
+    return edge ? {
+      ...base,
+      edgeId: String(edge.id || ''),
+      sourceNodeId: startNodeId,
+      targetNodeId: customNodeId,
+    } : null;
+  }
+
+  if (taskKey === 'tutorial.basics.open_custom_node') {
+    return selectedKind.value === 'node' && String(selectedId.value || '') === customNodeId
+      ? { ...base, nodeId: customNodeId }
+      : null;
+  }
+
+  if (taskKey === 'tutorial.basics.add_when_enter') {
+    const block = customNode && serializedBlockRecord(
+      customNode.workspace || {},
+      'node_when_enter',
+      bindings.whenEnterBlockId,
+    );
+    return block ? {
+      ...base,
+      nodeId: customNodeId,
+      blockId: block.id,
+      blockType: block.blockType,
+      workspaceRole: 'node',
+    } : null;
+  }
+
+  if (taskKey === 'tutorial.basics.add_wait') {
+    const block = customNode && serializedBlockRecord(
+      customNode.workspace || {},
+      'control_wait',
+      bindings.waitBlockId,
+    );
+    if (!block || !block.connected || block.parentBlockType !== 'node_when_enter') return null;
+    return {
+      ...base,
+      nodeId: customNodeId,
+      blockId: block.id,
+      blockType: block.blockType,
+      parentBlockType: block.parentBlockType,
+      connected: true,
+      workspaceRole: 'node',
+    };
+  }
+
+  if (taskKey === 'tutorial.basics.set_wait_seconds') {
+    const block = customNode && serializedBlockRecord(
+      customNode.workspace || {},
+      'control_wait',
+      bindings.waitBlockId,
+    );
+    const value = Number(block?.fields?.SECONDS);
+    if (
+      !block
+      || block.id !== String(bindings.waitBlockId || '')
+      || !block.connected
+      || block.parentBlockType !== 'node_when_enter'
+      || !Number.isFinite(value)
+    ) return null;
+    return {
+      ...base,
+      nodeId: customNodeId,
+      blockId: block.id,
+      blockType: block.blockType,
+      fieldName: 'SECONDS',
+      newValue: value,
+      value,
+      workspaceRole: 'node',
+    };
+  }
+
+  if (taskKey === 'tutorial.basics.select_edge') {
+    return selectedKind.value === 'edge' && String(selectedId.value || '') === edgeId
+      ? { ...base, edgeId }
+      : null;
+  }
+
+  if (taskKey === 'tutorial.basics.add_true_condition') {
+    const block = boundEdge && serializedBlockRecord(
+      boundEdge.conditionWorkspace || {},
+      'logic_boolean',
+      bindings.conditionBlockId,
+    );
+    const value = String(block?.fields?.BOOL || '').toUpperCase();
+    if (!block || value !== 'TRUE') return null;
+    return {
+      ...base,
+      edgeId,
+      blockId: block.id,
+      blockType: block.blockType,
+      workspaceRole: 'condition',
+      fieldName: 'BOOL',
+      newValue: 'TRUE',
+      value: 'TRUE',
+    };
+  }
+
+  return null;
+}
+
+function observeTutorialNodeState() {
+  tutorialObservationTimer = null;
+  refreshEmbeddedWorkspaceStates();
+  const details = tutorialNodeStateObservationDetails();
+  if (!details) return;
+  const signature = `${details.observedTaskKey}|${canonicalJson(details)}`;
+  if (signature === lastTutorialObservationSignature) return;
+  lastTutorialObservationSignature = signature;
+  void cabbageContextService.recordEvent({
+    type: 'tutorial_node_state_observed',
+    category: 'tutorial',
+    success: true,
+    details,
+  }).catch(() => {
+    if (lastTutorialObservationSignature === signature) lastTutorialObservationSignature = '';
+  });
+}
+
+function scheduleTutorialNodeStateObservation(delay = 80) {
+  if (!componentMounted) return;
+  if (tutorialObservationTimer) window.clearTimeout(tutorialObservationTimer);
+  tutorialObservationTimer = window.setTimeout(observeTutorialNodeState, Math.max(0, delay));
 }
 
 function changedSerializedBlockIds(previousWorkspace = {}, nextWorkspace = {}) {
@@ -2684,6 +2939,13 @@ watch(
   [codeRunning, runBusy, runStatus, runDetail],
   syncProjectNodeGraphRuntimeState
 );
+watch(
+  () => [activeNodeTutorialTaskKey.value, canonicalJson(tutorialNodeBindings.value)],
+  () => {
+    lastTutorialObservationSignature = '';
+    scheduleTutorialNodeStateObservation(0);
+  }
+);
 
 async function persistResolvedActorIssues(actions = []) {
   if (!actions.length) return;
@@ -3052,6 +3314,7 @@ onMounted(async () => {
       if (componentMounted) {
         cabbageAssistant.hydrateContext(snapshot);
         void captureTutorialNodeGraphBaseline();
+        scheduleTutorialNodeStateObservation();
       }
     },
     { projectScopeId: currentCabbageScopeId, emitCurrent: true },
@@ -3102,6 +3365,7 @@ onMounted(async () => {
   await loadGraphForCurrentTarget();
   if (!componentMounted) return;
   await captureTutorialNodeGraphBaseline();
+  scheduleTutorialNodeStateObservation(0);
   if (sceneActorContext.sceneName !== String(props.sceneName || '').trim()) {
     await refreshSceneActorOptions();
     if (!componentMounted) return;
@@ -3193,6 +3457,9 @@ onBeforeUnmount(() => {
   saveTimer = null;
   if (preWarningTimer) window.clearTimeout(preWarningTimer);
   preWarningTimer = null;
+  if (tutorialObservationTimer) window.clearTimeout(tutorialObservationTimer);
+  tutorialObservationTimer = null;
+  lastTutorialObservationSignature = '';
   if (initialLoadComplete && graphDirty) saveNow(null, { force: true });
   resizeObserver?.disconnect?.();
   if (resizeFrame) window.cancelAnimationFrame(resizeFrame);

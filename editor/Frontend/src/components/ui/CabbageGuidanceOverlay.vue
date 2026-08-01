@@ -12,6 +12,8 @@
       @wheel.prevent.stop
     >
       <div v-if="highlightStyle" class="guidance-highlight" :style="highlightStyle"></div>
+      <div v-if="fromHighlightStyle" class="guidance-highlight guidance-source" :style="fromHighlightStyle"></div>
+      <div v-if="connectorStyle" class="guidance-connector" :style="connectorStyle"></div>
       <section class="guidance-card">
         <div class="guidance-card-head">
           <strong>{{ guidance.state.guidance?.title || t('cabbageGuidance.title') }}</strong>
@@ -42,15 +44,40 @@ const localizedStepText = computed(() => {
   const current = step.value || {};
   if (locale.value === 'en-US') return current.textEn || current.text || t('cabbageGuidance.fallbackText');
   return current.text || current.textEn || t('cabbageGuidance.fallbackText');
-});const isLast = computed(() => guidance.state.stepIndex >= (guidance.state.guidance?.steps?.length || 1) - 1);
+});
+const isLast = computed(() => guidance.state.stepIndex >= (guidance.state.guidance?.steps?.length || 1) - 1);
 const rect = computed(() => guidance.state.targetRect);
+const fromRect = computed(() => guidance.state.fromRect);
 
-const highlightStyle = computed(() => {
-  const value = rect.value;
+function highlightRectStyle(value) {
   if (!value) return null;
   return {
     left: `${value.left - 5}px`, top: `${value.top - 5}px`,
     width: `${value.width + 10}px`, height: `${value.height + 10}px`,
+  };
+}
+
+const highlightStyle = computed(() => {
+  const value = rect.value;
+  if (!value) return null;
+  return highlightRectStyle(value);
+});
+const fromHighlightStyle = computed(() => highlightRectStyle(fromRect.value));
+const connectorStyle = computed(() => {
+  const from = fromRect.value;
+  const to = rect.value;
+  if (!from || !to) return null;
+  const startX = from.left + from.width / 2;
+  const startY = from.top + from.height / 2;
+  const endX = to.left + to.width / 2;
+  const endY = to.top + to.height / 2;
+  const distance = Math.hypot(endX - startX, endY - startY);
+  if (distance < 24) return null;
+  return {
+    left: `${startX}px`,
+    top: `${startY}px`,
+    width: `${distance}px`,
+    transform: `rotate(${Math.atan2(endY - startY, endX - startX)}rad)`,
   };
 });
 
@@ -67,8 +94,21 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true));
 
 <style scoped>
 .guidance-overlay { position:fixed; inset:0; z-index:2147483600; pointer-events:auto; overflow:hidden; }
-.guidance-highlight { position:fixed; border:2px solid #f2cf73; border-radius:9px; box-shadow:0 0 0 9999px rgba(0,0,0,.58),0 0 0 4px rgba(216,184,108,.2),0 0 26px rgba(242,207,115,.72); animation:guide-pulse 1.25s ease-in-out infinite; }
-.guidance-card { position:fixed; left:50%; bottom:26px; width:min(480px,calc(100% - 32px)); transform:translateX(-50%); border:1px solid #8c6f36; border-radius:10px; background:#15130d; box-shadow:0 18px 50px rgba(0,0,0,.7); padding:13px 14px; color:#f2ead5; }
+.guidance-highlight { position:fixed; z-index:1; border:2px solid #f2cf73; border-radius:9px; box-shadow:0 0 0 9999px rgba(0,0,0,.58),0 0 0 4px rgba(216,184,108,.2),0 0 26px rgba(242,207,115,.72); animation:guide-pulse 1.25s ease-in-out infinite; }
+.guidance-highlight.guidance-source {
+  z-index:2; border-color:#7dd3fc; box-shadow:0 0 0 4px rgba(56,189,248,.18),0 0 24px rgba(125,211,252,.7);
+  animation:guide-source-pulse 1.25s ease-in-out infinite;
+}
+.guidance-connector {
+  position:fixed; z-index:3; height:3px; transform-origin:0 50%; border-radius:999px;
+  background:linear-gradient(90deg,#7dd3fc 0%,#f2cf73 82%); box-shadow:0 0 10px rgba(242,207,115,.65);
+  pointer-events:none;
+}
+.guidance-connector::after {
+  content:''; position:absolute; right:-1px; top:50%; width:10px; height:10px;
+  border-top:3px solid #f2cf73; border-right:3px solid #f2cf73; transform:translateY(-50%) rotate(45deg);
+}
+.guidance-card { position:fixed; z-index:4; left:50%; bottom:26px; width:min(480px,calc(100% - 32px)); transform:translateX(-50%); border:1px solid #8c6f36; border-radius:10px; background:#15130d; box-shadow:0 18px 50px rgba(0,0,0,.7); padding:13px 14px; color:#f2ead5; }
 .guidance-card-head { display:flex; align-items:center; justify-content:space-between; gap:12px; color:#e5c77f; font-size:13px; }
 .guidance-card-head span { color:#9d9278; font-size:11px; }
 .guidance-card p { margin:8px 0 11px; color:#d8cfb7; font-size:12px; line-height:1.65; white-space:pre-wrap; }
@@ -78,4 +118,5 @@ onBeforeUnmount(() => window.removeEventListener('keydown', onKeydown, true));
 .guidance-actions .primary { border-color:#b8924a; background:#6d5226; color:#fff7dc; }
 .guidance-card small { display:block; margin-top:8px; color:#8f856e; font-size:10px; }
 @keyframes guide-pulse { 50% { box-shadow:0 0 0 9999px rgba(0,0,0,.58),0 0 0 7px rgba(216,184,108,.12),0 0 34px rgba(242,207,115,.86); } }
+@keyframes guide-source-pulse { 50% { box-shadow:0 0 0 7px rgba(56,189,248,.12),0 0 32px rgba(125,211,252,.85); } }
 </style>

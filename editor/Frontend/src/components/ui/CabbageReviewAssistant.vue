@@ -41,18 +41,54 @@
 
           <div v-if="expandedHistoryGroups.has(group.key)" class="chapter-steps">
             <div v-if="group.tasks.length" class="chapter-step-list">
-              <div v-for="task in group.tasks" :key="historyTaskKey(task)" class="chapter-step">
-                <span class="chapter-step-order">{{ historyTaskOrder(task) }}</span>
-                <span class="chapter-step-content">
-                  <strong>{{ localizedTaskField(task, 'title') }}</strong>
-                  <small>
-                    {{ taskCompletionTimestamp(task)
-                      ? `${t('cabbageReview.stepCompletedAt')} ${formatTimestamp(taskCompletionTimestamp(task))}`
-                      : t('cabbageReview.notCompleted') }}
-                  </small>
-                </span>
-                <span class="chapter-step-check">{{ taskCompletionTimestamp(task) ? '✓' : '·' }}</span>
-              </div>
+              <article
+                v-for="task in group.tasks"
+                :key="historyTaskKey(task)"
+                class="chapter-step"
+                :class="{ expanded: expandedHistoryTasks.has(historyRowKey(group, task)) }"
+              >
+                <button
+                  type="button"
+                  class="chapter-step-summary"
+                  @click="toggleHistoryTask(group, task)"
+                >
+                  <span class="chapter-step-order">{{ historyTaskOrder(task) }}</span>
+                  <span class="chapter-step-content">
+                    <strong>{{ localizedTaskField(task, 'title') }}</strong>
+                    <small>
+                      {{ taskCompletionTimestamp(task)
+                        ? `${t('cabbageReview.stepCompletedAt')} ${formatTimestamp(taskCompletionTimestamp(task))}`
+                        : t('cabbageReview.notCompleted') }}
+                    </small>
+                  </span>
+                  <span class="chapter-step-check">
+                    <span v-if="taskCompletionTimestamp(task)">&#10003;</span>
+                    <span v-else>&#8226;</span>
+                  </span>
+                  <span
+                    class="task-chevron"
+                    :class="{ expanded: expandedHistoryTasks.has(historyRowKey(group, task)) }"
+                  >&#8964;</span>
+                </button>
+                <div
+                  v-if="expandedHistoryTasks.has(historyRowKey(group, task))"
+                  class="chapter-step-detail"
+                >
+                  <p class="history-task-description">{{ taskDescription(task) }}</p>
+                  <div class="task-suggestion">
+                    <strong>{{ t('cabbageReview.howToComplete') }}</strong>
+                    <p>{{ completionText(task) }}</p>
+                  </div>
+                  <div class="task-actions">
+                    <button type="button" class="showcase-button" @click="showcase(task)">
+                      {{ t('cabbageReview.showcase') }}
+                    </button>
+                    <button type="button" class="task-discuss" @click="openChat(task)">
+                      {{ t('cabbageReview.continueDiscussion') }}
+                    </button>
+                  </div>
+                </div>
+              </article>
             </div>
             <div v-else class="chapter-empty">{{ t('cabbageReview.noChapterRecords') }}</div>
             <button
@@ -183,6 +219,7 @@ const dockStore = useDockStore();
 const assistant = useCabbageAssistantStore();
 const expandedKeys = reactive(new Set());
 const expandedHistoryGroups = reactive(new Set());
+const expandedHistoryTasks = reactive(new Set());
 const historyVisible = ref(false);
 const completionClock = ref(Date.now());
 const completionNoticeFading = ref(false);
@@ -311,6 +348,7 @@ function latestCompletion(tasks) { return tasks.reduce((value, task) => Math.max
 function sortHistoryRecords(left, right) { return taskCompletionTimestamp(right) - taskCompletionTimestamp(left); }
 function activeRowKey(task, index = 0) { return `active:${taskKey(task) || `task_${index}`}`; }
 function historyTaskKey(task) { return `${taskKey(task)}:${taskCompletionTimestamp(task)}`; }
+function historyRowKey(group, task) { return `${group?.key || 'history'}:${historyTaskKey(task)}`; }
 function historyTaskOrder(task) { return Number(task.chapterTaskOrder || task.globalOrder || task.order) || '·'; }
 function localizedTaskField(task, field) {
   const source = String(task?.[field] || '');
@@ -383,12 +421,19 @@ function toggleHistory() {
   expandedKeys.clear();
   if (!historyVisible.value) return;
   expandedHistoryGroups.clear();
+  expandedHistoryTasks.clear();
   const current = historyGroups.value.find((group) => group.current);
   if (current) expandedHistoryGroups.add(current.key);
 }
 function toggleHistoryGroup(key) {
   if (expandedHistoryGroups.has(key)) expandedHistoryGroups.delete(key);
   else expandedHistoryGroups.add(key);
+}
+function toggleHistoryTask(group, task) {
+  const key = historyRowKey(group, task);
+  if (expandedHistoryTasks.has(key)) expandedHistoryTasks.delete(key);
+  else expandedHistoryTasks.add(key);
+  assistant.selectTask(taskKey(task));
 }
 function toggleTask(task, index) {
   const key = activeRowKey(task, index);
@@ -465,6 +510,7 @@ watch(() => `${assistant.projectScopeId}:${assistant.worldId}`, () => {
   historyVisible.value = false;
   expandedKeys.clear();
   expandedHistoryGroups.clear();
+  expandedHistoryTasks.clear();
   completionDismissRequestKey = '';
   clearCompletionTimers();
   scheduleCompletionNotice();
@@ -605,7 +651,13 @@ onBeforeUnmount(() => {
 .chapter-summary-meta .task-chevron { margin-left: auto; }
 .chapter-steps { border-top: 1px solid #352a17; padding: 8px; background: #0e0d09; }
 .chapter-step-list { display: flex; flex-direction: column; gap: 5px; }
-.chapter-step { display: flex; align-items: center; gap: 8px; border: 1px solid #292317; border-radius: 6px; padding: 7px 8px; background: #15130d; }
+.chapter-step { overflow: hidden; border: 1px solid #292317; border-radius: 6px; background: #15130d; }
+.chapter-step.expanded { border-color: #58451f; background: #19160e; }
+.chapter-step-summary {
+  width: 100%; display: flex; align-items: center; gap: 8px; border: 0; padding: 8px;
+  background: transparent; color: inherit; text-align: left;
+}
+.chapter-step-summary:hover { background: rgba(216, 184, 108, .045); }
 .chapter-step-order {
   flex: 0 0 auto; display: grid; width: 22px; height: 22px; place-items: center;
   border-radius: 50%; background: #302713; color: #d9bd78; font-size: 10px;
@@ -614,6 +666,11 @@ onBeforeUnmount(() => {
 .chapter-step-content strong { display: block; color: #d8cfb7; font-size: 12px; font-weight: 650; }
 .chapter-step-content small { display: block; margin-top: 3px; color: #776f5e; font-size: 10px; }
 .chapter-step-check { flex: 0 0 auto; color: #9fc66c; font-size: 13px; }
+.chapter-step-summary .task-chevron { flex: 0 0 auto; }
+.chapter-step-detail { border-top: 1px solid #302817; padding: 9px 10px 10px 40px; background: #100f0a; }
+.history-task-description { margin: 0 0 9px; color: #bdb49d; font-size: 12px; line-height: 1.55; }
+.chapter-step-detail .task-suggestion { margin-top: 0; }
+.chapter-step-detail .task-actions { margin-top: 9px; }
 .chapter-empty { padding: 13px 8px; color: #746c5c; font-size: 11px; text-align: center; }
 .chapter-retry { display: block; margin-left: auto; }
 @keyframes state-spin { to { transform: rotate(360deg); } }

@@ -2892,6 +2892,45 @@ const cloneTutorialValue = (value, fallback = {}) => {
   }
 };
 
+const isTutorialRecord = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+
+const isTutorialVector3 = (value) => (
+  Array.isArray(value)
+  && value.length === 3
+  && value.every((component) => Number.isFinite(Number(component)))
+);
+
+const isTutorialDirection = (value) => (
+  isTutorialRecord(value)
+  && ['x', 'y', 'z'].every((axis) => Number.isFinite(Number(value[axis])))
+);
+
+const hasCompleteTutorialBaseline = (baseline = {}) => (
+  isTutorialRecord(baseline)
+  && isTutorialVector3(baseline.cameraState?.position)
+  && isTutorialVector3(baseline.cameraState?.forward)
+  && isTutorialVector3(baseline.cameraState?.up)
+  && isTutorialRecord(baseline.sceneLight)
+  && typeof baseline.sceneLight.enabled === 'boolean'
+  && isTutorialDirection(baseline.sceneLight.direction)
+  && isTutorialRecord(baseline.panels)
+  && Object.keys(baseline.panels).length > 0
+  && isTutorialRecord(baseline.sceneInventory)
+  && Array.isArray(baseline.sceneInventory.actors)
+  && Array.isArray(baseline.sceneInventory.resourcePaths)
+  && typeof baseline.activeSceneId === 'string'
+  && baseline.activeSceneId.length > 0
+);
+
+const hasCompleteTutorialNodeGraphBaseline = (baseline = {}) => (
+  isTutorialRecord(baseline)
+  && typeof baseline.targetKey === 'string'
+  && baseline.targetKey.length > 0
+  && Array.isArray(baseline.nodeIds)
+  && Array.isArray(baseline.edgeIds)
+  && Array.isArray(baseline.startNodeIds)
+);
+
 const captureTutorialBaseline = async (session = {}) => {
   const sessionId = String(session.sessionId || '');
   if (!sessionId || tutorialBaselineCaptureSessionId === sessionId) {
@@ -2899,14 +2938,43 @@ const captureTutorialBaseline = async (session = {}) => {
   }
   tutorialBaselineCaptureSessionId = sessionId;
   const actorContext = getActorContext();
+  const activeSceneId = tabs.value[activeTab.value]?.id || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME;
+  let sceneInventory = { actors: [], resourcePaths: [] };
+  try {
+    const treeResult = await sceneService.listSceneTree(activeSceneId);
+    if (treeResult?.success === false) throw new Error(treeResult?.error || 'Scene inventory request failed');
+    const tree = treeResult?.data ?? treeResult;
+    const actors = Array.isArray(tree?.actors) ? tree.actors : [];
+    sceneInventory = {
+      actors: actors.map((actor) => ({
+        id: String(actor?.handle || actor?.id || actor?.actor_id || ''),
+        name: String(actor?.name || actor?.actorName || actor?.actor_name || ''),
+        resourcePath: String(actor?.path || actor?.resourcePath || actor?.resource_path || ''),
+      })),
+      resourcePaths: [...new Set(actors
+        .map((actor) => String(actor?.path || actor?.resourcePath || actor?.resource_path || ''))
+        .filter(Boolean))],
+    };
+  } catch (error) {
+    tutorialBaselineCaptureSessionId = '';
+    logWarn('Failed to capture tutorial scene inventory', error);
+    window.setTimeout(() => {
+      const currentSession = cabbageAssistant.tutorialSession || {};
+      if (String(currentSession.sessionId || '') === sessionId && currentSession.status === 'active') {
+        void captureTutorialBaseline(currentSession);
+      }
+    }, 1000);
+    return;
+  }
   const baseline = {
     capturedAt: Date.now(),
     cameraState: cloneTutorialValue(cameraState.value, {}),
     cameraBindingState: cloneTutorialValue(cameraBindingState.value, {}),
     viewportFocused: document.activeElement === viewportPickSurfaceRef.value,
     actorContext: cloneTutorialValue(actorContext, {}),
-    activeSceneId: tabs.value[activeTab.value]?.id || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME,
+    activeSceneId,
     activeTab: activeTab.value,
+    sceneInventory,
     sceneLight: {
       enabled: Boolean(sceneLightSettings.enabled),
       direction: cloneTutorialValue(sceneLightSettings.direction, { x: 1, y: 1, z: 1 }),
@@ -2923,6 +2991,12 @@ const captureTutorialBaseline = async (session = {}) => {
   } catch (error) {
     tutorialBaselineCaptureSessionId = '';
     logError('Failed to capture tutorial baseline', error);
+    window.setTimeout(() => {
+      const currentSession = cabbageAssistant.tutorialSession || {};
+      if (String(currentSession.sessionId || '') === sessionId && currentSession.status === 'active') {
+        void captureTutorialBaseline(currentSession);
+      }
+    }, 1000);
   }
 };
 
@@ -2933,10 +3007,18 @@ const sceneTreeContainsActor = (value, actorName) => {
   return Object.values(value).some((item) => sceneTreeContainsActor(item, actorName));
 };
 
-const removeTutorialActor = async (bindings = {}) => {
+const removeTutorialActor = async (bindings = {}, sceneInventory = {}) => {
   const sceneName = String(bindings.sceneName || '');
   const actorName = String(bindings.modelActorName || '');
+  const actorId = String(bindings.modelActorId || '');
   if (!sceneName || !actorName) return;
+  const existingActors = Array.isArray(sceneInventory.actors) ? sceneInventory.actors : [];
+  const existedBeforeTutorial = existingActors.some((actor) => {
+    const existingId = String(actor?.id || '');
+    if (actorId && existingId) return existingId === actorId;
+    return !actorId && String(actor?.name || '') === actorName;
+  });
+  if (existedBeforeTutorial) return;
   try {
     const treeResult = await sceneService.listSceneTree(sceneName);
     const tree = treeResult?.data ?? treeResult;
@@ -3000,9 +3082,18 @@ const restoreTutorialSession = async (session = {}) => {
 
     const bindings = cloneTutorialValue(session.bindings, {});
     const baseline = cloneTutorialValue(session.baseline, {});
-    await removeTutorialActor(bindings);
+    const needsNodeGraphRestore = Boolean(
+      bindings.customNodeId || bindings.edgeId || bindings.startNodeCreatedByTutorial
+    );
+    if (!hasCompleteTutorialBaseline(baseline)) {
+      throw new Error('Tutorial restoration baseline is incomplete');
+    }
+    if ((needsNodeGraphRestore || baseline.nodeGraph) && !hasCompleteTutorialNodeGraphBaseline(baseline.nodeGraph)) {
+      throw new Error('Tutorial node graph baseline is incomplete');
+    }
+    await removeTutorialActor(bindings, baseline.sceneInventory);
 
-    if (baseline.nodeGraph || bindings.customNodeId || bindings.edgeId || bindings.startNodeCreatedByTutorial) {
+    if (baseline.nodeGraph || needsNodeGraphRestore) {
       if (!dockStore.panels.NodeGraphPanel?.open) {
         await openFloatingPanel(dockStore, 'NodeGraphPanel');
       }
@@ -3043,9 +3134,10 @@ const restoreTutorialSession = async (session = {}) => {
       clearActorContext();
     }
 
-    await projectService.sceneSave(sceneId);
-    await restoreTutorialPanels(baseline.panels || {});
+    await restoreTutorialPanels(baseline.panels);
     if (baseline.viewportFocused) focusViewportInput();
+    else if (document.activeElement === viewportPickSurfaceRef.value) viewportPickSurfaceRef.value?.blur?.();
+    await projectService.sceneSave(sceneId);
     await syncSceneCameraBinding(sceneId, { preservePose: true });
     scheduleCameraUpdate();
 

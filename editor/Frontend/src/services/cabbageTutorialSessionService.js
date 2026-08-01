@@ -4,6 +4,7 @@ const RESPONSE_TYPE = 'tutorial-restore-response';
 
 const restorers = new Map();
 const pending = new Map();
+const incomingRequests = new Map();
 let channel = null;
 let listening = false;
 
@@ -47,11 +48,24 @@ async function handleMessage(event) {
   const message = event?.data;
   if (!message || typeof message !== 'object') return;
   if (message.type === REQUEST_TYPE) {
-    const response = await executeRestorer(message.name, message.payload);
-    if (!response.handled) return;
+    const requestId = String(message.requestId || '');
+    if (!requestId) return;
+    let execution = incomingRequests.get(requestId);
+    if (!execution) {
+      execution = executeRestorer(message.name, message.payload);
+      incomingRequests.set(requestId, execution);
+    }
+    const response = await execution;
+    if (!response.handled) {
+      if (incomingRequests.get(requestId) === execution) incomingRequests.delete(requestId);
+      return;
+    }
+    window.setTimeout(() => {
+      if (incomingRequests.get(requestId) === execution) incomingRequests.delete(requestId);
+    }, 10000);
     getChannel()?.postMessage({
       type: RESPONSE_TYPE,
-      requestId: message.requestId,
+      requestId,
       name: message.name,
       ...response,
     });
@@ -62,6 +76,7 @@ async function handleMessage(event) {
   if (!entry || entry.name !== String(message.name || '')) return;
   pending.delete(entry.requestId);
   window.clearTimeout(entry.timer);
+  window.clearInterval(entry.retryTimer);
   if (message.success) entry.resolve(message.result || { success: true });
   else entry.reject(new Error(String(message.error || `Tutorial restorer ${entry.name} failed`)));
 }
@@ -88,26 +103,33 @@ export async function requestTutorialRestore(name, payload = {}, { timeoutMs = 5
   if (!currentChannel) throw new Error(`Tutorial restorer ${key} is unavailable`);
   const requestId = `tutorial_restore_${Date.now()}_${Math.random().toString(16).slice(2)}`;
   return new Promise((resolve, reject) => {
-    const timer = window.setTimeout(() => {
-      pending.delete(requestId);
-      reject(new Error(`Tutorial restorer ${key} timed out`));
-    }, Math.max(500, Number(timeoutMs) || 5000));
-    pending.set(requestId, { requestId, name: key, resolve, reject, timer });
-    currentChannel.postMessage({
+    const request = {
       type: REQUEST_TYPE,
       requestId,
       name: key,
       payload: clone(payload, {}),
-    });
+    };
+    const timer = window.setTimeout(() => {
+      const entry = pending.get(requestId);
+      if (entry) window.clearInterval(entry.retryTimer);
+      pending.delete(requestId);
+      reject(new Error(`Tutorial restorer ${key} timed out`));
+    }, Math.max(500, Number(timeoutMs) || 5000));
+    const entry = { requestId, name: key, resolve, reject, timer, retryTimer: null };
+    pending.set(requestId, entry);
+    entry.retryTimer = window.setInterval(() => currentChannel.postMessage(request), 250);
+    currentChannel.postMessage(request);
   });
 }
 
 export function closeTutorialSessionChannel() {
   for (const entry of pending.values()) {
     window.clearTimeout(entry.timer);
+    window.clearInterval(entry.retryTimer);
     entry.reject(new Error('Tutorial session channel closed'));
   }
   pending.clear();
+  incomingRequests.clear();
   channel?.close?.();
   channel = null;
   listening = false;

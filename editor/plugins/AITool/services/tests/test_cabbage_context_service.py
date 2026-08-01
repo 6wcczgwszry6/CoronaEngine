@@ -198,14 +198,24 @@ class CabbageContextServiceTests(unittest.TestCase):
 
     def test_tutorial_tasks_are_bilingual_and_do_not_expose_track_or_discipline(self):
         tutorials = self.tutorial_tasks(self.service.load()["context"])
+        visible_fields = (
+            "chapterTitle", "chapterTitleEn", "chapterSummary", "chapterSummaryEn",
+            "title", "titleEn", "message", "messageEn", "suggestion", "suggestionEn",
+            "completionCriteria", "completionCriteriaEn",
+        )
+        forbidden_internal_names = (
+            "node_when_enter", "control_wait", "logic_boolean", "run_succeeded",
+            "SetPhysicsEnabled", "SECONDS",
+        )
+        self.assertEqual(29, len(CabbageContextService.TUTORIAL_TASKS))
         for task in tutorials:
             with self.subTest(task=task["taskKey"]):
-                for field in (
-                    "chapterTitle", "chapterTitleEn", "chapterSummary", "chapterSummaryEn",
-                    "title", "titleEn", "message", "messageEn", "suggestion", "suggestionEn",
-                    "completionCriteria", "completionCriteriaEn",
-                ):
-                    self.assertTrue(str(task.get(field) or "").strip(), field)
+                for field in visible_fields:
+                    value = str(task.get(field) or "").strip()
+                    self.assertTrue(value, field)
+                    self.assertNotIn("???", value)
+                    for internal_name in forbidden_internal_names:
+                        self.assertNotIn(internal_name, value)
                 self.assertNotIn("track", task)
                 self.assertNotIn("discipline", task)
 
@@ -352,6 +362,144 @@ class CabbageContextServiceTests(unittest.TestCase):
             "blockType": "logic_boolean", "newValue": True,
         })
         self.assertEqual(["tutorial.basics.add_true_condition"], true_condition["completedTaskKeys"])
+
+    def test_node_steps_can_reconcile_existing_ui_state_in_order(self):
+        response = self.complete_tutorial_steps(16)
+        self.assertEqual(
+            "tutorial.basics.confirm_start_node",
+            self.active_tutorial(response["context"])["taskKey"],
+        )
+
+        wrong_task = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.create_custom_node",
+            "nodeId": "start-1", "nodeType": "start",
+            "startNodeCount": 1, "uniqueStart": True,
+            "source": "state_observation",
+        })
+        self.assertEqual([], wrong_task["completedTaskKeys"])
+
+        confirmed = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.confirm_start_node",
+            "nodeId": "start-1", "nodeType": "start",
+            "startNodeCount": 1, "uniqueStart": True,
+            "createdByTutorial": False, "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.confirm_start_node"], confirmed["completedTaskKeys"])
+        self.assertFalse(confirmed["context"]["tutorialSession"]["bindings"]["startNodeCreatedByTutorial"])
+
+        created = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.create_custom_node",
+            "nodeId": "custom-1", "nodeType": "custom",
+            "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.create_custom_node"], created["completedTaskKeys"])
+
+        move_observation = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.move_custom_node",
+            "nodeId": "custom-1", "actualDelta": 20,
+            "source": "state_observation",
+        })
+        self.assertEqual([], move_observation["completedTaskKeys"])
+        moved = self.record("node_moved", {"nodeId": "custom-1", "actualDelta": 20})
+        self.assertEqual(["tutorial.basics.move_custom_node"], moved["completedTaskKeys"])
+
+        reverse_edge = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.connect_nodes",
+            "edgeId": "reverse-edge", "sourceNodeId": "custom-1", "targetNodeId": "start-1",
+            "source": "state_observation",
+        })
+        self.assertEqual([], reverse_edge["completedTaskKeys"])
+        connected = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.connect_nodes",
+            "edgeId": "edge-1", "sourceNodeId": "start-1", "targetNodeId": "custom-1",
+            "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.connect_nodes"], connected["completedTaskKeys"])
+
+        opened = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.open_custom_node",
+            "nodeId": "custom-1", "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.open_custom_node"], opened["completedTaskKeys"])
+
+        entered = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.add_when_enter",
+            "nodeId": "custom-1", "blockId": "enter-1", "blockType": "node_when_enter",
+            "workspaceRole": "node", "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.add_when_enter"], entered["completedTaskKeys"])
+
+        for details in (
+            {
+                "blockId": "wait-1", "parentBlockType": "node_when_enter", "connected": False,
+            },
+            {
+                "blockId": "wait-1", "parentBlockType": "other_event", "connected": True,
+            },
+        ):
+            rejected = self.record("tutorial_node_state_observed", {
+                "observedTaskKey": "tutorial.basics.add_wait",
+                "nodeId": "custom-1", "blockType": "control_wait",
+                "workspaceRole": "node", "source": "state_observation", **details,
+            })
+            self.assertEqual([], rejected["completedTaskKeys"])
+        waited = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.add_wait",
+            "nodeId": "custom-1", "blockId": "wait-1", "blockType": "control_wait",
+            "parentBlockType": "node_when_enter", "connected": True,
+            "workspaceRole": "node", "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.add_wait"], waited["completedTaskKeys"])
+
+        for details in (
+            {
+                "blockId": "other", "parentBlockType": "node_when_enter", "connected": True,
+            },
+            {
+                "blockId": "wait-1", "parentBlockType": "node_when_enter", "connected": False,
+            },
+            {
+                "blockId": "wait-1", "parentBlockType": "other_event", "connected": True,
+            },
+        ):
+            rejected = self.record("tutorial_node_state_observed", {
+                "observedTaskKey": "tutorial.basics.set_wait_seconds",
+                "nodeId": "custom-1", "blockType": "control_wait", "fieldName": "SECONDS",
+                "newValue": 2, "workspaceRole": "node", "source": "state_observation", **details,
+            })
+            self.assertEqual([], rejected["completedTaskKeys"])
+        seconds = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.set_wait_seconds",
+            "nodeId": "custom-1", "blockId": "wait-1", "blockType": "control_wait",
+            "parentBlockType": "node_when_enter", "connected": True, "fieldName": "SECONDS",
+            "newValue": 2, "workspaceRole": "node", "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.set_wait_seconds"], seconds["completedTaskKeys"])
+
+        selected = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.select_edge",
+            "edgeId": "edge-1", "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.select_edge"], selected["completedTaskKeys"])
+
+        false_condition = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.add_true_condition",
+            "edgeId": "edge-1", "blockId": "bool-1", "blockType": "logic_boolean",
+            "workspaceRole": "condition", "fieldName": "BOOL", "newValue": "FALSE",
+            "value": "FALSE", "source": "state_observation",
+        })
+        self.assertEqual([], false_condition["completedTaskKeys"])
+        true_condition = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.add_true_condition",
+            "edgeId": "edge-1", "blockId": "bool-1", "blockType": "logic_boolean",
+            "workspaceRole": "condition", "fieldName": "BOOL", "newValue": "TRUE",
+            "value": "TRUE", "source": "state_observation",
+        })
+        self.assertEqual(["tutorial.basics.add_true_condition"], true_condition["completedTaskKeys"])
+        self.assertEqual(
+            "tutorial.basics.run_graph",
+            self.active_tutorial(true_condition["context"])["taskKey"],
+        )
 
     def test_tutorial_baseline_capture_merges_late_sections_without_overwriting(self):
         first = self.record("tutorial_baseline_captured", {

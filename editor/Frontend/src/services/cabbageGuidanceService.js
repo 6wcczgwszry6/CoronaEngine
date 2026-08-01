@@ -38,6 +38,7 @@ const SELECTOR_KEYS = Object.freeze({
   'node-toolbox': '[data-guidance="node-toolbox"]',
   'node-state-tool': '[data-guidance="node-state-tool"]',
   'node-type-custom': '[data-guidance="node-type-custom"]',
+  'node-type-start': '[data-guidance="node-type-start"]',
   'node-canvas': '[data-guidance="node-canvas"]',
   'node-blockly-editor': '[data-guidance="node-blockly-editor"]',
   'node-transition-condition': '[data-guidance="node-transition-condition"]',
@@ -58,6 +59,7 @@ let lifecycleToken = 0;
 let exactTargetSeen = false;
 let exactTargetMissingTicks = 0;
 let exactTargetPrepareTicks = 0;
+let fromTargetPrepareTicks = 0;
 let lifecycleGuardsAttached = false;
 
 function safeId(value) {
@@ -115,8 +117,8 @@ function elementForTarget(target = {}, { allowFallback = true } = {}) {
   return element;
 }
 
-function rectForTarget(target = {}) {
-  const element = elementForTarget(target);
+function rectForTarget(target = {}, { allowFallback = true } = {}) {
+  const element = elementForTarget(target, { allowFallback });
   if (!element) return null;
   const rect = element.getBoundingClientRect();
   if (rect.width <= 0 || rect.height <= 0) return null;
@@ -136,8 +138,8 @@ function exactElementForTarget(target = {}) {
   return elementForTarget(target, { allowFallback: false });
 }
 
-function revealTarget(target = {}) {
-  const element = elementForTarget(target);
+function revealTarget(target = {}, { allowFallback = true } = {}) {
+  const element = elementForTarget(target, { allowFallback });
   if (!element || typeof element.scrollIntoView !== 'function') return;
   const rect = element.getBoundingClientRect();
   const outsideViewport = rect.top < 8
@@ -147,6 +149,26 @@ function revealTarget(target = {}) {
   if (outsideViewport) {
     element.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'smooth' });
   }
+}
+
+function guidancePrepareDetail(target = {}) {
+  return {
+    panelId: state.guidance?.panelId,
+    selectorKey: String(target.selectorKey || ''),
+    nodeId: String(target.nodeId || ''),
+    blockId: String(target.blockId || ''),
+    blockType: String(target.blockType || ''),
+    edgeId: String(target.edgeId || ''),
+    portSide: String(target.portSide || ''),
+    portIndex: Number.isFinite(Number(target.portIndex)) ? Number(target.portIndex) : null,
+  };
+}
+
+function prepareGuidanceTarget(target = {}) {
+  if (!target || !Object.keys(target).length) return;
+  window.dispatchEvent(new CustomEvent('cabbage-guidance-prepare', {
+    detail: guidancePrepareDetail(target),
+  }));
 }
 
 function refreshRects() {
@@ -163,6 +185,7 @@ function refreshRects() {
 
   const step = currentStep();
   const target = step?.target || {};
+  const fromTarget = step?.fromTarget || {};
   const exactElement = exactElementForTarget(target);
   if (exactElement) {
     exactTargetSeen = true;
@@ -177,21 +200,21 @@ function refreshRects() {
   } else if (['node', 'block', 'edge', 'port'].includes(target.kind)) {
     exactTargetPrepareTicks += 1;
     if (exactTargetPrepareTicks <= 10 && exactTargetPrepareTicks % 3 === 1) {
-      window.dispatchEvent(new CustomEvent('cabbage-guidance-prepare', {
-        detail: {
-          panelId: state.guidance?.panelId,
-          selectorKey: String(target.selectorKey || ''),
-          nodeId: String(target.nodeId || ''),
-          blockId: String(target.blockId || ''),
-          edgeId: String(target.edgeId || ''),
-          portSide: String(target.portSide || ''),
-          portIndex: Number.isFinite(Number(target.portIndex)) ? Number(target.portIndex) : null,
-        },
-      }));
+      prepareGuidanceTarget(target);
     }
   }
+  if (Object.keys(fromTarget).length && !exactElementForTarget(fromTarget)) {
+    fromTargetPrepareTicks += 1;
+    if (fromTargetPrepareTicks <= 10 && fromTargetPrepareTicks % 3 === 1) {
+      prepareGuidanceTarget(fromTarget);
+    }
+  } else {
+    fromTargetPrepareTicks = 0;
+  }
   state.targetRect = rectForTarget(target);
-  state.fromRect = rectForTarget(step?.fromTarget || {});
+  // A drag source should never fall back to the destination editor. Hide the blue
+  // marker until the exact palette block or source port is visible.
+  state.fromRect = rectForTarget(fromTarget, { allowFallback: false });
 }
 
 function startRectTracking() {
@@ -327,8 +350,12 @@ const LEGACY_TUTORIAL_GUIDANCE = Object.freeze({
 });
 
 
-function taskGuidanceText(source, fallback) {
-  return String(source?.guidanceText || source?.suggestion || source?.completionCriteria || source?.message || fallback || '');
+function taskGuidanceText(source, fallback, english = false) {
+  const fields = english
+    ? ['guidanceTextEn', 'suggestionEn', 'completionCriteriaEn', 'messageEn']
+    : ['guidanceText', 'suggestion', 'completionCriteria', 'message'];
+  const value = fields.map((field) => String(source?.[field] || '').trim()).find(Boolean);
+  return value || String(fallback || '');
 }
 
 function targetFromBinding(bindings, key, fallback) {
@@ -341,8 +368,14 @@ function targetFromBinding(bindings, key, fallback) {
 }
 
 function tutorialStep(source, target, action, fallback, extra = {}) {
-  const text = taskGuidanceText(source, fallback);
-  return { target, action, text, textEn: text, ...extra };
+  const { fallbackEn = fallback, preferFallbackText = false, ...stepExtra } = extra;
+  return {
+    target,
+    action,
+    text: preferFallbackText ? String(fallback || '') : taskGuidanceText(source, fallback),
+    textEn: preferFallbackText ? String(fallbackEn || fallback || '') : taskGuidanceText(source, fallbackEn, true),
+    ...stepExtra,
+  };
 }
 
 function basicGuidance(panelId, target, action, fallback, extra = {}) {
@@ -371,60 +404,155 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
   set_mass: basicGuidance('SceneDatas', { kind: 'selector', selectorKey: 'object-physics-mass' }, 'input', 'Set Mass to 10.'),
   set_light_x: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'scene-light-x' }, 'input', 'Set Scene Lighting Direction X to 0.5.'),
   open_nodes: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'node-shortcut' }, 'click', 'Click the Nodes shortcut yourself.'),
-  confirm_start_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
-    source,
-    targetFromBinding(source.bindings, 'startNodeId', { kind: 'selector', selectorKey: 'node-state-tool' }),
-    'click',
-    'Click the existing start node, or drag in a State Node if none exists.'
-  )] }),
+  confirm_start_node: (source) => {
+    const startNodeId = String(source.bindings?.startNodeId || '');
+    if (startNodeId) {
+      return { panelId: 'NodeGraphPanel', steps: [tutorialStep(
+        source,
+        { kind: 'node', nodeId: startNodeId },
+        'click',
+        '点击黄色高亮的“开始”节点，确认中间画布里只有这一个开始节点。',
+        { fallbackEn: 'Click the yellow-highlighted Start node and confirm it is the only Start node on the canvas.', preferFallbackText: true },
+      )] };
+    }
+    return { panelId: 'NodeGraphPanel', steps: [
+      tutorialStep(
+        source,
+        { kind: 'selector', selectorKey: 'node-canvas' },
+        'drag',
+        '从蓝色高亮的“状态节点”开始拖动，把它放到黄色高亮的中间画布空白处。',
+        {
+          fromTarget: { kind: 'selector', selectorKey: 'node-state-tool' },
+          fallbackEn: 'Drag the blue-highlighted State Node into an empty spot in the yellow-highlighted middle canvas.',
+          preferFallbackText: true,
+        },
+      ),
+      tutorialStep(
+        source,
+        { kind: 'selector', selectorKey: 'node-type-start' },
+        'click',
+        '保持新节点被选中，再点击右侧黄色高亮的“开始节点”。如果它已经显示“开始”，就不用再改。',
+        { fallbackEn: 'Keep the new node selected, then click the yellow-highlighted Start Node option on the right. If it already says Start, leave it unchanged.', preferFallbackText: true },
+      ),
+    ] };
+  },
   create_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     { kind: 'selector', selectorKey: 'node-canvas' },
     'drag',
-    'Drag the State Node tool into the node canvas.',
-    { fromTarget: { kind: 'selector', selectorKey: 'node-state-tool' } }
+    '从蓝色高亮的“状态节点”开始拖动，把它放到黄色高亮的中间画布空白处，新节点应显示为“自定义节点”。',
+    {
+      fromTarget: { kind: 'selector', selectorKey: 'node-state-tool' },
+      fallbackEn: 'Drag the blue-highlighted State Node into an empty spot in the yellow-highlighted canvas. The new node should say Custom Node.',
+      preferFallbackText: true,
+    }
   )] }),
   move_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     targetFromBinding(source.bindings, 'customNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
     'drag',
-    'Drag the tutorial custom node to a new position.'
+    '按住黄色高亮的自定义节点标题区，把它明显拖到另一个位置后松开。',
+    { fallbackEn: 'Hold the title area of the yellow-highlighted Custom node, drag it a visible distance, then release.', preferFallbackText: true }
   )] }),
   connect_nodes: (source) => {
     const startNodeId = String(source.bindings?.startNodeId || '');
     const customNodeId = String(source.bindings?.customNodeId || '');
     const target = startNodeId && customNodeId
-      ? { kind: 'port', nodeId: customNodeId, portSide: 'input', portIndex: 0 }
+      ? { kind: 'port', nodeId: customNodeId, portSide: 'left', portIndex: 0 }
       : { kind: 'selector', selectorKey: 'node-canvas' };
     const extra = startNodeId && customNodeId
-      ? { fromTarget: { kind: 'port', nodeId: startNodeId, portSide: 'output', portIndex: 0 } }
+      ? { fromTarget: { kind: 'port', nodeId: startNodeId, portSide: 'right', portIndex: 0 } }
       : {};
-    return { panelId: 'NodeGraphPanel', steps: [tutorialStep(source, target, 'connect', 'Connect the start node output to the custom node input.', extra)] };
+    return {
+      panelId: 'NodeGraphPanel',
+      steps: [tutorialStep(
+        source,
+        target,
+        'connect',
+        '从蓝色高亮的开始节点右侧小圆点开始，连到黄色高亮的自定义节点左侧小圆点。',
+        {
+          ...extra,
+          fallbackEn: 'Connect the blue-highlighted circle on the right of Start to the yellow-highlighted circle on the left of Custom.',
+          preferFallbackText: true,
+        },
+      )],
+    };
   },
   open_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     targetFromBinding(source.bindings, 'customNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
     'click',
-    'Click the tutorial custom node to open its internal block editor.'
+    '点击黄色高亮的自定义节点，然后看右侧下方是否出现它的彩色积木编辑区。',
+    { fallbackEn: 'Click the yellow-highlighted Custom node, then check that its colorful block editor appears in the lower-right area.', preferFallbackText: true }
   )] }),
-  add_when_enter: basicGuidance('NodeGraphPanel', { kind: 'block-type', blockType: 'node_when_enter' }, 'drag', 'Drag node_when_enter into the custom node workspace.'),
-  add_wait: basicGuidance('NodeGraphPanel', { kind: 'block-type', blockType: 'control_wait' }, 'drag', 'Drag control_wait below node_when_enter and connect it.'),
+  add_when_enter: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-blockly-editor' },
+    'drag',
+    '把蓝色高亮、表面写着“当进入当前节点时”的积木，拖到黄色高亮的右侧空白编辑区。',
+    {
+      fromTarget: { kind: 'block-type', blockType: 'node_when_enter' },
+      fallbackEn: 'Drag the blue-highlighted block labeled "When entering this node" into the yellow-highlighted empty editor on the right.',
+      preferFallbackText: true,
+    }
+  )] }),
+  add_wait: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'whenEnterBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+    'drag',
+    '把蓝色高亮、表面写着“等待 1 秒”的积木，拖到黄色高亮的进入事件积木里，直到它自动吸附。',
+    {
+      fromTarget: { kind: 'block-type', blockType: 'control_wait' },
+      fallbackEn: 'Drag the blue-highlighted block labeled "Wait 1 second" into the yellow-highlighted entry-event block until it snaps into place.',
+      preferFallbackText: true,
+    }
+  )] }),
   set_wait_seconds: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     targetFromBinding(source.bindings, 'waitBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
     'input',
-    'Set the Wait block SECONDS field to 2.'
+    '在黄色高亮的“等待”积木上，把“等待”和“秒”之间的数字改为 2。',
+    { fallbackEn: 'In the yellow-highlighted Wait block, change the number between "Wait" and "seconds" to 2.', preferFallbackText: true }
   )] }),
   select_edge: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     targetFromBinding(source.bindings, 'edgeId', { kind: 'selector', selectorKey: 'node-canvas' }),
     'click',
-    'Click the edge between the start and custom nodes.'
+    '点击黄色高亮的节点连线或线中间的小标签，让右侧下方切换到“连线条件编辑”。',
+    { fallbackEn: 'Click the yellow-highlighted connection or its middle label so the lower-right area switches to connection condition editing.', preferFallbackText: true }
   )] }),
-  add_true_condition: basicGuidance('NodeGraphPanel', { kind: 'block-type', blockType: 'logic_boolean' }, 'drag', 'Drag logic_boolean into the condition workspace and set it to TRUE.'),
-  run_node_graph: basicGuidance('NodeGraphPanel', { kind: 'selector', selectorKey: 'node-run' }, 'click', 'Click Run and wait for run_succeeded.'),
-  start_preview: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'preview-start' }, 'click', 'Click Start Preview and wait for running.'),
-  stop_preview: basicGuidance('MainPage', { kind: 'selector', selectorKey: 'preview-stop' }, 'click', 'Click Stop Preview and wait for the scene to restore.'),
+  add_true_condition: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-transition-condition' },
+    'drag',
+    '把蓝色高亮、表面可选“真/假”的积木，拖到黄色高亮的右侧连线条件区，并确认它显示“真”。',
+    {
+      fromTarget: { kind: 'block-type', blockType: 'logic_boolean' },
+      fallbackEn: 'Drag the blue-highlighted True/False block into the yellow-highlighted connection condition area, then make sure it shows True.',
+      preferFallbackText: true,
+    }
+  )] }),
+  run_node_graph: basicGuidance(
+    'NodeGraphPanel',
+    { kind: 'selector', selectorKey: 'node-run' },
+    'click',
+    '点击节点窗口上方的“运行”，等待运行结果明确显示成功。',
+    { fallbackEn: 'Click Run at the top of the node window and wait until the result clearly says it succeeded.' },
+  ),
+  start_preview: basicGuidance(
+    'MainPage',
+    { kind: 'selector', selectorKey: 'preview-start' },
+    'click',
+    '点击“开始预览”，等到预览画面真正启动。',
+    { fallbackEn: 'Click Start Preview and wait until the preview is visibly running.' },
+  ),
+  stop_preview: basicGuidance(
+    'MainPage',
+    { kind: 'selector', selectorKey: 'preview-stop' },
+    'click',
+    '点击“结束预览”，等待预览完全停止且场景恢复。',
+    { fallbackEn: 'Click End Preview and wait until preview stops completely and the scene is restored.' },
+  ),
 });
 
 const ISSUE_GUIDANCE = Object.freeze({
@@ -562,22 +690,18 @@ async function showStep(index) {
   exactTargetSeen = false;
   exactTargetMissingTicks = 0;
   exactTargetPrepareTicks = 0;
+  fromTargetPrepareTicks = 0;
   const step = currentStep();
-  window.dispatchEvent(new CustomEvent('cabbage-guidance-prepare', {
-    detail: {
-      panelId: state.guidance.panelId,
-      selectorKey: String(step?.target?.selectorKey || ''),
-      nodeId: String(step?.target?.nodeId || ''),
-      blockId: String(step?.target?.blockId || ''),
-      blockType: String(step?.target?.blockType || ''),
-      edgeId: String(step?.target?.edgeId || ''),
-      portSide: String(step?.target?.portSide || ''),
-      portIndex: Number.isFinite(Number(step?.target?.portIndex)) ? Number(step.target.portIndex) : null,
-    },
-  }));
+  prepareGuidanceTarget(step?.target || {});
   await wait(80);
   revealTarget(step?.target || {});
-  await wait(120);
+  if (step?.fromTarget) {
+    prepareGuidanceTarget(step.fromTarget);
+    await wait(120);
+    revealTarget(step.fromTarget, { allowFallback: false });
+  } else {
+    await wait(120);
+  }
   refreshRects();
 }
 
@@ -640,6 +764,7 @@ async function stop({ restorePanelState = true } = {}) {
   exactTargetSeen = false;
   exactTargetMissingTicks = 0;
   exactTargetPrepareTicks = 0;
+  fromTargetPrepareTicks = 0;
   detachLifecycleGuards();
   if (restorePanelState) await restorePanel();
   else restoreState = null;
