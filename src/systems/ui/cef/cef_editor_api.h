@@ -2,6 +2,8 @@
 
 #include "cef_editor_native_api_registry.h"
 
+#include <include/cef_frame.h>
+
 #include <Python.h>
 
 #include <cstddef>
@@ -131,6 +133,9 @@ std::optional<EditorApiRequest> parse_editor_api_request(const nlohmann::json& p
                                                          EditorApiCaller caller);
 std::optional<EditorApiEventSpec> find_editor_api_event(std::string_view event_name);
 std::size_t emit_editor_api_event(std::string_view event_name, const nlohmann::json& payload);
+std::size_t emit_editor_api_event_to_frame(std::string_view event_name,
+                                            const nlohmann::json& payload,
+                                            const CefRefPtr<CefFrame>& frame);
 std::size_t emit_python_script_event(std::string_view event_name, const nlohmann::json& payload);
 
 void register_python_script_service_dispatcher(PyObject* dispatcher);

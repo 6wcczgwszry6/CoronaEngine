@@ -149,8 +149,10 @@ import { appService, editorApi, projectService, sceneService, scriptingService }
 import { buildDragRegions, dragRegionsSignature } from '@/utils/cameraDragRegions.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
-import { createViewportGizmoController } from '@/utils/viewportGizmo.js';
-import { getActorContext } from '@/blockly/composables/useActorContext.js';
+import {
+  createViewportGizmoController,
+  isViewportGizmoSelectionOwner,
+} from '@/utils/viewportGizmo.js';
 import {
   createViewportUiCalibrationStore,
   createViewportUiModeStore,
@@ -194,6 +196,7 @@ let actorSelectionCallbackToken = null;
 let gizmoPointerResultCallbackToken = null;
 let pendingScratchClick = null;
 let gizmoDownRequestId = '';
+let gizmoDownPointerId = null;
 let gizmoDownConsumed = false;
 let gizmoClickTimer = 0;
 
@@ -385,8 +388,12 @@ const viewportUiPointerController = createViewportUiPointerController({
   getRenderRect: getCameraRenderRect,
 });
 
+const cameraViewSelectionContext = () => ({
+  sourceViewport: 'cameraView',
+  sourceCameraHandle: Number(camera.value?.handle || 0),
+});
+
 const cameraViewPickController = createViewportPickController({
-  retryDelayMs: 60,
   getBridge: () => window.coronaBridge,
   getCameraBinding: () => ({
     sceneId,
@@ -396,7 +403,7 @@ const cameraViewPickController = createViewportPickController({
   getRenderRect: getCameraRenderRect,
   getActorIndex: () => actorPickIndex,
   emitActorChange: (type, scene, actorName) =>
-    editorApi.sceneTools.selectActor(scene, type, actorName),
+    editorApi.sceneTools.selectActor(scene, type, actorName, cameraViewSelectionContext()),
 });
 
 const viewportGizmoController = createViewportGizmoController({
@@ -429,6 +436,15 @@ const findActorPickEntryByName = (actorName) => {
 };
 
 const syncViewportGizmoSelection = async (payload = {}) => {
+  const ownsGizmo = isViewportGizmoSelectionOwner({
+    viewportScope: 'cameraView',
+    cameraHandle: camera.value?.handle,
+    selection: payload,
+  });
+  if (!ownsGizmo) {
+    viewportGizmoController.clearTarget();
+    return;
+  }
   const actorName = String(payload.actor || '');
   const actorType = String(payload.actor_type || payload.type || '');
   const selectedScene = String(payload.scene || sceneId);
@@ -820,7 +836,6 @@ const finishPendingScratchClick = (pickedActor = '') => {
   const pending = pendingScratchClick;
   if (!pending) return;
   pendingScratchClick = null;
-  if (pending.timer != null) window.clearTimeout(pending.timer);
   sendScratchMouse(
     'click',
     pending.button,
@@ -835,14 +850,14 @@ const finishPendingScratchClick = (pickedActor = '') => {
 };
 
 const handleScratchClick = (event) => {
-  if (pendingScratchClick) finishPendingScratchClick('');
-
   const rect = getCameraRenderRect();
   const snapshot = {
     clientX: Number(event?.clientX || 0),
     clientY: Number(event?.clientY || 0),
     button: Number(event?.button || 0),
   };
+  // Replace an unfinished pick with the newest click. Older GPU completions
+  // remain harmless because the controller matches the latest requestId.
   pendingScratchClick = {
     button: scratchMouseButton(snapshot.button),
     x: snapshot.clientX,
@@ -851,7 +866,6 @@ const handleScratchClick = (event) => {
     viewportY: snapshot.clientY - Number(rect.top || 0),
     viewportWidth: Number(rect.width || 0),
     viewportHeight: Number(rect.height || 0),
-    timer: null,
     requestId: '',
   };
 
@@ -861,10 +875,12 @@ const handleScratchClick = (event) => {
     return;
   }
   pendingScratchClick.requestId = requestId;
-  pendingScratchClick.timer = window.setTimeout(() => finishPendingScratchClick(''), 220);
 };
 
 const handleViewportClick = (event) => {
+  // A single click owns selection/clearing. Ignore the synthetic second
+  // click from a rapid double-click so it cannot reset an active Gizmo drag.
+  if (Number(event?.detail || 0) > 1) return;
   if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
   const snapshot = {
     clientX: Number(event?.clientX || 0),
@@ -879,7 +895,7 @@ const handleViewportClick = (event) => {
 
 const finishCameraViewClickFromPick = (payload, result) => {
   if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
-  if (result?.status === 'pending' || result?.status === 'stale') return;
+  if (result?.status === 'stale') return;
   const pickedActor =
     result?.actor?.name ||
     payload?.actorName ||
@@ -892,25 +908,29 @@ const finishCameraViewClickFromPick = (payload, result) => {
 const handleCameraViewActorPickResult = (payload) => {
   const result = cameraViewPickController.handlePickResult(payload);
   if (result.status === 'miss') {
-    editorApi.sceneTools.selectActor(sceneId, 'scene', '').catch(() => {});
-    viewportGizmoController.clearTarget();
+    editorApi.sceneTools.selectActor(
+      sceneId,
+      'scene',
+      '',
+      cameraViewSelectionContext(),
+    ).catch(() => {});
   }
-  if (result.status !== 'unknown' || !payload?.sceneId) {
-    finishCameraViewClickFromPick(payload, result);
-    return;
-  }
-  refreshCameraViewActorPickIndex()
-    .then(() => finishCameraViewClickFromPick(payload, cameraViewPickController.handlePickResult(payload)))
-    .catch(() => finishCameraViewClickFromPick(payload, result));
+  finishCameraViewClickFromPick(payload, result);
 };
 
 const handleViewportGizmoPointerResult = (payload = {}) => {
   const result = viewportGizmoController.handleResult(payload);
   if (payload.requestId === gizmoDownRequestId && payload.consumed) {
     gizmoDownConsumed = true;
+    try {
+      inputLayerRef.value?.setPointerCapture?.(gizmoDownPointerId);
+    } catch (_) {
+      // Pointer capture is best effort on embedded browser surfaces.
+    }
   }
   if (result.status === 'ended' || result.status === 'cancelled') {
     gizmoDownRequestId = '';
+    gizmoDownPointerId = null;
   }
 };
 
@@ -1001,12 +1021,8 @@ const handleViewportPointer = (event) => {
 
 const handleViewportPointerDown = (event) => {
   gizmoDownConsumed = false;
+  gizmoDownPointerId = event.pointerId;
   gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
-  try {
-    inputLayerRef.value?.setPointerCapture?.(event.pointerId);
-  } catch (_) {
-    // Pointer capture is best effort on embedded browser surfaces.
-  }
   viewportUiPointerController.send(
     event,
     event.type,
@@ -1129,14 +1145,6 @@ onMounted(async () => {
     actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(syncViewportGizmoSelection);
     gizmoPointerResultCallbackToken =
       await editorApi.events.onViewportGizmoPointerResult(handleViewportGizmoPointerResult);
-    const selected = getActorContext();
-    if (selected?.actor) {
-      await syncViewportGizmoSelection({
-        scene: selected.scene || sceneId,
-        actor: selected.actor,
-        actor_type: 'actor',
-      });
-    }
     syncViewportUiMode();
     await syncWindowSize(true);
   } catch (error) {
@@ -1160,7 +1168,6 @@ onBeforeUnmount(() => {
   if (scratchMouseMoveFrame) window.cancelAnimationFrame(scratchMouseMoveFrame);
   scratchMouseMoveFrame = 0;
   pendingScratchMouseMove = null;
-  if (pendingScratchClick?.timer != null) window.clearTimeout(pendingScratchClick.timer);
   if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
   gizmoClickTimer = 0;
   pendingScratchClick = null;

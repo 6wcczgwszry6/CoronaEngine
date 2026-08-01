@@ -512,6 +512,7 @@ import {
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
   createViewportGizmoController,
+  isViewportGizmoSelectionOwner,
   resolveViewportGizmoTarget,
 } from '@/utils/viewportGizmo.js';
 import {
@@ -582,6 +583,7 @@ let gizmoPointerResultCallbackToken = null;
 let sceneAddedCallbackToken = null;
 let sceneRenamedCallbackToken = null;
 let gizmoDownRequestId = '';
+let gizmoDownPointerId = null;
 let gizmoDownConsumed = false;
 let gizmoClickTimer = 0;
 const viewportPickSurfaceRef = ref(null);
@@ -667,7 +669,10 @@ const currentViewportUiDescriptor = () => ({
 });
 
 const emitActorChangeFast = (type, sceneId, actorName) => {
-  editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
+  editorApi.sceneTools.selectActor(sceneId, type, actorName, {
+    sourceViewport: 'main',
+    sourceCameraHandle: Number(cameraBindingState.value.cameraHandle || 0),
+  }).catch((error) => {
     logError('Failed to publish actor selection', error);
   });
 };
@@ -682,19 +687,27 @@ const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = ''
   }
 
   setActorContext(sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME, actorName);
-  await syncMainViewportGizmoSelection({
-    ...payload,
-    scene: sceneId,
-    actor: actorName,
-    actor_type: actorType,
+  const ownsGizmo = isViewportGizmoSelectionOwner({
+    viewportScope: 'main',
+    cameraHandle: cameraBindingState.value.cameraHandle,
+    selection: payload,
   });
+  if (ownsGizmo) {
+    await syncMainViewportGizmoSelection({
+      ...payload,
+      scene: sceneId,
+      actor: actorName,
+      actor_type: actorType,
+    });
+  } else {
+    viewportGizmoController.clearTarget();
+  }
   if (!dockStore.panels.SceneDatas?.open) {
     await openFloatingPanel(dockStore, 'SceneDatas');
   }
 };
 
 const viewportPickController = createViewportPickController({
-  retryDelayMs: 60,
   getBridge: () => window.coronaBridge,
   getCameraBinding: () => cameraBindingState.value,
   getHitRect: getViewportHitRect,
@@ -1743,12 +1756,8 @@ const handleViewportPointerDown = (event) => {
   // MainPage's first snapshot. Rebind before the user starts interacting.
   void refreshSceneCameraBinding({ preservePose: true });
   gizmoDownConsumed = false;
+  gizmoDownPointerId = event.pointerId;
   gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
-  try {
-    viewportPickSurfaceRef.value?.setPointerCapture?.(event.pointerId);
-  } catch (_) {
-    // Pointer capture is best effort on embedded browser surfaces.
-  }
   sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
@@ -1774,9 +1783,15 @@ const handleViewportGizmoPointerResult = (payload = {}) => {
   const result = viewportGizmoController.handleResult(payload);
   if (payload.requestId === gizmoDownRequestId && payload.consumed) {
     gizmoDownConsumed = true;
+    try {
+      viewportPickSurfaceRef.value?.setPointerCapture?.(gizmoDownPointerId);
+    } catch (_) {
+      // Pointer capture is best effort on embedded browser surfaces.
+    }
   }
   if (result.status === 'ended' || result.status === 'cancelled') {
     gizmoDownRequestId = '';
+    gizmoDownPointerId = null;
   }
 };
 
@@ -1788,16 +1803,10 @@ const finishPendingScratchClick = (pickedActor = '') => {
   const pending = pendingScratchClick;
   if (!pending) return;
   pendingScratchClick = null;
-  if (pending.timer != null) window.clearTimeout(pending.timer);
   sendScratchPointerEvent('click', pending.event, pickedActor);
 };
 
 const handleViewportScratchClick = (event) => {
-  // Preserve rapid click gameplay even though the native picker tracks one
-  // outstanding request at a time. The previous click falls back to an empty
-  // pick, which is exactly what whole-viewport click blocks need.
-  if (pendingScratchClick) finishPendingScratchClick('');
-
   const eventSnapshot = {
     clientX: Number(event?.clientX || 0),
     clientY: Number(event?.clientY || 0),
@@ -1809,14 +1818,20 @@ const handleViewportScratchClick = (event) => {
     return;
   }
 
+  // A newer click supersedes an unfinished request. The engine may still
+  // complete the old request, but viewportPickController filters it by the
+  // latest requestId and finishScratchClickFromPick ignores its old pending
+  // entry. This keeps a later blank click from being swallowed by a slow pick.
   pendingScratchClick = {
     requestId,
     event: eventSnapshot,
-    timer: window.setTimeout(() => finishPendingScratchClick(''), 220),
   };
 };
 
 const handleViewportClick = (event) => {
+  // A single click owns selection/clearing. Ignore the synthetic second
+  // click from a rapid double-click so it cannot reset an active Gizmo drag.
+  if (Number(event?.detail || 0) > 1) return;
   if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
   const eventSnapshot = {
     clientX: Number(event?.clientX || 0),
@@ -1831,7 +1846,7 @@ const handleViewportClick = (event) => {
 
 const finishScratchClickFromPick = (payload, result) => {
   if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
-  if (result?.status === 'pending' || result?.status === 'stale') return;
+  if (result?.status === 'stale') return;
   const pickedActor =
     result?.actor?.name ||
     payload?.actorName ||
@@ -1924,49 +1939,20 @@ const applyActorPickResult = (result, payload = result?.payload) => {
   // 此处无需额外处理。
 };
 
-const applyViewportGizmoPickResult = (result, payload = result?.payload) => {
-  if (result.status === 'selected' && result.actor?.name) {
-    void syncMainViewportGizmoSelection(
-      {
-        scene:
-          payload?.sceneId
-          || cameraBindingState.value.sceneId
-          || DEFAULT_SCENE_NAME,
-        actor: result.actor.name,
-        actor_type: result.actor.type || 'actor',
-      },
-      result,
-    );
-  } else if (result.status === 'miss') {
-    viewportGizmoController.clearTarget();
+const handleActorPickResult = (payload) => {
+  const result = viewportPickController.handlePickResult(payload);
+  applyActorPickResult(result, payload);
+  // Gizmo synchronization is owned exclusively by actorSelectionChanged.
+  // A miss still publishes the empty scene selection so that the same
+  // selection path clears the property panel and Gizmo exactly once.
+  if (result.status === 'miss') {
     emitActorChangeFast(
       'scene',
       payload?.sceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME,
       '',
     );
   }
-};
-
-const handleActorPickResult = (payload) => {
-  const result = viewportPickController.handlePickResult(payload);
-  if (result.status !== 'unknown' || !payload?.sceneId) {
-    applyActorPickResult(result, payload);
-    applyViewportGizmoPickResult(result, payload);
-    finishScratchClickFromPick(payload, result);
-    return;
-  }
-
-  refreshActorPickIndex(payload.sceneId)
-    .then(() => {
-      const refreshedResult = viewportPickController.handlePickResult(payload);
-      applyActorPickResult(refreshedResult, payload);
-      applyViewportGizmoPickResult(refreshedResult, payload);
-      finishScratchClickFromPick(payload, refreshedResult);
-    })
-    .catch((error) => {
-      logError('Actor pick index refresh failed', error);
-      finishScratchClickFromPick(payload, result);
-    });
+  finishScratchClickFromPick(payload, result);
 };
 
 const sendCameraUpdateFast = () => {

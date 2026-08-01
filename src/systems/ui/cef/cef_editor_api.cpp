@@ -244,10 +244,11 @@ constexpr std::array<EditorApiParamSpec, 3> kSceneToolsFocusActorParams = {{
     param("camera_name", EditorApiValueType::String, true),
 }};
 
-constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSelectActorParams = {{
+constexpr std::array<EditorApiParamSpec, 4> kSceneToolsSelectActorParams = {{
     param("scene_name", EditorApiValueType::String),
     param("actor_type", EditorApiValueType::String),
     param("actor_name", EditorApiValueType::String),
+    param("context", EditorApiValueType::Object, true),
 }};
 
 constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSetRenderBackendParams = {{
@@ -1068,6 +1069,49 @@ std::optional<EditorApiEventSpec> find_editor_api_event(std::string_view event_n
 
 std::size_t emit_editor_api_event(std::string_view event_name, const nlohmann::json& payload) {
     return EditorApiCallbackRegistry::instance().emit_editor_api_event(event_name, payload);
+}
+
+std::size_t emit_editor_api_event_to_frame(std::string_view event_name,
+                                            const nlohmann::json& payload,
+                                            const CefRefPtr<CefFrame>& frame) {
+    const auto event_spec = find_editor_api_event(event_name);
+    if (!frame || !event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::Cef) ||
+        !validate_editor_api_event_payload(*event_spec, payload)) {
+        return 0;
+    }
+
+    std::vector<CallbackRecord> records;
+    const auto browser = frame->GetBrowser();
+    const int browser_id = browser ? browser->GetIdentifier() : 0;
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        for (const auto& [_, record] : g_callbacks) {
+            if (record.python_script || record.event_name != event_name || !record.context.frame) {
+                continue;
+            }
+            if (record.context.frame->GetIdentifier() != frame->GetIdentifier() ||
+                !record.context.browser || browser_id !=
+                    record.context.browser->GetIdentifier()) {
+                continue;
+            }
+            records.push_back(record);
+        }
+    }
+
+    std::size_t emitted = 0;
+    for (const auto& record : records) {
+        nlohmann::json event_payload = {
+            {"event", record.event_name},
+            {"payload", payload},
+            {"token", record.token},
+        };
+        frame->ExecuteJavaScript(
+            "window.__coronaEditorApiDispatch && window.__coronaEditorApiDispatch(" +
+                event_payload.dump() + ");",
+            frame->GetURL(), 0);
+        ++emitted;
+    }
+    return emitted;
 }
 
 std::size_t emit_python_script_event(std::string_view event_name, const nlohmann::json& payload) {

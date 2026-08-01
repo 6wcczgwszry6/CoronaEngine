@@ -16,6 +16,28 @@ const modifierMask = (event) =>
   | (event?.altKey ? 4 : 0)
   | (event?.metaKey ? 8 : 0);
 
+export const isViewportGizmoSelectionOwner = ({
+  viewportScope = 'main',
+  cameraHandle = 0,
+  selection = {},
+} = {}) => {
+  const sourceViewport = String(
+    selection.source_viewport || selection.sourceViewport || 'main',
+  ).trim();
+  if (sourceViewport === 'main') {
+    return viewportScope === 'main';
+  }
+  if (sourceViewport !== 'cameraView' || viewportScope !== 'cameraView') {
+    return false;
+  }
+  const sourceCameraHandle = Number(
+    selection.source_camera_handle || selection.sourceCameraHandle || 0,
+  );
+  const localCameraHandle = Number(cameraHandle || 0);
+  return sourceCameraHandle > 0 && localCameraHandle > 0 &&
+    sourceCameraHandle === localCameraHandle;
+};
+
 export const resolveViewportGizmoTarget = ({
   sceneId = '',
   selection = {},

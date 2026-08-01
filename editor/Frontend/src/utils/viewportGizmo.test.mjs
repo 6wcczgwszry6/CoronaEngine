@@ -129,3 +129,42 @@ test('resolves a scene-tree selection through the actor index', () => {
   });
   assert.equal(target?.handle, 1176640039248);
 });
+
+test('routes a gizmo selection only to its source viewport', () => {
+  assert.equal(
+    typeof viewportGizmoModule.isViewportGizmoSelectionOwner,
+    'function',
+    'viewport ownership resolver must exist',
+  );
+
+  const fromCameraView = {
+    source_viewport: 'cameraView',
+    source_camera_handle: 22,
+  };
+  assert.equal(viewportGizmoModule.isViewportGizmoSelectionOwner({
+    viewportScope: 'main',
+    cameraHandle: 11,
+    selection: fromCameraView,
+  }), false);
+  assert.equal(viewportGizmoModule.isViewportGizmoSelectionOwner({
+    viewportScope: 'cameraView',
+    cameraHandle: 22,
+    selection: fromCameraView,
+  }), true);
+  assert.equal(viewportGizmoModule.isViewportGizmoSelectionOwner({
+    viewportScope: 'cameraView',
+    cameraHandle: 33,
+    selection: fromCameraView,
+  }), false);
+
+  assert.equal(viewportGizmoModule.isViewportGizmoSelectionOwner({
+    viewportScope: 'main',
+    cameraHandle: 11,
+    selection: {},
+  }), true);
+  assert.equal(viewportGizmoModule.isViewportGizmoSelectionOwner({
+    viewportScope: 'cameraView',
+    cameraHandle: 22,
+    selection: {},
+  }), false);
+});

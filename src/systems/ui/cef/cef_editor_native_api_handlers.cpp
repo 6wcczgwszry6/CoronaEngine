@@ -11,6 +11,7 @@
 #endif
 
 #include "browser_manager.h"
+#include "actor_selection_routing.h"
 #include "cef_client.h"
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
@@ -7364,11 +7365,8 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             const auto scene_name = arg_string(request.args, 0);
             const auto actor_type = arg_string(request.args, 1, "actor");
             const auto actor_name = arg_string(request.args, 2);
-            nlohmann::json payload = {
-                {"actor_type", actor_type},
-                {"scene", scene_name},
-                {"actor", actor_name},
-            };
+            const auto payload = make_actor_selection_event_payload(
+                scene_name, actor_type, actor_name, arg_object(request.args, 3));
             emit_editor_api_event("SceneTools.actorSelectionChanged", payload);
             return native_success({
                 {"status", "success"},

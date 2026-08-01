@@ -12,7 +12,6 @@ export const indexActorsByHandle = (actors = []) => {
 };
 
 export const createViewportPickController = ({
-  retryDelayMs = 60,
   getBridge,
   getCameraBinding,
   getHitRect,
@@ -22,23 +21,14 @@ export const createViewportPickController = ({
   getActorIndex,
   onPickStart,
   emitActorChange,
-  setTimeoutFn = globalThis.setTimeout,
-  clearTimeoutFn = globalThis.clearTimeout,
   makeRequestId,
 } = {}) => {
   let latestRequestId = '';
-  let retryTimer = null;
+  const pendingRequests = new Map();
   let sequence = 0;
 
   const nextRequestId =
     makeRequestId || (() => `pick-${Date.now()}-${++sequence}`);
-
-  const clearRetry = () => {
-    if (retryTimer != null) {
-      clearTimeoutFn(retryTimer);
-      retryTimer = null;
-    }
-  };
 
   const normalizeRect = (rect) => {
     if (!rect) return null;
@@ -72,7 +62,8 @@ export const createViewportPickController = ({
 
   return {
     dispose() {
-      clearRetry();
+      latestRequestId = '';
+      pendingRequests.clear();
     },
 
     pickAt(event, overrides = {}) {
@@ -125,37 +116,37 @@ export const createViewportPickController = ({
 
       const requestId = nextRequestId();
       latestRequestId = requestId;
-      clearRetry();
-
-      try {
+      pendingRequests.set(requestId, { cameraHandle, sceneId });
+       try {
         callFastPick(bridge, cameraHandle, sceneId, requestId, x, y, width, height);
       } catch (_) {
+        pendingRequests.delete(requestId);
         return false;
       }
       onPickStart?.(requestId);
 
-      retryTimer = setTimeoutFn(() => {
-        retryTimer = null;
-        try {
-          const retryBridge = getBridge?.() || bridge;
-          if (retryBridge && typeof retryBridge.pickActor === 'function') {
-            callFastPick(retryBridge, cameraHandle, sceneId, requestId, x, y, width, height);
-          }
-        } catch (_) {
-          // Fast-only path: failed retry is ignored, never falls back to Python.
-        }
-      }, retryDelayMs);
-
-      return requestId;
+       return requestId;
     },
 
     handlePickResult(payload) {
-      if (!payload || payload.requestId !== latestRequestId) {
+      const binding = getCameraBinding?.() || {};
+      const activeCameraHandle = Number(binding.cameraHandle || 0);
+      const activeSceneId = binding.sceneId || '';
+      const payloadCameraHandle = Number(payload?.cameraHandle || 0);
+      const requestId = payload?.requestId || '';
+      const request = pendingRequests.get(requestId);
+      if (!payload || !request ||
+          (payloadCameraHandle > 0 && payloadCameraHandle !== request.cameraHandle) ||
+          (payload?.sceneId && payload.sceneId !== request.sceneId)) {
         return { status: 'stale', payload };
       }
 
-      if (payload.status === 'pending') {
-        return { status: 'pending', payload };
+      const isLatest = requestId === latestRequestId;
+      pendingRequests.delete(requestId);
+      if (!isLatest ||
+          (payloadCameraHandle > 0 && payloadCameraHandle !== activeCameraHandle) ||
+          (payload?.sceneId && activeSceneId && payload.sceneId !== activeSceneId)) {
+        return { status: 'stale', payload };
       }
 
       if (payload.status === 'miss') {
