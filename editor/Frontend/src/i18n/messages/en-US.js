@@ -45,7 +45,7 @@ export default {
     FileManager: 'File Manager',
     ProjectSettings: 'Project Settings',
     NodeGraphPanel: 'Nodes',
-    CabbageChatPanel: 'Cabbage Help',
+    CabbageChatPanel: 'AI Creative Assistant',
     AITalkBar: 'AI Chat',
     EditorSettings: 'Pause Menu',
     Network: 'LAN Chat',

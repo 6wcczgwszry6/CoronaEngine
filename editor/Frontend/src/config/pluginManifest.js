@@ -155,7 +155,7 @@ export const PLUGIN_MANIFEST = [
     id: 'CabbageChatPanel',
     routePath: '/CabbageChat',
     displayNameKey: 'plugins.CabbageChatPanel',
-    displayName: '包菜答疑',
+    displayName: 'AI 创作助手',
     pageType: 'plugin',
     defaultDock: 'right',
     defaultWidth: 420,

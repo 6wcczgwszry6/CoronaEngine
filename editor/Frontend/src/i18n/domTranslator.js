@@ -424,14 +424,14 @@ const EXPLICIT_DOM_TEXT_TRANSLATIONS = {
   '切断与 Corona 系统的连接后，所有未保存的宇宙演化进程将在后台处于休眠状态。':
     'After disconnecting from Corona, all unsaved world evolution will remain dormant in the background.',
   确认离开: 'Confirm Leave',
-  包菜答疑: 'Cabbage Help',
+  'AI 创作助手': 'AI Creative Assistant',
   当前任务: 'Current Task',
-  继续问包菜: 'Ask Cabbage',
-  '可以询问当前任务为什么发生、积木应该接在哪里，或怎样确认已经修好。':
-    'Ask why the current task occurred, where blocks should connect, or how to verify the fix.',
+  '开始使用 AI 创作助手': 'Start Creating with the AI Creative Assistant',
+  '可以询问当前任务、让 AI 修改节点图，或根据你的描述生成节点逻辑。':
+    'Ask about the current task, have AI modify the node graph, or generate node logic from your description.',
   展示: 'Show',
   包菜: 'Cabbage',
-  '包菜正在查看当前世界与任务…': 'Cabbage is reviewing the current world and task...',
+  'AI 正在查看当前世界与任务…': 'AI is reviewing the current world and task...',
   清空会话: 'Clear Conversation',
   停止等待: 'Stop Waiting',
   弹出为可拖动窗口: 'Pop Out as Draggable Window',
@@ -687,7 +687,8 @@ const RUNTIME_DOM_TEXT_TRANSLATIONS = {
   全部待处理任务: 'All Pending Tasks',
   当前没有待处理任务: 'No Pending Tasks',
   你: 'You',
-  '包菜答疑暂时不可用，请稍后再试。': 'Cabbage Help Is Temporarily Unavailable. Try Again Later.',
+  'AI 创作助手暂时不可用，请稍后再试。':
+    'The AI Creative Assistant Is Temporarily Unavailable. Try Again Later.',
   'DeepSeek 没有返回可显示的内容。': 'DeepSeek Returned No Displayable Content.',
   '已停止等待本次回答。': 'Stopped Waiting for This Response.',
 
@@ -772,20 +773,22 @@ const RUNTIME_DOM_TEXT_TRANSLATIONS = {
   '教程节点图运行验证失败': 'Tutorial Node Graph Run Validation Failed',
   '节点图保存失败，已取消全局运行': 'Node Graph Save Failed; Global Run Was Cancelled',
 
-  '包菜正在读取积木文档并生成当前节点逻辑…':
-    'Cabbage Is Reading the Block Documentation and Generating the Current Node Logic...',
+  'AI 正在读取积木文档并生成当前节点逻辑…':
+    'AI Is Reading the Block Documentation and Generating the Current Node Logic...',
   '节点逻辑已经生成并保存。': 'Node Logic Was Generated and Saved.',
   '节点逻辑生成失败。': 'Failed to Generate Node Logic.',
-  '包菜正在读取现有节点并补充逻辑…': 'Cabbage Is Reading Existing Nodes and Extending the Logic...',
+  'AI 正在读取现有节点并补充逻辑…':
+    'AI Is Reading Existing Nodes and Extending the Logic...',
   '已在现有节点图中补充并保存所需逻辑。':
     'The Required Logic Was Added to the Existing Node Graph and Saved.',
   '节点逻辑补充失败。': 'Failed to Extend Node Logic.',
-  '包菜正在读取现有节点并进行局部修改…':
-    'Cabbage Is Reading Existing Nodes and Applying a Local Edit...',
+  'AI 正在读取现有节点并进行局部修改…':
+    'AI Is Reading Existing Nodes and Applying a Local Edit...',
   '已保留无关逻辑并完成局部修改。':
     'Unrelated Logic Was Preserved and the Local Edit Was Completed.',
   '节点逻辑修改失败。': 'Failed to Edit Node Logic.',
-  '包菜正在定位并删除指定节点逻辑…': 'Cabbage Is Locating and Deleting the Requested Node Logic...',
+  'AI 正在定位并删除指定节点逻辑…':
+    'AI Is Locating and Deleting the Requested Node Logic...',
   '已删除指定逻辑并保存节点图。': 'The Requested Logic Was Deleted and the Node Graph Was Saved.',
   '节点逻辑删除失败。': 'Failed to Delete Node Logic.',
   没有被修改: 'Was Not Modified',

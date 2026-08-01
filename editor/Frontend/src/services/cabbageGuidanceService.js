@@ -654,9 +654,9 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
     'MainPage',
     { kind: 'selector', selectorKey: 'cabbage-chat-input' },
     'click',
-    '\u70b9\u51fb\u53f3\u4fa7\u201c\u5305\u83dc\u7b54\u7591\u201d\u6700\u4e0b\u65b9\u7684\u5927\u8f93\u5165\u6846\u3002\u63d0\u793a\u8bcd\u5c31\u662f\u4f60\u5199\u7ed9 AI \u7684\u5177\u4f53\u8981\u6c42\u3002',
+    '\u70b9\u51fb\u53f3\u4fa7\u201cAI \u521b\u4f5c\u52a9\u624b\u201d\u6700\u4e0b\u65b9\u7684\u5927\u8f93\u5165\u6846\u3002\u63d0\u793a\u8bcd\u5c31\u662f\u4f60\u5199\u7ed9 AI \u7684\u5177\u4f53\u8981\u6c42\u3002',
     {
-      fallbackEn: 'Click the large input box at the bottom of Cabbage Assistant. A prompt is the specific request you write for the AI.',
+      fallbackEn: 'Click the large input box at the bottom of AI Creative Assistant. A prompt is the specific request you write for the AI.',
       preferFallbackText: true,
     },
   ),
@@ -672,8 +672,8 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
       source,
       { kind: 'selector', selectorKey: 'cabbage-chat-send' },
       'click',
-      '\u70b9\u51fb\u201c\u53d1\u9001\u201d\uff0c\u7136\u540e\u7b49\u5f85\u201c\u5305\u83dc\u7b54\u7591\u201d\u771f\u6b63\u8fd4\u56de\u56de\u7b54\u3002',
-      { fallbackEn: 'Click Send, then wait until Cabbage Assistant returns a real answer.', preferFallbackText: true },
+      '\u70b9\u51fb\u201c\u53d1\u9001\u201d\uff0c\u7136\u540e\u7b49\u5f85\u201cAI \u521b\u4f5c\u52a9\u624b\u201d\u771f\u6b63\u8fd4\u56de\u56de\u7b54\u3002',
+      { fallbackEn: 'Click Send, then wait until AI Creative Assistant returns a real answer.', preferFallbackText: true },
     ),
   ] }),
   modify_with_ai: (source) => ({ panelId: 'MainPage', steps: [

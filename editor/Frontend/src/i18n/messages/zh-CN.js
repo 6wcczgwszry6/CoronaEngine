@@ -45,7 +45,7 @@ export default {
     FileManager: '文件管理器',
     ProjectSettings: '项目设置',
     NodeGraphPanel: '节点',
-    CabbageChatPanel: '包菜答疑',
+    CabbageChatPanel: 'AI 创作助手',
     AITalkBar: 'AI 对话',
     EditorSettings: '暂停菜单',
     Network: '局域网聊天',

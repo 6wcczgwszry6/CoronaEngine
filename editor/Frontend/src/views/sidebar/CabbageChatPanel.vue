@@ -5,13 +5,13 @@
   >
     <DockTitleBar
       v-if="!props.resident && !isDocked"
-      title="包菜答疑"
+      title="AI 创作助手"
       routePath="/CabbageChat"
       @close="closeFloat"
     />
 
     <div v-if="props.resident" class="resident-chat-title">
-      <span>包菜答疑</span>
+      <span>AI 创作助手</span>
       <button
         type="button"
         class="resident-float-button"
@@ -42,9 +42,8 @@
 
     <div ref="historyRef" class="chat-history">
       <div v-if="!assistant.messages.length" class="chat-empty">
-        <img src="@/assets/cabbage.png" alt="" />
-        <strong>继续问包菜</strong>
-        <p>可以询问当前任务为什么发生、积木应该接在哪里，或怎样确认已经修好。</p>
+        <strong>开始使用 AI 创作助手</strong>
+        <p>可以询问当前任务、让 AI 修改节点图，或根据你的描述生成节点逻辑。</p>
       </div>
       <article
         v-for="message in assistant.messages"
@@ -52,7 +51,7 @@
         class="chat-message"
         :class="message.role"
       >
-        <div class="chat-role">{{ message.role === 'assistant' ? '包菜' : '你' }}</div>
+        <div class="chat-role">{{ message.role === 'assistant' ? 'AI' : '你' }}</div>
         <div class="chat-content">
           <div>
             {{
@@ -77,11 +76,11 @@
         </div>
       </article>
       <article v-if="streamingContent" class="chat-message assistant streaming">
-        <div class="chat-role">包菜</div>
+        <div class="chat-role">AI</div>
         <div class="chat-content">{{ cleanedStreamingContent }}</div>
       </article>
       <div v-if="assistant.chatBusy && !streamingContent" class="chat-pending">
-        包菜正在查看当前世界与任务…
+        AI 正在查看当前世界与任务…
       </div>
     </div>
 
@@ -215,27 +214,27 @@ const cleanedStreamingContent = computed(() => localizedAssistantText(streamingC
 const NODE_GRAPH_OPERATION_COPY = Object.freeze({
   create: {
     progress:
-      '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026',
+      'AI \u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026',
     success: '\u8282\u70b9\u903b\u8f91\u5df2\u7ecf\u751f\u6210\u5e76\u4fdd\u5b58\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u751f\u6210\u5931\u8d25\u3002',
   },
   extend: {
     progress:
-      '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8865\u5145\u903b\u8f91\u2026',
+      'AI \u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8865\u5145\u903b\u8f91\u2026',
     success:
       '\u5df2\u5728\u73b0\u6709\u8282\u70b9\u56fe\u4e2d\u8865\u5145\u5e76\u4fdd\u5b58\u6240\u9700\u903b\u8f91\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u8865\u5145\u5931\u8d25\u3002',
   },
   edit: {
     progress:
-      '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8fdb\u884c\u5c40\u90e8\u4fee\u6539\u2026',
+      'AI \u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8fdb\u884c\u5c40\u90e8\u4fee\u6539\u2026',
     success:
       '\u5df2\u4fdd\u7559\u65e0\u5173\u903b\u8f91\u5e76\u5b8c\u6210\u5c40\u90e8\u4fee\u6539\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u4fee\u6539\u5931\u8d25\u3002',
   },
   delete: {
     progress:
-      '\u5305\u83dc\u6b63\u5728\u5b9a\u4f4d\u5e76\u5220\u9664\u6307\u5b9a\u8282\u70b9\u903b\u8f91\u2026',
+      'AI \u6b63\u5728\u5b9a\u4f4d\u5e76\u5220\u9664\u6307\u5b9a\u8282\u70b9\u903b\u8f91\u2026',
     success: '\u5df2\u5220\u9664\u6307\u5b9a\u903b\u8f91\u5e76\u4fdd\u5b58\u8282\u70b9\u56fe\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u5220\u9664\u5931\u8d25\u3002',
   },
@@ -307,7 +306,7 @@ async function pollStatus(requestId, taskId) {
     if (assistant.activeRequestId !== requestId || activeTaskId.value !== taskId) return;
     if (response?.success !== true) {
       finishRequest(requestId, {
-        error: String(response?.message || '包菜答疑暂时不可用，请稍后再试。'),
+        error: String(response?.message || 'AI 创作助手暂时不可用，请稍后再试。'),
       });
       return;
     }
@@ -343,7 +342,7 @@ async function pollStatus(requestId, taskId) {
     }
     if (response.status === 'error') {
       finishRequest(requestId, {
-        error: String(response?.message || '包菜答疑暂时不可用，请稍后再试。'),
+        error: String(response?.message || 'AI 创作助手暂时不可用，请稍后再试。'),
       });
       return;
     }
@@ -351,7 +350,7 @@ async function pollStatus(requestId, taskId) {
   } catch (error) {
     if (assistant.activeRequestId === requestId) {
       finishRequest(requestId, {
-        error: String(error?.message || '包菜答疑暂时不可用，请稍后再试。'),
+        error: String(error?.message || 'AI 创作助手暂时不可用，请稍后再试。'),
       });
     }
   }
@@ -453,7 +452,7 @@ async function sendMessage() {
       finishRequest(requestId, {
         error: String(
           response?.message ||
-            '\u5305\u83dc\u7b54\u7591\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002'
+            'AI \u521b\u4f5c\u52a9\u624b\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002'
         ),
       });
       return;
@@ -465,7 +464,7 @@ async function sendMessage() {
       finishRequest(requestId, {
         error: String(
           error?.message ||
-            '\u5305\u83dc\u7b54\u7591\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002'
+            'AI \u521b\u4f5c\u52a9\u624b\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002'
         ),
       });
     }
@@ -724,23 +723,14 @@ onBeforeUnmount(() => {
 
 .chat-empty {
   margin: auto;
-  max-width: 280px;
-  padding: 22px 18px;
+  max-width: 300px;
+  padding: 14px 18px;
   text-align: center;
   color: #b9ad8f;
   font-size: 12px;
   line-height: 1.7;
 }
 
-.chat-empty img {
-  width: 64px;
-  height: 64px;
-  margin: 0 auto 11px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 50%;
-  background: #d8b86c;
-  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.26);
-}
 
 .chat-empty strong {
   display: block;
@@ -750,7 +740,7 @@ onBeforeUnmount(() => {
 }
 
 .chat-empty p {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
 }
 
 .chat-message {
