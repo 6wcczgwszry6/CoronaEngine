@@ -315,6 +315,27 @@ struct ActorPickDevice {
     bool result_ready{false};
 };
 
+// Runtime-only actor pick request/completion messages. These are deliberately
+// kept outside ActorPickDevice so multiple clicks can be in flight without a
+// newer request overwriting an older one.
+struct ActorPickRequestCommand {
+    std::uintptr_t camera_handle{};
+    std::string scene_id;
+    std::string request_id;
+    std::uint32_t x{0};
+    std::uint32_t y{0};
+};
+
+struct ActorPickCompletion {
+    std::uintptr_t camera_handle{};
+    std::string scene_id;
+    std::string request_id;
+    std::string status; // success, miss, error
+    std::uintptr_t actor_handle{};
+    std::uint32_t x{0};
+    std::uint32_t y{0};
+};
+
 struct CameraMoveCommand {
     std::uintptr_t camera_handle{};
     ktm::fvec3 position{};
@@ -582,6 +603,10 @@ class SharedDataHub {
 
     ActorPickStorage& actor_pick_storage();
     const ActorPickStorage& actor_pick_storage() const;
+    void enqueue_actor_pick_request(ActorPickRequestCommand command);
+    std::optional<ActorPickRequestCommand> take_actor_pick_request(std::uintptr_t camera_handle);
+    void enqueue_actor_pick_completion(ActorPickCompletion completion);
+    std::vector<ActorPickCompletion> drain_actor_pick_completions();
 
     EnvironmentStorage& environment_storage();
     const EnvironmentStorage& environment_storage() const;
@@ -631,6 +656,9 @@ class SharedDataHub {
     EnvironmentStorage environment_storage_;
     CameraStorage camera_storage_;
     ActorPickStorage actor_pick_storage_;
+    mutable std::mutex actor_pick_queue_mutex_;
+    std::vector<ActorPickRequestCommand> pending_actor_pick_requests_;
+    std::vector<ActorPickCompletion> actor_pick_completions_;
     SceneStorage scene_storage_;
     ImageStorage image_storage_;
     std::mutex camera_move_mutex_;

@@ -160,6 +160,45 @@ const SharedDataHub::CameraStorage& SharedDataHub::camera_storage() const { retu
 SharedDataHub::ActorPickStorage& SharedDataHub::actor_pick_storage() { return actor_pick_storage_; }
 const SharedDataHub::ActorPickStorage& SharedDataHub::actor_pick_storage() const { return actor_pick_storage_; }
 
+void SharedDataHub::enqueue_actor_pick_request(ActorPickRequestCommand command) {
+    if (command.camera_handle == 0 || command.request_id.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    pending_actor_pick_requests_.push_back(std::move(command));
+}
+
+std::optional<ActorPickRequestCommand> SharedDataHub::take_actor_pick_request(
+    std::uintptr_t camera_handle) {
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    const auto it = std::find_if(pending_actor_pick_requests_.begin(),
+                                 pending_actor_pick_requests_.end(),
+                                 [camera_handle](const auto& request) {
+                                     return request.camera_handle == camera_handle;
+                                 });
+    if (it == pending_actor_pick_requests_.end()) {
+        return std::nullopt;
+    }
+    auto request = std::move(*it);
+    pending_actor_pick_requests_.erase(it);
+    return request;
+}
+
+void SharedDataHub::enqueue_actor_pick_completion(ActorPickCompletion completion) {
+    if (completion.camera_handle == 0 || completion.request_id.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    actor_pick_completions_.push_back(std::move(completion));
+}
+
+std::vector<ActorPickCompletion> SharedDataHub::drain_actor_pick_completions() {
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    std::vector<ActorPickCompletion> completions;
+    completions.swap(actor_pick_completions_);
+    return completions;
+}
+
 SharedDataHub::EnvironmentStorage& SharedDataHub::environment_storage() { return environment_storage_; }
 const SharedDataHub::EnvironmentStorage& SharedDataHub::environment_storage() const { return environment_storage_; }
 

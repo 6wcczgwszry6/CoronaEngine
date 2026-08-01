@@ -7,6 +7,7 @@
 #include <corona/kernel/event/i_event_stream.h>
 #include <corona/kernel/system/system_base.h>
 #include <corona/shared_data_hub.h>
+#include <corona/systems/optics/actor_pick_readback_worker.h>
 #ifdef CORONA_ENABLE_VISION
 #include <corona/systems/optics/vision_pipeline_key.h>
 #include <corona/systems/optics/vision_scene_resource.h>
@@ -215,13 +216,24 @@ class OpticsSystem : public Kernel::SystemBase {
 
     struct ActorPickRequest {
         std::uintptr_t pick_handle{0};
+        std::uintptr_t camera_handle{0};
+        std::string scene_id;
         std::string request_id;
         std::uint32_t x{0};
         std::uint32_t y{0};
     };
     std::optional<ActorPickRequest> take_pending_actor_pick(std::uintptr_t camera_handle);
     void complete_actor_pick(const ActorPickRequest& request,
-                             const std::vector<std::uintptr_t>& scene_actor_handles);
+                             const std::vector<std::uintptr_t>& scene_actor_handles,
+                             bool read_ok,
+                             std::uint32_t instance_id);
+    void fail_actor_pick(const ActorPickRequest& request);
+    void enqueue_actor_pick_readback(
+        ActorPickRequest request,
+        Horizon::HardwareBuffer result_buffer,
+        Horizon::SubmitReceipt receipt,
+        std::vector<std::uintptr_t> scene_actor_handles,
+        OpticsDetail::ActorPickReadbackWorker::Reservation reservation);
 
     struct ViewportCursorState {
         bool visible = false;
@@ -313,6 +325,7 @@ class OpticsSystem : public Kernel::SystemBase {
     static constexpr uint64_t kUiViewIdleEvictFrames = 240;
 
     std::unique_ptr<Hardware> hardware_;
+    std::unique_ptr<OpticsDetail::ActorPickReadbackWorker> actor_pick_readback_worker_;
     double pending_native_throttle_wait_ms_{0.0};
     std::atomic<std::uint64_t> pending_native_consumed_serial_{0};
 

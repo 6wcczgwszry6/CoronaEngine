@@ -137,13 +137,12 @@ struct Hardware {
     std::uint64_t materialTableCapacity = 0;
     std::uint64_t uiInstanceInfoCapacity = 0;
     std::uint64_t uiMaterialTableCapacity = 0;
-    Corona::Horizon::HardwareBuffer actorPickBuffer;
     Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
     Corona::Horizon::HardwareBuffer shadowInfoBuffer;
 
     // === Per-submission buffer 池（消除 V-buffer 共享 buffer 跨帧/跨相机覆盖竞争）===
     // 上面这些 *Buffer 单例的语义已改为"每相机从对应池租一份写入"，见 optics_system.cpp
-    // 场景/overlay pass。单例本身仅保留给冷路径（actor-pick/screenshot，均已 wait_idle）。
+    // 场景/overlay pass。单例本身仅保留给 screenshot 等冷路径。
     FramePlaceBufferPool vpUniformBufferPool;
     FramePlaceBufferPool uniformBufferPool;
     FramePlaceBufferPool shadowInfoBufferPool;

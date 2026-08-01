@@ -5,6 +5,9 @@
 corona_add_system(optics
     SOURCES
         optics_system.cpp
+        actor_pick_readback_worker.cpp
+        ${PROJECT_SOURCE_DIR}/include/corona/systems/optics/actor_pick_readback_worker.h
+        actor_pick_result.h
         hardware.h
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_material_adapter.cpp>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_material_adapter.h>
@@ -191,6 +194,18 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
 endif()
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_optics_actor_pick_readback_worker_tests
+        tests/test_actor_pick_readback_worker.cpp
+        actor_pick_readback_worker.cpp
+    )
+    target_include_directories(corona_optics_actor_pick_readback_worker_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(NAME OpticsActorPickReadbackWorkerTests
+             COMMAND corona_optics_actor_pick_readback_worker_tests)
+
     add_executable(corona_optics_native_frame_throttle_tests
         tests/test_native_frame_throttle.cpp
     )
