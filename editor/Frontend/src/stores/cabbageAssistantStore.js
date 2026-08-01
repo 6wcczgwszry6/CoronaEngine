@@ -551,6 +551,14 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       this.goalTaskPlan = clone(context.goalTaskPlan || {}, {});
       this.goalSignalCounts = clone(context.goalSignalCounts || {}, {});
       this.tutorialSession = clone(context.tutorialSession || {}, {});
+      if (!this.tutorialAssistanceUnlocked()) {
+        this.ephemeralTip = null;
+        this.lastOptimizationTipAt = 0;
+        this.shownOptimizationRevisions = [];
+        this.preWarning = null;
+        this.shownPreWarningKeys = [];
+        this.activePreWarningSignatures = [];
+      }
       this.activeTasks = (Array.isArray(context.activeTasks) ? context.activeTasks : [])
         .map((task) =>
           normalizeTask(task, this.graphRevision, Number(task?.updatedAt) || Date.now())
@@ -752,7 +760,12 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
       return promoted;
     },
 
+    tutorialAssistanceUnlocked() {
+      return String(this.tutorialSession?.status || '') === 'completed';
+    },
+
     showOptimizationTip(tip = {}, graphRevision = '') {
+      if (!this.tutorialAssistanceUnlocked()) return false;
       const revision = String(graphRevision || '').trim();
       const tipKey = String(tip.tipKey || '')
         .trim()
@@ -815,6 +828,7 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     },
 
     showPreWarning(warning = {}) {
+      if (!this.tutorialAssistanceUnlocked()) return false;
       const code = normalizeIssueCode(warning.code);
       const revision = String(warning.graphRevision || this.graphRevision || '').trim();
       const signature = preWarningSignature(code, warning.pattern || {});
@@ -866,6 +880,10 @@ export const useCabbageAssistantStore = defineStore('cabbageAssistant', {
     },
 
     evaluateRememberedIssuePatterns(workspace = {}, graphRevision = '', projectContext = {}) {
+      if (!this.tutorialAssistanceUnlocked()) {
+        this.activePreWarningSignatures = [];
+        return null;
+      }
       const revision = String(graphRevision || '').trim();
       if (!revision || !workspace || typeof workspace !== 'object') return null;
       const nodes = Array.isArray(workspace.nodes) ? workspace.nodes.filter(Boolean) : [];

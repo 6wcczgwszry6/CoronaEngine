@@ -91,15 +91,6 @@
               </article>
             </div>
             <div v-else class="chapter-empty">{{ t('cabbageReview.noChapterRecords') }}</div>
-            <button
-              v-if="group.status === 'restore_failed'"
-              type="button"
-              class="retry-button chapter-retry"
-              :disabled="restoreRetryBusy"
-              @click.stop="retryRestore"
-            >
-              {{ restoreRetryBusy ? t('cabbageReview.retryingRestore') : t('cabbageReview.retryRestore') }}
-            </button>
           </div>
         </article>
 
@@ -107,29 +98,6 @@
           <span class="task-empty-icon">✓</span>
           <span>{{ t('cabbageReview.emptyHistory') }}</span>
         </div>
-      </div>
-
-      <div v-else-if="tutorialStatus === 'restoring'" class="task-list state-list">
-        <article class="system-state-card restoring-card" aria-live="polite">
-          <span class="state-icon spinner">↻</span>
-          <div>
-            <strong>{{ t('cabbageReview.restoring') }}</strong>
-            <p>{{ t('cabbageReview.restoringDescription') }}</p>
-          </div>
-        </article>
-      </div>
-
-      <div v-else-if="tutorialStatus === 'restore_failed'" class="task-list state-list">
-        <article class="system-state-card restore-failed-card" aria-live="assertive">
-          <span class="state-icon">!</span>
-          <div class="state-content">
-            <strong>{{ t('cabbageReview.restoreFailed') }}</strong>
-            <p>{{ restoreError || t('cabbageReview.restoreFailedDescription') }}</p>
-            <button type="button" class="retry-button" :disabled="restoreRetryBusy" @click="retryRestore">
-              {{ restoreRetryBusy ? t('cabbageReview.retryingRestore') : t('cabbageReview.retryRestore') }}
-            </button>
-          </div>
-        </article>
       </div>
 
       <div v-else-if="completionNoticeVisible" class="task-list state-list">
@@ -211,8 +179,21 @@ const props = defineProps({
   resident: { type: Boolean, default: false },
 });
 
-const TUTORIAL_TOTAL = 29;
-const CHAPTER_TOTALS = Object.freeze({ chapter_viewport: 6, chapter_scene: 9, chapter_nodes: 12, chapter_preview: 2 });
+const TUTORIAL_TOTAL = 41;
+const CHAPTER_TOTALS = Object.freeze({
+  chapter_viewport: 6,
+  chapter_scene: 9,
+  chapter_nodes: 22,
+  chapter_ai: 4,
+});
+const REMOVED_TUTORIAL_TASK_KEYS = new Set([
+  'tutorial.basics.start_preview',
+  'tutorial.basics.stop_preview',
+  'tutorial.basics.add_wait',
+  'tutorial.basics.set_wait_seconds',
+  'tutorial.basics.select_edge',
+  'tutorial.basics.add_true_condition',
+]);
 const NOTICE_FADE_MS = 650;
 const { t, locale } = useI18n();
 const dockStore = useDockStore();
@@ -223,7 +204,6 @@ const expandedHistoryTasks = reactive(new Set());
 const historyVisible = ref(false);
 const completionClock = ref(Date.now());
 const completionNoticeFading = ref(false);
-const restoreRetryBusy = ref(false);
 let optimizationTimer = null;
 let preWarningTimer = null;
 let completionFadeTimer = null;
@@ -236,7 +216,6 @@ const tutorialTotal = computed(() => {
   return Math.max(TUTORIAL_TOTAL, maximum);
 });
 const tutorialStatus = computed(() => String(assistant.tutorialSession?.status || ''));
-const restoreError = computed(() => String(assistant.tutorialSession?.lastRestoreError || '').trim());
 const completionNoticeExpiresAt = computed(() => Math.max(0, Number(assistant.tutorialSession?.completionNoticeExpiresAt) || 0));
 
 const preWarningTask = computed(() => {
@@ -278,22 +257,15 @@ const chapterGroups = computed(() => {
     if (!key) continue;
     if (!chapterMap.has(key)) chapterMap.set(key, { key, order: Number(task.chapterOrder) || 0, titleTask: task });
   }
-  const currentKey = String(currentTutorialTask.value?.chapterKey || (
-    ['restoring', 'restore_failed'].includes(tutorialStatus.value) ? 'chapter_preview' : ''
-  ));
+  const currentKey = String(currentTutorialTask.value?.chapterKey || '');
   return [...chapterMap.values()].sort((left, right) => left.order - right.order).map((chapter) => {
     const tasks = completedBasicTasks.value.filter((task) => task.chapterKey === chapter.key);
     const total = chapterTotal(chapter.key);
     const completedCount = Math.min(total, tasks.length);
-    const finalChapter = chapter.key === 'chapter_preview';
+    const finalChapter = chapter.key === 'chapter_ai';
     let status = completedCount >= total ? 'cleared' : (chapter.key === currentKey ? 'in_progress' : 'not_started');
-    if (finalChapter && tutorialStatus.value !== 'completed') {
-      status = tutorialStatus.value === 'restore_failed'
-        ? 'restore_failed'
-        : (completedCount > 0 || chapter.key === currentKey ? 'in_progress' : 'not_started');
-    }
     const completedAt = status === 'cleared'
-      ? (finalChapter ? Number(assistant.tutorialSession?.restoredAt) || latestCompletion(tasks) : latestCompletion(tasks))
+      ? (finalChapter ? Number(assistant.tutorialSession?.completedAt) || Number(assistant.tutorialSession?.restoredAt) || latestCompletion(tasks) : latestCompletion(tasks))
       : 0;
     return {
       key: chapter.key,
@@ -330,7 +302,10 @@ const otherHistoryGroup = computed(() => {
 const historyGroups = computed(() => [...chapterGroups.value, legacyTutorialGroup.value, otherHistoryGroup.value].filter(Boolean));
 
 function taskKey(task) { return String(task?.taskKey || task?.issueKey || ''); }
-function isBasicTutorial(task) { return task?.type === 'tutorial' && taskKey(task).startsWith('tutorial.basics.'); }
+function isBasicTutorial(task) {
+  const key = taskKey(task);
+  return task?.type === 'tutorial' && key.startsWith('tutorial.basics.') && !REMOVED_TUTORIAL_TASK_KEYS.has(key);
+}
 function chapterTotal(chapterKey) {
   const catalogCount = basicTaskCatalog.value.filter((task) => task.chapterKey === chapterKey).length;
   return Math.max(Number(CHAPTER_TOTALS[chapterKey]) || 0, catalogCount);
@@ -372,7 +347,7 @@ function transientClass(task) { return task?.type === 'pre-warning' ? 'reminder'
 function historyStatusLabel(status) {
   const labels = {
     in_progress: 'cabbageReview.inProgress', cleared: 'cabbageReview.chapterCleared',
-    restore_failed: 'cabbageReview.restoreFailed', not_started: 'cabbageReview.notStarted', archived: 'cabbageReview.archived',
+    not_started: 'cabbageReview.notStarted', archived: 'cabbageReview.archived',
   };
   return t(labels[status] || labels.archived);
 }
@@ -439,16 +414,6 @@ function toggleTask(task, index) {
   const key = activeRowKey(task, index);
   if (expandedKeys.has(key)) expandedKeys.delete(key); else expandedKeys.add(key);
   assistant.selectTask(taskKey(task));
-}
-async function retryRestore() {
-  if (restoreRetryBusy.value) return;
-  restoreRetryBusy.value = true;
-  try {
-    await cabbageContextService.recordEvent({
-      type: 'tutorial_restore_retry_requested', category: 'tutorial', success: true,
-      details: { sessionId: String(assistant.tutorialSession?.sessionId || '') },
-    });
-  } finally { restoreRetryBusy.value = false; }
 }
 async function openChat(task) {
   assistant.selectTask(taskKey(task));
@@ -589,7 +554,7 @@ onBeforeUnmount(() => {
 .task-suggestion { border-left: 2px solid #d8b86c; padding-left: 8px; }
 .task-suggestion strong { color: #e5c77f; font-size: 12px; }
 .task-actions { margin-top: 11px; display: flex; justify-content: flex-end; gap: 7px; }
-.showcase-button, .task-discuss, .retry-button {
+.showcase-button, .task-discuss {
   border: 1px solid #665025; border-radius: 5px; color: #fff7dc; padding: 6px 10px; font-size: 12px;
   transition: background .14s ease, border-color .14s ease, opacity .14s ease;
 }
@@ -597,9 +562,6 @@ onBeforeUnmount(() => {
 .showcase-button:hover { border-color: #d8b86c; background: #8c6f36; }
 .task-discuss { background: #4b391c; }
 .task-discuss:hover { border-color: #b8924a; background: #624b25; }
-.retry-button { margin-top: 10px; background: #71312b; border-color: #9b4a41; }
-.retry-button:hover { background: #8f4037; border-color: #d06a5e; }
-.retry-button:disabled { cursor: wait; opacity: .55; }
 .task-empty {
   display: flex; min-height: 90px; align-items: center; justify-content: center; gap: 8px;
   padding: 12px; color: #9d9278; font-size: 13px; text-align: center;
@@ -609,20 +571,14 @@ onBeforeUnmount(() => {
   border-radius: 50%; color: #d8b86c; font-size: 12px;
 }
 .state-list { display: flex; align-items: stretch; }
-.system-state-card, .completion-card {
+.completion-card {
   width: 100%; min-height: 118px; box-sizing: border-box; display: flex; align-items: center; gap: 13px;
   border: 1px solid #665025; border-radius: 9px; padding: 16px; background: #17140d;
 }
-.system-state-card strong { color: #f1d589; font-size: 14px; }
-.system-state-card p { margin: 7px 0 0; color: #bdb49d; font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; }
-.state-content { min-width: 0; }
-.state-icon, .completion-icon {
+.completion-icon {
   flex: 0 0 auto; display: grid; width: 36px; height: 36px; place-items: center;
   border: 1px solid currentColor; border-radius: 50%; color: #d8b86c; font-size: 20px; font-weight: 800;
 }
-.spinner { animation: state-spin 1.2s linear infinite; }
-.restore-failed-card { border-color: #7f3030; background: #211010; }
-.restore-failed-card .state-icon, .restore-failed-card strong { color: #ff9d90; }
 .completion-card {
   justify-content: center; border-color: #6f8d42;
   background: radial-gradient(circle at top, rgba(124, 157, 73, .23), transparent 62%), #13190d;
@@ -635,7 +591,6 @@ onBeforeUnmount(() => {
 .chapter-card { overflow: hidden; border: 1px solid #3f3018; border-radius: 8px; background: #15130d; }
 .chapter-card.current { border-color: #a17c35; }
 .chapter-card.status-cleared { border-color: #526737; }
-.chapter-card.status-restore_failed { border-color: #7f3030; }
 .chapter-summary { width: 100%; border: 0; background: transparent; color: inherit; padding: 11px; text-align: left; }
 .chapter-summary-main, .chapter-summary-meta { display: flex; align-items: center; gap: 8px; }
 .chapter-title { min-width: 0; flex: 1; color: #ece1c5; font-size: 13px; font-weight: 750; }
@@ -645,7 +600,6 @@ onBeforeUnmount(() => {
 }
 .chapter-status.status-in_progress { border-color: #9b7833; color: #f0ce7d; }
 .chapter-status.status-cleared { border-color: #657d43; color: #c9e6a3; }
-.chapter-status.status-restore_failed { border-color: #9b443d; color: #ffaaa0; }
 .chapter-description { display: block; margin-top: 7px; color: #a79d87; font-size: 12px; line-height: 1.45; }
 .chapter-summary-meta { margin-top: 8px; color: #897f6a; font-size: 10px; }
 .chapter-summary-meta .task-chevron { margin-left: auto; }
@@ -672,8 +626,6 @@ onBeforeUnmount(() => {
 .chapter-step-detail .task-suggestion { margin-top: 0; }
 .chapter-step-detail .task-actions { margin-top: 9px; }
 .chapter-empty { padding: 13px 8px; color: #746c5c; font-size: 11px; text-align: center; }
-.chapter-retry { display: block; margin-left: auto; }
-@keyframes state-spin { to { transform: rotate(360deg); } }
 @media (max-width: 720px) { .cabbage-review-root { width: min(430px, calc(100% - 24px)); } }
 @media (max-height: 680px) {
   .cabbage-review-root { max-height: calc(100% - 68px); }

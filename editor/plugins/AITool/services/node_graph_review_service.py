@@ -84,6 +84,7 @@ class NodeGraphReviewService:
         "engine_rotationY": ("OBJECT",),
         "engine_rotationZ": ("OBJECT",),
         "object_set_position": ("NAME",),
+        "object_move_direction": ("NAME",),
         "object_get_x": ("NAME",),
         "object_get_y": ("NAME",),
         "object_get_z": ("NAME",),

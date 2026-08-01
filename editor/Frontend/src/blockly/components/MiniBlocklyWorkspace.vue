@@ -435,8 +435,18 @@ function addBlock(blockType, clientX, clientY) {
     emitChange();
     emit('block-added', eventDetailsForBlock(block, {
       interaction: hasScreenPoint ? 'drag' : 'pick',
-      value: block.getFieldValue?.('BOOL') ?? block.getFieldValue?.('SECONDS') ?? '',
-      newValue: block.getFieldValue?.('BOOL') ?? block.getFieldValue?.('SECONDS') ?? '',
+      value: block.getFieldValue?.('BOOL')
+        ?? block.getFieldValue?.('SECONDS')
+        ?? block.getFieldValue?.('SPEED')
+        ?? block.getFieldValue?.('DIRECTION')
+        ?? block.getFieldValue?.('NAME')
+        ?? '',
+      newValue: block.getFieldValue?.('BOOL')
+        ?? block.getFieldValue?.('SECONDS')
+        ?? block.getFieldValue?.('SPEED')
+        ?? block.getFieldValue?.('DIRECTION')
+        ?? block.getFieldValue?.('NAME')
+        ?? '',
     }));
     return true;
   } catch (e) {

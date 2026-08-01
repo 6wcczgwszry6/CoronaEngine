@@ -69,7 +69,7 @@ class NodeGraphGenerationService:
         "engine_X", "engine_Y", "engine_Z",
         "engine_Xset", "engine_Yset", "engine_Zset",
         "engine_Xadd", "engine_Yadd", "engine_Zadd",
-        "object_set_position", "object_get_x", "object_get_y", "object_get_z",
+        "object_set_position", "object_move_direction", "object_get_x", "object_get_y", "object_get_z",
     }
     CAPABILITY_BLOCK_TYPES = {
         "input-control": {
@@ -84,7 +84,7 @@ class NodeGraphGenerationService:
             "engine_move", "engine_moveto", "engine_movetoXYZ", "engine_movetoXYZtime",
             "engine_Xset", "engine_Yset", "engine_Zset",
             "engine_Xadd", "engine_Yadd", "engine_Zadd",
-            "object_set_position", "object_move_to_lane", "object_move_to_lane_smooth",
+            "object_set_position", "object_move_direction", "object_move_to_lane", "object_move_to_lane_smooth",
             "object_third_person_move", "object_first_person_move",
         },
         "physics": {
@@ -159,7 +159,7 @@ class NodeGraphGenerationService:
             "engine_move", "engine_moveto", "engine_movetoXYZ", "engine_movetoXYZtime",
             "engine_Xset", "engine_Yset", "engine_Zset",
             "engine_Xadd", "engine_Yadd", "engine_Zadd",
-            "object_set_position", "object_move_to_lane", "object_move_to_lane_smooth",
+            "object_set_position", "object_move_direction", "object_move_to_lane", "object_move_to_lane_smooth",
             "object_third_person_move", "object_first_person_move",
         },
         "physics": {"object_set_native_physics", "object_set_tag_velocity_axis"},

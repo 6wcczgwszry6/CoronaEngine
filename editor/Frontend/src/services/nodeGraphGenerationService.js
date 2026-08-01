@@ -21,6 +21,10 @@ const REPLACEMENT_COMMAND_PATTERN =
   /^(?:(?:\u8bf7(?:\u4f60)?|\u9ebb\u70e6|\u5e2e\u6211|\u5e2e\u5fd9|\u7ed9\u6211|\u66ff\u6211|\u4e3a\u6211)\s*)?(?:(?:\u5c06|\u628a)\s*)?[^\u3002\uff01\uff1f!?\n]{0,80}?(?:\u4fee\u6539(?:\u6210|\u4e3a)|\u6539(?:\u6210|\u4e3a)|\u66ff\u6362(?:\u6210|\u4e3a)|\u6362(?:\u6210|\u4e3a)|\u8c03\u6574(?:\u6210|\u4e3a)|\u8bbe\u7f6e(?:\u6210|\u4e3a)|\u8bbe(?:\u6210|\u4e3a)|\u53d8(?:\u6210|\u4e3a))/i;
 const QUESTION_PATTERN =
   /(\u5982\u4f55|\u600e\u4e48|\u600e\u6837|\u4e3a\u4ec0\u4e48|\u662f\u4ec0\u4e48|\u6709\u4ec0\u4e48|\u80fd\u4e0d\u80fd|\u53ef\u4e0d\u53ef\u4ee5|\u5417\s*[?\uff1f]?$|how\s+(?:do|can|to)|what\b|why\b)/i;
+const EXPLANATION_REQUEST_PATTERN =
+  /(\u89e3\u91ca|\u8bf4\u660e|\u544a\u8bc9\u6211|\u56de\u7b54|\u5206\u6790|\u4ec0\u4e48\u65f6\u5019|\u662f\u4ec0\u4e48|\u4e3a\u4ec0\u4e48|explain|tell\s+me|answer|describe|when\b|what\b|why\b)/i;
+const READ_ONLY_REQUEST_PATTERN =
+  /((?:\u4e0d\u8981|\u65e0\u9700|\u4e0d\u7528|\u4e0d\u9700\u8981|\u8bf7\u52ff)[^\u3002\uff01\uff1f!?\n]{0,20}(?:\u4fee\u6539|\u7f16\u8f91|\u6539\u53d8|\u751f\u6210|\u589e\u52a0|\u6dfb\u52a0|\u5220\u9664)|(?:\u53ea|\u4ec5)(?:\u9700\u8981)?(?:\u89e3\u91ca|\u8bf4\u660e|\u56de\u7b54|\u5206\u6790)|(?:explain|answer)\s+only|(?:do\s+not|don't|without)\s+(?:modify|edit|change|generate|add|delete))/i;
 const DELETE_PATTERN = /(\u5220\u9664|\u79fb\u9664|\u53bb\u6389|\u5220\u6389|delete|remove)/i;
 const EDIT_PATTERN =
   /(\u4fee\u6539|\u6539(?:\u6210|\u4e3a)|\u66ff\u6362(?:\u6210|\u4e3a)|\u6362(?:\u6210|\u4e3a)|\u8c03\u6574(?:\u6210|\u4e3a)|\u8bbe\u7f6e(?:\u6210|\u4e3a)|\u8bbe(?:\u6210|\u4e3a)|\u53d8(?:\u6210|\u4e3a)|\u7f16\u8f91|\u6539\u9020|\u91cd\u505a|\u8c03\u6574|edit|modify|rebuild|change|replace)/i;
@@ -66,6 +70,8 @@ export function nodeGraphGenerationIntent(text) {
   const startsWithMutation = LEADING_MUTATION_PATTERN.test(instruction);
   const hasObjectImperative = OBJECT_IMPERATIVE_PATTERN.test(instruction);
   const hasReplacementCommand = REPLACEMENT_COMMAND_PATTERN.test(instruction);
+  const isReadOnlyRequest =
+    EXPLANATION_REQUEST_PATTERN.test(instruction) && READ_ONLY_REQUEST_PATTERN.test(instruction);
   const isUncommandedQuestion = QUESTION_PATTERN.test(instruction) && !hasImperativePrefix;
   if (
     !instruction ||
@@ -75,7 +81,8 @@ export function nodeGraphGenerationIntent(text) {
       !startsWithMutation &&
       !hasObjectImperative &&
       !hasReplacementCommand) ||
-    isUncommandedQuestion
+    isUncommandedQuestion ||
+    isReadOnlyRequest
   ) {
     return { matched: false, operation: '', instruction };
   }
@@ -117,6 +124,16 @@ function assertCurrentRequest(state) {
     state.cancelled = true;
     throw new Error('生成期间已切换世界，旧结果不会修改当前节点图。');
   }
+}
+
+function workspaceEntityIds(workspace = {}, collectionName = '') {
+  const collection = Array.isArray(workspace?.[collectionName]) ? workspace[collectionName] : [];
+  return new Set(collection.map((item) => String(item?.id || '').trim()).filter(Boolean));
+}
+
+function createdWorkspaceIds(beforeWorkspace = {}, afterWorkspace = {}, collectionName = '') {
+  const beforeIds = workspaceEntityIds(beforeWorkspace, collectionName);
+  return [...workspaceEntityIds(afterWorkspace, collectionName)].filter((id) => !beforeIds.has(id));
 }
 
 export async function generateNodeGraphFromInstruction(instruction, operation = 'create') {
@@ -206,6 +223,14 @@ export async function generateNodeGraphFromInstruction(instruction, operation = 
       const details = Array.isArray(applied?.errors) ? applied.errors.join('；') : '';
       throw new Error(details || '生成结果未通过节点编辑器校验，当前节点图没有被修改。');
     }
+    const afterApplySnapshot = await getGeneratedNodeGraphSnapshot({ timeoutMs: 1800 });
+    const afterWorkspace =
+      afterApplySnapshot?.workspace &&
+      String(afterApplySnapshot.projectScopeId || '') === payload.projectScopeId
+        ? afterApplySnapshot.workspace
+        : generated?.workspace || {};
+    const createdNodeIds = createdWorkspaceIds(latest.workspace, afterWorkspace, 'nodes');
+    const createdEdgeIds = createdWorkspaceIds(latest.workspace, afterWorkspace, 'edges');
     const appliedSummary =
       applied?.summary && typeof applied.summary === 'object' ? applied.summary : {};
     let visibleLocation = '';
@@ -241,6 +266,9 @@ export async function generateNodeGraphFromInstruction(instruction, operation = 
         .filter(Boolean)
         .join('\n'),
       warnings: Array.isArray(applied.warnings) ? applied.warnings : [],
+      operation: String(operation || ''),
+      createdNodeIds,
+      createdEdgeIds,
     };
   } finally {
     if (activeGeneration === state) activeGeneration = null;

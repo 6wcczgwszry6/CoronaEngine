@@ -35,6 +35,8 @@ const SELECTOR_KEYS = Object.freeze({
   'object-physics-enabled': '[data-guidance="object-physics-enabled"]',
   'object-physics-mass': '[data-guidance="object-physics-mass"]',
   'node-run': '[data-guidance="node-run"]',
+  'node-select-mode': '[data-guidance="node-select-mode"]',
+  'node-delete-mode': '[data-guidance="node-delete-mode"]',
   'node-toolbox': '[data-guidance="node-toolbox"]',
   'node-state-tool': '[data-guidance="node-state-tool"]',
   'node-type-custom': '[data-guidance="node-type-custom"]',
@@ -42,6 +44,8 @@ const SELECTOR_KEYS = Object.freeze({
   'node-canvas': '[data-guidance="node-canvas"]',
   'node-blockly-editor': '[data-guidance="node-blockly-editor"]',
   'node-transition-condition': '[data-guidance="node-transition-condition"]',
+  'cabbage-chat-input': '[data-guidance="cabbage-chat-input"]',
+  'cabbage-chat-send': '[data-guidance="cabbage-chat-send"]',
 });
 
 const state = reactive({
@@ -436,6 +440,13 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
       ),
     ] };
   },
+  choose_select_tool: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-select-mode' },
+    'click',
+    String(source.message || ''),
+    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
+  )] }),
   create_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     { kind: 'selector', selectorKey: 'node-canvas' },
@@ -447,12 +458,51 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
       preferFallbackText: true,
     }
   )] }),
+  select_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'customNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
+    'click',
+    String(source.message || ''),
+    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
+  )] }),
   move_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     targetFromBinding(source.bindings, 'customNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
     'drag',
     '按住黄色高亮的自定义节点标题区，把它明显拖到另一个位置后松开。',
     { fallbackEn: 'Hold the title area of the yellow-highlighted Custom node, drag it a visible distance, then release.', preferFallbackText: true }
+  )] }),
+  create_delete_practice_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-canvas' },
+    'drag',
+    String(source.message || ''),
+    {
+      fromTarget: { kind: 'selector', selectorKey: 'node-state-tool' },
+      fallbackEn: String(source.messageEn || ''),
+      preferFallbackText: true,
+    }
+  )] }),
+  choose_clear_tool: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-delete-mode' },
+    'click',
+    String(source.message || ''),
+    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
+  )] }),
+  delete_practice_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'deletePracticeNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
+    'click',
+    String(source.message || ''),
+    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
+  )] }),
+  return_select_tool: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    { kind: 'selector', selectorKey: 'node-select-mode' },
+    'click',
+    String(source.message || ''),
+    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
   )] }),
   connect_nodes: (source) => {
     const startNodeId = String(source.bindings?.startNodeId || '');
@@ -496,48 +546,100 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
       preferFallbackText: true,
     }
   )] }),
-  add_wait: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+  add_set_position: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     targetFromBinding(source.bindings, 'whenEnterBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
     'drag',
-    '把蓝色高亮、表面写着“等待 1 秒”的积木，拖到黄色高亮的进入事件积木里，直到它自动吸附。',
+    '\u628a\u84dd\u8272\u9ad8\u4eae\u3001\u8868\u9762\u5199\u7740\u201c\u8bbe\u7f6e\u5bf9\u8c61\u2026\u4f4d\u7f6e X\u2026Y\u2026Z\u2026\u201d\u7684\u79ef\u6728\uff0c\u62d6\u8fdb\u9ec4\u8272\u9ad8\u4eae\u7684\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u91cc\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002',
     {
-      fromTarget: { kind: 'block-type', blockType: 'control_wait' },
-      fallbackEn: 'Drag the blue-highlighted block labeled "Wait 1 second" into the yellow-highlighted entry-event block until it snaps into place.',
+      fromTarget: { kind: 'block-type', blockType: 'object_set_position' },
+      fallbackEn: 'Drag the blue-highlighted "Set object ... Position X ... Y ... Z ..." block into the yellow-highlighted "When entering this node" block until they snap together.',
       preferFallbackText: true,
     }
   )] }),
-  set_wait_seconds: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+  set_position_model: (source) => {
+    const modelName = String(source.bindings?.modelActorName || '');
+    return { panelId: 'NodeGraphPanel', steps: [tutorialStep(
+      source,
+      targetFromBinding(source.bindings, 'setPositionBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+      'input',
+      modelName
+        ? `\u5728\u9ec4\u8272\u9ad8\u4eae\u79ef\u6728\u6700\u4e0a\u65b9\u7684\u5bf9\u8c61\u540d\u79f0\u6846\u4e2d\uff0c\u5b8c\u6574\u8f93\u5165\u201c${modelName}\u201d\u3002`
+        : '\u5728\u9ec4\u8272\u9ad8\u4eae\u79ef\u6728\u6700\u4e0a\u65b9\u7684\u5bf9\u8c61\u540d\u79f0\u6846\u4e2d\uff0c\u5b8c\u6574\u8f93\u5165\u7b2c\u4e8c\u7ae0\u6559\u7a0b\u6a21\u578b\u540d\u79f0\u3002',
+      {
+        fallbackEn: modelName
+          ? `Enter the full model name "${modelName}" in the top name field of the yellow-highlighted block.`
+          : 'Enter the full Chapter 2 tutorial model name in the top name field of the yellow-highlighted block.',
+        preferFallbackText: true,
+      }
+    )] };
+  },
+  set_start_x: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
-    targetFromBinding(source.bindings, 'waitBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+    targetFromBinding(source.bindings, 'setPositionBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
     'input',
-    '在黄色高亮的“等待”积木上，把“等待”和“秒”之间的数字改为 2。',
-    { fallbackEn: 'In the yellow-highlighted Wait block, change the number between "Wait" and "seconds" to 2.', preferFallbackText: true }
+    '\u5728\u9ec4\u8272\u9ad8\u4eae\u7684\u4f4d\u7f6e\u79ef\u6728\u4e2d\uff0c\u628a\u201c\u4f4d\u7f6e X\u201d\u540e\u9762\u7684\u6570\u5b57\u6539\u4e3a -3\uff0cY \u548c Z \u4fdd\u6301 0\u3002',
+    { fallbackEn: 'In the yellow-highlighted position block, change Position X to -3 and keep Y and Z at 0.', preferFallbackText: true }
   )] }),
-  select_edge: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+  add_while_active: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
-    targetFromBinding(source.bindings, 'edgeId', { kind: 'selector', selectorKey: 'node-canvas' }),
-    'click',
-    '点击黄色高亮的节点连线或线中间的小标签，让右侧下方切换到“连线条件编辑”。',
-    { fallbackEn: 'Click the yellow-highlighted connection or its middle label so the lower-right area switches to connection condition editing.', preferFallbackText: true }
-  )] }),
-  add_true_condition: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
-    source,
-    { kind: 'selector', selectorKey: 'node-transition-condition' },
+    { kind: 'selector', selectorKey: 'node-blockly-editor' },
     'drag',
-    '把蓝色高亮、表面可选“真/假”的积木，拖到黄色高亮的右侧连线条件区，并确认它显示“真”。',
+    '\u628a\u84dd\u8272\u9ad8\u4eae\u3001\u8868\u9762\u5199\u7740\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u7684\u79ef\u6728\uff0c\u62d6\u5230\u9ec4\u8272\u9ad8\u4eae\u7f16\u8f91\u533a\u7684\u53e6\u4e00\u5757\u7a7a\u767d\u4f4d\u7f6e\uff0c\u4e0d\u8981\u653e\u8fdb\u4e0a\u4e00\u5757\u4e8b\u4ef6\u79ef\u6728\u91cc\u3002',
     {
-      fromTarget: { kind: 'block-type', blockType: 'logic_boolean' },
-      fallbackEn: 'Drag the blue-highlighted True/False block into the yellow-highlighted connection condition area, then make sure it shows True.',
+      fromTarget: { kind: 'block-type', blockType: 'node_while_active' },
+      fallbackEn: 'Drag the blue-highlighted "While this node is active" block to a separate empty spot in the yellow-highlighted editor. Do not place it inside the previous event block.',
       preferFallbackText: true,
     }
+  )] }),
+  add_move_direction: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'whileActiveBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+    'drag',
+    '\u628a\u84dd\u8272\u9ad8\u4eae\u3001\u8868\u9762\u5199\u7740\u201c\u8ba9\u5bf9\u8c61\u2026\u6301\u7eed\u79fb\u52a8\uff0c\u65b9\u5411\u2026\u901f\u5ea6\u2026\u201d\u7684\u79ef\u6728\uff0c\u62d6\u8fdb\u9ec4\u8272\u9ad8\u4eae\u7684\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728\u91cc\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002',
+    {
+      fromTarget: { kind: 'block-type', blockType: 'object_move_direction' },
+      fallbackEn: 'Drag the blue-highlighted "Move object ... continuously, Direction ... Speed ..." block into the yellow-highlighted "While this node is active" block until it snaps in.',
+      preferFallbackText: true,
+    }
+  )] }),
+  set_move_model: (source) => {
+    const modelName = String(source.bindings?.modelActorName || '');
+    return { panelId: 'NodeGraphPanel', steps: [tutorialStep(
+      source,
+      targetFromBinding(source.bindings, 'moveDirectionBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+      'input',
+      modelName
+        ? `\u5728\u9ec4\u8272\u9ad8\u4eae\u7684\u6301\u7eed\u79fb\u52a8\u79ef\u6728\u7b2c\u4e00\u884c\uff0c\u5b8c\u6574\u8f93\u5165\u6a21\u578b\u540d\u79f0\u201c${modelName}\u201d\u3002`
+        : '\u5728\u9ec4\u8272\u9ad8\u4eae\u7684\u6301\u7eed\u79fb\u52a8\u79ef\u6728\u7b2c\u4e00\u884c\uff0c\u5b8c\u6574\u8f93\u5165\u7b2c\u4e8c\u7ae0\u6559\u7a0b\u6a21\u578b\u540d\u79f0\u3002',
+      {
+        fallbackEn: modelName
+          ? `Enter the full model name "${modelName}" on the first line of the yellow-highlighted movement block.`
+          : 'Enter the full Chapter 2 tutorial model name on the first line of the yellow-highlighted movement block.',
+        preferFallbackText: true,
+      }
+    )] };
+  },
+  set_move_direction: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'moveDirectionBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+    'input',
+    '\u5728\u9ec4\u8272\u9ad8\u4eae\u79ef\u6728\u7684\u201c\u65b9\u5411\u201d\u4e0b\u62c9\u6846\u4e2d\uff0c\u9009\u62e9\u201c\u5411\u53f3\u201d\u3002',
+    { fallbackEn: 'Choose Right from the Direction list in the yellow-highlighted movement block.', preferFallbackText: true }
+  )] }),
+  set_move_speed: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
+    source,
+    targetFromBinding(source.bindings, 'moveDirectionBlockId', { kind: 'selector', selectorKey: 'node-blockly-editor' }),
+    'input',
+    '\u5728\u9ec4\u8272\u9ad8\u4eae\u79ef\u6728\u4e2d\uff0c\u628a\u201c\u901f\u5ea6\u201d\u540e\u9762\u7684\u6570\u5b57\u6539\u4e3a 2\u3002\u6a21\u578b\u540d\u79f0\u8981\u6b63\u786e\uff0c\u65b9\u5411\u8981\u4fdd\u6301\u201c\u5411\u53f3\u201d\u3002',
+    { fallbackEn: 'Set Speed to 2 in the yellow-highlighted block. Keep the correct model name and Direction set to Right.', preferFallbackText: true }
   )] }),
   run_node_graph: basicGuidance(
     'NodeGraphPanel',
     { kind: 'selector', selectorKey: 'node-run' },
     'click',
-    '点击节点窗口上方的“运行”，等待运行结果明确显示成功。',
-    { fallbackEn: 'Click Run at the top of the node window and wait until the result clearly says it succeeded.' },
+    '\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u4e0a\u65b9\u7684\u201c\u8fd0\u884c\u201d\u6309\u94ae\u4e00\u6b21\u3002\u70b9\u51fb\u540e\uff0c\u6a21\u578b\u4f1a\u5148\u8df3\u5230 X=-3\uff0c\u7136\u540e\u4ee5\u6bcf\u79d2 2 \u4e2a\u5355\u4f4d\u7684\u901f\u5ea6\u6301\u7eed\u5411\u53f3\u79fb\u52a8\u3002\u4efb\u52a1\u5728\u4f60\u70b9\u51fb\u65f6\u7acb\u5373\u5b8c\u6210\u3002',
+    { fallbackEn: 'Click Run once. The model will jump to X=-3 and then keep moving right at two units per second. The task completes immediately when you click.' },
   ),
   start_preview: basicGuidance(
     'MainPage',
@@ -553,6 +655,64 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
     '点击“结束预览”，等待预览完全停止且场景恢复。',
     { fallbackEn: 'Click End Preview and wait until preview stops completely and the scene is restored.' },
   ),
+  focus_ai_composer: basicGuidance(
+    'MainPage',
+    { kind: 'selector', selectorKey: 'cabbage-chat-input' },
+    'click',
+    '\u70b9\u51fb\u53f3\u4fa7\u201c\u5305\u83dc\u7b54\u7591\u201d\u6700\u4e0b\u65b9\u7684\u5927\u8f93\u5165\u6846\u3002\u63d0\u793a\u8bcd\u5c31\u662f\u4f60\u5199\u7ed9 AI \u7684\u5177\u4f53\u8981\u6c42\u3002',
+    {
+      fallbackEn: 'Click the large input box at the bottom of Cabbage Assistant. A prompt is the specific request you write for the AI.',
+      preferFallbackText: true,
+    },
+  ),
+  ask_ai_question: (source) => ({ panelId: 'MainPage', steps: [
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'cabbage-chat-input' },
+      'input',
+      '\u8f93\u5165\u4e00\u53e5\u53ea\u8bf7 AI \u89e3\u91ca\u3001\u4e0d\u4fee\u6539\u7684\u95ee\u9898\u3002\u793a\u4f8b\uff1a\u201c\u8bf7\u544a\u8bc9\u6211\u7b49\u5f85 2 \u79d2\u4f1a\u5728\u4ec0\u4e48\u65f6\u5019\u6267\u884c\uff0c\u53ea\u89e3\u91ca\uff0c\u4e0d\u8981\u4fee\u6539\u8282\u70b9\u56fe\u3002\u201d',
+      { fallbackEn: 'Enter a question that asks for an explanation only. Example: "Explain why the tutorial model starts at X=-3 and then keeps moving right. Explain only; do not modify the node graph."', preferFallbackText: true },
+    ),
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'cabbage-chat-send' },
+      'click',
+      '\u70b9\u51fb\u201c\u53d1\u9001\u201d\uff0c\u7136\u540e\u7b49\u5f85\u201c\u5305\u83dc\u7b54\u7591\u201d\u771f\u6b63\u8fd4\u56de\u56de\u7b54\u3002',
+      { fallbackEn: 'Click Send, then wait until Cabbage Assistant returns a real answer.', preferFallbackText: true },
+    ),
+  ] }),
+  modify_with_ai: (source) => ({ panelId: 'MainPage', steps: [
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'cabbage-chat-input' },
+      'input',
+      '\u8f93\u5165\u4e00\u53e5\u5177\u4f53\u4fee\u6539\u8981\u6c42\u3002\u793a\u4f8b\uff1a\u201c\u8bf7\u628a\u6559\u7a0b\u6a21\u578b\u6301\u7eed\u5411\u53f3\u79fb\u52a8\u7684\u901f\u5ea6\u4ece 2 \u6539\u4e3a 4\uff0c\u53ea\u4fee\u6539\u901f\u5ea6\uff0c\u5176\u4ed6\u5185\u5bb9\u4fdd\u6301\u4e0d\u53d8\u3002\u201d',
+      { fallbackEn: 'Enter a specific edit request. Example: "Change the tutorial model\'s continuous rightward movement speed from 2 to 4. Change only the speed and keep everything else unchanged."', preferFallbackText: true },
+    ),
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'cabbage-chat-send' },
+      'click',
+      '\u70b9\u51fb\u201c\u53d1\u9001\u201d\uff0c\u7b49\u5f85 AI \u771f\u6b63\u5b8c\u6210\u5e76\u4fdd\u5b58\u4fee\u6539\u3002',
+      { fallbackEn: 'Click Send and wait until the AI actually applies and saves the edit.', preferFallbackText: true },
+    ),
+  ] }),
+  generate_with_ai: (source) => ({ panelId: 'MainPage', steps: [
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'cabbage-chat-input' },
+      'input',
+      '\u8f93\u5165\u4e00\u53e5\u201c\u589e\u52a0\u65b0\u5185\u5bb9\u201d\u7684\u8981\u6c42\u3002\u793a\u4f8b\uff1a\u201c\u8bf7\u589e\u52a0\u4e00\u4e2a\u7ed3\u675f\u8282\u70b9\uff0c\u628a\u5f53\u524d\u81ea\u5b9a\u4e49\u8282\u70b9\u8fde\u63a5\u5230\u5b83\uff0c\u4fdd\u7559\u5df2\u6709\u8282\u70b9\u548c\u79ef\u6728\u3002\u201d',
+      { fallbackEn: 'Enter an add request. Example: "Add an End node, connect the current Custom node to it, and keep all existing nodes and blocks."', preferFallbackText: true },
+    ),
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'cabbage-chat-send' },
+      'click',
+      '\u70b9\u51fb\u201c\u53d1\u9001\u201d\uff0c\u7b49\u5f85 AI \u589e\u52a0\u5e76\u4fdd\u5b58\u65b0\u903b\u8f91\u3002\u5b8c\u6210\u540e\u6559\u7a0b\u4f1a\u7ed3\u675f\uff0c\u4f60\u521b\u5efa\u7684\u6a21\u578b\u3001\u8282\u70b9\u548c\u79ef\u6728\u90fd\u4f1a\u4fdd\u7559\u3002',
+      { fallbackEn: 'Click Send and wait until the AI adds and saves the new logic. When the tutorial ends, your model, nodes, and blocks all remain in the project.', preferFallbackText: true },
+    ),
+  ] }),
 });
 
 const ISSUE_GUIDANCE = Object.freeze({

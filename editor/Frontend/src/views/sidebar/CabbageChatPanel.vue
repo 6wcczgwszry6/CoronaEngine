@@ -91,8 +91,10 @@
       <textarea
         ref="composerInputRef"
         v-model="input"
+        data-guidance="cabbage-chat-input"
         rows="3"
         maxlength="2000"
+        @pointerdown="recordComposerPointerDown"
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="composer-actions">
@@ -107,7 +109,7 @@
         <button v-if="assistant.chatBusy" type="button" class="danger" @click="stopWaiting">
           停止等待
         </button>
-        <button v-else type="submit" class="primary" :disabled="!input.trim()">发送</button>
+        <button v-else type="submit" class="primary" data-guidance="cabbage-chat-send" :disabled="!input.trim()">发送</button>
       </div>
     </form>
   </div>
@@ -153,6 +155,7 @@ let requestSequence = 0;
 let pollTimer = null;
 let unsubscribeAssistantContext = null;
 let activeMessageContext = null;
+let activePrompt = '';
 
 const selectedKey = computed({
   get: () => assistant.selectedTaskKey,
@@ -248,6 +251,16 @@ function scrollToBottom() {
   });
 }
 
+function recordComposerPointerDown(event) {
+  if (Number(event?.button ?? 0) !== 0) return;
+  void cabbageContextService.recordEvent({
+    type: 'ai_composer_focused',
+    category: 'tutorial',
+    success: true,
+    details: { source: 'user' },
+  });
+}
+
 function clearPollTimer() {
   if (pollTimer) window.clearTimeout(pollTimer);
   pollTimer = null;
@@ -278,6 +291,7 @@ function finishRequest(
   assistant.chatBusy = false;
   assistant.chatError = error;
   activeMessageContext = null;
+  activePrompt = '';
   scrollToBottom();
 }
 
@@ -305,6 +319,16 @@ async function pollStatus(requestId, taskId) {
         finishRequest(requestId, { error: 'DeepSeek 没有返回可显示的内容。' });
         return;
       }
+      void cabbageContextService.recordEvent({
+        type: 'ai_question_answered',
+        category: 'tutorial',
+        success: true,
+        details: {
+          prompt: activePrompt,
+          mode: 'ask',
+          responseReceived: true,
+        },
+      });
       finishRequest(requestId, {
         keepPartial: true,
         needsShowcase: response?.needsShowcase === true,
@@ -353,6 +377,7 @@ async function sendMessage() {
   const content = input.value.trim();
   if (!content || assistant.chatBusy) return;
   input.value = '';
+  activePrompt = content;
   const selectedTask = assistant.selectedTask;
   const messageContext = {
     taskKey: String(selectedTask?.taskKey || ''),
@@ -381,6 +406,19 @@ async function sendMessage() {
       if (assistant.activeRequestId !== requestId || activeRequestKind.value !== 'generation')
         return;
       streamingContent.value = String(generated.summary || operationCopy.success);
+      void cabbageContextService.recordEvent({
+        type: 'ai_node_graph_changed',
+        category: 'tutorial',
+        success: true,
+        details: {
+          prompt: activePrompt,
+          mode: generationIntent.operation === 'edit' ? 'modify' : 'generate',
+          operation: generationIntent.operation,
+          applied: true,
+          createdNodeIds: Array.isArray(generated.createdNodeIds) ? generated.createdNodeIds : [],
+          createdEdgeIds: Array.isArray(generated.createdEdgeIds) ? generated.createdEdgeIds : [],
+        },
+      });
       finishRequest(requestId, { keepPartial: true });
     } catch (error) {
       if (assistant.activeRequestId === requestId) {
@@ -456,6 +494,7 @@ async function stopWaiting() {
     if (message) void cabbageContextService.appendMessage(message);
   }
   activeMessageContext = null;
+  activePrompt = '';
   if (requestKind === 'generation') {
     await cancelActiveNodeGraphGeneration();
   } else if (taskId) {
@@ -481,6 +520,7 @@ function resetChatForProjectChange() {
   assistant.chatBusy = false;
   assistant.chatError = '';
   activeMessageContext = null;
+  activePrompt = '';
   if (requestKind === 'generation') cancelActiveNodeGraphGeneration().catch(() => {});
   else if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
 }
@@ -533,6 +573,7 @@ onBeforeUnmount(() => {
   activeRequestKind.value = '';
   streamingContent.value = '';
   assistant.chatBusy = false;
+  activePrompt = '';
   if (requestKind === 'generation') cancelActiveNodeGraphGeneration().catch(() => {});
   else if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
 });

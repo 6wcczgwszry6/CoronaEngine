@@ -192,6 +192,15 @@ export const CUSTOM_BLOCK_TRANSLATIONS = {
 
   // Motion and physics
   "让对象": 'Move object',
+  '\u6301\u7eed\u79fb\u52a8': 'continuously',
+  '\u5411\u524d': 'Forward',
+  '\u5411\u540e': 'Backward',
+  '\u5411\u5de6': 'Left',
+  '\u5411\u53f3': 'Right',
+  '\u5411\u4e0a': 'Up',
+  '\u5411\u4e0b': 'Down',
+  '\u5355\u4f4d/\u79d2': 'units/second',
+  '\u8ba9\u6307\u5b9a\u5bf9\u8c61\u4ee5\u56fa\u5b9a\u901f\u5ea6\u6301\u7eed\u5411\u4e00\u4e2a\u65b9\u5411\u79fb\u52a8': 'Move the selected object continuously in one direction; place this block inside "While this node is active" to see continuous motion',
   "移动": 'move',
   "步": 'steps',
   "让角色向前移动指定的步数": 'Move the character forward by the selected number of steps',

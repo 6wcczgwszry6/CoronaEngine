@@ -763,6 +763,13 @@ const RUNTIME_DOM_TEXT_TRANSLATIONS = {
   后端拒绝执行节点图: 'The Backend Rejected Node Graph Execution',
   '运行中（{status}）': 'Running ({status})',
   '执行失败：{error}': 'Execution Failed: {error}',
+  '运行成功，正在恢复运行前状态...': 'Run Succeeded. Restoring the Pre-run State...',
+  '运行前状态恢复失败': 'Failed to Restore the Pre-run State',
+  '运行已成功，但任务进度没有同步，请再点击一次“运行”':
+    'The Run Succeeded, but Task Progress Was Not Synchronized. Click Run Again.',
+  '运行成功，已恢复运行前状态': 'Run Succeeded. The Pre-run State Has Been Restored.',
+  '运行验证失败：{error}': 'Run Validation Failed: {error}',
+  '教程节点图运行验证失败': 'Tutorial Node Graph Run Validation Failed',
   '节点图保存失败，已取消全局运行': 'Node Graph Save Failed; Global Run Was Cancelled',
 
   '包菜正在读取积木文档并生成当前节点逻辑…':

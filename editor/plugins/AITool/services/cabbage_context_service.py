@@ -24,6 +24,20 @@ from .node_graph_review_service import NodeGraphReviewService
 logger = logging.getLogger(__name__)
 
 
+def _renumber_tutorial_tasks(tasks: list[dict[str, Any]]) -> tuple[dict[str, Any], ...]:
+    chapter_counts: dict[str, int] = {}
+    normalized: list[dict[str, Any]] = []
+    for global_order, raw in enumerate(tasks, start=1):
+        task = dict(raw)
+        chapter_key = str(task.get("chapterKey") or "")
+        chapter_counts[chapter_key] = chapter_counts.get(chapter_key, 0) + 1
+        task["chapterTaskOrder"] = chapter_counts[chapter_key]
+        task["globalOrder"] = global_order
+        task["order"] = global_order
+        normalized.append(task)
+    return tuple(normalized)
+
+
 class CabbageContextService:
     SCHEMA_VERSION = 2
     CONTEXT_DIR = "CabbageAssistant"
@@ -141,19 +155,19 @@ class CabbageContextService:
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u4f7f\u7528\u8282\u70b9\u3001\u8fde\u7ebf\u548c\u79ef\u6728\u642d\u5efa\u5e76\u8fd0\u884c\u7b2c\u4e00\u6bb5\u53ef\u89c6\u5316\u903b\u8f91\u3002",
-                "chapterSummaryEn": "Build and run your first visual logic with nodes, connections, and blocks."
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u79ef\u6728\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the Chapter 2 model jump to a starting point and then keep moving right, so the result is easy to see."
         },
         {
-                "chapterKey": "chapter_preview",
+                "chapterKey": "chapter_ai",
                 "chapterOrder": 4,
-                "chapterTitle": "\u7ec8\u7ae0\uff1a\u8fd0\u884c\u4f60\u7684\u4e16\u754c",
-                "chapterTitleEn": "Final Chapter: Run Your World",
-                "chapterSummary": "\u542f\u52a8\u5e76\u7ed3\u675f\u9879\u76ee\u9884\u89c8\uff0c\u786e\u8ba4\u4e16\u754c\u80fd\u5b8c\u6574\u6062\u590d\u3002",
-                "chapterSummaryEn": "Start and stop project preview, confirming that the world restores cleanly."
+                "chapterTitle": "\u7b2c\u56db\u7ae0\uff1a\u8ba9 AI \u5e2e\u4f60\u521b\u4f5c",
+                "chapterTitleEn": "Chapter 4: Create with AI",
+                "chapterSummary": "\u4f7f\u7528\u53f3\u4fa7\u7684\u201c\u5305\u83dc\u7b54\u7591\u201d\uff0c\u5b66\u4f1a\u628a\u9700\u6c42\u8bf4\u6e05\u695a\uff0c\u8ba9 AI \u56de\u7b54\u95ee\u9898\u3001\u4fee\u6539\u73b0\u6709\u5185\u5bb9\u548c\u589e\u52a0\u65b0\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Use Cabbage Assistant on the right and learn to write clear prompts for questions, edits, and new logic."
         }
 ])
-    TUTORIAL_TASKS = tuple([
+    TUTORIAL_TASKS = _renumber_tutorial_tasks([
         {
                 "taskKey": "tutorial.basics.viewport_focus",
                 "type": "tutorial",
@@ -491,8 +505,8 @@ class CabbageContextService:
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 1,
                 "globalOrder": 16,
                 "order": 16,
@@ -513,8 +527,8 @@ class CabbageContextService:
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 2,
                 "globalOrder": 17,
                 "order": 17,
@@ -529,14 +543,36 @@ class CabbageContextService:
                 "guidanceIntent": "confirm_start_node"
         },
         {
+                "taskKey": "tutorial.basics.choose_select_tool",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 0,
+                "globalOrder": 0,
+                "order": 0,
+                "title": "\u5207\u6362\u5230\u201c\u9009\u62e9\u201d\u5de5\u5177",
+                "titleEn": "Switch to the Select Tool",
+                "message": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u9876\u90e8\u7684\u201c\u9009\u62e9\u201d\u6309\u94ae\u3002\u8fd9\u4e2a\u5de5\u5177\u7528\u6765\u9009\u4e2d\u8282\u70b9\uff0c\u4e5f\u53ea\u6709\u5728\u201c\u9009\u62e9\u201d\u6a21\u5f0f\u4e0b\u624d\u80fd\u62d6\u52a8\u8282\u70b9\u3002\u5373\u4f7f\u6309\u94ae\u5df2\u7ecf\u4eae\u8d77\uff0c\u4e5f\u8bf7\u4eb2\u81ea\u70b9\u51fb\u4e00\u6b21\u3002",
+                "messageEn": "Click Select at the top of the node window. This tool lets you select nodes and is required before you can drag them. Click it yourself even if it is already highlighted.",
+                "suggestion": "\u70b9\u51fb\u540e\u201c\u9009\u62e9\u201d\u6309\u94ae\u4f1a\u4fdd\u6301\u9ad8\u4eae\u3002",
+                "suggestionEn": "The Select button remains highlighted after you click it.",
+                "completionCriteria": "\u68c0\u6d4b\u5230\u4f60\u4eb2\u81ea\u70b9\u51fb\u4e86\u201c\u9009\u62e9\u201d\u6309\u94ae\u3002",
+                "completionCriteriaEn": "The editor detects that you clicked Select yourself.",
+                "guidanceIntent": "choose_select_tool"
+        },
+        {
                 "taskKey": "tutorial.basics.create_custom_node",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 3,
                 "globalOrder": 18,
                 "order": 18,
@@ -551,14 +587,36 @@ class CabbageContextService:
                 "guidanceIntent": "create_custom_node"
         },
         {
+                "taskKey": "tutorial.basics.select_custom_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 0,
+                "globalOrder": 0,
+                "order": 0,
+                "title": "\u7528\u201c\u9009\u62e9\u201d\u5de5\u5177\u9009\u4e2d\u81ea\u5b9a\u4e49\u8282\u70b9",
+                "titleEn": "Select the Custom Node",
+                "message": "\u786e\u8ba4\u9876\u90e8\u201c\u9009\u62e9\u201d\u6309\u94ae\u4eae\u8d77\uff0c\u7136\u540e\u7528\u9f20\u6807\u5de6\u952e\u70b9\u51fb\u521a\u521b\u5efa\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\u3002\u88ab\u9009\u4e2d\u7684\u8282\u70b9\u4f1a\u663e\u793a\u660e\u663e\u7684\u9ad8\u4eae\u8fb9\u6846\u3002",
+                "messageEn": "Make sure Select is highlighted, then left-click the Custom node you just created. The selected node receives a clear highlight border.",
+                "suggestion": "\u8fd9\u4e00\u6b65\u53ea\u70b9\u51fb\u8282\u70b9\uff0c\u6682\u65f6\u4e0d\u8981\u62d6\u52a8\u3002",
+                "suggestionEn": "Click the node without dragging it yet.",
+                "completionCriteria": "\u6559\u7a0b\u81ea\u5b9a\u4e49\u8282\u70b9\u5df2\u5728\u201c\u9009\u62e9\u201d\u6a21\u5f0f\u4e0b\u88ab\u4f60\u9009\u4e2d\u3002",
+                "completionCriteriaEn": "The tutorial Custom node is selected by you while the Select tool is active.",
+                "guidanceIntent": "select_custom_node"
+        },
+        {
                 "taskKey": "tutorial.basics.move_custom_node",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 4,
                 "globalOrder": 19,
                 "order": 19,
@@ -573,14 +631,102 @@ class CabbageContextService:
                 "guidanceIntent": "move_custom_node"
         },
         {
+                "taskKey": "tutorial.basics.create_delete_practice_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 0,
+                "globalOrder": 0,
+                "order": 0,
+                "title": "\u653e\u5165\u4e00\u4e2a\u7528\u6765\u7ec3\u4e60\u6e05\u9664\u7684\u8282\u70b9",
+                "titleEn": "Add a Node for Deletion Practice",
+                "message": "\u518d\u628a\u5de6\u4fa7\u7684\u201c\u72b6\u6001\u8282\u70b9\u201d\u62d6\u5230\u4e2d\u95f4\u7a7a\u767d\u4f4d\u7f6e\u3002\u8fd9\u662f\u4e00\u4e2a\u4e13\u95e8\u7528\u6765\u7ec3\u4e60\u5220\u9664\u7684\u4e34\u65f6\u8282\u70b9\uff0c\u4e0d\u8981\u628a\u5b83\u548c\u5176\u4ed6\u8282\u70b9\u8fde\u8d77\u6765\u3002",
+                "messageEn": "Drag another State Node from the left into an empty area. This is a temporary node used only to practice deletion, so do not connect it to anything.",
+                "suggestion": "\u4fdd\u7559\u4e4b\u524d\u7684\u6559\u7a0b\u81ea\u5b9a\u4e49\u8282\u70b9\uff0c\u8fd9\u6b21\u8981\u65b0\u589e\u7b2c\u4e8c\u4e2a\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
+                "suggestionEn": "Keep the first tutorial Custom node. Add a second Custom node for this practice step.",
+                "completionCriteria": "\u4e00\u4e2a\u65b0\u7684\u4e34\u65f6\u81ea\u5b9a\u4e49\u8282\u70b9\u5df2\u52a0\u5165\u8282\u70b9\u56fe\u3002",
+                "completionCriteriaEn": "A new temporary Custom node is added to the graph.",
+                "guidanceIntent": "create_delete_practice_node"
+        },
+        {
+                "taskKey": "tutorial.basics.choose_clear_tool",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 0,
+                "globalOrder": 0,
+                "order": 0,
+                "title": "\u5207\u6362\u5230\u201c\u6e05\u9664\u201d\u5de5\u5177",
+                "titleEn": "Switch to the Clear Tool",
+                "message": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u9876\u90e8\u7684\u201c\u6e05\u9664\u201d\u6309\u94ae\u3002\u6309\u94ae\u4eae\u8d77\u540e\uff0c\u4f60\u63a5\u4e0b\u6765\u70b9\u51fb\u7684\u8282\u70b9\u4f1a\u88ab\u76f4\u63a5\u5220\u9664\uff0c\u800c\u4e0d\u662f\u88ab\u9009\u4e2d\u3002",
+                "messageEn": "Click Clear at the top of the node window. While it is highlighted, clicking a node deletes it instead of selecting it.",
+                "suggestion": "\u5148\u53ea\u5207\u6362\u5de5\u5177\uff0c\u4e0d\u8981\u70b9\u51fb\u5f00\u59cb\u8282\u70b9\u6216\u524d\u9762\u5df2\u7f16\u8f91\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
+                "suggestionEn": "Switch tools first. Do not click the Start node or the Custom node you already edited.",
+                "completionCriteria": "\u68c0\u6d4b\u5230\u4f60\u4eb2\u81ea\u70b9\u51fb\u4e86\u201c\u6e05\u9664\u201d\u6309\u94ae\u3002",
+                "completionCriteriaEn": "The editor detects that you clicked Clear yourself.",
+                "guidanceIntent": "choose_clear_tool"
+        },
+        {
+                "taskKey": "tutorial.basics.delete_practice_node",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 0,
+                "globalOrder": 0,
+                "order": 0,
+                "title": "\u7528\u201c\u6e05\u9664\u201d\u5de5\u5177\u5220\u9664\u7ec3\u4e60\u8282\u70b9",
+                "titleEn": "Delete the Practice Node",
+                "message": "\u4fdd\u6301\u201c\u6e05\u9664\u201d\u6309\u94ae\u9ad8\u4eae\uff0c\u7136\u540e\u70b9\u51fb\u521a\u521a\u65b0\u589e\u7684\u4e34\u65f6\u81ea\u5b9a\u4e49\u8282\u70b9\u3002\u5b83\u5e94\u8be5\u4ece\u753b\u5e03\u4e2d\u76f4\u63a5\u6d88\u5931\u3002",
+                "messageEn": "Keep Clear highlighted, then click the temporary Custom node you just added. It should disappear from the canvas immediately.",
+                "suggestion": "\u64cd\u4f5c\u5c55\u793a\u4f1a\u9ad8\u4eae\u6b63\u786e\u7684\u4e34\u65f6\u8282\u70b9\u3002\u4e0d\u8981\u5220\u9664\u5f00\u59cb\u8282\u70b9\u6216\u7b2c\u4e00\u4e2a\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
+                "suggestionEn": "The operation guide highlights the correct temporary node. Do not delete Start or the first Custom node.",
+                "completionCriteria": "\u6559\u7a0b\u8bb0\u4f4f\u7684\u4e34\u65f6\u7ec3\u4e60\u8282\u70b9\u5df2\u88ab\u5220\u9664\u3002",
+                "completionCriteriaEn": "The temporary practice node remembered by the tutorial is deleted.",
+                "guidanceIntent": "delete_practice_node"
+        },
+        {
+                "taskKey": "tutorial.basics.return_select_tool",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 0,
+                "globalOrder": 0,
+                "order": 0,
+                "title": "\u5207\u56de\u201c\u9009\u62e9\u201d\u5de5\u5177",
+                "titleEn": "Return to the Select Tool",
+                "message": "\u5220\u9664\u7ec3\u4e60\u8282\u70b9\u540e\uff0c\u518d\u70b9\u51fb\u9876\u90e8\u7684\u201c\u9009\u62e9\u201d\u6309\u94ae\u3002\u540e\u9762\u9700\u8981\u7528\u9009\u62e9\u5de5\u5177\u8fde\u63a5\u3001\u9009\u4e2d\u548c\u7ee7\u7eed\u7f16\u8f91\u8282\u70b9\u3002",
+                "messageEn": "After deleting the practice node, click Select again. You will use it to connect, select, and continue editing nodes.",
+                "suggestion": "\u201c\u9009\u62e9\u201d\u6309\u94ae\u5e94\u91cd\u65b0\u9ad8\u4eae\u3002",
+                "suggestionEn": "The Select button should be highlighted again.",
+                "completionCriteria": "\u68c0\u6d4b\u5230\u4f60\u4eb2\u81ea\u5207\u56de\u4e86\u201c\u9009\u62e9\u201d\u5de5\u5177\u3002",
+                "completionCriteriaEn": "The editor detects that you switched back to Select yourself.",
+                "guidanceIntent": "return_select_tool"
+        },
+        {
                 "taskKey": "tutorial.basics.connect_nodes",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 5,
                 "globalOrder": 20,
                 "order": 20,
@@ -601,8 +747,8 @@ class CabbageContextService:
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 6,
                 "globalOrder": 21,
                 "order": 21,
@@ -623,108 +769,196 @@ class CabbageContextService:
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 7,
                 "globalOrder": 22,
                 "order": 22,
                 "title": "\u653e\u5165\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728",
-                "titleEn": "Add the \u201cWhen Entering This Node\u201d Block",
-                "message": "\u5728\u5de6\u4fa7\u5f69\u8272\u79ef\u6728\u533a\u70b9\u51fb\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u6587\u5b57\u4e3a\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u5e3d\u5b50\u5f62\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7a7a\u767d\u7684\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u3002",
-                "messageEn": "Click the Events category in the colorful block area on the left. Find the hat-shaped block labeled \u201cWhen entering this node\u201d and drag it into the empty internal editor on the right.",
-                "suggestion": "\u8bf7\u6309\u79ef\u6728\u4e0a\u770b\u5f97\u89c1\u7684\u6587\u5b57\u67e5\u627e\uff0c\u4e0d\u9700\u8981\u8bb0\u4f4f\u4efb\u4f55\u4ee3\u7801\u540d\u3002",
-                "suggestionEn": "Find the block by the words shown on it; you do not need to know any internal code name.",
-                "completionCriteria": "\u6559\u7a0b\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e00\u5757\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u3002",
-                "completionCriteriaEn": "The tutorial Custom node contains one \u201cWhen entering this node\u201d block.",
+                "titleEn": "Add the Entry Event Block",
+                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u5217\u8868\u4e2d\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7684\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u3002\u8fd9\u5757\u79ef\u6728\u8868\u793a\uff1a\u5f53\u6d41\u7a0b\u8fdb\u5165\u8fd9\u4e2a\u81ea\u5b9a\u4e49\u8282\u70b9\u65f6\uff0c\u91cc\u9762\u7684\u52a8\u4f5c\u53ea\u6267\u884c\u4e00\u6b21\u3002",
+                "messageEn": "Find the block labeled \"When entering this node\" in the block list and drag it into the node editor on the right. Actions placed inside it run once when the flow enters this Custom node.",
+                "suggestion": "\u5148\u53ea\u653e\u8fd9\u4e00\u5757\uff0c\u4e0d\u8981\u653e\u5230\u8fde\u7ebf\u6761\u4ef6\u533a\u3002",
+                "suggestionEn": "Place only this block for now, and make sure it is in the node editor rather than the connection-condition editor.",
+                "completionCriteria": "\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e86\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u3002",
+                "completionCriteriaEn": "The Custom node contains the \"When entering this node\" block.",
                 "guidanceIntent": "add_when_enter"
         },
         {
-                "taskKey": "tutorial.basics.add_wait",
+                "taskKey": "tutorial.basics.add_set_position",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 8,
                 "globalOrder": 23,
                 "order": 23,
-                "title": "\u5728\u4e0b\u65b9\u63a5\u4e0a\u201c\u7b49\u5f85\u201d\u79ef\u6728",
-                "titleEn": "Attach a Wait Block Below It",
-                "message": "\u5728\u5de6\u4fa7\u5f69\u8272\u79ef\u6728\u533a\u70b9\u51fb\u201c\u63a7\u5236\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u6587\u5b57\u4e3a\u201c\u7b49\u5f85 1 \u79d2\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u5230\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u91cc\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u5b83\u81ea\u52a8\u5438\u9644\u3002",
-                "messageEn": "Click the Control category on the left and find the block that reads \u201cWait 1 second.\u201d Drag it into the Action slot inside the \u201cWhen entering this node\u201d block until it snaps into place.",
-                "suggestion": "\u201c\u7b49\u5f85\u201d\u5fc5\u987b\u63a5\u5728\u8fdb\u5165\u4e8b\u4ef6\u91cc\u9762\uff0c\u5355\u72ec\u653e\u5728\u65c1\u8fb9\u4e0d\u4f1a\u5b8c\u6210\u3002",
-                "suggestionEn": "The Wait block must be attached inside the entry event. Leaving it loose beside the event will not complete the task.",
-                "completionCriteria": "\u201c\u7b49\u5f85\u201d\u79ef\u6728\u5df2\u7ecf\u5438\u9644\u5728\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u201c\u6267\u884c\u201d\u4f4d\u7f6e\u4e2d\u3002",
-                "completionCriteriaEn": "The Wait block is snapped into the Action slot of the entry event.",
-                "guidanceIntent": "add_wait"
+                "title": "\u628a\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u63a5\u5230\u8fdb\u5165\u52a8\u4f5c\u91cc",
+                "titleEn": "Attach the Set Object Position Block",
+                "message": "\u5728\u5de6\u4fa7\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8bbe\u7f6e\u5bf9\u8c61\u2026\u4f4d\u7f6e X\u2026Y\u2026Z\u2026\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u4e24\u5757\u79ef\u6728\u81ea\u52a8\u54ac\u5408\u3002\u8fd9\u4e2a\u52a8\u4f5c\u4f1a\u5728\u8282\u70b9\u521a\u5f00\u59cb\u65f6\u628a\u6a21\u578b\u9001\u5230\u56fa\u5b9a\u8d77\u70b9\u3002",
+                "messageEn": "Find the block that reads \"Set object ... Position X ... Y ... Z ...\" and drag it into the Execute slot under \"When entering this node\" until the blocks snap together. This will place the model at a clear starting point when the node begins.",
+                "suggestion": "\u5982\u679c\u79ef\u6728\u8fd8\u80fd\u5355\u72ec\u6d6e\u52a8\uff0c\u5c31\u8bf4\u660e\u8fd8\u6ca1\u63a5\u4e0a\uff1b\u7ee7\u7eed\u9760\u8fd1\u201c\u6267\u884c\u201d\u51f9\u69fd\u3002",
+                "suggestionEn": "If the block still floats by itself, it is not attached. Move it closer to the Execute slot until it snaps in.",
+                "completionCriteria": "\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u5df2\u8fde\u63a5\u5728\u8fdb\u5165\u52a8\u4f5c\u91cc\u3002",
+                "completionCriteriaEn": "The Set Object Position block is attached inside the entry event.",
+                "guidanceIntent": "add_set_position"
         },
         {
-                "taskKey": "tutorial.basics.set_wait_seconds",
+                "taskKey": "tutorial.basics.set_position_model",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 9,
                 "globalOrder": 24,
                 "order": 24,
-                "title": "\u628a\u7b49\u5f85\u65f6\u95f4\u6539\u4e3a 2 \u79d2",
-                "titleEn": "Change the Wait Time to 2 Seconds",
-                "message": "\u5728\u521a\u63a5\u597d\u7684\u201c\u7b49\u5f85\u201d\u79ef\u6728\u4e0a\uff0c\u627e\u5230\u201c\u7b49\u5f85\u201d\u548c\u201c\u79d2\u201d\u4e4b\u95f4\u7684\u6570\u5b57\u6846\uff0c\u628a\u91cc\u9762\u7684 1 \u6539\u4e3a 2\u3002",
-                "messageEn": "On the Wait block you just attached, find the number between \u201cWait\u201d and \u201cseconds\u201d and change 1 to 2.",
-                "suggestion": "\u70b9\u51fb\u6570\u5b57\u6846\uff0c\u6309 Ctrl+A\uff0c\u8f93\u5165 2\uff0c\u518d\u6309\u56de\u8f66\u6216\u70b9\u51fb\u79ef\u6728\u5916\u90e8\u3002",
-                "suggestionEn": "Click the number, press Ctrl+A, type 2, then press Enter or click outside the block.",
-                "completionCriteria": "\u5df2\u8fde\u63a5\u7684\u201c\u7b49\u5f85\u201d\u79ef\u6728\u8868\u9762\u663e\u793a\u201c\u7b49\u5f85 2 \u79d2\u201d\u3002",
-                "completionCriteriaEn": "The attached Wait block visibly reads \u201cWait 2 seconds.\u201d",
-                "guidanceIntent": "set_wait_seconds"
+                "title": "\u586b\u5199\u8981\u79fb\u52a8\u7684\u6a21\u578b\u540d\u79f0",
+                "titleEn": "Enter the Model Name for the Starting Position",
+                "message": "\u5728\u521a\u63a5\u597d\u7684\u201c\u8bbe\u7f6e\u5bf9\u8c61\u201d\u79ef\u6728\u6700\u4e0a\u65b9\uff0c\u70b9\u51fb\u201c\u8bbe\u7f6e\u5bf9\u8c61\u201d\u540e\u9762\u7684\u7a7a\u767d\u8f93\u5165\u6846\uff0c\u628a\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6559\u7a0b\u6a21\u578b\u540d\u79f0\u5b8c\u6574\u586b\u8fdb\u53bb\u3002\u8fd9\u6837\u79ef\u6728\u624d\u77e5\u9053\u8981\u79fb\u52a8\u54ea\u4e2a\u7269\u4f53\u3002",
+                "messageEn": "Click the empty name field after \"Set object\" in the block you just attached, then enter the full name of the tutorial model imported in Chapter 2. This tells the block exactly which object to move.",
+                "suggestion": "\u8bf7\u7167\u7740\u573a\u666f\u6811\u91cc\u7684\u540d\u79f0\u539f\u6837\u8f93\u5165\uff0c\u4e0d\u8981\u586b\u6a21\u578b\u6587\u4ef6\u8def\u5f84\u3002",
+                "suggestionEn": "Copy the name exactly as it appears in the scene tree; do not enter a file path.",
+                "completionCriteria": "\u4f4d\u7f6e\u79ef\u6728\u4e2d\u7684\u5bf9\u8c61\u540d\u79f0\u4e0e\u7b2c\u4e8c\u7ae0\u6559\u7a0b\u6a21\u578b\u4e00\u81f4\u3002",
+                "completionCriteriaEn": "The object name in the position block matches the Chapter 2 tutorial model.",
+                "guidanceIntent": "set_position_model"
         },
         {
-                "taskKey": "tutorial.basics.select_edge",
+                "taskKey": "tutorial.basics.set_start_x",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 10,
                 "globalOrder": 25,
                 "order": 25,
-                "title": "\u6253\u5f00\u8fd9\u6761\u8fde\u7ebf\u7684\u6761\u4ef6\u533a",
-                "titleEn": "Open the Connection Condition Area",
-                "message": "\u70b9\u51fb\u5f00\u59cb\u8282\u70b9\u548c\u81ea\u5b9a\u4e49\u8282\u70b9\u4e4b\u95f4\u7684\u90a3\u6761\u7ebf\uff0c\u4e5f\u53ef\u4ee5\u70b9\u7ebf\u4e2d\u95f4\u7684\u5c0f\u6807\u7b7e\u3002\u53f3\u4fa7\u4e0b\u65b9\u5e94\u8be5\u5207\u6362\u5230\u201c\u8fde\u7ebf\u6761\u4ef6\u7f16\u8f91\u201d\u3002",
-                "messageEn": "Click the line between the Start and Custom nodes, or click the small label in the middle of that line. The lower-right area should switch to connection condition editing.",
-                "suggestion": "\u5982\u679c\u53f3\u4fa7\u8fd8\u663e\u793a\u201c\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u201d\uff0c\u8bf7\u518d\u70b9\u4e00\u6b21\u8fde\u7ebf\u4e2d\u95f4\u3002",
-                "suggestionEn": "If the right side still shows node editing, click the middle of the connection again.",
-                "completionCriteria": "\u6559\u7a0b\u521b\u5efa\u7684\u90a3\u6761\u8fde\u7ebf\u5df2\u88ab\u9009\u4e2d\u3002",
-                "completionCriteriaEn": "The connection created by the tutorial is selected.",
-                "guidanceIntent": "select_edge"
+                "title": "\u628a\u6a21\u578b\u7684\u8d77\u70b9 X \u6539\u4e3a -3",
+                "titleEn": "Set the Starting X Position to -3",
+                "message": "\u5728\u540c\u4e00\u5757\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u4e2d\uff0c\u628a\u201c\u4f4d\u7f6e X\u201d\u540e\u9762\u7684\u6570\u5b57\u6539\u4e3a -3\u3002Y \u548c Z \u4fdd\u6301 0\u3002\u8fd0\u884c\u65f6\uff0c\u6a21\u578b\u4f1a\u5148\u660e\u663e\u8df3\u5230\u5de6\u4fa7\u7684\u8d77\u70b9\u3002",
+                "messageEn": "In the same Set Object Position block, change the number after Position X to -3. Keep Y and Z at 0. When the graph runs, the model will visibly jump to a starting point on the left.",
+                "suggestion": "\u8f93\u5165\u8d1f\u53f7\u548c\u6570\u5b57 3\uff0c\u7136\u540e\u6309\u56de\u8f66\u6216\u70b9\u51fb\u6846\u5916\u786e\u8ba4\u3002",
+                "suggestionEn": "Enter minus three, then press Enter or click outside the field to confirm it.",
+                "completionCriteria": "\u4f4d\u7f6e\u79ef\u6728\u7684 X \u663e\u793a\u4e3a -3\uff0c\u4e14\u5bf9\u8c61\u540d\u79f0\u4ecd\u662f\u6559\u7a0b\u6a21\u578b\u3002",
+                "completionCriteriaEn": "The position block shows X as -3 and still targets the tutorial model.",
+                "guidanceIntent": "set_start_x"
         },
         {
-                "taskKey": "tutorial.basics.add_true_condition",
+                "taskKey": "tutorial.basics.add_while_active",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
                 "chapterTaskOrder": 11,
                 "globalOrder": 26,
                 "order": 26,
-                "title": "\u653e\u5165\u4e00\u5757\u663e\u793a\u201c\u771f\u201d\u7684\u79ef\u6728",
-                "titleEn": "Add a Block That Shows True",
-                "message": "\u9009\u4e2d\u8fde\u7ebf\u540e\uff0c\u5de6\u4fa7\u4f1a\u663e\u793a\u53ef\u7528\u4e8e\u8fde\u7ebf\u7684\u79ef\u6728\u3002\u5728\u201c\u903b\u8f91\u201d\u6216\u771f\u5047\u76f8\u5173\u5206\u7c7b\u4e2d\uff0c\u627e\u5230\u8868\u9762\u53ef\u4ee5\u9009\u62e9\u201c\u771f/\u5047\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7a7a\u767d\u7684\u8fde\u7ebf\u6761\u4ef6\u533a\uff0c\u5e76\u786e\u8ba4\u79ef\u6728\u663e\u793a\u201c\u771f\u201d\u3002",
-                "messageEn": "After selecting the connection, the left side shows blocks that can control it. Find the True/False block, drag it into the empty connection condition area on the right, and make sure it shows True.",
-                "suggestion": "\u5982\u679c\u79ef\u6728\u663e\u793a\u201c\u5047\u201d\uff0c\u70b9\u51fb\u5b83\u7684\u4e0b\u62c9\u9879\u5e76\u6539\u6210\u201c\u771f\u201d\u3002\u4f60\u53ea\u9700\u8981\u4fdd\u7559\u8fd9\u4e00\u5757\u5b8c\u6574\u79ef\u6728\u3002",
-                "suggestionEn": "If the block shows False, open its drop-down and change it to True. Keep this one complete block in the condition area.",
-                "completionCriteria": "\u6559\u7a0b\u8fde\u7ebf\u7684\u6761\u4ef6\u533a\u5185\u6709\u4e00\u5757\u663e\u793a\u201c\u771f\u201d\u7684\u771f\u5047\u79ef\u6728\u3002",
-                "completionCriteriaEn": "The tutorial connection condition contains a True/False block set to True.",
-                "guidanceIntent": "add_true_condition"
+                "title": "\u653e\u5165\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728",
+                "titleEn": "Add the Continuous Node Event Block",
+                "message": "\u518d\u4ece\u5de6\u4fa7\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7f16\u8f91\u533a\u7684\u53e6\u4e00\u5757\u7a7a\u767d\u4f4d\u7f6e\uff0c\u8ba9\u5b83\u4f5c\u4e3a\u4e00\u5757\u72ec\u7acb\u7684\u9876\u5c42\u79ef\u6728\u3002\u653e\u5728\u5b83\u91cc\u9762\u7684\u52a8\u4f5c\u4f1a\u5728\u8282\u70b9\u6301\u7eed\u671f\u95f4\u53cd\u590d\u6267\u884c\u3002",
+                "messageEn": "Find the block labeled \"While this node is active\" and drag it to a separate empty spot in the editor as another top-level block. Actions inside it repeat while the node remains active.",
+                "suggestion": "\u4e0d\u8981\u628a\u5b83\u585e\u8fdb\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u91cc\uff1b\u4e24\u5757\u4e8b\u4ef6\u79ef\u6728\u8981\u5e76\u6392\u653e\u7f6e\u3002",
+                "suggestionEn": "Do not put it inside the entry event. Keep the two event blocks separate and side by side.",
+                "completionCriteria": "\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e86\u4e00\u5757\u72ec\u7acb\u7684\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728\u3002",
+                "completionCriteriaEn": "The Custom node contains a separate \"While this node is active\" block.",
+                "guidanceIntent": "add_while_active"
+        },
+        {
+                "taskKey": "tutorial.basics.add_move_direction",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 12,
+                "globalOrder": 27,
+                "order": 27,
+                "title": "\u628a\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u63a5\u5230\u91cc\u9762",
+                "titleEn": "Attach the Continuous Movement Block",
+                "message": "\u5728\u5de6\u4fa7\u8fd0\u52a8\u7c7b\u79ef\u6728\u4e2d\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8ba9\u5bf9\u8c61\u2026\u6301\u7eed\u79fb\u52a8\uff0c\u65b9\u5411\u2026\u901f\u5ea6\u2026\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002",
+                "messageEn": "In the Motion blocks, find the block that reads \"Move object ... continuously, Direction ... Speed ...\" and drag it into the Execute slot under \"While this node is active\" until it snaps in.",
+                "suggestion": "\u8fd9\u5757\u79ef\u6728\u53ea\u6709\u653e\u5728\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u91cc\uff0c\u6a21\u578b\u624d\u4f1a\u4e0d\u65ad\u79fb\u52a8\u3002",
+                "suggestionEn": "The model moves continuously only when this block is attached inside the continuous node event.",
+                "completionCriteria": "\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728\u5df2\u8fde\u63a5\u5728\u6301\u7eed\u4e8b\u4ef6\u91cc\u3002",
+                "completionCriteriaEn": "The continuous movement block is attached inside the continuous event.",
+                "guidanceIntent": "add_move_direction"
+        },
+        {
+                "taskKey": "tutorial.basics.set_move_model",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 13,
+                "globalOrder": 28,
+                "order": 28,
+                "title": "\u586b\u5199\u8981\u6301\u7eed\u79fb\u52a8\u7684\u6a21\u578b\u540d\u79f0",
+                "titleEn": "Enter the Model Name for Continuous Movement",
+                "message": "\u5728\u201c\u8ba9\u5bf9\u8c61\u2026\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728\u7b2c\u4e00\u884c\u7684\u7a7a\u767d\u8f93\u5165\u6846\u4e2d\uff0c\u518d\u6b21\u586b\u5165\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6559\u7a0b\u6a21\u578b\u5b8c\u6574\u540d\u79f0\u3002\u4e0a\u4e00\u5757\u79ef\u6728\u8d1f\u8d23\u628a\u5b83\u653e\u5230\u8d77\u70b9\uff0c\u8fd9\u4e00\u5757\u8d1f\u8d23\u8ba9\u540c\u4e00\u4e2a\u6a21\u578b\u52a8\u8d77\u6765\u3002",
+                "messageEn": "Enter the full Chapter 2 tutorial model name in the first-line name field of the continuous movement block. The first action places this model at the start, and this action makes the same model move.",
+                "suggestion": "\u4e24\u5757\u52a8\u4f5c\u79ef\u6728\u4e2d\u7684\u5bf9\u8c61\u540d\u79f0\u5fc5\u987b\u5b8c\u5168\u76f8\u540c\u3002",
+                "suggestionEn": "The object names in both action blocks must match exactly.",
+                "completionCriteria": "\u6301\u7eed\u79fb\u52a8\u79ef\u6728\u7684\u5bf9\u8c61\u540d\u79f0\u4e0e\u6559\u7a0b\u6a21\u578b\u4e00\u81f4\u3002",
+                "completionCriteriaEn": "The continuous movement block targets the tutorial model.",
+                "guidanceIntent": "set_move_model"
+        },
+        {
+                "taskKey": "tutorial.basics.set_move_direction",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 14,
+                "globalOrder": 29,
+                "order": 29,
+                "title": "\u628a\u79fb\u52a8\u65b9\u5411\u6539\u4e3a\u201c\u5411\u53f3\u201d",
+                "titleEn": "Set the Movement Direction to Right",
+                "message": "\u5728\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728\u7684\u7b2c\u4e8c\u884c\uff0c\u70b9\u51fb\u201c\u65b9\u5411\u201d\u540e\u9762\u7684\u4e0b\u62c9\u6846\uff0c\u9009\u62e9\u201c\u5411\u53f3\u201d\u3002\u8fd0\u884c\u65f6\uff0c\u6a21\u578b\u5c06\u4ece X=-3 \u7684\u8d77\u70b9\u5411\u53f3\u79fb\u52a8\u3002",
+                "messageEn": "On the second line of the continuous movement block, open the Direction list and choose Right. When run, the model will move right from its X=-3 starting point.",
+                "suggestion": "\u8981\u9009\u7684\u662f\u79ef\u6728\u8868\u9762\u4e0a\u7684\u201c\u5411\u53f3\u201d\uff0c\u4e0d\u662f\u952e\u76d8 D \u952e\u3002",
+                "suggestionEn": "Choose Right from the block itself; this step does not ask you to press the D key.",
+                "completionCriteria": "\u6301\u7eed\u79fb\u52a8\u79ef\u6728\u7684\u65b9\u5411\u663e\u793a\u4e3a\u201c\u5411\u53f3\u201d\u3002",
+                "completionCriteriaEn": "The continuous movement block shows Direction as Right.",
+                "guidanceIntent": "set_move_direction"
+        },
+        {
+                "taskKey": "tutorial.basics.set_move_speed",
+                "type": "tutorial",
+                "chapterKey": "chapter_nodes",
+                "chapterOrder": 3,
+                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
+                "chapterTitleEn": "Chapter 3: Bring the World to Life",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 15,
+                "globalOrder": 30,
+                "order": 30,
+                "title": "\u628a\u6301\u7eed\u79fb\u52a8\u901f\u5ea6\u6539\u4e3a 2",
+                "titleEn": "Set the Continuous Movement Speed to 2",
+                "message": "\u5728\u540c\u4e00\u5757\u79ef\u6728\u4e2d\uff0c\u628a\u201c\u901f\u5ea6\u201d\u540e\u9762\u7684\u6570\u5b57\u6539\u4e3a 2\u3002\u8fd9\u8868\u793a\u6a21\u578b\u6bcf\u79d2\u5411\u53f3\u79fb\u52a8 2 \u4e2a\u5355\u4f4d\uff0c\u901f\u5ea6\u4e0d\u4f1a\u592a\u5feb\uff0c\u53ef\u4ee5\u6e05\u695a\u770b\u89c1\u5b83\u5728\u79fb\u52a8\u3002",
+                "messageEn": "In the same block, change the number after Speed to 2. The model will move two units to the right each second, slowly enough to see clearly.",
+                "suggestion": "\u8f93\u5165 2 \u540e\u6309\u56de\u8f66\u6216\u70b9\u51fb\u6846\u5916\u3002\u6b64\u65f6\u6a21\u578b\u540d\u79f0\u5e94\u6b63\u786e\uff0c\u65b9\u5411\u4ecd\u662f\u201c\u5411\u53f3\u201d\u3002",
+                "suggestionEn": "Enter 2, then press Enter or click outside. The model name should still be correct and Direction should still be Right.",
+                "completionCriteria": "\u6301\u7eed\u79fb\u52a8\u79ef\u6728\u5df2\u6307\u5411\u6559\u7a0b\u6a21\u578b\uff0c\u65b9\u5411\u4e3a\u5411\u53f3\uff0c\u901f\u5ea6\u4e3a 2\u3002",
+                "completionCriteriaEn": "The movement block targets the tutorial model, points Right, and has Speed set to 2.",
+                "guidanceIntent": "set_move_speed"
         },
         {
                 "taskKey": "tutorial.basics.run_graph",
@@ -733,68 +967,112 @@ class CabbageContextService:
                 "chapterOrder": 3,
                 "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
                 "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u7528\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u642d\u51fa\u4e00\u6bb5\u7b80\u5355\u7684\u8fd0\u884c\u6d41\u7a0b\uff0c\u4e0d\u9700\u8981\u7f16\u5199\u4ee3\u7801\u3002",
-                "chapterSummaryEn": "Build a simple flow with nodes and colorful blocks. No code is required.",
-                "chapterTaskOrder": 12,
-                "globalOrder": 27,
-                "order": 27,
-                "title": "\u8fd0\u884c\u8282\u70b9\u56fe",
-                "titleEn": "Run the Node Graph",
-                "message": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u4e0a\u65b9\u7684\u201c\u8fd0\u884c\u201d\u6309\u94ae\uff0c\u7136\u540e\u7b49\u5f85\u65c1\u8fb9\u7684\u8fd0\u884c\u7ed3\u679c\u660e\u786e\u663e\u793a\u6210\u529f\u3002",
-                "messageEn": "Click Run at the top of the node window, then wait until the nearby result clearly reports success.",
-                "suggestion": "\u5982\u679c\u663e\u793a\u5931\u8d25\uff0c\u5148\u68c0\u67e5\uff1a\u53ea\u6709\u4e00\u4e2a\u5f00\u59cb\u8282\u70b9\uff0c\u8fde\u7ebf\u65b9\u5411\u6b63\u786e\uff0c\u201c\u7b49\u5f85\u201d\u5df2\u63a5\u5728\u8fdb\u5165\u4e8b\u4ef6\u4e0b\u65b9\uff0c\u8fde\u7ebf\u6761\u4ef6\u663e\u793a\u201c\u771f\u201d\u3002",
-                "suggestionEn": "If it fails, check that there is one Start node, the connection direction is correct, Wait is attached under the entry event, and the connection condition shows True.",
-                "completionCriteria": "\u8282\u70b9\u56fe\u672c\u6b21\u8fd0\u884c\u7684\u6700\u7ec8\u7ed3\u679c\u4e3a\u6210\u529f\u3002",
-                "completionCriteriaEn": "This node graph run finishes successfully.",
+                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
+                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
+                "chapterTaskOrder": 16,
+                "globalOrder": 31,
+                "order": 31,
+                "title": "\u70b9\u51fb\u201c\u8fd0\u884c\u201d\uff0c\u770b\u6a21\u578b\u52a8\u8d77\u6765",
+                "titleEn": "Click Run and Watch the Model Move",
+                "message": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u4e0a\u65b9\u7684\u201c\u8fd0\u884c\u201d\u6309\u94ae\u4e00\u6b21\u3002\u6309\u4e0b\u540e\uff0c\u6559\u7a0b\u6a21\u578b\u5e94\u5148\u8df3\u5230 X=-3 \u7684\u8d77\u70b9\uff0c\u7136\u540e\u4ee5\u6bcf\u79d2 2 \u4e2a\u5355\u4f4d\u7684\u901f\u5ea6\u6301\u7eed\u5411\u53f3\u79fb\u52a8\u3002\u4efb\u52a1\u5728\u4f60\u4eb2\u81ea\u70b9\u51fb\u201c\u8fd0\u884c\u201d\u65f6\u7acb\u5373\u901a\u8fc7\uff0c\u4e0d\u7b49\u5f85\u8fd0\u884c\u7ed3\u679c\u3002",
+                "messageEn": "Click Run at the top of the node window once. The tutorial model should jump to X=-3 and then keep moving right at two units per second. The task completes immediately when you click Run yourself; it does not wait for the run result.",
+                "suggestion": "\u70b9\u51fb\u540e\u53ef\u4ee5\u770b\u4e3b\u89c6\u53e3\u4e2d\u7684\u6a21\u578b\u3002\u5373\u4f7f\u540e\u9762\u51fa\u73b0\u8fd0\u884c\u9519\u8bef\uff0c\u4e5f\u4e0d\u4f1a\u963b\u6b62\u8fd9\u4e2a\u70b9\u51fb\u4efb\u52a1\u901a\u8fc7\u3002",
+                "suggestionEn": "Watch the model in the main viewport after clicking. A later run error does not prevent this click task from passing.",
+                "completionCriteria": "\u4f60\u4eb2\u81ea\u70b9\u51fb\u4e86\u8282\u70b9\u7a97\u53e3\u4e0a\u65b9\u7684\u201c\u8fd0\u884c\u201d\u6309\u94ae\u3002",
+                "completionCriteriaEn": "You click the Run button at the top of the node window yourself.",
                 "guidanceIntent": "run_node_graph"
         },
         {
-                "taskKey": "tutorial.basics.start_preview",
+                "taskKey": "tutorial.basics.focus_ai_composer",
                 "type": "tutorial",
-                "chapterKey": "chapter_preview",
+                "chapterKey": "chapter_ai",
                 "chapterOrder": 4,
-                "chapterTitle": "\u7ec8\u7ae0\uff1a\u8fd0\u884c\u4f60\u7684\u4e16\u754c",
-                "chapterTitleEn": "Final Chapter: Run Your World",
-                "chapterSummary": "\u542f\u52a8\u4e00\u6b21\u9879\u76ee\u9884\u89c8\uff0c\u7136\u540e\u5b89\u5168\u7ed3\u675f\uff0c\u786e\u8ba4\u7f16\u8f91\u5668\u56de\u5230\u9884\u89c8\u524d\u7684\u72b6\u6001\u3002",
-                "chapterSummaryEn": "Start the project preview once, then stop it safely and confirm the editor returns to its previous state.",
+                "chapterTitle": "\u7b2c\u56db\u7ae0\uff1a\u8ba9 AI \u5e2e\u4f60\u521b\u4f5c",
+                "chapterTitleEn": "Chapter 4: Create with AI",
+                "chapterSummary": "\u4f7f\u7528\u53f3\u4fa7\u7684\u201c\u5305\u83dc\u7b54\u7591\u201d\uff0c\u5b66\u4f1a\u628a\u9700\u6c42\u8bf4\u6e05\u695a\uff0c\u8ba9 AI \u56de\u7b54\u95ee\u9898\u3001\u4fee\u6539\u73b0\u6709\u5185\u5bb9\u548c\u589e\u52a0\u65b0\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Use Cabbage Assistant on the right and learn to write clear prompts for questions, edits, and new logic.",
                 "chapterTaskOrder": 1,
-                "globalOrder": 28,
-                "order": 28,
-                "title": "\u5f00\u59cb\u9879\u76ee\u9884\u89c8",
-                "titleEn": "Start the Project Preview",
-                "message": "\u56de\u5230\u7f16\u8f91\u5668\u4e3b\u9875\u9762\uff0c\u70b9\u51fb\u201c\u5f00\u59cb\u9884\u89c8\u201d\u3002\u7b49\u5f85\u9884\u89c8\u753b\u9762\u771f\u6b63\u542f\u52a8\uff0c\u4e0d\u8981\u5728\u52a0\u8f7d\u4e2d\u7acb\u5373\u70b9\u51fb\u7ed3\u675f\u3002",
-                "messageEn": "Return to the main editor page and click Start Preview. Wait until the preview has actually started; do not stop it while it is still loading.",
-                "suggestion": "\u770b\u5230\u9884\u89c8\u753b\u9762\u8fd0\u884c\u540e\uff0c\u518d\u7b49\u5f85\u4efb\u52a1\u81ea\u52a8\u5207\u6362\u5230\u4e0b\u4e00\u6b65\u3002",
-                "suggestionEn": "Once the preview is visibly active, wait for the task panel to advance automatically.",
-                "completionCriteria": "\u9879\u76ee\u9884\u89c8\u5df2\u7ecf\u771f\u6b63\u542f\u52a8\u3002",
-                "completionCriteriaEn": "The project preview has actually started.",
-                "guidanceIntent": "start_preview"
+                "globalOrder": 32,
+                "order": 32,
+                "title": "\u70b9\u51fb\u201c\u5305\u83dc\u7b54\u7591\u201d\u7684\u8f93\u5165\u6846",
+                "titleEn": "Click the Cabbage Assistant Input",
+                "message": "\u5728\u7f16\u8f91\u5668\u53f3\u4fa7\u627e\u5230\u201c\u5305\u83dc\u7b54\u7591\u201d\uff0c\u70b9\u51fb\u6700\u4e0b\u65b9\u7684\u5927\u8f93\u5165\u6846\uff0c\u8ba9\u5149\u6807\u51fa\u73b0\u5728\u8f93\u5165\u6846\u91cc\u3002\u63a5\u4e0b\u6765\u7684\u4e09\u6b65\u90fd\u5728\u8fd9\u91cc\u8f93\u5165\u201c\u63d0\u793a\u8bcd\u201d\u3002\u63d0\u793a\u8bcd\u5c31\u662f\u4f60\u5199\u7ed9 AI \u7684\u5177\u4f53\u8981\u6c42\u3002",
+                "messageEn": "Find Cabbage Assistant on the right and click the large input box at the bottom so the text cursor appears. The next three steps use this box. A prompt is the specific request you write for the AI.",
+                "suggestion": "\u8fd9\u4e00\u6b65\u53ea\u9700\u8981\u70b9\u51fb\u8f93\u5165\u6846\uff0c\u4e0d\u7528\u7acb\u523b\u53d1\u9001\u3002\u5199\u63d0\u793a\u8bcd\u65f6\uff0c\u5c3d\u91cf\u8bf4\u660e\u201c\u8981\u5904\u7406\u4ec0\u4e48\u3001\u5e0c\u671b\u5f97\u5230\u4ec0\u4e48\u7ed3\u679c\u3001\u54ea\u4e9b\u5185\u5bb9\u4e0d\u8981\u6539\u201d\u3002",
+                "suggestionEn": "Only click the input box; do not send anything yet. A useful prompt says what to work on, the result you want, and what must stay unchanged.",
+                "completionCriteria": "\u4f60\u4eb2\u81ea\u70b9\u51fb\u4e86\u201c\u5305\u83dc\u7b54\u7591\u201d\u8f93\u5165\u6846\u3002",
+                "completionCriteriaEn": "You click the Cabbage Assistant input yourself.",
+                "guidanceIntent": "focus_ai_composer"
         },
         {
-                "taskKey": "tutorial.basics.stop_preview",
+                "taskKey": "tutorial.basics.ask_ai",
                 "type": "tutorial",
-                "chapterKey": "chapter_preview",
+                "chapterKey": "chapter_ai",
                 "chapterOrder": 4,
-                "chapterTitle": "\u7ec8\u7ae0\uff1a\u8fd0\u884c\u4f60\u7684\u4e16\u754c",
-                "chapterTitleEn": "Final Chapter: Run Your World",
-                "chapterSummary": "\u542f\u52a8\u4e00\u6b21\u9879\u76ee\u9884\u89c8\uff0c\u7136\u540e\u5b89\u5168\u7ed3\u675f\uff0c\u786e\u8ba4\u7f16\u8f91\u5668\u56de\u5230\u9884\u89c8\u524d\u7684\u72b6\u6001\u3002",
-                "chapterSummaryEn": "Start the project preview once, then stop it safely and confirm the editor returns to its previous state.",
+                "chapterTitle": "\u7b2c\u56db\u7ae0\uff1a\u8ba9 AI \u5e2e\u4f60\u521b\u4f5c",
+                "chapterTitleEn": "Chapter 4: Create with AI",
+                "chapterSummary": "\u4f7f\u7528\u53f3\u4fa7\u7684\u201c\u5305\u83dc\u7b54\u7591\u201d\uff0c\u5b66\u4f1a\u628a\u9700\u6c42\u8bf4\u6e05\u695a\uff0c\u8ba9 AI \u56de\u7b54\u95ee\u9898\u3001\u4fee\u6539\u73b0\u6709\u5185\u5bb9\u548c\u589e\u52a0\u65b0\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Use Cabbage Assistant on the right and learn to write clear prompts for questions, edits, and new logic.",
                 "chapterTaskOrder": 2,
-                "globalOrder": 29,
-                "order": 29,
-                "title": "\u7ed3\u675f\u9879\u76ee\u9884\u89c8",
-                "titleEn": "End the Project Preview",
-                "message": "\u9884\u89c8\u542f\u52a8\u540e\uff0c\u70b9\u51fb\u201c\u7ed3\u675f\u9884\u89c8\u201d\u3002\u8bf7\u7b49\u5f85\u9884\u89c8\u7a97\u53e3\u5b8c\u5168\u505c\u6b62\uff0c\u5e76\u7b49\u5f85\u7f16\u8f91\u5668\u573a\u666f\u6062\u590d\u5b8c\u6210\u3002",
-                "messageEn": "After preview starts, click End Preview. Wait for the preview to stop completely and for the editor scene to finish restoring.",
-                "suggestion": "\u4e0d\u8981\u8fde\u7eed\u91cd\u590d\u70b9\u51fb\u3002\u7ed3\u675f\u540e\u4efb\u52a1\u9762\u677f\u4f1a\u663e\u793a\u201c\u6b63\u5728\u6062\u590d\u6559\u7a0b\u524d\u72b6\u6001\u201d\uff0c\u6062\u590d\u6210\u529f\u624d\u7b97\u6b63\u5f0f\u901a\u5173\u3002",
-                "suggestionEn": "Do not click repeatedly. After stopping, the task panel restores the pre-tutorial state; the tutorial is complete only after that restoration succeeds.",
-                "completionCriteria": "\u9884\u89c8\u5df2\u5b8c\u5168\u505c\u6b62\uff0c\u573a\u666f\u6ca1\u6709\u6062\u590d\u9519\u8bef\uff0c\u5e76\u5f00\u59cb\u6062\u590d\u6559\u7a0b\u524d\u72b6\u6001\u3002",
-                "completionCriteriaEn": "Preview stops completely, the scene has no restore error, and the tutorial begins restoring the pre-tutorial state.",
-                "guidanceIntent": "stop_preview"
+                "globalOrder": 33,
+                "order": 33,
+                "title": "\u5411 AI \u8be2\u95ee\u4e00\u4e2a\u95ee\u9898",
+                "titleEn": "Ask the AI a Question",
+                "message": "\u5728\u8f93\u5165\u6846\u4e2d\u5199\u4e00\u53e5\u53ea\u8bf7 AI \u89e3\u91ca\u3001\u4e0d\u8981\u4fee\u6539\u5185\u5bb9\u7684\u63d0\u793a\u8bcd\uff0c\u7136\u540e\u70b9\u51fb\u201c\u53d1\u9001\u201d\u3002\u8bf4\u6e05\u695a\u4f60\u60f3\u4e86\u89e3\u4ec0\u4e48\u3001\u6307\u7684\u662f\u54ea\u4e2a\u8282\u70b9\u6216\u79ef\u6728\uff0c\u5e76\u5199\u4e0a\u201c\u53ea\u89e3\u91ca\uff0c\u4e0d\u8981\u4fee\u6539\u201d\u3002\u53d1\u9001\u540e\u7b49\u5f85 AI \u771f\u6b63\u8fd4\u56de\u56de\u7b54\u3002",
+                "messageEn": "Write a prompt that asks the AI to explain something without changing it, then click Send. Say what you want to understand, which node or block you mean, and include \"explain only; do not modify.\" Wait for a real answer.",
+                "suggestion": "\u793a\u4f8b\uff1a\u8bf7\u89e3\u91ca\u6559\u7a0b\u6a21\u578b\u4e3a\u4ec0\u4e48\u4f1a\u5148\u79fb\u52a8\u5230 X=-3\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\u3002\u53ea\u89e3\u91ca\uff0c\u4e0d\u8981\u4fee\u6539\u8282\u70b9\u56fe\u3002",
+                "suggestionEn": "Example: Explain why the tutorial model first moves to X=-3 and then keeps moving right. Explain only; do not modify the node graph.",
+                "completionCriteria": "\u201c\u5305\u83dc\u7b54\u7591\u201d\u6536\u5230\u8be2\u95ee\u63d0\u793a\u8bcd\uff0c\u5e76\u6210\u529f\u8fd4\u56de\u4e86\u4e00\u6761\u56de\u7b54\u3002",
+                "completionCriteriaEn": "Cabbage Assistant receives a question prompt and successfully returns an answer.",
+                "guidanceIntent": "ask_ai_question"
+        },
+        {
+                "taskKey": "tutorial.basics.modify_with_ai",
+                "type": "tutorial",
+                "chapterKey": "chapter_ai",
+                "chapterOrder": 4,
+                "chapterTitle": "\u7b2c\u56db\u7ae0\uff1a\u8ba9 AI \u5e2e\u4f60\u521b\u4f5c",
+                "chapterTitleEn": "Chapter 4: Create with AI",
+                "chapterSummary": "\u4f7f\u7528\u53f3\u4fa7\u7684\u201c\u5305\u83dc\u7b54\u7591\u201d\uff0c\u5b66\u4f1a\u628a\u9700\u6c42\u8bf4\u6e05\u695a\uff0c\u8ba9 AI \u56de\u7b54\u95ee\u9898\u3001\u4fee\u6539\u73b0\u6709\u5185\u5bb9\u548c\u589e\u52a0\u65b0\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Use Cabbage Assistant on the right and learn to write clear prompts for questions, edits, and new logic.",
+                "chapterTaskOrder": 3,
+                "globalOrder": 34,
+                "order": 34,
+                "title": "\u8ba9 AI \u4fee\u6539\u73b0\u6709\u5185\u5bb9",
+                "titleEn": "Ask the AI to Modify Existing Content",
+                "message": "\u5728\u8f93\u5165\u6846\u4e2d\u5199\u4e00\u53e5\u4fee\u6539\u8981\u6c42\uff0c\u7136\u540e\u70b9\u51fb\u201c\u53d1\u9001\u201d\u3002\u63d0\u793a\u8bcd\u91cc\u8981\u8bf4\u6e05\u695a\uff1a\u8981\u6539\u54ea\u4e2a\u5185\u5bb9\u3001\u5b83\u73b0\u5728\u662f\u4ec0\u4e48\u3001\u8981\u6539\u6210\u4ec0\u4e48\uff0c\u4ee5\u53ca\u54ea\u4e9b\u5185\u5bb9\u5fc5\u987b\u4fdd\u6301\u4e0d\u53d8\u3002\u7b49\u5f85 AI \u771f\u6b63\u5b8c\u6210\u5e76\u4fdd\u5b58\u4fee\u6539\u3002",
+                "messageEn": "Write an edit prompt and click Send. Clearly name what to change, its current value, the new value, and what must remain unchanged. Wait until the edit is actually applied and saved.",
+                "suggestion": "\u793a\u4f8b\uff1a\u8bf7\u628a\u6559\u7a0b\u6a21\u578b\u6301\u7eed\u5411\u53f3\u79fb\u52a8\u7684\u901f\u5ea6\u4ece 2 \u6539\u4e3a 4\uff0c\u53ea\u4fee\u6539\u901f\u5ea6\uff0c\u5176\u4ed6\u8282\u70b9\u548c\u79ef\u6728\u4fdd\u6301\u4e0d\u53d8\u3002",
+                "suggestionEn": "Example: Change the tutorial model's continuous rightward movement speed from 2 to 4. Change only the speed; keep every other node and block unchanged.",
+                "completionCriteria": "AI \u5df2\u7ecf\u6210\u529f\u4fee\u6539\u5e76\u4fdd\u5b58\u4e86\u5f53\u524d\u8282\u70b9\u56fe\u3002",
+                "completionCriteriaEn": "The AI successfully applies and saves one node-graph edit.",
+                "guidanceIntent": "modify_with_ai"
+        },
+        {
+                "taskKey": "tutorial.basics.generate_with_ai",
+                "type": "tutorial",
+                "chapterKey": "chapter_ai",
+                "chapterOrder": 4,
+                "chapterTitle": "\u7b2c\u56db\u7ae0\uff1a\u8ba9 AI \u5e2e\u4f60\u521b\u4f5c",
+                "chapterTitleEn": "Chapter 4: Create with AI",
+                "chapterSummary": "\u4f7f\u7528\u53f3\u4fa7\u7684\u201c\u5305\u83dc\u7b54\u7591\u201d\uff0c\u5b66\u4f1a\u628a\u9700\u6c42\u8bf4\u6e05\u695a\uff0c\u8ba9 AI \u56de\u7b54\u95ee\u9898\u3001\u4fee\u6539\u73b0\u6709\u5185\u5bb9\u548c\u589e\u52a0\u65b0\u903b\u8f91\u3002",
+                "chapterSummaryEn": "Use Cabbage Assistant on the right and learn to write clear prompts for questions, edits, and new logic.",
+                "chapterTaskOrder": 4,
+                "globalOrder": 35,
+                "order": 35,
+                "title": "\u8ba9 AI \u589e\u52a0\u4e00\u6bb5\u65b0\u903b\u8f91",
+                "titleEn": "Ask the AI to Generate New Logic",
+                "message": "\u6700\u540e\uff0c\u5728\u8f93\u5165\u6846\u4e2d\u5199\u4e00\u53e5\u201c\u589e\u52a0\u65b0\u5185\u5bb9\u201d\u7684\u63d0\u793a\u8bcd\uff0c\u7136\u540e\u70b9\u51fb\u201c\u53d1\u9001\u201d\u3002\u8bf4\u6e05\u695a\u8981\u65b0\u5efa\u4ec0\u4e48\u3001\u4ece\u54ea\u91cc\u5f00\u59cb\u8fde\u63a5\u3001\u6700\u540e\u8981\u5f97\u5230\u4ec0\u4e48\u7ed3\u679c\uff0c\u4ee5\u53ca\u54ea\u4e9b\u539f\u6709\u5185\u5bb9\u8981\u4fdd\u7559\u3002\u8bf7\u4f7f\u7528\u201c\u589e\u52a0\u201d\u6216\u201c\u8865\u5145\u201d\u8fd9\u7c7b\u8bf4\u6cd5\uff0c\u4e0d\u8981\u8ba9 AI \u91cd\u505a\u6574\u5f20\u8282\u70b9\u56fe\u3002",
+                "messageEn": "Finally, write a prompt that adds new logic and click Send. Say what to create, where to connect it, the result you want, and which existing content must remain. Use words such as \"add\" or \"extend\" instead of asking the AI to rebuild the whole graph.",
+                "suggestion": "\u793a\u4f8b\uff1a\u8bf7\u5728\u5f53\u524d\u8282\u70b9\u56fe\u4e2d\u589e\u52a0\u4e00\u4e2a\u7ed3\u675f\u8282\u70b9\uff0c\u5e76\u628a\u5f53\u524d\u81ea\u5b9a\u4e49\u8282\u70b9\u8fde\u63a5\u5230\u7ed3\u675f\u8282\u70b9\uff0c\u4fdd\u7559\u5df2\u6709\u8282\u70b9\u548c\u79ef\u6728\u3002",
+                "suggestionEn": "Example: Add an End node to the current node graph and connect the current Custom node to it. Keep all existing nodes and blocks.",
+                "completionCriteria": "AI \u5df2\u6210\u529f\u589e\u52a0\u5e76\u4fdd\u5b58\u65b0\u903b\u8f91\u3002\u6240\u6709\u6559\u7a0b\u4fee\u6539\u90fd\u4f1a\u4fdd\u7559\uff0c\u4e0d\u4f1a\u91cd\u7f6e\u9879\u76ee\u3002",
+                "completionCriteriaEn": "The AI successfully adds and saves new logic. All tutorial changes remain in the project; nothing is reset.",
+                "guidanceIntent": "generate_with_ai"
         }
 ])
-    RETIRED_TUTORIAL_TASK_KEYS = {'tutorial.import_model', 'tutorial.transform_model', 'tutorial.adjust_lighting', 'tutorial.adjust_physics', 'tutorial.create_node', 'tutorial.move_node', 'tutorial.connect_nodes', 'tutorial.drag_block', 'tutorial.edit_block_parameter', 'tutorial.set_transition_condition', 'tutorial.run_node_graph', 'tutorial.rotate_model'}
-    TUTORIAL_TOTAL_TASKS = 29
+    RETIRED_TUTORIAL_TASK_KEYS = {'tutorial.import_model', 'tutorial.transform_model', 'tutorial.adjust_lighting', 'tutorial.adjust_physics', 'tutorial.create_node', 'tutorial.move_node', 'tutorial.connect_nodes', 'tutorial.drag_block', 'tutorial.edit_block_parameter', 'tutorial.set_transition_condition', 'tutorial.run_node_graph', 'tutorial.rotate_model', 'tutorial.basics.start_preview', 'tutorial.basics.stop_preview', 'tutorial.basics.add_wait', 'tutorial.basics.set_wait_seconds', 'tutorial.basics.select_edge', 'tutorial.basics.add_true_condition'}
+    TUTORIAL_TOTAL_TASKS = 41
     TUTORIAL_VALUE_TOLERANCE = 0.01
     TUTORIAL_ROTATION_TOLERANCE = 0.1
     def __init__(self) -> None:
@@ -1038,6 +1316,7 @@ class CabbageContextService:
             "sessionId": f"tutorial_{uuid.uuid4().hex}",
             "status": "active",
             "startedAt": now,
+            "completedAt": 0,
             "restoredAt": 0,
             "bindings": {
                 "sceneName": "",
@@ -1047,8 +1326,12 @@ class CabbageContextService:
                 "startNodeId": "",
                 "startNodeCreatedByTutorial": False,
                 "customNodeId": "",
+                "deletePracticeNodeId": "",
                 "edgeId": "",
                 "whenEnterBlockId": "",
+                "setPositionBlockId": "",
+                "whileActiveBlockId": "",
+                "moveDirectionBlockId": "",
                 "waitBlockId": "",
                 "conditionBlockId": "",
             },
@@ -1066,11 +1349,17 @@ class CabbageContextService:
         session = dict(default)
         session["sessionId"] = str(raw.get("sessionId") or default["sessionId"])[:180]
         status = str(raw.get("status") or "active")
-        session["status"] = status if status in {"active", "restoring", "completed", "restore_failed"} else "active"
-        for key in ("startedAt", "restoredAt", "completionNoticeExpiresAt"):
+        if status in {"restoring", "restore_failed"}:
+            # Schema v2 originally restored the project after the final tutorial step.
+            # Restoration is retired: old pending sessions are completed without touching project data.
+            status = "completed"
+        session["status"] = status if status in {"active", "completed"} else "active"
+        for key in ("startedAt", "completedAt", "restoredAt", "completionNoticeExpiresAt"):
             session[key] = max(0, int(raw.get(key) or 0))
         if not session["startedAt"]:
             session["startedAt"] = now
+        if session["status"] == "completed" and not session["completedAt"]:
+            session["completedAt"] = session["restoredAt"] or now
         session["lastRestoreError"] = str(raw.get("lastRestoreError") or "")[:2000]
         raw_bindings = raw.get("bindings") if isinstance(raw.get("bindings"), dict) else {}
         bindings = dict(default["bindings"])
@@ -1083,6 +1372,12 @@ class CabbageContextService:
         session["baseline"] = cls._clone(raw.get("baseline")) if isinstance(raw.get("baseline"), dict) else {}
         raw_log = raw.get("modificationLog") if isinstance(raw.get("modificationLog"), list) else []
         session["modificationLog"] = [cls._clone(item) for item in raw_log if isinstance(item, dict)][-200:]
+        if session["status"] == "completed":
+            # Nothing may be rolled back after completion. Drop only restoration metadata;
+            # tutorial-created project content and the bindings used by history remain intact.
+            session["baseline"] = {}
+            session["modificationLog"] = []
+            session["lastRestoreError"] = ""
         return session
 
     @classmethod
@@ -1349,11 +1644,19 @@ class CabbageContextService:
             raise ValueError("\u5305\u83dc\u64cd\u4f5c\u4e8b\u4ef6\u7f3a\u5c11 type")
         details = payload.get("details") if isinstance(payload.get("details"), dict) else {}
         safe_details: dict[str, Any] = {}
+        string_list_fields = {"createdNodeIds", "createdEdgeIds"}
         for key, raw in details.items():
             name = str(key)[:80]
             if isinstance(raw, (str, int, float, bool)) or raw is None:
                 limit = 50000 if name in {"baselineJson", "modificationJson"} else 2000 if name in {"error", "restoreError"} else 500
                 safe_details[name] = raw if not isinstance(raw, str) else raw[:limit]
+            elif name in string_list_fields and isinstance(raw, (list, tuple)):
+                values: list[str] = []
+                for item in raw[:100]:
+                    value = str(item or "").strip()[:500]
+                    if value and value not in values:
+                        values.append(value)
+                safe_details[name] = values
         return {
             "eventId": str(payload.get("eventId") or f"event_{uuid.uuid4().hex}"),
             "type": event_type,
@@ -1459,22 +1762,13 @@ class CabbageContextService:
             if session.get("status") == "completed":
                 session["completionNoticeExpiresAt"] = 0
             return []
-        if event_type == "tutorial_restore_retry_requested":
-            if session.get("status") == "restore_failed":
-                session["status"] = "restoring"
-                session["lastRestoreError"] = ""
-            return []
-        if event_type == "tutorial_restore_failed":
-            session["status"] = "restore_failed"
-            session["lastRestoreError"] = cls._detail_text(details, "error", "restoreError")[:2000]
-            session["completionNoticeExpiresAt"] = 0
-            return []
-        if event_type == "tutorial_restore_succeeded" and event.get("success"):
-            session["status"] = "completed"
-            session["restoredAt"] = now
-            session["lastRestoreError"] = ""
-            session["completionNoticeExpiresAt"] = now + 15000
-            session["modificationLog"] = []
+        if event_type in {
+            "tutorial_restore_retry_requested",
+            "tutorial_restore_failed",
+            "tutorial_restore_succeeded",
+        }:
+            # Legacy clients may still emit restoration events. They are intentionally
+            # ignored so a finished tutorial can never mutate or reset project content.
             return []
 
         if not event.get("success") or session.get("status") != "active":
@@ -1559,14 +1853,63 @@ class CabbageContextService:
                 bindings["startNodeCreatedByTutorial"] = created
                 if created:
                     cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="start")
+        elif task_key == "tutorial.basics.choose_select_tool":
+            matched = (
+                event_type == "node_tool_mode_changed"
+                and details.get("mode") == "select"
+                and details.get("source") == "user"
+            )
         elif task_key == "tutorial.basics.create_custom_node":
             matched = (event_type == "node_created" or state_observed) and str(details.get("nodeType") or "").lower() == "custom" and bool(node_id)
             if matched:
                 bindings["customNodeId"] = node_id
                 cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="custom")
+        elif task_key == "tutorial.basics.select_custom_node":
+            matched = (
+                event_type == "node_selected"
+                and node_id == bindings.get("customNodeId")
+                and details.get("mode") == "select"
+                and details.get("source") == "user"
+            )
         elif task_key == "tutorial.basics.move_custom_node":
             delta = cls._detail_number(details, "actualDelta", "distance", "delta")
-            matched = event_type == "node_moved" and node_id == bindings.get("customNodeId") and (delta is None or abs(delta) > 1e-6)
+            matched = (
+                event_type == "node_moved"
+                and node_id == bindings.get("customNodeId")
+                and details.get("mode") == "select"
+                and details.get("source") == "user"
+                and delta is not None
+                and abs(delta) > 1e-6
+            )
+        elif task_key == "tutorial.basics.create_delete_practice_node":
+            matched = (
+                event_type == "node_created"
+                and str(details.get("nodeType") or "").lower() == "custom"
+                and bool(node_id)
+                and node_id != bindings.get("customNodeId")
+            )
+            if matched:
+                bindings["deletePracticeNodeId"] = node_id
+                cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="custom")
+        elif task_key == "tutorial.basics.choose_clear_tool":
+            matched = (
+                event_type == "node_tool_mode_changed"
+                and details.get("mode") == "delete"
+                and details.get("source") == "user"
+            )
+        elif task_key == "tutorial.basics.delete_practice_node":
+            matched = (
+                event_type == "node_deleted"
+                and node_id == bindings.get("deletePracticeNodeId")
+                and details.get("mode") == "delete"
+                and details.get("source") == "user"
+            )
+        elif task_key == "tutorial.basics.return_select_tool":
+            matched = (
+                event_type == "node_tool_mode_changed"
+                and details.get("mode") == "select"
+                and details.get("source") == "user"
+            )
         elif task_key == "tutorial.basics.connect_nodes":
             source_id = cls._detail_text(details, "sourceNodeId")
             target_id = cls._detail_text(details, "targetNodeId")
@@ -1581,53 +1924,177 @@ class CabbageContextService:
             if matched:
                 bindings["whenEnterBlockId"] = block_id
                 cls._append_tutorial_modification(session, "block_created", event, nodeId=node_id, blockId=block_id, blockType="node_when_enter")
-        elif task_key == "tutorial.basics.add_wait":
-            matched = (event_type in {"block_added", "block_connected"} or state_observed) and node_id == bindings.get("customNodeId") and details.get("blockType") == "control_wait" and details.get("parentBlockType") == "node_when_enter" and cls._detail_bool(details, "connected") is True and bool(block_id)
-            if matched:
-                bindings["waitBlockId"] = block_id
-                cls._append_tutorial_modification(session, "block_created", event, nodeId=node_id, blockId=block_id, blockType="control_wait")
-        elif task_key == "tutorial.basics.set_wait_seconds":
-            new_value = cls._detail_number(details, "newValue", "value")
-            observed_connection_matches = (
-                not state_observed
-                or (
-                    cls._detail_bool(details, "connected") is True
-                    and details.get("parentBlockType") == "node_when_enter"
-                )
+        elif task_key == "tutorial.basics.add_set_position":
+            matched = (
+                (event_type in {"block_added", "block_connected"} or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and details.get("blockType") == "object_set_position"
+                and details.get("parentBlockType") == "node_when_enter"
+                and cls._detail_bool(details, "connected") is True
+                and bool(block_id)
             )
+            if matched:
+                bindings["setPositionBlockId"] = block_id
+                cls._append_tutorial_modification(
+                    session, "block_created", event,
+                    nodeId=node_id, blockId=block_id, blockType="object_set_position",
+                )
+        elif task_key == "tutorial.basics.set_position_model":
+            model_name = cls._detail_text(details, "newValue", "value", "modelName")
             matched = (
                 (event_type == "block_parameter_changed" or state_observed)
-                and block_id == bindings.get("waitBlockId")
-                and details.get("blockType") == "control_wait"
-                and str(details.get("fieldName") or "").upper() == "SECONDS"
-                and new_value is not None
-                and abs(new_value - 2.0) <= cls.TUTORIAL_VALUE_TOLERANCE
-                and observed_connection_matches
+                and node_id == bindings.get("customNodeId")
+                and block_id == bindings.get("setPositionBlockId")
+                and details.get("blockType") == "object_set_position"
+                and details.get("parentBlockType") == "node_when_enter"
+                and cls._detail_bool(details, "connected") is True
+                and str(details.get("fieldName") or "").upper() == "NAME"
+                and model_name == bindings.get("modelActorName")
             )
-        elif task_key == "tutorial.basics.select_edge":
-            matched = (event_type == "edge_selected" or state_observed) and edge_id == bindings.get("edgeId") and details.get("source") in {None, "", "user", "state_observation"}
-        elif task_key == "tutorial.basics.add_true_condition":
-            bool_value = cls._detail_bool(details, "newValue", "value")
-            matched = (event_type in {"block_added", "block_connected", "block_parameter_changed"} or state_observed) and edge_id == bindings.get("edgeId") and details.get("workspaceRole") == "condition" and details.get("blockType") == "logic_boolean" and bool_value is True and bool(block_id)
+        elif task_key == "tutorial.basics.set_start_x":
+            start_x = cls._detail_number(details, "newValue", "value", "x")
+            start_y = cls._detail_number(details, "y")
+            start_z = cls._detail_number(details, "z")
+            observed_model = cls._detail_text(details, "modelName")
+            matched = (
+                (event_type == "block_parameter_changed" or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and block_id == bindings.get("setPositionBlockId")
+                and details.get("blockType") == "object_set_position"
+                and details.get("parentBlockType") == "node_when_enter"
+                and cls._detail_bool(details, "connected") is True
+                and str(details.get("fieldName") or "").upper() == "X"
+                and start_x is not None
+                and abs(start_x + 3.0) <= cls.TUTORIAL_VALUE_TOLERANCE
+                and observed_model == bindings.get("modelActorName")
+                and (start_y is None or abs(start_y) <= cls.TUTORIAL_VALUE_TOLERANCE)
+                and (start_z is None or abs(start_z) <= cls.TUTORIAL_VALUE_TOLERANCE)
+            )
+        elif task_key == "tutorial.basics.add_while_active":
+            matched = (
+                (event_type == "block_added" or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and details.get("blockType") == "node_while_active"
+                and not cls._detail_text(details, "parentBlockType")
+                and cls._detail_bool(details, "connected") is not True
+                and bool(block_id)
+            )
             if matched:
-                bindings["conditionBlockId"] = block_id
-                cls._append_tutorial_modification(session, "block_created", event, edgeId=edge_id, blockId=block_id, blockType="logic_boolean")
+                bindings["whileActiveBlockId"] = block_id
+                cls._append_tutorial_modification(
+                    session, "block_created", event,
+                    nodeId=node_id, blockId=block_id, blockType="node_while_active",
+                )
+        elif task_key == "tutorial.basics.add_move_direction":
+            matched = (
+                (event_type in {"block_added", "block_connected"} or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and details.get("blockType") == "object_move_direction"
+                and details.get("parentBlockType") == "node_while_active"
+                and cls._detail_bool(details, "connected") is True
+                and bool(block_id)
+            )
+            if matched:
+                bindings["moveDirectionBlockId"] = block_id
+                cls._append_tutorial_modification(
+                    session, "block_created", event,
+                    nodeId=node_id, blockId=block_id, blockType="object_move_direction",
+                )
+        elif task_key == "tutorial.basics.set_move_model":
+            model_name = cls._detail_text(details, "newValue", "value", "modelName")
+            matched = (
+                (event_type == "block_parameter_changed" or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and block_id == bindings.get("moveDirectionBlockId")
+                and details.get("blockType") == "object_move_direction"
+                and details.get("parentBlockType") == "node_while_active"
+                and cls._detail_bool(details, "connected") is True
+                and str(details.get("fieldName") or "").upper() == "NAME"
+                and model_name == bindings.get("modelActorName")
+            )
+        elif task_key == "tutorial.basics.set_move_direction":
+            direction = cls._detail_text(details, "newValue", "value", "direction").upper()
+            model_name = cls._detail_text(details, "modelName")
+            matched = (
+                (event_type == "block_parameter_changed" or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and block_id == bindings.get("moveDirectionBlockId")
+                and details.get("blockType") == "object_move_direction"
+                and details.get("parentBlockType") == "node_while_active"
+                and cls._detail_bool(details, "connected") is True
+                and str(details.get("fieldName") or "").upper() == "DIRECTION"
+                and direction == "RIGHT"
+                and model_name == bindings.get("modelActorName")
+            )
+        elif task_key == "tutorial.basics.set_move_speed":
+            speed = cls._detail_number(details, "newValue", "value", "speed")
+            model_name = cls._detail_text(details, "modelName")
+            direction = cls._detail_text(details, "direction").upper()
+            matched = (
+                (event_type == "block_parameter_changed" or state_observed)
+                and node_id == bindings.get("customNodeId")
+                and block_id == bindings.get("moveDirectionBlockId")
+                and details.get("blockType") == "object_move_direction"
+                and details.get("parentBlockType") == "node_while_active"
+                and cls._detail_bool(details, "connected") is True
+                and str(details.get("fieldName") or "").upper() == "SPEED"
+                and speed is not None
+                and abs(speed - 2.0) <= cls.TUTORIAL_VALUE_TOLERANCE
+                and model_name == bindings.get("modelActorName")
+                and direction == "RIGHT"
+            )
         elif task_key == "tutorial.basics.run_graph":
-            matched = event_type == "run_succeeded"
-        elif task_key == "tutorial.basics.start_preview":
-            matched = event_type == "preview_started" and str(details.get("status") or "running") == "running"
-        elif task_key == "tutorial.basics.stop_preview":
-            stopped = str(details.get("status") or "stopped") == "stopped"
-            restored = cls._detail_bool(details, "restored", "sceneRestored") is True
-            restore_error = cls._detail_text(details, "restoreError", "error")
-            matched = event_type == "preview_stopped" and stopped and restored and not restore_error
+            matched = event_type == "run_clicked" and details.get("source") == "user"
+        elif task_key == "tutorial.basics.focus_ai_composer":
+            matched = event_type == "ai_composer_focused" and details.get("source") == "user"
+        elif task_key == "tutorial.basics.ask_ai":
+            matched = (
+                event_type == "ai_question_answered"
+                and details.get("mode") == "ask"
+                and cls._detail_bool(details, "responseReceived") is True
+                and bool(cls._detail_text(details, "prompt"))
+            )
+        elif task_key == "tutorial.basics.modify_with_ai":
+            matched = (
+                event_type == "ai_node_graph_changed"
+                and details.get("mode") == "modify"
+                and details.get("operation") == "edit"
+                and cls._detail_bool(details, "applied") is True
+                and bool(cls._detail_text(details, "prompt"))
+            )
+        elif task_key == "tutorial.basics.generate_with_ai":
+            matched = (
+                event_type == "ai_node_graph_changed"
+                and details.get("mode") == "generate"
+                and details.get("operation") == "extend"
+                and cls._detail_bool(details, "applied") is True
+                and bool(cls._detail_text(details, "prompt"))
+            )
+            if matched:
+                for created_node_id in details.get("createdNodeIds") or []:
+                    node_id_text = str(created_node_id or "").strip()
+                    if node_id_text:
+                        cls._append_tutorial_modification(
+                            session, "node_created", event, nodeId=node_id_text, source="ai_tutorial",
+                        )
+                for created_edge_id in details.get("createdEdgeIds") or []:
+                    edge_id_text = str(created_edge_id or "").strip()
+                    if edge_id_text:
+                        cls._append_tutorial_modification(
+                            session, "edge_created", event, edgeId=edge_id_text, source="ai_tutorial",
+                        )
 
         if not matched or not cls._complete_task_locked(context, task_key, now):
             return []
-        if task_key == "tutorial.basics.stop_preview":
-            session["status"] = "restoring"
+        if task_key == "tutorial.basics.generate_with_ai":
+            # The tutorial now leaves the user's model, nodes, blocks, camera and panel
+            # layout exactly as they are when the final task succeeds.
+            session["status"] = "completed"
+            session["completedAt"] = now
             session["lastRestoreError"] = ""
-            session["completionNoticeExpiresAt"] = 0
+            session["completionNoticeExpiresAt"] = now + 15000
+            session["baseline"] = {}
+            session["modificationLog"] = []
         return [task_key]
 
     @classmethod
