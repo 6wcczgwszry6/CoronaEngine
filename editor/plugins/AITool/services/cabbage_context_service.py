@@ -732,10 +732,10 @@ class CabbageContextService:
                 "order": 22,
                 "title": "\u5728\u201c\u4e8b\u4ef6\u201d\u7c7b\u4e2d\u653e\u5165\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728",
                 "titleEn": "Add the Entry Block from Events",
-                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u5148\u70b9\u51fb\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\uff0c\u518d\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7684\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u3002\u201c\u4e8b\u4ef6\u201d\u7c7b\u79ef\u6728\u7528\u6765\u544a\u8bc9\u8282\u70b9\u4ec0\u4e48\u65f6\u5019\u5f00\u59cb\u505a\u4e8b\uff1b\u8fd9\u4e00\u5757\u8868\u793a\u6d41\u7a0b\u521a\u8fdb\u5165\u8be5\u8282\u70b9\u65f6\uff0c\u91cc\u9762\u7684\u52a8\u4f5c\u6267\u884c\u4e00\u6b21\u3002",
-                "messageEn": "In the block toolbox on the left, click the Events category, find the block labeled \"When entering this node,\" and drag it into the node editor on the right. Event blocks tell the node when to act; this one runs its actions once when the flow enters the node.",
-                "suggestion": "\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\u5728\u5de6\u4fa7\u5206\u7c7b\u5217\u4e2d\u3002\u5148\u53ea\u653e\u8fd9\u4e00\u5757\uff0c\u4e0d\u8981\u628a\u5b83\u653e\u5230\u8fde\u7ebf\u6761\u4ef6\u533a\u3002",
-                "suggestionEn": "Events is in the category list on the left. Place only this block for now, and make sure it is in the node editor rather than the connection-condition editor.",
+                "message": "\u67e5\u627e\u4f4d\u7f6e\uff1a\u5de6\u4fa7\u79ef\u6728\u680f \u2192 \u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\u3002\u6253\u5f00\u5206\u7c7b\u540e\uff0c\u627e\u5230\u5199\u7740\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7684\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u7a7a\u767d\u5904\u3002\u5b83\u8868\u793a\u6d41\u7a0b\u521a\u8fdb\u5165\u8fd9\u4e2a\u8282\u70b9\u65f6\uff0c\u6267\u884c\u4e00\u6b21\u653e\u5728\u91cc\u9762\u7684\u52a8\u4f5c\u3002",
+                "messageEn": "Where to find it: left block toolbox > Events category. Open Events, find the block labeled \"When entering this node,\" and drag it to an empty area of the node editor on the right. It runs the actions placed inside it once when the flow enters this node.",
+                "suggestion": "\u4e0d\u8981\u628a\u8fd9\u5757\u79ef\u6728\u653e\u5230\u8fde\u7ebf\u6761\u4ef6\u7f16\u8f91\u533a\u3002\u6b63\u786e\u4f4d\u7f6e\u662f\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u90e8\u7684\u5f69\u8272\u79ef\u6728\u7f16\u8f91\u533a\uff1b\u8fd9\u4e00\u6b65\u5148\u53ea\u653e\u8fd9\u4e00\u5757\u3002",
+                "suggestionEn": "Do not place this block in the connection-condition editor. Use the colorful block editor inside the Custom node, and add only this block for this step.",
                 "completionCriteria": "\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e86\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u3002",
                 "completionCriteriaEn": "The Custom node contains the \"When entering this node\" block.",
                 "guidanceIntent": "add_when_enter"
@@ -754,10 +754,10 @@ class CabbageContextService:
                 "order": 23,
                 "title": "\u4ece\u201c\u8fd0\u52a8\u201d\u7c7b\u6dfb\u52a0\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728",
                 "titleEn": "Add Set Object Position from Motion",
-                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u70b9\u51fb\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8bbe\u7f6e\u5bf9\u8c61\u2026\u4f4d\u7f6e X\u2026Y\u2026Z\u2026\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u4e24\u5757\u79ef\u6728\u81ea\u52a8\u54ac\u5408\u3002\u8fd9\u4e2a\u52a8\u4f5c\u4f1a\u5728\u8282\u70b9\u521a\u5f00\u59cb\u65f6\u628a\u6a21\u578b\u9001\u5230\u56fa\u5b9a\u8d77\u70b9\u3002",
-                "messageEn": "Click the Motion category in the block toolbox on the left. Find the block labeled \"Set object ... Position X ... Y ... Z ...\" and drag it into the Execute slot under \"When entering this node\" until the blocks snap together. This places the model at a clear starting point when the node begins.",
-                "suggestion": "\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u91cc\u8fd8\u6709\u5f88\u591a\u79fb\u52a8\u79ef\u6728\uff0c\u8bf7\u6839\u636e\u79ef\u6728\u8868\u9762\u7684\u201c\u8bbe\u7f6e\u5bf9\u8c61\u201d\u548c\u201c\u4f4d\u7f6e X / Y / Z\u201d\u6587\u5b57\u8fa8\u8ba4\u3002\u5982\u679c\u79ef\u6728\u8fd8\u80fd\u5355\u72ec\u6d6e\u52a8\uff0c\u5c31\u7ee7\u7eed\u9760\u8fd1\u201c\u6267\u884c\u201d\u51f9\u69fd\u3002",
-                "suggestionEn": "Motion contains many movement blocks, so identify this one by the words \"Set object\" and \"Position X / Y / Z\" on its face. If it still floats by itself, move it closer to the Execute slot until it snaps in.",
+                "message": "\u67e5\u627e\u4f4d\u7f6e\uff1a\u5de6\u4fa7\u79ef\u6728\u680f \u2192 \u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u3002\u5728\u8fd9\u4e2a\u5206\u7c7b\u4e2d\uff0c\u627e\u5230\u8868\u9762\u540c\u65f6\u5199\u7740\u201c\u8bbe\u7f6e\u5bf9\u8c61\u201d\u548c\u201c\u4f4d\u7f6e X\u3001Y\u3001Z\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u5230\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u4e24\u5757\u79ef\u6728\u81ea\u52a8\u54ac\u5408\u3002",
+                "messageEn": "Where to find it: left block toolbox > Motion category. Find the block whose face contains both \"Set object\" and \"Position X, Y, Z.\" Drag it into the Execute slot under \"When entering this node\" until the two blocks snap together.",
+                "suggestion": "\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u91cc\u6709\u591a\u5757\u5916\u89c2\u76f8\u4f3c\u7684\u79ef\u6728\u3002\u8fd9\u4e00\u6b65\u8981\u627e\u7684\u662f\u5e26 X\u3001Y\u3001Z \u4f4d\u7f6e\u6570\u503c\u7684\u90a3\u4e00\u5757\uff0c\u4e0d\u662f\u201c\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728\u3002",
+                "suggestionEn": "Motion contains several similar-looking blocks. Choose the one with X, Y, and Z position values, not the continuous-movement block.",
                 "completionCriteria": "\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u5df2\u8fde\u63a5\u5728\u8fdb\u5165\u52a8\u4f5c\u91cc\u3002",
                 "completionCriteriaEn": "The Set Object Position block is attached inside the entry event.",
                 "guidanceIntent": "add_set_position"
@@ -820,10 +820,10 @@ class CabbageContextService:
                 "order": 26,
                 "title": "\u5728\u201c\u4e8b\u4ef6\u201d\u7c7b\u4e2d\u653e\u5165\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728",
                 "titleEn": "Add the Continuous Event Block from Events",
-                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u70b9\u51fb\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u7f16\u8f91\u533a\u7684\u53e6\u4e00\u5757\u7a7a\u767d\u4f4d\u7f6e\u3002\u8fd9\u5757\u79ef\u6728\u8868\u793a\uff1a\u53ea\u8981\u6d41\u7a0b\u8fd8\u505c\u7559\u5728\u8fd9\u4e2a\u8282\u70b9\uff0c\u91cc\u9762\u7684\u52a8\u4f5c\u5c31\u4f1a\u4e0d\u65ad\u6267\u884c\u3002\u8bf7\u4e0d\u8981\u628a\u5b83\u653e\u8fdb\u4e0a\u4e00\u5757\u4e8b\u4ef6\u79ef\u6728\u91cc\u3002",
-                "messageEn": "Click the Events category in the block toolbox on the left, find the block labeled \"While this node is active,\" and drag it to a separate empty spot in the editor. It repeatedly runs its actions while the flow remains in this node. Do not place it inside the previous event block.",
-                "suggestion": "\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u548c\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u90fd\u5728\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\u4e2d\uff0c\u4f46\u5b83\u4eec\u8981\u5206\u5f00\u653e\u5728\u7f16\u8f91\u533a\u91cc\u3002",
-                "suggestionEn": "Both entry and continuous node blocks are in Events, but they must remain separate in the editor.",
+                "message": "\u67e5\u627e\u4f4d\u7f6e\uff1a\u5de6\u4fa7\u79ef\u6728\u680f \u2192 \u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\u3002\u627e\u5230\u5199\u7740\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u7684\u53e6\u4e00\u5757\u7a7a\u767d\u4f4d\u7f6e\u3002\u5b83\u8868\u793a\u53ea\u8981\u6d41\u7a0b\u8fd8\u505c\u7559\u5728\u8fd9\u4e2a\u8282\u70b9\uff0c\u653e\u5728\u91cc\u9762\u7684\u52a8\u4f5c\u5c31\u4f1a\u4e0d\u65ad\u6267\u884c\u3002",
+                "messageEn": "Where to find it: left block toolbox > Events category. Find the block labeled \"While this node is active\" and drag it to a separate empty area of the node editor. The actions inside it repeat for as long as the flow remains in this node.",
+                "suggestion": "\u8fd9\u5757\u79ef\u6728\u8981\u548c\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u5e76\u6392\u653e\u5728\u7f16\u8f91\u533a\u91cc\uff0c\u4e0d\u8981\u628a\u5b83\u585e\u8fdb\u4e0a\u4e00\u5757\u4e8b\u4ef6\u79ef\u6728\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\u3002",
+                "suggestionEn": "Place this block beside \"When entering this node\" in the editor. Do not put it inside the previous event block's Execute slot.",
                 "completionCriteria": "\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e86\u4e00\u5757\u72ec\u7acb\u7684\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728\u3002",
                 "completionCriteriaEn": "The Custom node contains a separate \"While this node is active\" block.",
                 "guidanceIntent": "add_while_active"
@@ -842,10 +842,10 @@ class CabbageContextService:
                 "order": 27,
                 "title": "\u4ece\u201c\u8fd0\u52a8\u201d\u7c7b\u6dfb\u52a0\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728",
                 "titleEn": "Add Continuous Movement from Motion",
-                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u70b9\u51fb\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8ba9\u5bf9\u8c61\u2026\u6301\u7eed\u79fb\u52a8\uff0c\u65b9\u5411\u2026\u901f\u5ea6\u2026\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002",
-                "messageEn": "Click the Motion category in the block toolbox on the left. Find the block labeled \"Move object ... continuously, Direction ... Speed ...\" and drag it into the Execute slot under \"While this node is active\" until it snaps in.",
-                "suggestion": "\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u91cc\u6709\u591a\u4e2a\u79fb\u52a8\u79ef\u6728\uff0c\u8bf7\u9009\u62e9\u8868\u9762\u540c\u65f6\u5e26\u6709\u201c\u6301\u7eed\u79fb\u52a8\u201d\u3001\u201c\u65b9\u5411\u201d\u548c\u201c\u901f\u5ea6\u201d\u7684\u90a3\u4e00\u5757\u3002",
-                "suggestionEn": "Motion contains several movement blocks. Choose the one whose face includes \"continuously,\" \"Direction,\" and \"Speed.\"",
+                "message": "\u67e5\u627e\u4f4d\u7f6e\uff1a\u5de6\u4fa7\u79ef\u6728\u680f \u2192 \u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u3002\u5728\u8fd9\u4e2a\u5206\u7c7b\u4e2d\uff0c\u627e\u5230\u8868\u9762\u540c\u65f6\u5e26\u6709\u201c\u6301\u7eed\u79fb\u52a8\u201d\u3001\u201c\u65b9\u5411\u201d\u548c\u201c\u901f\u5ea6\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u5230\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002",
+                "messageEn": "Where to find it: left block toolbox > Motion category. Find the block whose face contains \"continuously,\" \"Direction,\" and \"Speed.\" Drag it into the Execute slot under \"While this node is active\" until it snaps in.",
+                "suggestion": "\u4e0d\u8981\u9009\u53ea\u6709 X\u3001Y\u3001Z \u7684\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u3002\u8fd9\u4e00\u6b65\u8981\u9009\u80fd\u586b\u5199\u79fb\u52a8\u65b9\u5411\u548c\u901f\u5ea6\u7684\u90a3\u4e00\u5757\u3002",
+                "suggestionEn": "Do not choose the Set Object Position block with only X, Y, and Z values. Choose the block that lets you set both movement direction and speed.",
                 "completionCriteria": "\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728\u5df2\u8fde\u63a5\u5728\u6301\u7eed\u4e8b\u4ef6\u91cc\u3002",
                 "completionCriteriaEn": "The continuous movement block is attached inside the continuous event.",
                 "guidanceIntent": "add_move_direction"
@@ -1201,6 +1201,20 @@ class CabbageContextService:
     def _ensure_tutorial_slots_locked(cls, context: dict[str, Any], now: int) -> None:
         """Keep exactly one basic tutorial task active and all later steps queued."""
         templates = cls._tutorial_templates()
+        # Tutorial copy evolves as the editor UI changes. Refresh current-version history
+        # entries too, so completed steps show the same clearer copy as active steps while
+        # preserving completion timestamps and other runtime-only fields. Retired tutorial
+        # entries intentionally keep their original text under the legacy history group.
+        for raw in context.get("taskHistory") or []:
+            if not isinstance(raw, dict) or raw.get("type") != "tutorial":
+                continue
+            template = templates.get(str(raw.get("taskKey") or ""))
+            if not template:
+                continue
+            raw.update(template)
+            raw.pop("track", None)
+            raw.pop("discipline", None)
+
         history_keys = {
             str(task.get("taskKey") or "")
             for task in context.get("taskHistory") or []

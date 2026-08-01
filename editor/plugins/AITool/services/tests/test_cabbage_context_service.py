@@ -274,6 +274,78 @@ class CabbageContextServiceTests(unittest.TestCase):
                 self.assertNotIn("track", task)
                 self.assertNotIn("discipline", task)
 
+    def test_block_add_tasks_name_the_visible_toolbox_category(self):
+        tutorials = {
+            task["taskKey"]: task
+            for task in self.tutorial_tasks(self.service.load()["context"])
+        }
+        expected_categories = {
+            "tutorial.basics.add_when_enter": ("\u4e8b\u4ef6", "Events"),
+            "tutorial.basics.add_set_position": ("\u8fd0\u52a8", "Motion"),
+            "tutorial.basics.add_while_active": ("\u4e8b\u4ef6", "Events"),
+            "tutorial.basics.add_move_direction": ("\u8fd0\u52a8", "Motion"),
+        }
+        for task_key, (category_zh, category_en) in expected_categories.items():
+            with self.subTest(task=task_key):
+                task = tutorials[task_key]
+                self.assertIn("\u67e5\u627e\u4f4d\u7f6e", task["message"])
+                self.assertIn(f"\u201c{category_zh}\u201d\u5206\u7c7b", task["message"])
+                self.assertIn("left block toolbox >", task["messageEn"])
+                self.assertIn(f"{category_en} category", task["messageEn"])
+                self.assertIn(category_zh, task["title"])
+                self.assertIn(category_en, task["titleEn"])
+
+    def test_current_tutorial_copy_refreshes_active_and_completed_tasks(self):
+        context = self.service._default_context(self.world)
+        active = next(
+            task for task in context["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.add_when_enter"
+        )
+        active.update({
+            "title": "stale active title",
+            "message": "stale active message",
+            "track": "programming",
+        })
+
+        completed_at = self.service._now_ms() - 5000
+        history = next(
+            dict(task) for task in context["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.add_set_position"
+        )
+        history.update({
+            "title": "stale history title",
+            "message": "stale history message",
+            "status": "completed",
+            "completedAt": completed_at,
+            "updatedAt": completed_at,
+            "track": "art",
+            "discipline": "art",
+            "historyOnlyMarker": "keep-me",
+        })
+        context["taskHistory"].append(history)
+        self.service._write_locked(self.world, context)
+
+        refreshed = self.service.load()["context"]
+        refreshed_active = next(
+            task for task in refreshed["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.add_when_enter"
+        )
+        refreshed_history = self.history_task(
+            refreshed, "tutorial.basics.add_set_position",
+        )
+
+        self.assertIn("\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b", refreshed_active["message"])
+        self.assertNotEqual("stale active title", refreshed_active["title"])
+        self.assertNotIn("track", refreshed_active)
+        self.assertIsNotNone(refreshed_history)
+        self.assertIn("\u201c\u8fd0\u52a8\u201d\u5206\u7c7b", refreshed_history["message"])
+        self.assertNotEqual("stale history title", refreshed_history["title"])
+        self.assertEqual("completed", refreshed_history["status"])
+        self.assertEqual(completed_at, refreshed_history["completedAt"])
+        self.assertEqual("keep-me", refreshed_history["historyOnlyMarker"])
+        self.assertNotIn("track", refreshed_history)
+        self.assertNotIn("discipline", refreshed_history)
+
     def test_only_current_step_can_complete_and_camera_requires_actual_change(self):
         early = self.record("model_imported", {"actorId": "too-early"})
         self.assertEqual([], early["completedTaskKeys"])
