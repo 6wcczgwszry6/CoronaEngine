@@ -440,13 +440,6 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
       ),
     ] };
   },
-  choose_select_tool: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
-    source,
-    { kind: 'selector', selectorKey: 'node-select-mode' },
-    'click',
-    String(source.message || ''),
-    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
-  )] }),
   create_custom_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     { kind: 'selector', selectorKey: 'node-canvas' },
@@ -483,20 +476,22 @@ const BASICS_TUTORIAL_GUIDANCE = Object.freeze({
       preferFallbackText: true,
     }
   )] }),
-  choose_clear_tool: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
-    source,
-    { kind: 'selector', selectorKey: 'node-delete-mode' },
-    'click',
-    String(source.message || ''),
-    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
-  )] }),
-  delete_practice_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
-    source,
-    targetFromBinding(source.bindings, 'deletePracticeNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
-    'click',
-    String(source.message || ''),
-    { fallbackEn: String(source.messageEn || ''), preferFallbackText: true }
-  )] }),
+  delete_practice_node: (source) => ({ panelId: 'NodeGraphPanel', steps: [
+    tutorialStep(
+      source,
+      { kind: 'selector', selectorKey: 'node-delete-mode' },
+      'click',
+      '先点击黄色高亮的“清除”按钮。',
+      { fallbackEn: 'First click the yellow-highlighted Clear button.', preferFallbackText: true },
+    ),
+    tutorialStep(
+      source,
+      targetFromBinding(source.bindings, 'deletePracticeNodeId', { kind: 'selector', selectorKey: 'node-canvas' }),
+      'click',
+      '再点击黄色高亮的临时练习节点，把它从画布中删除。',
+      { fallbackEn: 'Then click the yellow-highlighted temporary practice node to delete it from the canvas.', preferFallbackText: true },
+    ),
+  ] }),
   return_select_tool: (source) => ({ panelId: 'NodeGraphPanel', steps: [tutorialStep(
     source,
     { kind: 'selector', selectorKey: 'node-select-mode' },

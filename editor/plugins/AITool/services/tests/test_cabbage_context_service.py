@@ -123,9 +123,6 @@ class CabbageContextServiceTests(unittest.TestCase):
             ("tutorial.basics.confirm_start_node", "node_selected", {
                 "nodeId": "start-1", "nodeType": "start", "uniqueStart": True, "source": "user",
             }),
-            ("tutorial.basics.choose_select_tool", "node_tool_mode_changed", {
-                "mode": "select", "source": "user",
-            }),
             ("tutorial.basics.create_custom_node", "node_created", {
                 "nodeId": "custom-1", "nodeType": "custom",
             }),
@@ -137,9 +134,6 @@ class CabbageContextServiceTests(unittest.TestCase):
             }),
             ("tutorial.basics.create_delete_practice_node", "node_created", {
                 "nodeId": "delete-practice-1", "nodeType": "custom",
-            }),
-            ("tutorial.basics.choose_clear_tool", "node_tool_mode_changed", {
-                "mode": "delete", "source": "user",
             }),
             ("tutorial.basics.delete_practice_node", "node_deleted", {
                 "nodeId": "delete-practice-1", "nodeType": "custom", "mode": "delete", "source": "user",
@@ -229,26 +223,26 @@ class CabbageContextServiceTests(unittest.TestCase):
             self.assertEqual([expected_key], response["completedTaskKeys"])
         return response
 
-    def test_new_world_uses_schema_v2_with_four_chapters_and_41_steps(self):
+    def test_new_world_uses_schema_v2_with_four_chapters_and_39_steps(self):
         response = self.service.load()
         self.assertTrue(response["success"])
         context = response["context"]
         tutorials = self.tutorial_tasks(context)
 
         self.assertEqual(2, context["schemaVersion"])
-        self.assertEqual(41, len(tutorials))
+        self.assertEqual(39, len(tutorials))
         self.assertEqual(
             ["chapter_viewport", "chapter_scene", "chapter_nodes", "chapter_ai"],
             list(dict.fromkeys(task["chapterKey"] for task in tutorials)),
         )
         self.assertEqual(
-            {"chapter_viewport": 6, "chapter_scene": 9, "chapter_nodes": 22, "chapter_ai": 4},
+            {"chapter_viewport": 6, "chapter_scene": 9, "chapter_nodes": 20, "chapter_ai": 4},
             {
                 chapter_key: sum(task["chapterKey"] == chapter_key for task in tutorials)
                 for chapter_key in {task["chapterKey"] for task in tutorials}
             },
         )
-        self.assertEqual(list(range(1, 42)), [task["globalOrder"] for task in tutorials])
+        self.assertEqual(list(range(1, 40)), [task["globalOrder"] for task in tutorials])
         self.assertTrue(all(task["taskKey"].startswith("tutorial.basics.") for task in tutorials))
         self.assertEqual("tutorial.basics.viewport_focus", self.active_tutorial(context)["taskKey"])
         self.assertTrue(all(
@@ -268,7 +262,7 @@ class CabbageContextServiceTests(unittest.TestCase):
             "object_move_direction", "control_wait", "logic_boolean", "run_succeeded",
             "SetPhysicsEnabled", "SECONDS", "DIRECTION", "SPEED",
         )
-        self.assertEqual(41, len(CabbageContextService.TUTORIAL_TASKS))
+        self.assertEqual(39, len(CabbageContextService.TUTORIAL_TASKS))
         for task in tutorials:
             with self.subTest(task=task["taskKey"]):
                 for field in visible_fields:
@@ -362,19 +356,9 @@ class CabbageContextServiceTests(unittest.TestCase):
     def test_node_and_block_steps_require_bound_entities_and_connections(self):
         response = self.complete_tutorial_steps(17)
         self.assertEqual(
-            "tutorial.basics.choose_select_tool",
+            "tutorial.basics.create_custom_node",
             self.active_tutorial(response["context"])["taskKey"],
         )
-
-        for details in (
-            {"mode": "select", "source": "guidance"},
-            {"mode": "select", "source": "system"},
-            {"mode": "delete", "source": "user"},
-        ):
-            self.assertEqual([], self.record("node_tool_mode_changed", details)["completedTaskKeys"])
-        self.assertEqual(["tutorial.basics.choose_select_tool"], self.record(
-            "node_tool_mode_changed", {"mode": "select", "source": "user"},
-        )["completedTaskKeys"])
 
         created = self.record("node_created", {"nodeId": "custom-1", "nodeType": "custom"})
         self.assertEqual(["tutorial.basics.create_custom_node"], created["completedTaskKeys"])
@@ -417,13 +401,6 @@ class CabbageContextServiceTests(unittest.TestCase):
             "delete-practice-1",
             created_delete_node["context"]["tutorialSession"]["bindings"]["deletePracticeNodeId"],
         )
-
-        self.assertEqual([], self.record("node_tool_mode_changed", {
-            "mode": "delete", "source": "guidance",
-        })["completedTaskKeys"])
-        self.assertEqual(["tutorial.basics.choose_clear_tool"], self.record(
-            "node_tool_mode_changed", {"mode": "delete", "source": "user"},
-        )["completedTaskKeys"])
 
         for details in (
             {"nodeId": "custom-1", "mode": "delete", "source": "user"},
@@ -593,14 +570,6 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertEqual(["tutorial.basics.confirm_start_node"], completed["completedTaskKeys"])
         self.assertFalse(completed["context"]["tutorialSession"]["bindings"]["startNodeCreatedByTutorial"])
 
-        self.assertEqual([], self.record("tutorial_node_state_observed", {
-            "observedTaskKey": "tutorial.basics.choose_select_tool",
-            "mode": "select", "source": "state_observation",
-        })["completedTaskKeys"])
-        self.assertEqual(["tutorial.basics.choose_select_tool"], self.record(
-            "node_tool_mode_changed", {"mode": "select", "source": "user"},
-        )["completedTaskKeys"])
-
         completed = self.record("tutorial_node_state_observed", {
             "observedTaskKey": "tutorial.basics.create_custom_node",
             "source": "state_observation", "nodeId": "custom-1", "nodeType": "custom",
@@ -626,9 +595,6 @@ class CabbageContextServiceTests(unittest.TestCase):
 
         self.assertEqual(["tutorial.basics.create_delete_practice_node"], self.record(
             "node_created", {"nodeId": "delete-practice-1", "nodeType": "custom"},
-        )["completedTaskKeys"])
-        self.assertEqual(["tutorial.basics.choose_clear_tool"], self.record(
-            "node_tool_mode_changed", {"mode": "delete", "source": "user"},
         )["completedTaskKeys"])
         self.assertEqual(["tutorial.basics.delete_practice_node"], self.record("node_deleted", {
             "nodeId": "delete-practice-1", "mode": "delete", "source": "user",
@@ -729,7 +695,7 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertEqual("existing-start", baseline["nodeGraph"]["selectedId"])
 
     def test_run_and_ai_completion_keeps_tutorial_content_and_never_restores(self):
-        response = self.complete_tutorial_steps(36)
+        response = self.complete_tutorial_steps(34)
         self.assertEqual("tutorial.basics.run_graph", self.active_tutorial(response["context"])["taskKey"])
         self.assertEqual([], self.record("run_started")["completedTaskKeys"])
         self.assertEqual([], self.record("run_succeeded")["completedTaskKeys"])
@@ -744,7 +710,7 @@ class CabbageContextServiceTests(unittest.TestCase):
             "tutorial.basics.focus_ai_composer",
             self.active_tutorial(after_run["context"])["taskKey"],
         )
-        self.assertEqual(37, len([
+        self.assertEqual(35, len([
             task for task in after_run["context"]["taskHistory"]
             if task.get("taskKey", "").startswith("tutorial.basics.")
         ]))
@@ -797,7 +763,7 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertEqual({}, session["baseline"])
         self.assertEqual([], session["modificationLog"])
         self.assertEqual([], self.tutorial_tasks(finished["context"]))
-        self.assertEqual(41, len([
+        self.assertEqual(39, len([
             task for task in finished["context"]["taskHistory"]
             if task.get("taskKey", "").startswith("tutorial.basics.")
         ]))
@@ -820,8 +786,8 @@ class CabbageContextServiceTests(unittest.TestCase):
         dismissed = self.record("tutorial_completion_notice_dismissed")
         self.assertEqual(0, dismissed["context"]["tutorialSession"]["completionNoticeExpiresAt"])
 
-    def test_full_41_step_sequence_preserves_chapter_history_and_bindings(self):
-        response = self.complete_tutorial_steps(41)
+    def test_full_39_step_sequence_preserves_chapter_history_and_bindings(self):
+        response = self.complete_tutorial_steps(39)
         context = response["context"]
         history = [
             task for task in context["taskHistory"]
@@ -871,6 +837,14 @@ class CabbageContextServiceTests(unittest.TestCase):
             "createdAt": 1,
             "updatedAt": 1,
         })
+        context["activeTasks"].append({
+            "taskKey": "tutorial.basics.choose_select_tool",
+            "type": "tutorial",
+            "chapterKey": "chapter_nodes",
+            "status": "queued",
+            "createdAt": 1,
+            "updatedAt": 1,
+        })
         context["taskHistory"].append({
             "taskKey": "tutorial.create_node",
             "type": "tutorial",
@@ -884,6 +858,7 @@ class CabbageContextServiceTests(unittest.TestCase):
         loaded = self.service.load()["context"]
         self.assertNotIn("tutorial.rotate_model", self.active_task_keys(loaded))
         self.assertNotIn("tutorial.basics.start_preview", self.active_task_keys(loaded))
+        self.assertNotIn("tutorial.basics.choose_select_tool", self.active_task_keys(loaded))
         self.assertIsNotNone(self.history_task(loaded, "tutorial.create_node"))
         migrated = next(
             task for task in loaded["activeTasks"]

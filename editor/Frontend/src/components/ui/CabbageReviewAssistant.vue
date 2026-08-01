@@ -179,11 +179,11 @@ const props = defineProps({
   resident: { type: Boolean, default: false },
 });
 
-const TUTORIAL_TOTAL = 41;
+const TUTORIAL_TOTAL = 39;
 const CHAPTER_TOTALS = Object.freeze({
   chapter_viewport: 6,
   chapter_scene: 9,
-  chapter_nodes: 22,
+  chapter_nodes: 20,
   chapter_ai: 4,
 });
 const REMOVED_TUTORIAL_TASK_KEYS = new Set([
@@ -193,6 +193,8 @@ const REMOVED_TUTORIAL_TASK_KEYS = new Set([
   'tutorial.basics.set_wait_seconds',
   'tutorial.basics.select_edge',
   'tutorial.basics.add_true_condition',
+  'tutorial.basics.choose_select_tool',
+  'tutorial.basics.choose_clear_tool',
 ]);
 const NOTICE_FADE_MS = 650;
 const { t, locale } = useI18n();

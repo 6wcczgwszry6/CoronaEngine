@@ -543,28 +543,6 @@ class CabbageContextService:
                 "guidanceIntent": "confirm_start_node"
         },
         {
-                "taskKey": "tutorial.basics.choose_select_tool",
-                "type": "tutorial",
-                "chapterKey": "chapter_nodes",
-                "chapterOrder": 3,
-                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
-                "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
-                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
-                "chapterTaskOrder": 0,
-                "globalOrder": 0,
-                "order": 0,
-                "title": "\u5207\u6362\u5230\u201c\u9009\u62e9\u201d\u5de5\u5177",
-                "titleEn": "Switch to the Select Tool",
-                "message": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u9876\u90e8\u7684\u201c\u9009\u62e9\u201d\u6309\u94ae\u3002\u8fd9\u4e2a\u5de5\u5177\u7528\u6765\u9009\u4e2d\u8282\u70b9\uff0c\u4e5f\u53ea\u6709\u5728\u201c\u9009\u62e9\u201d\u6a21\u5f0f\u4e0b\u624d\u80fd\u62d6\u52a8\u8282\u70b9\u3002\u5373\u4f7f\u6309\u94ae\u5df2\u7ecf\u4eae\u8d77\uff0c\u4e5f\u8bf7\u4eb2\u81ea\u70b9\u51fb\u4e00\u6b21\u3002",
-                "messageEn": "Click Select at the top of the node window. This tool lets you select nodes and is required before you can drag them. Click it yourself even if it is already highlighted.",
-                "suggestion": "\u70b9\u51fb\u540e\u201c\u9009\u62e9\u201d\u6309\u94ae\u4f1a\u4fdd\u6301\u9ad8\u4eae\u3002",
-                "suggestionEn": "The Select button remains highlighted after you click it.",
-                "completionCriteria": "\u68c0\u6d4b\u5230\u4f60\u4eb2\u81ea\u70b9\u51fb\u4e86\u201c\u9009\u62e9\u201d\u6309\u94ae\u3002",
-                "completionCriteriaEn": "The editor detects that you clicked Select yourself.",
-                "guidanceIntent": "choose_select_tool"
-        },
-        {
                 "taskKey": "tutorial.basics.create_custom_node",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
@@ -653,28 +631,6 @@ class CabbageContextService:
                 "guidanceIntent": "create_delete_practice_node"
         },
         {
-                "taskKey": "tutorial.basics.choose_clear_tool",
-                "type": "tutorial",
-                "chapterKey": "chapter_nodes",
-                "chapterOrder": 3,
-                "chapterTitle": "\u7b2c\u4e09\u7ae0\uff1a\u8ba9\u4e16\u754c\u52a8\u8d77\u6765",
-                "chapterTitleEn": "Chapter 3: Bring the World to Life",
-                "chapterSummary": "\u8ba9\u7b2c\u4e8c\u7ae0\u5bfc\u5165\u7684\u6a21\u578b\u5148\u8df3\u5230\u8d77\u70b9\uff0c\u518d\u6301\u7eed\u5411\u53f3\u79fb\u52a8\uff0c\u4eb2\u773c\u770b\u5230\u8282\u70b9\u548c\u5f69\u8272\u79ef\u6728\u5e26\u6765\u7684\u6548\u679c\u3002",
-                "chapterSummaryEn": "Make the model imported in Chapter 2 jump to a starting point and then keep moving right, so you can see the node logic working.",
-                "chapterTaskOrder": 0,
-                "globalOrder": 0,
-                "order": 0,
-                "title": "\u5207\u6362\u5230\u201c\u6e05\u9664\u201d\u5de5\u5177",
-                "titleEn": "Switch to the Clear Tool",
-                "message": "\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u9876\u90e8\u7684\u201c\u6e05\u9664\u201d\u6309\u94ae\u3002\u6309\u94ae\u4eae\u8d77\u540e\uff0c\u4f60\u63a5\u4e0b\u6765\u70b9\u51fb\u7684\u8282\u70b9\u4f1a\u88ab\u76f4\u63a5\u5220\u9664\uff0c\u800c\u4e0d\u662f\u88ab\u9009\u4e2d\u3002",
-                "messageEn": "Click Clear at the top of the node window. While it is highlighted, clicking a node deletes it instead of selecting it.",
-                "suggestion": "\u5148\u53ea\u5207\u6362\u5de5\u5177\uff0c\u4e0d\u8981\u70b9\u51fb\u5f00\u59cb\u8282\u70b9\u6216\u524d\u9762\u5df2\u7f16\u8f91\u7684\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
-                "suggestionEn": "Switch tools first. Do not click the Start node or the Custom node you already edited.",
-                "completionCriteria": "\u68c0\u6d4b\u5230\u4f60\u4eb2\u81ea\u70b9\u51fb\u4e86\u201c\u6e05\u9664\u201d\u6309\u94ae\u3002",
-                "completionCriteriaEn": "The editor detects that you clicked Clear yourself.",
-                "guidanceIntent": "choose_clear_tool"
-        },
-        {
                 "taskKey": "tutorial.basics.delete_practice_node",
                 "type": "tutorial",
                 "chapterKey": "chapter_nodes",
@@ -688,8 +644,8 @@ class CabbageContextService:
                 "order": 0,
                 "title": "\u7528\u201c\u6e05\u9664\u201d\u5de5\u5177\u5220\u9664\u7ec3\u4e60\u8282\u70b9",
                 "titleEn": "Delete the Practice Node",
-                "message": "\u4fdd\u6301\u201c\u6e05\u9664\u201d\u6309\u94ae\u9ad8\u4eae\uff0c\u7136\u540e\u70b9\u51fb\u521a\u521a\u65b0\u589e\u7684\u4e34\u65f6\u81ea\u5b9a\u4e49\u8282\u70b9\u3002\u5b83\u5e94\u8be5\u4ece\u753b\u5e03\u4e2d\u76f4\u63a5\u6d88\u5931\u3002",
-                "messageEn": "Keep Clear highlighted, then click the temporary Custom node you just added. It should disappear from the canvas immediately.",
+                "message": "\u5148\u70b9\u51fb\u8282\u70b9\u7a97\u53e3\u9876\u90e8\u7684\u201c\u6e05\u9664\u201d\u6309\u94ae\uff0c\u518d\u70b9\u51fb\u521a\u521a\u65b0\u589e\u7684\u4e34\u65f6\u81ea\u5b9a\u4e49\u8282\u70b9\u3002\u5b83\u5e94\u8be5\u4ece\u753b\u5e03\u4e2d\u76f4\u63a5\u6d88\u5931\u3002",
+                "messageEn": "Click Clear at the top of the node window, then click the temporary Custom node you just added. It should disappear from the canvas immediately.",
                 "suggestion": "\u64cd\u4f5c\u5c55\u793a\u4f1a\u9ad8\u4eae\u6b63\u786e\u7684\u4e34\u65f6\u8282\u70b9\u3002\u4e0d\u8981\u5220\u9664\u5f00\u59cb\u8282\u70b9\u6216\u7b2c\u4e00\u4e2a\u81ea\u5b9a\u4e49\u8282\u70b9\u3002",
                 "suggestionEn": "The operation guide highlights the correct temporary node. Do not delete Start or the first Custom node.",
                 "completionCriteria": "\u6559\u7a0b\u8bb0\u4f4f\u7684\u4e34\u65f6\u7ec3\u4e60\u8282\u70b9\u5df2\u88ab\u5220\u9664\u3002",
@@ -774,12 +730,12 @@ class CabbageContextService:
                 "chapterTaskOrder": 7,
                 "globalOrder": 22,
                 "order": 22,
-                "title": "\u653e\u5165\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728",
-                "titleEn": "Add the Entry Event Block",
-                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u5217\u8868\u4e2d\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7684\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u3002\u8fd9\u5757\u79ef\u6728\u8868\u793a\uff1a\u5f53\u6d41\u7a0b\u8fdb\u5165\u8fd9\u4e2a\u81ea\u5b9a\u4e49\u8282\u70b9\u65f6\uff0c\u91cc\u9762\u7684\u52a8\u4f5c\u53ea\u6267\u884c\u4e00\u6b21\u3002",
-                "messageEn": "Find the block labeled \"When entering this node\" in the block list and drag it into the node editor on the right. Actions placed inside it run once when the flow enters this Custom node.",
-                "suggestion": "\u5148\u53ea\u653e\u8fd9\u4e00\u5757\uff0c\u4e0d\u8981\u653e\u5230\u8fde\u7ebf\u6761\u4ef6\u533a\u3002",
-                "suggestionEn": "Place only this block for now, and make sure it is in the node editor rather than the connection-condition editor.",
+                "title": "\u5728\u201c\u4e8b\u4ef6\u201d\u7c7b\u4e2d\u653e\u5165\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728",
+                "titleEn": "Add the Entry Block from Events",
+                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u5148\u70b9\u51fb\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\uff0c\u518d\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7684\u8282\u70b9\u5185\u90e8\u7f16\u8f91\u533a\u3002\u201c\u4e8b\u4ef6\u201d\u7c7b\u79ef\u6728\u7528\u6765\u544a\u8bc9\u8282\u70b9\u4ec0\u4e48\u65f6\u5019\u5f00\u59cb\u505a\u4e8b\uff1b\u8fd9\u4e00\u5757\u8868\u793a\u6d41\u7a0b\u521a\u8fdb\u5165\u8be5\u8282\u70b9\u65f6\uff0c\u91cc\u9762\u7684\u52a8\u4f5c\u6267\u884c\u4e00\u6b21\u3002",
+                "messageEn": "In the block toolbox on the left, click the Events category, find the block labeled \"When entering this node,\" and drag it into the node editor on the right. Event blocks tell the node when to act; this one runs its actions once when the flow enters the node.",
+                "suggestion": "\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\u5728\u5de6\u4fa7\u5206\u7c7b\u5217\u4e2d\u3002\u5148\u53ea\u653e\u8fd9\u4e00\u5757\uff0c\u4e0d\u8981\u628a\u5b83\u653e\u5230\u8fde\u7ebf\u6761\u4ef6\u533a\u3002",
+                "suggestionEn": "Events is in the category list on the left. Place only this block for now, and make sure it is in the node editor rather than the connection-condition editor.",
                 "completionCriteria": "\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e86\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u79ef\u6728\u3002",
                 "completionCriteriaEn": "The Custom node contains the \"When entering this node\" block.",
                 "guidanceIntent": "add_when_enter"
@@ -796,12 +752,12 @@ class CabbageContextService:
                 "chapterTaskOrder": 8,
                 "globalOrder": 23,
                 "order": 23,
-                "title": "\u628a\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u63a5\u5230\u8fdb\u5165\u52a8\u4f5c\u91cc",
-                "titleEn": "Attach the Set Object Position Block",
-                "message": "\u5728\u5de6\u4fa7\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8bbe\u7f6e\u5bf9\u8c61\u2026\u4f4d\u7f6e X\u2026Y\u2026Z\u2026\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u4e24\u5757\u79ef\u6728\u81ea\u52a8\u54ac\u5408\u3002\u8fd9\u4e2a\u52a8\u4f5c\u4f1a\u5728\u8282\u70b9\u521a\u5f00\u59cb\u65f6\u628a\u6a21\u578b\u9001\u5230\u56fa\u5b9a\u8d77\u70b9\u3002",
-                "messageEn": "Find the block that reads \"Set object ... Position X ... Y ... Z ...\" and drag it into the Execute slot under \"When entering this node\" until the blocks snap together. This will place the model at a clear starting point when the node begins.",
-                "suggestion": "\u5982\u679c\u79ef\u6728\u8fd8\u80fd\u5355\u72ec\u6d6e\u52a8\uff0c\u5c31\u8bf4\u660e\u8fd8\u6ca1\u63a5\u4e0a\uff1b\u7ee7\u7eed\u9760\u8fd1\u201c\u6267\u884c\u201d\u51f9\u69fd\u3002",
-                "suggestionEn": "If the block still floats by itself, it is not attached. Move it closer to the Execute slot until it snaps in.",
+                "title": "\u4ece\u201c\u8fd0\u52a8\u201d\u7c7b\u6dfb\u52a0\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728",
+                "titleEn": "Add Set Object Position from Motion",
+                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u70b9\u51fb\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8bbe\u7f6e\u5bf9\u8c61\u2026\u4f4d\u7f6e X\u2026Y\u2026Z\u2026\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u4e24\u5757\u79ef\u6728\u81ea\u52a8\u54ac\u5408\u3002\u8fd9\u4e2a\u52a8\u4f5c\u4f1a\u5728\u8282\u70b9\u521a\u5f00\u59cb\u65f6\u628a\u6a21\u578b\u9001\u5230\u56fa\u5b9a\u8d77\u70b9\u3002",
+                "messageEn": "Click the Motion category in the block toolbox on the left. Find the block labeled \"Set object ... Position X ... Y ... Z ...\" and drag it into the Execute slot under \"When entering this node\" until the blocks snap together. This places the model at a clear starting point when the node begins.",
+                "suggestion": "\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u91cc\u8fd8\u6709\u5f88\u591a\u79fb\u52a8\u79ef\u6728\uff0c\u8bf7\u6839\u636e\u79ef\u6728\u8868\u9762\u7684\u201c\u8bbe\u7f6e\u5bf9\u8c61\u201d\u548c\u201c\u4f4d\u7f6e X / Y / Z\u201d\u6587\u5b57\u8fa8\u8ba4\u3002\u5982\u679c\u79ef\u6728\u8fd8\u80fd\u5355\u72ec\u6d6e\u52a8\uff0c\u5c31\u7ee7\u7eed\u9760\u8fd1\u201c\u6267\u884c\u201d\u51f9\u69fd\u3002",
+                "suggestionEn": "Motion contains many movement blocks, so identify this one by the words \"Set object\" and \"Position X / Y / Z\" on its face. If it still floats by itself, move it closer to the Execute slot until it snaps in.",
                 "completionCriteria": "\u201c\u8bbe\u7f6e\u5bf9\u8c61\u4f4d\u7f6e\u201d\u79ef\u6728\u5df2\u8fde\u63a5\u5728\u8fdb\u5165\u52a8\u4f5c\u91cc\u3002",
                 "completionCriteriaEn": "The Set Object Position block is attached inside the entry event.",
                 "guidanceIntent": "add_set_position"
@@ -862,12 +818,12 @@ class CabbageContextService:
                 "chapterTaskOrder": 11,
                 "globalOrder": 26,
                 "order": 26,
-                "title": "\u653e\u5165\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728",
-                "titleEn": "Add the Continuous Node Event Block",
-                "message": "\u518d\u4ece\u5de6\u4fa7\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u53f3\u4fa7\u7f16\u8f91\u533a\u7684\u53e6\u4e00\u5757\u7a7a\u767d\u4f4d\u7f6e\uff0c\u8ba9\u5b83\u4f5c\u4e3a\u4e00\u5757\u72ec\u7acb\u7684\u9876\u5c42\u79ef\u6728\u3002\u653e\u5728\u5b83\u91cc\u9762\u7684\u52a8\u4f5c\u4f1a\u5728\u8282\u70b9\u6301\u7eed\u671f\u95f4\u53cd\u590d\u6267\u884c\u3002",
-                "messageEn": "Find the block labeled \"While this node is active\" and drag it to a separate empty spot in the editor as another top-level block. Actions inside it repeat while the node remains active.",
-                "suggestion": "\u4e0d\u8981\u628a\u5b83\u585e\u8fdb\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u91cc\uff1b\u4e24\u5757\u4e8b\u4ef6\u79ef\u6728\u8981\u5e76\u6392\u653e\u7f6e\u3002",
-                "suggestionEn": "Do not put it inside the entry event. Keep the two event blocks separate and side by side.",
+                "title": "\u5728\u201c\u4e8b\u4ef6\u201d\u7c7b\u4e2d\u653e\u5165\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728",
+                "titleEn": "Add the Continuous Event Block from Events",
+                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u70b9\u51fb\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u5230\u7f16\u8f91\u533a\u7684\u53e6\u4e00\u5757\u7a7a\u767d\u4f4d\u7f6e\u3002\u8fd9\u5757\u79ef\u6728\u8868\u793a\uff1a\u53ea\u8981\u6d41\u7a0b\u8fd8\u505c\u7559\u5728\u8fd9\u4e2a\u8282\u70b9\uff0c\u91cc\u9762\u7684\u52a8\u4f5c\u5c31\u4f1a\u4e0d\u65ad\u6267\u884c\u3002\u8bf7\u4e0d\u8981\u628a\u5b83\u653e\u8fdb\u4e0a\u4e00\u5757\u4e8b\u4ef6\u79ef\u6728\u91cc\u3002",
+                "messageEn": "Click the Events category in the block toolbox on the left, find the block labeled \"While this node is active,\" and drag it to a separate empty spot in the editor. It repeatedly runs its actions while the flow remains in this node. Do not place it inside the previous event block.",
+                "suggestion": "\u201c\u5f53\u8fdb\u5165\u5f53\u524d\u8282\u70b9\u65f6\u201d\u548c\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u90fd\u5728\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b\u4e2d\uff0c\u4f46\u5b83\u4eec\u8981\u5206\u5f00\u653e\u5728\u7f16\u8f91\u533a\u91cc\u3002",
+                "suggestionEn": "Both entry and continuous node blocks are in Events, but they must remain separate in the editor.",
                 "completionCriteria": "\u81ea\u5b9a\u4e49\u8282\u70b9\u5185\u51fa\u73b0\u4e86\u4e00\u5757\u72ec\u7acb\u7684\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u79ef\u6728\u3002",
                 "completionCriteriaEn": "The Custom node contains a separate \"While this node is active\" block.",
                 "guidanceIntent": "add_while_active"
@@ -884,12 +840,12 @@ class CabbageContextService:
                 "chapterTaskOrder": 12,
                 "globalOrder": 27,
                 "order": 27,
-                "title": "\u628a\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u63a5\u5230\u91cc\u9762",
-                "titleEn": "Attach the Continuous Movement Block",
-                "message": "\u5728\u5de6\u4fa7\u8fd0\u52a8\u7c7b\u79ef\u6728\u4e2d\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8ba9\u5bf9\u8c61\u2026\u6301\u7eed\u79fb\u52a8\uff0c\u65b9\u5411\u2026\u901f\u5ea6\u2026\u201d\u7684\u79ef\u6728\uff0c\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002",
-                "messageEn": "In the Motion blocks, find the block that reads \"Move object ... continuously, Direction ... Speed ...\" and drag it into the Execute slot under \"While this node is active\" until it snaps in.",
-                "suggestion": "\u8fd9\u5757\u79ef\u6728\u53ea\u6709\u653e\u5728\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u91cc\uff0c\u6a21\u578b\u624d\u4f1a\u4e0d\u65ad\u79fb\u52a8\u3002",
-                "suggestionEn": "The model moves continuously only when this block is attached inside the continuous node event.",
+                "title": "\u4ece\u201c\u8fd0\u52a8\u201d\u7c7b\u6dfb\u52a0\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728",
+                "titleEn": "Add Continuous Movement from Motion",
+                "message": "\u5728\u5de6\u4fa7\u79ef\u6728\u680f\u70b9\u51fb\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\uff0c\u627e\u5230\u8868\u9762\u5199\u7740\u201c\u8ba9\u5bf9\u8c61\u2026\u6301\u7eed\u79fb\u52a8\uff0c\u65b9\u5411\u2026\u901f\u5ea6\u2026\u201d\u7684\u79ef\u6728\u3002\u628a\u5b83\u62d6\u8fdb\u201c\u5f53\u524d\u8282\u70b9\u6301\u7eed\u65f6\u201d\u4e0b\u65b9\u7684\u201c\u6267\u884c\u201d\u7a7a\u4f4d\uff0c\u76f4\u5230\u81ea\u52a8\u54ac\u5408\u3002",
+                "messageEn": "Click the Motion category in the block toolbox on the left. Find the block labeled \"Move object ... continuously, Direction ... Speed ...\" and drag it into the Execute slot under \"While this node is active\" until it snaps in.",
+                "suggestion": "\u201c\u8fd0\u52a8\u201d\u5206\u7c7b\u91cc\u6709\u591a\u4e2a\u79fb\u52a8\u79ef\u6728\uff0c\u8bf7\u9009\u62e9\u8868\u9762\u540c\u65f6\u5e26\u6709\u201c\u6301\u7eed\u79fb\u52a8\u201d\u3001\u201c\u65b9\u5411\u201d\u548c\u201c\u901f\u5ea6\u201d\u7684\u90a3\u4e00\u5757\u3002",
+                "suggestionEn": "Motion contains several movement blocks. Choose the one whose face includes \"continuously,\" \"Direction,\" and \"Speed.\"",
                 "completionCriteria": "\u201c\u8ba9\u5bf9\u8c61\u6301\u7eed\u79fb\u52a8\u201d\u79ef\u6728\u5df2\u8fde\u63a5\u5728\u6301\u7eed\u4e8b\u4ef6\u91cc\u3002",
                 "completionCriteriaEn": "The continuous movement block is attached inside the continuous event.",
                 "guidanceIntent": "add_move_direction"
@@ -1071,8 +1027,8 @@ class CabbageContextService:
                 "guidanceIntent": "generate_with_ai"
         }
 ])
-    RETIRED_TUTORIAL_TASK_KEYS = {'tutorial.import_model', 'tutorial.transform_model', 'tutorial.adjust_lighting', 'tutorial.adjust_physics', 'tutorial.create_node', 'tutorial.move_node', 'tutorial.connect_nodes', 'tutorial.drag_block', 'tutorial.edit_block_parameter', 'tutorial.set_transition_condition', 'tutorial.run_node_graph', 'tutorial.rotate_model', 'tutorial.basics.start_preview', 'tutorial.basics.stop_preview', 'tutorial.basics.add_wait', 'tutorial.basics.set_wait_seconds', 'tutorial.basics.select_edge', 'tutorial.basics.add_true_condition'}
-    TUTORIAL_TOTAL_TASKS = 41
+    RETIRED_TUTORIAL_TASK_KEYS = {'tutorial.import_model', 'tutorial.transform_model', 'tutorial.adjust_lighting', 'tutorial.adjust_physics', 'tutorial.create_node', 'tutorial.move_node', 'tutorial.connect_nodes', 'tutorial.drag_block', 'tutorial.edit_block_parameter', 'tutorial.set_transition_condition', 'tutorial.run_node_graph', 'tutorial.rotate_model', 'tutorial.basics.start_preview', 'tutorial.basics.stop_preview', 'tutorial.basics.add_wait', 'tutorial.basics.set_wait_seconds', 'tutorial.basics.select_edge', 'tutorial.basics.add_true_condition', 'tutorial.basics.choose_select_tool', 'tutorial.basics.choose_clear_tool'}
+    TUTORIAL_TOTAL_TASKS = 39
     TUTORIAL_VALUE_TOLERANCE = 0.01
     TUTORIAL_ROTATION_TOLERANCE = 0.1
     def __init__(self) -> None:
@@ -1853,12 +1809,6 @@ class CabbageContextService:
                 bindings["startNodeCreatedByTutorial"] = created
                 if created:
                     cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="start")
-        elif task_key == "tutorial.basics.choose_select_tool":
-            matched = (
-                event_type == "node_tool_mode_changed"
-                and details.get("mode") == "select"
-                and details.get("source") == "user"
-            )
         elif task_key == "tutorial.basics.create_custom_node":
             matched = (event_type == "node_created" or state_observed) and str(details.get("nodeType") or "").lower() == "custom" and bool(node_id)
             if matched:
@@ -1891,12 +1841,6 @@ class CabbageContextService:
             if matched:
                 bindings["deletePracticeNodeId"] = node_id
                 cls._append_tutorial_modification(session, "node_created", event, nodeId=node_id, nodeType="custom")
-        elif task_key == "tutorial.basics.choose_clear_tool":
-            matched = (
-                event_type == "node_tool_mode_changed"
-                and details.get("mode") == "delete"
-                and details.get("source") == "user"
-            )
         elif task_key == "tutorial.basics.delete_practice_node":
             matched = (
                 event_type == "node_deleted"
