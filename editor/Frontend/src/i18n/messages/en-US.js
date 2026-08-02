@@ -536,7 +536,7 @@ export default {
     showcase: 'Show',
     stepCompletedAt: 'Completed at',
     suggestion: 'Suggestion',
-    title: 'Tasks & Suggestions',
+    title: 'Tasks And Hints',
   },
   cabbageGuidance: {
     complete: 'Done',
