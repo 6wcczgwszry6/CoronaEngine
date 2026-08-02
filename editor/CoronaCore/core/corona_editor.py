@@ -107,6 +107,20 @@ class CoronaEditor:
         return True
 
     @classmethod
+    def _warn_runtime_phase(cls, phase, elapsed_ms, threshold):
+        if elapsed_ms < threshold:
+            return
+        import time as _time
+        now = _time.monotonic()
+        last = cls._last_runtime_warning.get(phase, 0.0)
+        if now - last < 5.0:
+            return
+        logger.warning(
+            "python.lifecycle.overrun phase=%s elapsed_ms=%.2f state=%s",
+            phase, elapsed_ms, cls._runtime_state)
+        cls._last_runtime_warning[phase] = now
+
+    @classmethod
     def shutdown_runtime(cls):
         if cls._runtime_state == "stopped":
             return True
@@ -491,6 +505,7 @@ class CoronaEditor:
             return False
         cls.checkpoint()
         if not cls._scripts_initialized and cls.CoronaEngine is not None:
+            init_start = _time.perf_counter()
             try:
                 project_path = getattr(cls.CoronaEngine, 'active_project_path', None)
                 if not project_path:
@@ -512,10 +527,13 @@ class CoronaEditor:
                             logger.debug("ScriptsManager: 懒初始化完成，场景=%s", scene.name)
                         cls._scripts_initialized = True
             except Exception:
-                pass
+                logger.exception("ScriptsManager initialization failed")
+            cls._warn_runtime_phase(
+                "script_initialize", (_time.perf_counter() - init_start) * 1000.0, 500.0)
 
         cls.checkpoint()
         if cls.scripts_mgr is not None:
+            update_start = _time.perf_counter()
             try:
                 import time as _time
                 now = _time.perf_counter()
@@ -526,9 +544,12 @@ class CoronaEditor:
                 return False
             except Exception:
                 logger.exception("Script runtime update failed")
+            cls._warn_runtime_phase(
+                "script_update", (_time.perf_counter() - update_start) * 1000.0, 50.0)
 
         # ── Input 事件队列消费：CEF InputInject → 队列 → Python─ ─
         # 每帧批量消费积攒的键盘/鼠标注入事件，消除逐事件 cefQuery 开销
+        input_start = _time.perf_counter()
         try:
             import CoronaEngine
             events = CoronaEngine.drain_input_events()
@@ -545,16 +566,11 @@ class CoronaEditor:
             return False
         except Exception:
             logger.exception("Input event dispatch failed")
+        cls._warn_runtime_phase(
+            "input_dispatch", (_time.perf_counter() - input_start) * 1000.0, 50.0)
 
         elapsed_ms = (_time.perf_counter() - runtime_start) * 1000.0
-        if elapsed_ms >= 50.0:
-            now = _time.monotonic()
-            last = cls._last_runtime_warning.get("update", 0.0)
-            if now - last >= 5.0:
-                logger.warning(
-                    "python.lifecycle.overrun phase=update elapsed_ms=%.2f state=%s",
-                    elapsed_ms, cls._runtime_state)
-                cls._last_runtime_warning["update"] = now
+        cls._warn_runtime_phase("update", elapsed_ms, 50.0)
         return True
 
     @classmethod
