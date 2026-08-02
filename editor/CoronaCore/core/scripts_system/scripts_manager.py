@@ -25,6 +25,8 @@ class ScriptsManager:
         self.current_scene_script: Optional[SceneScript] = None
         self.actor_scripts: Dict[str, ActorScript] = {}  # actor_name -> ActorScript
         self.logger = logging.getLogger("ScriptManager")
+        self.state = "created"
+        self.shutdown_requested = False
         ScriptsManager._instances.append(self)
 
     def initialize_project(self, project_script_path: str, scene: Scene) -> bool:
@@ -36,6 +38,11 @@ class ScriptsManager:
         Returns:
             bool: 初始化是否成功
         """
+        if self.shutdown_requested or self.state == "stopped":
+            return False
+        if self.state in ("initializing", "ready", "updating"):
+            return self.state == "ready"
+        self.state = "initializing"
         try:
             self.logger.info(f"Initializing script system with global script: {project_script_path}")
 
@@ -56,6 +63,8 @@ class ScriptsManager:
                             # 找到ProjectScript子类，实例化并初始化
                             self.project_script = attr(f"Project_{Path(project_script_path).stem}")
                             self.project_script.initialize()
+                            self.project_script.is_initialized = True
+                            self.project_script.on_start()
                             self.logger.debug("Global script loaded: %s", self.project_script.name)
                             break
 
@@ -82,6 +91,8 @@ class ScriptsManager:
                                 # 找到SceneScript子类，实例化并初始化
                                 self.current_scene_script = attr(f"Scene_{scene.name}", scene)
                                 self.current_scene_script.initialize()
+                                self.current_scene_script.is_initialized = True
+                                self.current_scene_script.on_start()
                                 self.logger.debug(
                                     "Scene script loaded for %s: %s", scene.name, self.current_scene_script.name)
                                 break
@@ -108,6 +119,8 @@ class ScriptsManager:
                                     # 找到ActorScript子类，实例化并初始化
                                     actor_script = attr(f"Actor_{actor.name}", actor)
                                     actor_script.initialize()
+                                    actor_script.is_initialized = True
+                                    actor_script.on_start()
                                     self.actor_scripts[actor.name] = actor_script
                                     # 如果是 CameraLockedObject，关联到 Actor
                                     if isinstance(actor_script, CameraLockedObject):
@@ -116,40 +129,75 @@ class ScriptsManager:
                                     break
 
             self.logger.info("Script system initialized successfully")
+            self.state = "ready"
             return True
 
         except Exception as e:
             self.logger.error(f"Failed to initialize script system: {e}", exc_info=True)
+            self._shutdown_initialized_scripts()
+            self.state = "stopped"
             return False
 
     def update(self, delta_time: float):
         """更新所有脚本"""
+        if self.shutdown_requested or self.state not in ("ready", "updating"):
+            return False
+        self.state = "updating"
         # 更新全局脚本
         if self.project_script and self.project_script.is_initialized:
-            self.project_script.update(delta_time)
+            try:
+                self.project_script.update(delta_time)
+                self.project_script.on_update(delta_time)
+            except Exception:
+                self.logger.exception("Project script update failed")
 
         # 更新场景脚本
         if self.current_scene_script and self.current_scene_script.is_initialized:
-            self.current_scene_script.update(delta_time)
+            try:
+                self.current_scene_script.update(delta_time)
+                self.current_scene_script.on_update(delta_time)
+            except Exception:
+                self.logger.exception("Scene script update failed")
 
         # 更新单位脚本
         for script in self.actor_scripts.values():
             if script.is_initialized:
-                script.update(delta_time)
+                try:
+                    script.update(delta_time)
+                    script.on_update(delta_time)
+                except Exception:
+                    self.logger.exception("Actor script update failed: %s", script.name)
+
+        self.state = "ready"
+        return True
+
+    def _shutdown_initialized_scripts(self):
+        for script in list(self.actor_scripts.values())[::-1]:
+            try:
+                script.shutdown()
+            except Exception:
+                self.logger.exception("Actor script shutdown failed: %s", script.name)
+        self.actor_scripts.clear()
+        if self.current_scene_script:
+            try:
+                self.current_scene_script.shutdown()
+            except Exception:
+                self.logger.exception("Scene script shutdown failed")
+            self.current_scene_script = None
+        if self.project_script:
+            try:
+                self.project_script.shutdown()
+            except Exception:
+                self.logger.exception("Project script shutdown failed")
+            self.project_script = None
 
     def shutdown(self):
         """关闭脚本系统"""
-        # 关闭全局脚本
-        if self.project_script:
-            self.project_script.shutdown()
-
-        # 关闭场景脚本
-        if self.current_scene_script:
-            self.current_scene_script.shutdown()
-
-        # 关闭单位脚本
-        for script in self.actor_scripts.values():
-            script.shutdown()
-
-        self.actor_scripts.clear()
+        if self.state == "stopped":
+            return True
+        self.shutdown_requested = True
+        self.state = "stopping"
+        self._shutdown_initialized_scripts()
+        self.state = "stopped"
         self.logger.debug("Script system shutdown")
+        return True

@@ -19,6 +19,11 @@ class CoronaEditor:
 
     _selected_scene = None
     _selected_actor = None
+    _runtime_state = "created"
+    _shutdown_requested = False
+    _runtime_initialized = False
+    _runtime_started = False
+    _last_runtime_warning = {}
 
     @classmethod
     def _dispatch_script_request(cls, json_str):
@@ -63,6 +68,60 @@ class CoronaEditor:
         unregister = getattr(cls.CoronaEngine, "unregister_python_script_service_dispatcher", None)
         if callable(unregister):
             unregister()
+
+    @classmethod
+    def initialize_runtime(cls):
+        if cls._shutdown_requested:
+            return False
+        if cls._runtime_initialized:
+            return True
+        cls._runtime_state = "initializing"
+        cls._runtime_initialized = True
+        cls._runtime_state = "initialized"
+        return True
+
+    @classmethod
+    def start_runtime(cls):
+        if cls._shutdown_requested:
+            return False
+        if not cls._runtime_initialized:
+            cls.initialize_runtime()
+        cls._runtime_started = True
+        cls._runtime_state = "running"
+        return True
+
+    @classmethod
+    def is_shutting_down(cls):
+        return cls._shutdown_requested
+
+    @classmethod
+    def request_shutdown(cls):
+        cls._shutdown_requested = True
+        if cls._runtime_state not in ("stopped", "stopping"):
+            cls._runtime_state = "stop_requested"
+
+    @classmethod
+    def checkpoint(cls):
+        if cls._shutdown_requested:
+            raise RuntimeError("Python runtime shutdown requested")
+        return True
+
+    @classmethod
+    def shutdown_runtime(cls):
+        if cls._runtime_state == "stopped":
+            return True
+        cls.request_shutdown()
+        cls._runtime_state = "stopping"
+        if cls.scripts_mgr is not None:
+            try:
+                cls.scripts_mgr.shutdown()
+            except Exception:
+                logger.exception("ScriptsManager shutdown failed")
+            cls.scripts_mgr = None
+        cls._scripts_initialized = False
+        cls._runtime_started = False
+        cls._runtime_state = "stopped"
+        return True
 
     @classmethod
     def emit_editor_event(cls, event_name, args=None):
@@ -425,7 +484,12 @@ class CoronaEditor:
         ]
 
     @classmethod
-    def show_log_on_js(cls):
+    def update_runtime(cls):
+        import time as _time
+        runtime_start = _time.perf_counter()
+        if cls._shutdown_requested or not cls._runtime_started:
+            return False
+        cls.checkpoint()
         if not cls._scripts_initialized and cls.CoronaEngine is not None:
             try:
                 project_path = getattr(cls.CoronaEngine, 'active_project_path', None)
@@ -450,6 +514,7 @@ class CoronaEditor:
             except Exception:
                 pass
 
+        cls.checkpoint()
         if cls.scripts_mgr is not None:
             try:
                 import time as _time
@@ -457,8 +522,10 @@ class CoronaEditor:
                 delta = now - getattr(cls, '_last_script_update', now)
                 cls._last_script_update = now
                 cls.scripts_mgr.update(min(delta, 0.1))
+            except RuntimeError:
+                return False
             except Exception:
-                pass
+                logger.exception("Script runtime update failed")
 
         # ── Input 事件队列消费：CEF InputInject → 队列 → Python─ ─
         # 每帧批量消费积攒的键盘/鼠标注入事件，消除逐事件 cefQuery 开销
@@ -474,7 +541,27 @@ class CoronaEditor:
                         corona_engine_scratch.handle_key_release(e.arg0, e.arg1 or e.arg0)
                     elif e.type == 2:    # mouseEvent
                         corona_engine_scratch.handle_mouse_event(e.arg0, e.arg1, e.arg3, e.arg4)
+        except RuntimeError:
+            return False
         except Exception:
-            pass
+            logger.exception("Input event dispatch failed")
 
+        elapsed_ms = (_time.perf_counter() - runtime_start) * 1000.0
+        if elapsed_ms >= 50.0:
+            now = _time.monotonic()
+            last = cls._last_runtime_warning.get("update", 0.0)
+            if now - last >= 5.0:
+                logger.warning(
+                    "python.lifecycle.overrun phase=update elapsed_ms=%.2f state=%s",
+                    elapsed_ms, cls._runtime_state)
+                cls._last_runtime_warning["update"] = now
         return True
+
+    @classmethod
+    def show_log_on_js(cls):
+        """Backward-compatible C++ entry point for one runtime update."""
+        if not cls._runtime_initialized:
+            cls.initialize_runtime()
+        if not cls._runtime_started:
+            cls.start_runtime()
+        return cls.update_runtime()
