@@ -13,6 +13,7 @@ endif()
 # Create system library
 corona_add_system(script
     SOURCES
+        ${PROJECT_SOURCE_DIR}/include/corona/systems/script/python_lifecycle.h
         script_system.cpp
         python/corona_engine_api.cpp
         python/corona_engine_module.cpp
@@ -47,4 +48,14 @@ target_include_directories(corona_script_system PRIVATE
 target_link_directories(corona_script_system PUBLIC
     ${Python_LIBRARY_DIRS}
 )
+
+if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_python_lifecycle_tests
+        tests/test_python_lifecycle.cpp
+    )
+    target_include_directories(corona_python_lifecycle_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME PythonLifecycleTests COMMAND corona_python_lifecycle_tests)
+endif()
 

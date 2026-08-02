@@ -23,6 +23,7 @@ namespace Corona::Script::Python {
 const std::string codePath = PathCfg::engine_root();
 
 PythonAPI::PythonAPI() {
+    lifecycle_snapshot_.state = PythonLifecycleState::Created;
 }
 
 PythonAPI::~PythonAPI() {
@@ -32,6 +33,7 @@ PythonAPI::~PythonAPI() {
         } else {
             (void)pStartFunc.release();
             (void)messageFunc.release();
+            (void)pEditor.release();
             (void)pModule.release();
             (void)pFunc.release();
         }
@@ -40,23 +42,60 @@ PythonAPI::~PythonAPI() {
 
 void PythonAPI::begin_shutdown() {
     shutting_down_.store(true);
+    lifecycle_.request_stop();
+    std::lock_guard lock(lifecycle_mtx_);
+    lifecycle_snapshot_.state = lifecycle_.state();
+    lifecycle_snapshot_.shutting_down = true;
+    lifecycle_snapshot_.phase = "shutdown_requested";
+    CFW_LOG_NOTICE("PythonAPI: lifecycle transition -> StopRequested");
+}
+
+PythonLifecycleSnapshot PythonAPI::lifecycle_snapshot() const {
+    std::lock_guard lock(lifecycle_mtx_);
+    auto snapshot = lifecycle_snapshot_;
+    snapshot.state = lifecycle_.state();
+    snapshot.shutting_down = shutting_down_.load();
+    return snapshot;
 }
 
 void PythonAPI::shutdown() {
     begin_shutdown();
 
     if (!Py_IsInitialized()) {
+        lifecycle_.transition(PythonLifecycleState::Stopping);
+        lifecycle_.transition(PythonLifecycleState::Stopped);
         return;
     }
 
     CFW_LOG_INFO("PythonAPI: Shutting down Python interpreter...");
+    lifecycle_.transition(PythonLifecycleState::Stopping);
 
     (void)pStartFunc.release();
     (void)messageFunc.release();
+    if (pEditor.is_valid() && Py_IsInitialized()) {
+        nanobind::gil_scoped_acquire gil;
+        try {
+            if (nanobind::hasattr(pEditor, "shutdown_runtime")) {
+                nanobind::object shutdown_runtime = nanobind::getattr(pEditor, "shutdown_runtime");
+                shutdown_runtime();
+            }
+        } catch (const nanobind::python_error& e) {
+            log_python_error(e);
+        }
+    }
+    (void)pEditor.release();
     (void)pModule.release();
     (void)pFunc.release();
 
     PyConfig_Clear(&config);
+
+    lifecycle_.transition(PythonLifecycleState::Stopped);
+    {
+        std::lock_guard lock(lifecycle_mtx_);
+        lifecycle_snapshot_.state = lifecycle_.state();
+        lifecycle_snapshot_.phase = "shutdown_complete";
+        lifecycle_snapshot_.shutting_down = true;
+    }
 
     CFW_LOG_INFO("PythonAPI: Python shutdown complete");
 }
@@ -78,9 +117,16 @@ std::string PythonAPI::wstr2str(const std::wstring& wstr) {
 
 bool PythonAPI::initializeInterpreterLocked() {
     if (Py_IsInitialized()) {
+        if (lifecycle_.state() == PythonLifecycleState::Created) {
+            lifecycle_.transition(PythonLifecycleState::InterpreterInitializing);
+            lifecycle_.transition(PythonLifecycleState::InterpreterReady);
+        }
         return true;
     }
 
+    if (!lifecycle_.transition(PythonLifecycleState::InterpreterInitializing)) {
+        return lifecycle_.state() == PythonLifecycleState::InterpreterReady;
+    }
     CFW_LOG_INFO("PythonAPI: Initializing Python interpreter...");
 
     PyImport_AppendInittab("CoronaEngine", &PyInit_CoronaEngine);
@@ -89,6 +135,13 @@ bool PythonAPI::initializeInterpreterLocked() {
     auto check_status = [&](PyStatus status, const char* step) {
         if (!PyStatus_Exception(status)) {
             return true;
+        }
+        lifecycle_.transition(PythonLifecycleState::Failed);
+        {
+            std::lock_guard lock(lifecycle_mtx_);
+            lifecycle_snapshot_.state = lifecycle_.state();
+            lifecycle_snapshot_.phase = step;
+            lifecycle_snapshot_.error = status.err_msg ? status.err_msg : "unknown Python error";
         }
         CFW_LOG_CRITICAL("PythonAPI: {} failed: {}", step, status.err_msg ? status.err_msg : "unknown Python error");
         PyConfig_Clear(&config);
@@ -130,6 +183,12 @@ bool PythonAPI::initializeInterpreterLocked() {
         return false;
     }
     PyEval_SaveThread();
+    lifecycle_.transition(PythonLifecycleState::InterpreterReady);
+    {
+        std::lock_guard lock(lifecycle_mtx_);
+        lifecycle_snapshot_.state = lifecycle_.state();
+        lifecycle_snapshot_.phase = "interpreter_ready";
+    }
     CFW_LOG_INFO("PythonAPI: Python interpreter initialized successfully");
 
     if (!Py_IsInitialized()) {
@@ -169,7 +228,12 @@ bool PythonAPI::ensureInitialized() {
         return true;
     }
     if (!initializeInterpreterLocked()) {
+        lifecycle_.transition(PythonLifecycleState::Failed);
         return false;
+    }
+
+    if (!lifecycle_.transition(PythonLifecycleState::BackendInitializing)) {
+        return lifecycle_.state() == PythonLifecycleState::Running;
     }
 
     {
@@ -196,15 +260,31 @@ bool PythonAPI::ensureInitialized() {
             nanobind::object editor = nanobind::getattr(entrance, "editor");
             nanobind::object start_attr = nanobind::getattr(entrance, "run");
             nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
+            if (nanobind::hasattr(editor, "initialize_runtime")) {
+                nanobind::object init_runtime = nanobind::getattr(editor, "initialize_runtime");
+                init_runtime();
+            }
             pStartFunc = std::move(start_attr);
             messageFunc = std::move(log_attr);
+            pEditor = editor;
             pStartFunc();
+            if (nanobind::hasattr(editor, "start_runtime")) {
+                nanobind::object start_runtime = nanobind::getattr(editor, "start_runtime");
+                start_runtime();
+            }
             if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
                 event_bus->publish<Events::ScriptFinishStartEvent>({});
             }
             backend_initialized_.store(true);
+            lifecycle_.transition(PythonLifecycleState::Running);
+            {
+                std::lock_guard lock(lifecycle_mtx_);
+                lifecycle_snapshot_.state = lifecycle_.state();
+                lifecycle_snapshot_.phase = "running";
+            }
             CFW_LOG_INFO("PythonAPI: Python backend initialized successfully");
         } catch (const nanobind::python_error& e) {
+            lifecycle_.transition(PythonLifecycleState::Failed);
             log_python_error(e);
             // pModule.reset();
             // pFunc.reset();
@@ -247,6 +327,7 @@ bool PythonAPI::performHotReload() {
         nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
         pStartFunc = std::move(start_attr);
         messageFunc = std::move(log_attr);
+        pEditor = editor;
         /*  nanobind::object newFunc = nanobind::getattr(mod, "run");
           if (!nanobind::callable::check_(newFunc)) {
               CFW_LOG_WARNING("PythonAPI: new run attribute is not callable");
@@ -302,8 +383,11 @@ void PythonAPI::sendMessage(const std::string& message) const {
 }
 
 void PythonAPI::runPythonScript() {
+    const auto frame_start = std::chrono::steady_clock::now();
     // 如果正在关闭，不执行任何 Python 代码
-    if (shutting_down_.load()) {
+    if (shutting_down_.load() || lifecycle_.state() == PythonLifecycleState::StopRequested ||
+        lifecycle_.state() == PythonLifecycleState::Stopping ||
+        lifecycle_.state() == PythonLifecycleState::Stopped) {
         return;
     }
 
@@ -327,6 +411,16 @@ void PythonAPI::runPythonScript() {
     }
 
     invokeEntry(reloaded);
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - frame_start).count();
+    const auto now = nowMsec();
+    auto last = last_overrun_log_ms_.load(std::memory_order_relaxed);
+    if (elapsed >= 50 && now - last >= 5000 &&
+        last_overrun_log_ms_.compare_exchange_strong(last, now)) {
+        CFW_LOG_WARNING("PythonAPI: python.lifecycle.overrun phase=update elapsed_ms={} state={}",
+                        elapsed, static_cast<int>(lifecycle_.state()));
+    }
 }
 
 void PythonAPI::checkPythonScriptChange() {

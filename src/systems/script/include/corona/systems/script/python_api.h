@@ -2,6 +2,7 @@
 
 #include <Python.h>
 #include <corona/systems/script/python_hotfix.h>
+#include <corona/systems/script/python_lifecycle.h>
 #include <nanobind/nanobind.h>
 
 #include <atomic>
@@ -13,6 +14,14 @@
 #include <string>
 
 namespace Corona::Script::Python {
+
+struct PythonLifecycleSnapshot {
+    PythonLifecycleState state = PythonLifecycleState::Created;
+    std::string phase;
+    int64_t phase_elapsed_ms = 0;
+    bool shutting_down = false;
+    std::string error;
+};
 
 struct PythonAPI {
     PythonAPI();
@@ -27,6 +36,7 @@ struct PythonAPI {
     void shutdown();
 
     void begin_shutdown();
+    void request_stop() { begin_shutdown(); }
 
     bool initializeInterpreter();
     void runPythonScript();
@@ -38,6 +48,9 @@ struct PythonAPI {
      * @brief 检查 Python 是否正在关闭
      */
     bool is_shutting_down() const { return shutting_down_.load(); }
+    PythonLifecycleState lifecycle_state() const { return lifecycle_.state(); }
+    PythonLifecycleSnapshot lifecycle_snapshot() const;
+    bool checkpoint() const { return !shutting_down_.load(); }
 
     nanobind::object pStartFunc;  // callable 'start'
 
@@ -52,8 +65,13 @@ struct PythonAPI {
     bool hasHotReload = false;
     std::atomic<bool> shutting_down_{false};  // 标记是否正在关闭
     std::atomic<bool> backend_initialized_{false};
+    std::atomic<int64_t> last_overrun_log_ms_{0};
+    PythonLifecycle lifecycle_;
+    mutable std::mutex lifecycle_mtx_;
+    PythonLifecycleSnapshot lifecycle_snapshot_;
 
     nanobind::object pModule;      // module 'main'
+    nanobind::object pEditor;      // CoronaEditor lifecycle owner
     nanobind::object pFunc;        // callable 'run'
     nanobind::object messageFunc;  // callable 'put_queue'
 
