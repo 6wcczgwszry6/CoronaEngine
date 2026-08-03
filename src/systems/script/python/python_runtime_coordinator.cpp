@@ -107,6 +107,9 @@ PythonRuntimeResponse PythonRuntimeCoordinator::submit_and_wait(
         return PythonRuntimeResponse::failure(
             "synchronous python runtime request from the consumer thread would deadlock");
     }
+    if (request.deadline == std::chrono::steady_clock::time_point::max()) {
+        request.deadline = std::chrono::steady_clock::now() + timeout;
+    }
     auto ticket = submit(std::move(request));
     if (!ticket.accepted) return ticket.response;
     auto response = ticket.wait(timeout);
@@ -126,10 +129,18 @@ std::optional<PythonRuntimeRequest> PythonRuntimeCoordinator::wait_pop(
     while (!queue_.empty()) {
         auto request = std::move(queue_.front());
         queue_.pop_front();
-        if (pending_.contains(request.request_id)) {
-            current_request_ = request;
-            return request;
+        auto pending = pending_.find(request.request_id);
+        if (pending == pending_.end()) {
+            continue;
         }
+        if (request.deadline <= std::chrono::steady_clock::now()) {
+            auto ticket = std::move(pending->second);
+            pending_.erase(pending);
+            finish_ticket(ticket, PythonRuntimeResponse::timeout());
+            continue;
+        }
+        current_request_ = request;
+        return request;
     }
     return std::nullopt;
 }

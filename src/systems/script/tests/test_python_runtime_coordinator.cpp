@@ -121,6 +121,18 @@ int main() {
     }
 
     {
+        PythonRuntimeCoordinator coordinator(4);
+        auto expired = request("expired-before-dispatch");
+        expired.deadline = std::chrono::steady_clock::now() - 1ms;
+        auto ticket = coordinator.submit(std::move(expired));
+        if (!require(ticket.accepted, "an expiring request should still receive a completion ticket") ||
+            !require(!coordinator.wait_pop(5ms).has_value(),
+                     "an expired request must never enter the Python consumer") ||
+            !require(ticket.wait(50ms).status == PythonRuntimeResponseStatus::Timeout,
+                     "an expired queued request should complete as timeout")) return 1;
+    }
+
+    {
         PythonRuntimeCoordinator coordinator(8);
         auto ticket = coordinator.submit(request("shutdown"));
         coordinator.begin_quiescing();

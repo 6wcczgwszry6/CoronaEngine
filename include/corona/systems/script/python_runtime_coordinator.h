@@ -50,6 +50,8 @@ struct PythonRuntimeRequest {
     std::string function;
     std::string payload_json;
     Handler handler = nullptr;
+    std::chrono::steady_clock::time_point deadline =
+        std::chrono::steady_clock::time_point::max();
 };
 
 struct PythonRuntimeResponse {
