@@ -37,13 +37,19 @@ enum class PythonRuntimeState {
     Stopped,
 };
 
+struct PythonRuntimeResponse;
+
 struct PythonRuntimeRequest {
+    using Handler = PythonRuntimeResponse (*)(const PythonRuntimeRequest&);
+
     std::uint64_t request_id = 0;
+    std::uint64_t callback_token = 0;
     PythonRuntimeRequestKind kind = PythonRuntimeRequestKind::ServiceCall;
     std::string source;
     std::string module;
     std::string function;
     std::string payload_json;
+    Handler handler = nullptr;
 };
 
 struct PythonRuntimeResponse {
@@ -92,6 +98,7 @@ class PythonRuntimeCoordinator {
 
     PythonRuntimeState state() const noexcept;
     std::size_t pending_count() const;
+    bool bind_consumer_thread();
     bool is_consumer_thread() const;
 
    private:

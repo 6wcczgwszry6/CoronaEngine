@@ -26,9 +26,42 @@ PythonRuntimeRequest request(std::string payload = {}) {
     value.payload_json = std::move(payload);
     return value;
 }
+
+PythonRuntimeResponse callback_handler(const PythonRuntimeRequest& value) {
+    return PythonRuntimeResponse::success("callback:" + value.payload_json);
+}
 }  // namespace
 
 int main() {
+    {
+        PythonRuntimeCoordinator coordinator(2);
+        if (!require(coordinator.bind_consumer_thread(),
+                     "first thread should bind as the Python consumer")) return 1;
+        std::atomic<bool> second_thread_bound{true};
+        std::thread other([&] { second_thread_bound.store(coordinator.bind_consumer_thread()); });
+        other.join();
+        if (!require(!second_thread_bound.load(),
+                     "another thread must not replace the Python consumer")) return 1;
+    }
+
+    {
+        PythonRuntimeCoordinator coordinator(2);
+        auto callback = request("payload");
+        callback.kind = PythonRuntimeRequestKind::Callback;
+        callback.handler = &callback_handler;
+        auto ticket = coordinator.submit(std::move(callback));
+        auto queued = coordinator.wait_pop(50ms);
+        if (!require(queued.has_value(), "callback request should reach the consumer") ||
+            !require(queued->handler != nullptr, "callback handler should survive queueing")) return 1;
+        auto response = queued->handler(*queued);
+        coordinator.complete(queued->request_id, response);
+        response = ticket.wait(50ms);
+        if (!require(response.status == PythonRuntimeResponseStatus::Success,
+                     "callback handler should complete") ||
+            !require(response.payload_json == "callback:payload",
+                     "callback handler should receive the plain payload")) return 1;
+    }
+
     {
         PythonRuntimeCoordinator coordinator(2);
         std::thread consumer([&] {

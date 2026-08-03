@@ -4,6 +4,7 @@
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/systems/script/python_api.h>
+#include <corona/systems/script/engine_scripts.h>
 #include <corona/systems/script/python/python_error_handler.h>
 #include <corona/systems/script/python/python_path_config.h>
 #include <nanobind/stl/string.h>
@@ -34,14 +35,9 @@ PythonAPI::~PythonAPI() {
     if (!shutting_down_.load()) {
         if (Py_IsInitialized()) {
             shutdown();
-        } else {
-            (void)pStartFunc.release();
-            (void)messageFunc.release();
-            (void)pEditor.release();
-            (void)pModule.release();
-            (void)pFunc.release();
         }
     }
+    detach_python_objects_without_decref();
 }
 
 void PythonAPI::begin_shutdown() {
@@ -80,32 +76,17 @@ PythonLifecycleSnapshot PythonAPI::lifecycle_snapshot() const {
 void PythonAPI::shutdown() {
     begin_shutdown();
 
-    if (!Py_IsInitialized()) {
-        lifecycle_.transition(PythonLifecycleState::Stopping);
-        lifecycle_.transition(PythonLifecycleState::Stopped);
-        return;
-    }
-
-    CFW_LOG_INFO("PythonAPI: Shutting down Python interpreter...");
+    CFW_LOG_INFO("PythonAPI: Shutting down Python runtime ownership...");
     lifecycle_.transition(PythonLifecycleState::Stopping);
     runtime_coordinator_.begin_python_stopping();
 
-    (void)pStartFunc.release();
-    (void)messageFunc.release();
-    if (pEditor.is_valid() && Py_IsInitialized()) {
-        nanobind::gil_scoped_acquire gil;
-        try {
-            if (nanobind::hasattr(pEditor, "shutdown_runtime")) {
-                nanobind::object shutdown_runtime = nanobind::getattr(pEditor, "shutdown_runtime");
-                shutdown_runtime();
-            }
-        } catch (const nanobind::python_error& e) {
-            log_python_error(e);
-        }
+    const auto detached_count = detach_python_objects_without_decref();
+    if (detached_count != 0) {
+        CFW_LOG_ERROR(
+            "PythonAPI: {} Python references survived cooperative shutdown; detached without DECREF "
+            "because the ScriptSystem Python thread is no longer available",
+            detached_count);
     }
-    (void)pEditor.release();
-    (void)pModule.release();
-    (void)pFunc.release();
 
     PyConfig_Clear(&config);
 
@@ -119,6 +100,21 @@ void PythonAPI::shutdown() {
     }
 
     CFW_LOG_INFO("PythonAPI: Python shutdown complete");
+}
+
+std::size_t PythonAPI::detach_python_objects_without_decref() {
+    std::size_t detached_count = 0;
+    auto detach = [&detached_count](nanobind::object& object) {
+        if (!object.is_valid()) return;
+        const auto released = object.release();
+        if (released.is_valid()) ++detached_count;
+    };
+    detach(pStartFunc);
+    detach(messageFunc);
+    detach(pEditor);
+    detach(pModule);
+    detach(pFunc);
+    return detached_count;
 }
 
 int64_t PythonAPI::nowMsec() {
@@ -405,6 +401,10 @@ void PythonAPI::sendMessage(const std::string& message) const {
 
 void PythonAPI::runPythonScript() {
     const auto frame_start = std::chrono::steady_clock::now();
+    if (!runtime_coordinator_.bind_consumer_thread()) {
+        CFW_LOG_CRITICAL("PythonAPI: runPythonScript called from a non-owner thread");
+        return;
+    }
     // 如果正在关闭，不执行任何 Python 代码
     if (shutting_down_.load() || lifecycle_.state() == PythonLifecycleState::StopRequested ||
         lifecycle_.state() == PythonLifecycleState::Stopping ||
@@ -477,6 +477,7 @@ PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequ
                     nanobind::getattr(pEditor, "shutdown_runtime")();
                 }
             }
+            EngineScripts::clear_python_callback_registry();
             pStartFunc.reset();
             messageFunc.reset();
             pEditor.reset();
@@ -494,6 +495,9 @@ PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequ
             auto dispatcher = nanobind::getattr(pEditor, "dispatch_script_request_from_cpp");
             auto result = dispatcher(request.payload_json.c_str());
             return PythonRuntimeResponse::success(nanobind::cast<std::string>(result));
+        }
+        if (request.kind == PythonRuntimeRequestKind::Callback && request.handler) {
+            return request.handler(request);
         }
         return PythonRuntimeResponse::failure("unsupported python runtime request");
     } catch (const nanobind::python_error& error) {

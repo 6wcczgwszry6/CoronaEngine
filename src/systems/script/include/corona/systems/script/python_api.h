@@ -90,6 +90,7 @@ struct PythonAPI {
     void invokeEntry(bool isReload) const;
     void process_runtime_requests();
     PythonRuntimeResponse execute_runtime_request(const PythonRuntimeRequest& request);
+    std::size_t detach_python_objects_without_decref();
     static int64_t nowMsec();
     static std::wstring str2wstr(const std::string& str);
     static std::string wstr2str(const std::wstring& wstr);

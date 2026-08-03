@@ -3000,14 +3000,20 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
         for snippet in (
             "PyCallable_Check(callback)",
-            "Py_XINCREF(callback)",
-            "PyObject_CallObject",
-            "PyErr_Print",
-            "Py_XDECREF(callback)",
+            "PythonRuntimeRequestKind::Callback",
+            "callback_token",
+            "coordinator->submit",
             "clear_python_script_callbacks()",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
+
+        callback_section = source[
+            source.index("execute_editor_python_callback"):
+            source.index("NativeResult invoke_python_script_service")
+        ]
+        self.assertNotIn("PyGILState_Ensure", callback_section)
+        self.assertNotIn("PyGILState_Release", callback_section)
 
         for snippet in (
             'm.def("register_python_script_callback"',
@@ -3028,6 +3034,19 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, python_api_source)
+
+    def test_python_api_shutdown_does_not_release_objects_or_take_gil_off_thread(self):
+        source = (
+            self._repo_root() / "src" / "systems" / "script" / "python" / "python_api.cpp"
+        ).read_text(encoding="utf-8")
+        shutdown_start = source.index("void PythonAPI::shutdown()")
+        shutdown_end = source.index("int64_t PythonAPI::nowMsec()", shutdown_start)
+        shutdown_body = source[shutdown_start:shutdown_end]
+
+        self.assertNotIn("(void)pStartFunc.release()", source)
+        self.assertNotIn("(void)messageFunc.release()", source)
+        self.assertNotIn("nanobind::gil_scoped_acquire", shutdown_body)
+        self.assertIn("detach_python_objects_without_decref", shutdown_body)
 
     def test_scene_tools_registers_native_camera_handlers(self):
         source = self._handler_source()
@@ -3864,8 +3883,10 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             repo_root / "editor" / "CoronaCore" / "core" / "entities" / "actor.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Py_AddPendingCall", bindings_source)
-        self.assertIn("g_python_callbacks", bindings_source)
+        self.assertNotIn("Py_AddPendingCall", bindings_source)
+        self.assertNotIn("shared_ptr<nb::object>", bindings_source)
+        self.assertIn("PythonRuntimeRequestKind::Callback", bindings_source)
+        self.assertIn("callback_token", bindings_source)
         self.assertIn("resolve_fixed_dt", lifecycle_source)
         self.assertIn("kMaxCatchUpSteps", lifecycle_source)
         on_move_start = actor_source.index("    def on_move(self):")

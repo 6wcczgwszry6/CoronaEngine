@@ -115,8 +115,8 @@ PythonRuntimeResponse PythonRuntimeCoordinator::submit_and_wait(
 
 std::optional<PythonRuntimeRequest> PythonRuntimeCoordinator::wait_pop(
     std::chrono::milliseconds timeout) {
+    if (!bind_consumer_thread()) return std::nullopt;
     std::unique_lock lock(mutex_);
-    consumer_thread_id_ = std::this_thread::get_id();
     queue_cv_.wait_for(lock, timeout, [&] {
         return !queue_.empty() || state_.load(std::memory_order_relaxed) != PythonRuntimeState::Accepting;
     });
@@ -183,6 +183,16 @@ PythonRuntimeState PythonRuntimeCoordinator::state() const noexcept {
 std::size_t PythonRuntimeCoordinator::pending_count() const {
     std::lock_guard lock(mutex_);
     return pending_.size();
+}
+
+bool PythonRuntimeCoordinator::bind_consumer_thread() {
+    std::lock_guard lock(mutex_);
+    const auto current = std::this_thread::get_id();
+    if (consumer_thread_id_ == std::thread::id{}) {
+        consumer_thread_id_ = current;
+        return true;
+    }
+    return consumer_thread_id_ == current;
 }
 
 bool PythonRuntimeCoordinator::is_consumer_thread() const {
