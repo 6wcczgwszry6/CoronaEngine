@@ -14,11 +14,13 @@ endif()
 corona_add_system(script
     SOURCES
         ${PROJECT_SOURCE_DIR}/include/corona/systems/script/python_lifecycle.h
+        ${PROJECT_SOURCE_DIR}/include/corona/systems/script/python_runtime_coordinator.h
         script_system.cpp
         python/corona_engine_api.cpp
         python/corona_engine_module.cpp
         python/engine_bindings.cpp
         python/python_api.cpp
+        python/python_runtime_coordinator.cpp
         python/python_hotfix.cpp
         python/python_path_config.cpp
         python/python_error_handler.cpp
@@ -57,5 +59,14 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
         ${PROJECT_SOURCE_DIR}/include
     )
     add_test(NAME PythonLifecycleTests COMMAND corona_python_lifecycle_tests)
+
+    add_executable(corona_python_runtime_coordinator_tests
+        tests/test_python_runtime_coordinator.cpp
+        python/python_runtime_coordinator.cpp
+    )
+    target_include_directories(corona_python_runtime_coordinator_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/include
+    )
+    add_test(NAME PythonRuntimeCoordinatorTests COMMAND corona_python_runtime_coordinator_tests)
 endif()
 

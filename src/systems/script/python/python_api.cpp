@@ -24,9 +24,13 @@ const std::string codePath = PathCfg::engine_root();
 
 PythonAPI::PythonAPI() {
     lifecycle_snapshot_.state = PythonLifecycleState::Created;
+    install_active_python_runtime_coordinator(&runtime_coordinator_);
 }
 
 PythonAPI::~PythonAPI() {
+    if (active_python_runtime_coordinator() == &runtime_coordinator_) {
+        install_active_python_runtime_coordinator(nullptr);
+    }
     if (!shutting_down_.load()) {
         if (Py_IsInitialized()) {
             shutdown();
@@ -41,7 +45,22 @@ PythonAPI::~PythonAPI() {
 }
 
 void PythonAPI::begin_shutdown() {
+    if (shutting_down_.load()) {
+        return;
+    }
+    if (backend_initialized_.load() && lifecycle_.state() == PythonLifecycleState::Running) {
+        PythonRuntimeRequest request;
+        request.kind = PythonRuntimeRequestKind::LifecycleControl;
+        request.source = "ScriptSystem::stop";
+        request.function = "shutdown";
+        const auto response = runtime_coordinator_.submit_and_wait(
+            std::move(request), std::chrono::milliseconds(1500));
+        if (response.status != PythonRuntimeResponseStatus::Success) {
+            CFW_LOG_ERROR("PythonAPI: cooperative shutdown request failed: {}", response.error);
+        }
+    }
     shutting_down_.store(true);
+    runtime_coordinator_.begin_quiescing();
     lifecycle_.request_stop();
     std::lock_guard lock(lifecycle_mtx_);
     lifecycle_snapshot_.state = lifecycle_.state();
@@ -69,6 +88,7 @@ void PythonAPI::shutdown() {
 
     CFW_LOG_INFO("PythonAPI: Shutting down Python interpreter...");
     lifecycle_.transition(PythonLifecycleState::Stopping);
+    runtime_coordinator_.begin_python_stopping();
 
     (void)pStartFunc.release();
     (void)messageFunc.release();
@@ -90,6 +110,7 @@ void PythonAPI::shutdown() {
     PyConfig_Clear(&config);
 
     lifecycle_.transition(PythonLifecycleState::Stopped);
+    runtime_coordinator_.stop();
     {
         std::lock_guard lock(lifecycle_mtx_);
         lifecycle_snapshot_.state = lifecycle_.state();
@@ -182,7 +203,7 @@ bool PythonAPI::initializeInterpreterLocked() {
     if (!check_status(Py_InitializeFromConfig(&config), "initialize Python interpreter")) {
         return false;
     }
-    PyEval_SaveThread();
+    main_thread_state_ = PyEval_SaveThread();
     lifecycle_.transition(PythonLifecycleState::InterpreterReady);
     {
         std::lock_guard lock(lifecycle_mtx_);
@@ -396,6 +417,11 @@ void PythonAPI::runPythonScript() {
         return;
     }
 
+    process_runtime_requests();
+    if (shutting_down_.load()) {
+        return;
+    }
+
     bool reloaded = false;
     {
         std::unique_lock lk(queMtx);
@@ -420,6 +446,61 @@ void PythonAPI::runPythonScript() {
         last_overrun_log_ms_.compare_exchange_strong(last, now)) {
         CFW_LOG_WARNING("PythonAPI: python.lifecycle.overrun phase=update elapsed_ms={} state={}",
                         elapsed, static_cast<int>(lifecycle_.state()));
+    }
+}
+
+void PythonAPI::process_runtime_requests() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(4);
+    for (std::size_t processed = 0; processed < 32; ++processed) {
+        auto request = runtime_coordinator_.wait_pop(std::chrono::milliseconds(0));
+        if (!request) {
+            return;
+        }
+        auto response = execute_runtime_request(*request);
+        runtime_coordinator_.complete(request->request_id, std::move(response));
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return;
+        }
+    }
+}
+
+PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequest& request) {
+    nanobind::gil_scoped_acquire gil;
+    try {
+        if (request.kind == PythonRuntimeRequestKind::LifecycleControl &&
+            request.function == "shutdown") {
+            if (pEditor.is_valid()) {
+                if (nanobind::hasattr(pEditor, "request_shutdown")) {
+                    nanobind::getattr(pEditor, "request_shutdown")();
+                }
+                if (nanobind::hasattr(pEditor, "shutdown_runtime")) {
+                    nanobind::getattr(pEditor, "shutdown_runtime")();
+                }
+            }
+            pStartFunc.reset();
+            messageFunc.reset();
+            pEditor.reset();
+            pModule.reset();
+            pFunc.reset();
+            backend_initialized_.store(false);
+            shutting_down_.store(true);
+            return PythonRuntimeResponse::success("{}");
+        }
+
+        if (request.kind == PythonRuntimeRequestKind::ServiceCall) {
+            if (!pEditor.is_valid()) {
+                return PythonRuntimeResponse::failure("python editor is unavailable");
+            }
+            auto dispatcher = nanobind::getattr(pEditor, "dispatch_script_request_from_cpp");
+            auto result = dispatcher(request.payload_json.c_str());
+            return PythonRuntimeResponse::success(nanobind::cast<std::string>(result));
+        }
+        return PythonRuntimeResponse::failure("unsupported python runtime request");
+    } catch (const nanobind::python_error& error) {
+        log_python_error(error);
+        return PythonRuntimeResponse::failure(error.what());
+    } catch (const std::exception& error) {
+        return PythonRuntimeResponse::failure(error.what());
     }
 }
 

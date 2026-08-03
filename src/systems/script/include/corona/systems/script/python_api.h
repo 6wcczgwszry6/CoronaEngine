@@ -3,6 +3,7 @@
 #include <Python.h>
 #include <corona/systems/script/python_hotfix.h>
 #include <corona/systems/script/python_lifecycle.h>
+#include <corona/systems/script/python_runtime_coordinator.h>
 #include <nanobind/nanobind.h>
 
 #include <atomic>
@@ -51,6 +52,7 @@ struct PythonAPI {
     PythonLifecycleState lifecycle_state() const { return lifecycle_.state(); }
     PythonLifecycleSnapshot lifecycle_snapshot() const;
     bool checkpoint() const { return !shutting_down_.load(); }
+    PythonRuntimeCoordinator& runtime_coordinator() { return runtime_coordinator_; }
 
     nanobind::object pStartFunc;  // callable 'start'
 
@@ -67,6 +69,7 @@ struct PythonAPI {
     std::atomic<bool> backend_initialized_{false};
     std::atomic<int64_t> last_overrun_log_ms_{0};
     PythonLifecycle lifecycle_;
+    PythonRuntimeCoordinator runtime_coordinator_;
     mutable std::mutex lifecycle_mtx_;
     PythonLifecycleSnapshot lifecycle_snapshot_;
 
@@ -79,11 +82,14 @@ struct PythonAPI {
     std::vector<std::string> callableList;
 
     PyConfig config{};  // 值初始化
+    PyThreadState* main_thread_state_ = nullptr;
 
     bool ensureInitialized();
     bool initializeInterpreterLocked();
     bool performHotReload();
     void invokeEntry(bool isReload) const;
+    void process_runtime_requests();
+    PythonRuntimeResponse execute_runtime_request(const PythonRuntimeRequest& request);
     static int64_t nowMsec();
     static std::wstring str2wstr(const std::string& str);
     static std::string wstr2str(const std::wstring& wstr);
