@@ -43,10 +43,14 @@ class PythonScriptService:
 
     def shutdown(self, _timeout=0.0):
         callback = getattr(self._target, "cleanup", None)
-        if not callable(callback):
-            callback = getattr(self._target, "shutdown", None)
         if callable(callback):
             callback()
+            return {"service": self.module_name, "state": "stopped", "thread_alive": False}
+        callback = getattr(self._target, "shutdown", None)
+        if callable(callback):
+            snapshot = callback(max(0.0, float(_timeout)))
+            if isinstance(snapshot, dict):
+                return snapshot
         return {"service": self.module_name, "state": "stopped", "thread_alive": False}
 
     def snapshot(self):

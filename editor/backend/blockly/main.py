@@ -1,4 +1,3 @@
-import ctypes
 import hashlib
 import importlib.util
 import json
@@ -22,30 +21,12 @@ from utils.settings import core_path, settings_manager
 logger = logging.getLogger(__name__)
 
 
-def _inject_thread_system_exit(thread: threading.Thread) -> bool:
-    """向仍在执行 Python 字节码的脚本线程注入 SystemExit。"""
-    if not thread or not thread.is_alive() or thread.ident is None:
-        return True
-    tid = thread.ident
-    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
-        ctypes.c_ulong(tid), ctypes.py_object(SystemExit)
-    )
-    if res == 0:
-        logger.error("[ScratchTool] invalid thread id: %s", tid)
-        return False
-    if res > 1:
-        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_ulong(tid), None)
-        logger.error("[ScratchTool] SystemExit injection touched multiple threads; rolled back")
-        return False
-    return True
-
-
-def _force_kill_thread(
+def _request_thread_stop(
     thread: threading.Thread,
     timeout: float = 3.0,
     context_id: str | None = None,
 ):
-    """请求停止脚本线程；超时后注入 SystemExit 兜底。"""
+    """Cooperatively stop a script thread and isolate it when it misses the deadline."""
     from CoronaCore.utils import corona_engine_scratch
 
     corona_engine_scratch.request_stop(context_id)
@@ -53,10 +34,15 @@ def _force_kill_thread(
     if not thread.is_alive():
         return True
 
-    logger.warning("[ScratchTool] thread did not stop in %.1fs; injecting SystemExit", timeout)
-    _inject_thread_system_exit(thread)
-    thread.join(timeout=1.0)
-    return not thread.is_alive()
+    snapshot = corona_engine_scratch.runtime_context_snapshot(context_id) or {}
+    reason = (
+        f"thread={getattr(thread, 'name', 'scratch')} context={context_id or ''} "
+        f"node={snapshot.get('current_node_id', '')}:{snapshot.get('current_node_name', '')} "
+        f"missed cooperative stop deadline {timeout:.3f}s"
+    )
+    corona_engine_scratch.isolate_context(context_id, reason)
+    logger.error("[ScratchTool] isolated non-cooperative script: %s", reason)
+    return False
 
 
 class ScratchTool:
@@ -96,6 +82,7 @@ class ScratchTool:
     _exec_state_snapshot: Optional[dict[str, Any]] = None
     _exec_input_locked = False
     _persistence_lock = threading.RLock()
+    _shutdown_requested = False
 
     _preview_lock = threading.RLock()
     _preview_threads: list[dict[str, Any]] = []
@@ -506,6 +493,8 @@ class ScratchTool:
         actor_name: str = "",
         target_type: str = "actor",
     ) -> dict:
+        if cls._shutdown_requested:
+            return {"status": "error", "message": "Scratch runtime is shutting down"}
         try:
             from CoronaCore.utils import corona_engine_scratch
 
@@ -656,7 +645,8 @@ class ScratchTool:
                     old_thread = cls._exec_thread
                     old_context = cls._exec_context_id
             if old_thread is not None:
-                _force_kill_thread(old_thread, timeout=0.5, context_id=old_context)
+                if not _request_thread_stop(old_thread, timeout=0.5, context_id=old_context):
+                    raise RuntimeError("previous Blockly script did not stop cooperatively")
 
             context_id = cls._target_id(target_type, scene_name, actor_name)
             started_at = time.time()
@@ -779,18 +769,45 @@ class ScratchTool:
                 thread_to_stop = cls._exec_thread
 
         if thread_to_stop is not None:
-            _force_kill_thread(thread_to_stop, timeout=0.5, context_id=context_id)
+            thread_stopped = _request_thread_stop(
+                thread_to_stop, timeout=0.5, context_id=context_id
+            )
         elif context_id:
             corona_engine_scratch.request_stop(context_id)
+            thread_stopped = True
+        else:
+            thread_stopped = True
 
         child_threads = (
             corona_engine_scratch.active_child_threads({context_id}) if context_id else []
         )
         pending_children = cls._wait_for_threads(child_threads, 0.75)
         if pending_children:
-            for child in pending_children:
-                _inject_thread_system_exit(child)
-            cls._wait_for_threads(pending_children, 0.75)
+            corona_engine_scratch.isolate_context(
+                context_id,
+                "child script threads missed cooperative stop deadline: "
+                + ", ".join(sorted({child.name for child in pending_children})),
+            )
+
+        if not thread_stopped or pending_children:
+            names = [thread_to_stop.name] if thread_to_stop and thread_to_stop.is_alive() else []
+            names.extend(child.name for child in pending_children)
+            message = "脚本未协作停止，已隔离且未恢复场景: " + ", ".join(sorted(set(names)))
+            cls._set_exec_input_locked(False)
+            with cls._exec_lock:
+                cls._exec_state.update(
+                    status="error",
+                    outcome="stop_timeout",
+                    error=message,
+                    finishedAt=time.time(),
+                    inputLocked=False,
+                )
+            return {
+                "status": "error",
+                "message": message,
+                "restored": False,
+                "pendingThreads": sorted(set(names)),
+            }
 
         restored = False
         restore_error = None
@@ -822,6 +839,79 @@ class ScratchTool:
             result["restoreError"] = restore_error
             result["message"] = f"\u5df2\u505c\u6b62\uff0c\u4f46\u573a\u666f\u6062\u590d\u5931\u8d25: {restore_error}"
         return result
+
+    @classmethod
+    def request_shutdown(cls) -> None:
+        from CoronaCore.utils import corona_engine_scratch
+
+        cls._shutdown_requested = True
+        corona_engine_scratch.request_stop_all()
+
+    @classmethod
+    def shutdown(cls, timeout: float = 1.0) -> dict:
+        """Bounded service shutdown; never restores state while workers remain alive."""
+        from CoronaCore.utils import corona_engine_scratch
+
+        cls.request_shutdown()
+        with cls._exec_lock:
+            exec_thread = cls._exec_thread
+            exec_context = cls._exec_context_id
+        with cls._preview_lock:
+            preview_infos = list(cls._preview_threads)
+            preview_contexts = {
+                str((info.get("target") or {}).get("id") or "")
+                for info in preview_infos
+                if (info.get("target") or {}).get("id")
+            }
+        context_ids = {value for value in preview_contexts | {exec_context or ""} if value}
+        threads = [exec_thread] if exec_thread else []
+        threads.extend(info.get("thread") for info in preview_infos if info.get("thread"))
+        threads.extend(corona_engine_scratch.active_child_threads(context_ids or None))
+        pending = cls._wait_for_threads(
+            list({thread for thread in threads if thread}),
+            max(0.0, float(timeout)),
+        )
+        if pending:
+            reason = "Scratch service shutdown timeout: " + ", ".join(
+                sorted({thread.name for thread in pending})
+            )
+            for context_id in context_ids:
+                corona_engine_scratch.isolate_context(context_id, reason)
+            cls._set_exec_input_locked(False)
+            cls._set_preview_input_locked(False)
+            return {
+                "service": "ScratchTool",
+                "state": "stop_timeout",
+                "thread_alive": True,
+                "pending_threads": sorted({thread.name for thread in pending}),
+            }
+        cls._set_exec_input_locked(False)
+        cls._set_preview_input_locked(False)
+        return {
+            "service": "ScratchTool",
+            "state": "stopped",
+            "thread_alive": False,
+            "pending_threads": [],
+        }
+
+    @classmethod
+    def snapshot(cls) -> dict:
+        with cls._exec_lock:
+            exec_thread = cls._exec_thread
+        with cls._preview_lock:
+            preview_threads = [
+                info.get("thread") for info in cls._preview_threads if info.get("thread")
+            ]
+        alive = [
+            thread.name for thread in [exec_thread, *preview_threads]
+            if thread and thread.is_alive()
+        ]
+        return {
+            "service": "ScratchTool",
+            "state": "stop_requested" if cls._shutdown_requested else "ready",
+            "thread_alive": bool(alive),
+            "pending_threads": sorted(alive),
+        }
 
     @classmethod
     def get_script_status(cls) -> dict:
@@ -953,6 +1043,8 @@ class ScratchTool:
 
     @classmethod
     def start_game_preview(cls, payload: dict | str | None = None) -> dict:
+        if cls._shutdown_requested:
+            return {"status": "error", "message": "Scratch runtime is shutting down"}
         data = cls._normalize_payload(payload)
         scope = str(data.get("scope") or "project").strip().lower()
         requested_scene = str(data.get("scene_name") or data.get("sceneName") or "").strip()
@@ -1129,24 +1221,16 @@ class ScratchTool:
             child_threads = corona_engine_scratch.active_child_threads(context_ids)
             pending = cls._wait_for_threads(main_threads + child_threads, 1.25)
 
-            # 不合作的纯 Python 循环不会调用 check_stop()/wait()。并行注入，
-            # 然后使用统一截止时间等待，避免脚本数量越多停止越慢。
-            if pending:
-                logger.warning(
-                    "[ScratchTool] %d preview thread(s) ignored cooperative stop; injecting SystemExit",
-                    len(pending),
-                )
-                for thread in pending:
-                    _inject_thread_system_exit(thread)
-                pending = cls._wait_for_threads(pending, 1.5)
-
             # 广播/克隆处理器可能在主线程退出期间新建，再抓取一次。
             child_threads = corona_engine_scratch.active_child_threads(context_ids)
             pending = list({thread for thread in pending + child_threads if thread and thread.is_alive()})
             if pending:
-                for thread in pending:
-                    _inject_thread_system_exit(thread)
-                pending = cls._wait_for_threads(pending, 1.0)
+                for context_id in context_ids:
+                    corona_engine_scratch.isolate_context(
+                        context_id,
+                        "preview threads missed cooperative stop deadline: "
+                        + ", ".join(sorted({thread.name for thread in pending})),
+                    )
 
             if pending:
                 names = ", ".join(sorted({thread.name for thread in pending}))

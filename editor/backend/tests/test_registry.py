@@ -206,6 +206,27 @@ class PythonScriptServiceRegistryTests(unittest.TestCase):
         )
         self.assertEqual([item["service"] for item in snapshots], ["second", "first"])
 
+    def test_eager_service_forwards_shutdown_deadline_and_snapshot(self):
+        registry = self._load_registry()
+        deadlines = []
+
+        class Target:
+            @classmethod
+            def shutdown(cls, deadline):
+                deadlines.append(deadline)
+                return {
+                    "service": "ScratchTool",
+                    "state": "stop_timeout",
+                    "thread_alive": True,
+                }
+
+        service = registry.PythonScriptService("ScratchTool", Target)
+        snapshot = service.shutdown(0.25)
+
+        self.assertEqual(deadlines, [0.25])
+        self.assertEqual(snapshot["state"], "stop_timeout")
+        self.assertTrue(snapshot["thread_alive"])
+
 
 if __name__ == "__main__":
     unittest.main()
