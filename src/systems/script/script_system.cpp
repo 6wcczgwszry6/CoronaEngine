@@ -10,6 +10,7 @@
 #include <windows.h>
 
 #include <chrono>
+#include <iostream>
 
 namespace Corona::Systems {
 
@@ -50,6 +51,12 @@ void ScriptSystem::stop() {
     CFW_LOG_ERROR(
         "ScriptSystem: Python worker did not stop within {} seconds; terminating process",
         kShutdownTimeout.count());
+    const auto diagnostics = python_api_->shutdown_diagnostics();
+    std::cerr << diagnostics << std::endl;
+    ::OutputDebugStringA((diagnostics + "\n").c_str());
+    CFW_LOG_CRITICAL("{}", diagnostics);
+    CFW_LOG_FLUSH();
+    std::cerr.flush();
     ::TerminateProcess(::GetCurrentProcess(), 1);
 }
 

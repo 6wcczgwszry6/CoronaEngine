@@ -48,9 +48,20 @@ class CoronaEditorLifecycleTests(unittest.TestCase):
             result = editor.shutdown_runtime()
 
         self.assertTrue(result)
+        self.assertEqual(result["runtime_state"], "stopped")
+        self.assertEqual(result["services"], [{"state": "stopped"}])
+        self.assertIn("python_threads", result)
+        self.assertTrue(all("name" in item and "ident" in item for item in result["python_threads"]))
         self.assertEqual(calls, [("services", 2.0), "scripts", "dispatcher"])
         self.assertEqual(editor.module_list, {})
         self.assertEqual(editor._runtime_state, "stopped")
+
+    def test_cpp_python_owner_does_not_use_global_initialized_state_for_concurrency(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        source = (
+            repo_root / "src" / "systems" / "script" / "python" / "python_api.cpp"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("Py_IsInitialized()", source)
 
 
 if __name__ == "__main__":

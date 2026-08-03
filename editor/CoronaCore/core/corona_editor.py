@@ -24,6 +24,7 @@ class CoronaEditor:
     _runtime_initialized = False
     _runtime_started = False
     _last_runtime_warning = {}
+    _shutdown_snapshot = None
 
     @classmethod
     def _dispatch_script_request(cls, json_str):
@@ -123,9 +124,14 @@ class CoronaEditor:
     @classmethod
     def shutdown_runtime(cls):
         if cls._runtime_state == "stopped":
-            return True
+            return cls._shutdown_snapshot or {
+                "runtime_state": "stopped",
+                "services": [],
+                "python_threads": [],
+            }
         cls.request_shutdown()
         cls._runtime_state = "stopping"
+        snapshots = []
         try:
             from backend import registry as _service_registry
             snapshots = _service_registry.shutdown_python_script_services(2.0)
@@ -148,7 +154,20 @@ class CoronaEditor:
         cls.module_list.clear()
         cls._runtime_started = False
         cls._runtime_state = "stopped"
-        return True
+        cls._shutdown_snapshot = {
+            "runtime_state": cls._runtime_state,
+            "services": snapshots,
+            "python_threads": [
+                {
+                    "name": thread.name,
+                    "ident": thread.ident,
+                    "daemon": thread.daemon,
+                    "alive": thread.is_alive(),
+                }
+                for thread in threading.enumerate()
+            ],
+        }
+        return cls._shutdown_snapshot
 
     @classmethod
     def emit_editor_event(cls, event_name, args=None):

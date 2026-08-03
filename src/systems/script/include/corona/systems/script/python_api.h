@@ -48,6 +48,7 @@ struct PythonAPI {
     bool is_shutting_down() const { return shutting_down_.load(); }
     PythonLifecycleState lifecycle_state() const { return lifecycle_.state(); }
     PythonLifecycleSnapshot lifecycle_snapshot() const;
+    std::string shutdown_diagnostics() const;
     bool checkpoint() const { return !shutting_down_.load(); }
     PythonRuntimeCoordinator& runtime_coordinator() { return runtime_coordinator_; }
 
@@ -58,12 +59,14 @@ struct PythonAPI {
 
     mutable std::mutex initMtx;
     std::atomic<bool> shutting_down_{false};  // 标记是否正在关闭
+    std::atomic<bool> interpreter_initialized_{false};
     std::atomic<bool> backend_initialized_{false};
     std::atomic<int64_t> last_overrun_log_ms_{0};
     PythonLifecycle lifecycle_;
     PythonRuntimeCoordinator runtime_coordinator_;
     mutable std::mutex lifecycle_mtx_;
     PythonLifecycleSnapshot lifecycle_snapshot_;
+    std::string last_python_shutdown_snapshot_json_;
 
     nanobind::object pModule;      // module 'main'
     nanobind::object pEditor;      // CoronaEditor lifecycle owner

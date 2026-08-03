@@ -78,7 +78,10 @@ PythonRuntimeTicket PythonRuntimeCoordinator::submit(PythonRuntimeRequest reques
             result.response = PythonRuntimeResponse::runtime_stopping();
             return result;
         }
-        if (pending_.size() >= capacity_) {
+        const bool lifecycle_control =
+            request.kind == PythonRuntimeRequestKind::LifecycleControl;
+        const auto effective_capacity = capacity_ + (lifecycle_control ? 1u : 0u);
+        if (pending_.size() >= effective_capacity) {
             result.response = PythonRuntimeResponse::queue_full();
             return result;
         }
@@ -87,7 +90,7 @@ PythonRuntimeTicket PythonRuntimeCoordinator::submit(PythonRuntimeRequest reques
         result.request_id = request.request_id;
         result.state_ = ticket;
         pending_.emplace(request.request_id, ticket);
-        if (request.kind == PythonRuntimeRequestKind::LifecycleControl) {
+        if (lifecycle_control) {
             queue_.push_front(std::move(request));
         } else {
             queue_.push_back(std::move(request));
@@ -123,7 +126,10 @@ std::optional<PythonRuntimeRequest> PythonRuntimeCoordinator::wait_pop(
     while (!queue_.empty()) {
         auto request = std::move(queue_.front());
         queue_.pop_front();
-        if (pending_.contains(request.request_id)) return request;
+        if (pending_.contains(request.request_id)) {
+            current_request_ = request;
+            return request;
+        }
     }
     return std::nullopt;
 }
@@ -133,6 +139,9 @@ bool PythonRuntimeCoordinator::complete(std::uint64_t request_id,
     std::shared_ptr<Detail::PythonRuntimeTicketState> ticket;
     {
         std::lock_guard lock(mutex_);
+        if (current_request_ && current_request_->request_id == request_id) {
+            current_request_.reset();
+        }
         auto it = pending_.find(request_id);
         if (it == pending_.end()) return false;
         ticket = std::move(it->second);
@@ -183,6 +192,18 @@ PythonRuntimeState PythonRuntimeCoordinator::state() const noexcept {
 std::size_t PythonRuntimeCoordinator::pending_count() const {
     std::lock_guard lock(mutex_);
     return pending_.size();
+}
+
+PythonRuntimeSnapshot PythonRuntimeCoordinator::snapshot() const {
+    std::lock_guard lock(mutex_);
+    PythonRuntimeSnapshot result;
+    result.state = state_.load(std::memory_order_relaxed);
+    result.queued_count = queue_.size();
+    result.pending_count = pending_.size();
+    result.consumer_thread_bound = consumer_thread_id_ != std::thread::id{};
+    result.consumer_thread_token = std::hash<std::thread::id>{}(consumer_thread_id_);
+    result.current_request = current_request_;
+    return result;
 }
 
 bool PythonRuntimeCoordinator::bind_consumer_thread() {

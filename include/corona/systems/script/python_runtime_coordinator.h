@@ -64,6 +64,15 @@ struct PythonRuntimeResponse {
     static PythonRuntimeResponse runtime_stopping();
 };
 
+struct PythonRuntimeSnapshot {
+    PythonRuntimeState state = PythonRuntimeState::Accepting;
+    std::size_t queued_count = 0;
+    std::size_t pending_count = 0;
+    bool consumer_thread_bound = false;
+    std::size_t consumer_thread_token = 0;
+    std::optional<PythonRuntimeRequest> current_request;
+};
+
 namespace Detail {
 struct PythonRuntimeTicketState;
 }
@@ -98,6 +107,7 @@ class PythonRuntimeCoordinator {
 
     PythonRuntimeState state() const noexcept;
     std::size_t pending_count() const;
+    PythonRuntimeSnapshot snapshot() const;
     bool bind_consumer_thread();
     bool is_consumer_thread() const;
 
@@ -113,6 +123,7 @@ class PythonRuntimeCoordinator {
     std::deque<PythonRuntimeRequest> queue_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Detail::PythonRuntimeTicketState>> pending_;
     std::thread::id consumer_thread_id_;
+    std::optional<PythonRuntimeRequest> current_request_;
 };
 
 PythonRuntimeCoordinator* active_python_runtime_coordinator() noexcept;

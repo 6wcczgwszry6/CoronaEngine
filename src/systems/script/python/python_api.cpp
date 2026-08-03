@@ -11,6 +11,7 @@
 #include <windows.h>
 
 #include <iostream>
+#include <sstream>
 #include <ranges>
 #include <regex>
 #include <set>
@@ -32,10 +33,8 @@ PythonAPI::~PythonAPI() {
     if (active_python_runtime_coordinator() == &runtime_coordinator_) {
         install_active_python_runtime_coordinator(nullptr);
     }
-    if (!shutting_down_.load()) {
-        if (Py_IsInitialized()) {
-            shutdown();
-        }
+    if (runtime_coordinator_.state() != PythonRuntimeState::Stopped) {
+        shutdown();
     }
     detach_python_objects_without_decref();
 }
@@ -71,6 +70,34 @@ PythonLifecycleSnapshot PythonAPI::lifecycle_snapshot() const {
     snapshot.state = lifecycle_.state();
     snapshot.shutting_down = shutting_down_.load();
     return snapshot;
+}
+
+std::string PythonAPI::shutdown_diagnostics() const {
+    const auto runtime = runtime_coordinator_.snapshot();
+    std::lock_guard lock(lifecycle_mtx_);
+    std::ostringstream out;
+    out << "python.lifecycle.shutdown_timeout"
+        << " lifecycle_state=" << static_cast<int>(lifecycle_.state())
+        << " lifecycle_phase=" << lifecycle_snapshot_.phase
+        << " coordinator_state=" << static_cast<int>(runtime.state)
+        << " queued=" << runtime.queued_count
+        << " pending=" << runtime.pending_count
+        << " consumer_thread=" << runtime.consumer_thread_token;
+    if (runtime.current_request) {
+        out << " request_id=" << runtime.current_request->request_id
+            << " request_kind=" << static_cast<int>(runtime.current_request->kind)
+            << " request_source=" << runtime.current_request->source
+            << " request_module=" << runtime.current_request->module
+            << " request_function=" << runtime.current_request->function;
+    } else {
+        out << " request_id=none";
+    }
+    if (!last_python_shutdown_snapshot_json_.empty()) {
+        out << " python_snapshot=" << last_python_shutdown_snapshot_json_;
+    } else {
+        out << " python_snapshot=unavailable";
+    }
+    return out.str();
 }
 
 void PythonAPI::shutdown() {
@@ -133,7 +160,7 @@ std::string PythonAPI::wstr2str(const std::wstring& wstr) {
 }
 
 bool PythonAPI::initializeInterpreterLocked() {
-    if (Py_IsInitialized()) {
+    if (interpreter_initialized_.load(std::memory_order_acquire)) {
         if (lifecycle_.state() == PythonLifecycleState::Created) {
             lifecycle_.transition(PythonLifecycleState::InterpreterInitializing);
             lifecycle_.transition(PythonLifecycleState::InterpreterReady);
@@ -200,6 +227,7 @@ bool PythonAPI::initializeInterpreterLocked() {
         return false;
     }
     main_thread_state_ = PyEval_SaveThread();
+    interpreter_initialized_.store(true, std::memory_order_release);
     lifecycle_.transition(PythonLifecycleState::InterpreterReady);
     {
         std::lock_guard lock(lifecycle_mtx_);
@@ -207,25 +235,6 @@ bool PythonAPI::initializeInterpreterLocked() {
         lifecycle_snapshot_.phase = "interpreter_ready";
     }
     CFW_LOG_INFO("PythonAPI: Python interpreter initialized successfully");
-
-    if (!Py_IsInitialized()) {
-        CFW_LOG_CRITICAL("Python failed to initialize. Diagnostics:");
-        try {
-            auto print_wlist = [&](const char* title, const PyWideStringList& list) {
-                CFW_LOG_ERROR("  {} ({})", title, list.length);
-                for (Py_ssize_t i = 0; i < list.length; ++i) {
-                    std::wstring ws = list.items[i] ? std::wstring(list.items[i]) : L"";
-                    CFW_LOG_ERROR("    - {}", wstr2str(ws));
-                }
-            };
-            CFW_LOG_ERROR("  home: {}", wstr2str(config.home));
-            CFW_LOG_ERROR("  pythonpath_env: {}", wstr2str(config.pythonpath_env));
-            print_wlist("module_search_paths", config.module_search_paths);
-        } catch (...) {
-            CFW_LOG_ERROR("Failed to print Python configuration diagnostics");
-        }
-        return false;
-    }
 
     return true;
 }
@@ -407,12 +416,16 @@ PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequ
     try {
         if (request.kind == PythonRuntimeRequestKind::LifecycleControl &&
             request.function == "shutdown") {
+            std::string shutdown_snapshot_json = "{}";
             if (pEditor.is_valid()) {
                 if (nanobind::hasattr(pEditor, "request_shutdown")) {
                     nanobind::getattr(pEditor, "request_shutdown")();
                 }
                 if (nanobind::hasattr(pEditor, "shutdown_runtime")) {
-                    nanobind::getattr(pEditor, "shutdown_runtime")();
+                    auto result = nanobind::getattr(pEditor, "shutdown_runtime")();
+                    auto json = nanobind::module_::import_("json");
+                    shutdown_snapshot_json = nanobind::cast<std::string>(
+                        nanobind::getattr(json, "dumps")(result));
                 }
             }
             EngineScripts::clear_python_callback_registry();
@@ -423,7 +436,11 @@ PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequ
             pFunc.reset();
             backend_initialized_.store(false);
             shutting_down_.store(true);
-            return PythonRuntimeResponse::success("{}");
+            {
+                std::lock_guard lock(lifecycle_mtx_);
+                last_python_shutdown_snapshot_json_ = shutdown_snapshot_json;
+            }
+            return PythonRuntimeResponse::success(std::move(shutdown_snapshot_json));
         }
 
         if (request.kind == PythonRuntimeRequestKind::ServiceCall) {

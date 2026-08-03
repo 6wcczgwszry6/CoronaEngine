@@ -53,8 +53,21 @@ int main() {
         auto queued = coordinator.wait_pop(50ms);
         if (!require(queued.has_value(), "callback request should reach the consumer") ||
             !require(queued->handler != nullptr, "callback handler should survive queueing")) return 1;
+        const auto active = coordinator.snapshot();
+        if (!require(active.current_request.has_value(),
+                     "snapshot should identify the request running on the consumer") ||
+            !require(active.current_request->request_id == queued->request_id,
+                     "snapshot request id should match the running request") ||
+            !require(active.current_request->kind == PythonRuntimeRequestKind::Callback,
+                     "snapshot should preserve the running request kind") ||
+            !require(active.pending_count == 1 && active.queued_count == 0,
+                     "snapshot should distinguish pending from queued work") ||
+            !require(active.consumer_thread_bound,
+                     "snapshot should report the bound consumer thread")) return 1;
         auto response = queued->handler(*queued);
         coordinator.complete(queued->request_id, response);
+        if (!require(!coordinator.snapshot().current_request.has_value(),
+                     "completing a request should clear the active snapshot")) return 1;
         response = ticket.wait(50ms);
         if (!require(response.status == PythonRuntimeResponseStatus::Success,
                      "callback handler should complete") ||
@@ -84,6 +97,23 @@ int main() {
     }
 
     {
+        PythonRuntimeCoordinator coordinator(1);
+        auto ordinary = coordinator.submit(request("ordinary"));
+        auto shutdown = request("shutdown");
+        shutdown.kind = PythonRuntimeRequestKind::LifecycleControl;
+        shutdown.function = "shutdown";
+        auto shutdown_ticket = coordinator.submit(std::move(shutdown));
+        if (!require(ordinary.accepted, "ordinary request should occupy the bounded capacity") ||
+            !require(shutdown_ticket.accepted,
+                     "lifecycle control must bypass ordinary queue saturation")) return 1;
+        auto next = coordinator.wait_pop(50ms);
+        if (!require(next.has_value() && next->kind == PythonRuntimeRequestKind::LifecycleControl,
+                     "lifecycle control must run before queued ordinary requests")) return 1;
+        coordinator.complete(next->request_id, PythonRuntimeResponse::success());
+        coordinator.begin_quiescing();
+    }
+
+    {
         PythonRuntimeCoordinator coordinator(4);
         auto response = coordinator.submit_and_wait(request("late"), 5ms);
         if (!require(response.status == PythonRuntimeResponseStatus::Timeout, "request should time out") ||
@@ -94,8 +124,13 @@ int main() {
         PythonRuntimeCoordinator coordinator(8);
         auto ticket = coordinator.submit(request("shutdown"));
         coordinator.begin_quiescing();
+        const auto snapshot = coordinator.snapshot();
         auto response = ticket.wait(50ms);
         if (!require(coordinator.state() == PythonRuntimeState::Quiescing, "state should be quiescing") ||
+            !require(snapshot.state == PythonRuntimeState::Quiescing,
+                     "snapshot should expose the coordinator lifecycle state") ||
+            !require(snapshot.pending_count == 0 && snapshot.queued_count == 0,
+                     "quiescing snapshot should show that pending work was cancelled") ||
             !require(response.status == PythonRuntimeResponseStatus::RuntimeStopping,
                      "pending request should complete as runtime_stopping") ||
             !require(!coordinator.submit(request("rejected")).accepted,
