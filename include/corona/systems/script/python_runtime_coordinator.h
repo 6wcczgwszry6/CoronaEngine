@@ -10,6 +10,7 @@
 #include <mutex>
 #include <optional>
 #include <string>
+#include <thread>
 #include <unordered_map>
 
 namespace Corona::Script::Python {
@@ -91,6 +92,7 @@ class PythonRuntimeCoordinator {
 
     PythonRuntimeState state() const noexcept;
     std::size_t pending_count() const;
+    bool is_consumer_thread() const;
 
    private:
     bool cancel(std::uint64_t request_id, PythonRuntimeResponse response);
@@ -103,6 +105,7 @@ class PythonRuntimeCoordinator {
     std::condition_variable queue_cv_;
     std::deque<PythonRuntimeRequest> queue_;
     std::unordered_map<std::uint64_t, std::shared_ptr<Detail::PythonRuntimeTicketState>> pending_;
+    std::thread::id consumer_thread_id_;
 };
 
 PythonRuntimeCoordinator* active_python_runtime_coordinator() noexcept;

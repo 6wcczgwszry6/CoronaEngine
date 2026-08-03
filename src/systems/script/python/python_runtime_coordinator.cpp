@@ -100,6 +100,10 @@ PythonRuntimeTicket PythonRuntimeCoordinator::submit(PythonRuntimeRequest reques
 PythonRuntimeResponse PythonRuntimeCoordinator::submit_and_wait(
     PythonRuntimeRequest request,
     std::chrono::milliseconds timeout) {
+    if (is_consumer_thread()) {
+        return PythonRuntimeResponse::failure(
+            "synchronous python runtime request from the consumer thread would deadlock");
+    }
     auto ticket = submit(std::move(request));
     if (!ticket.accepted) return ticket.response;
     auto response = ticket.wait(timeout);
@@ -112,6 +116,7 @@ PythonRuntimeResponse PythonRuntimeCoordinator::submit_and_wait(
 std::optional<PythonRuntimeRequest> PythonRuntimeCoordinator::wait_pop(
     std::chrono::milliseconds timeout) {
     std::unique_lock lock(mutex_);
+    consumer_thread_id_ = std::this_thread::get_id();
     queue_cv_.wait_for(lock, timeout, [&] {
         return !queue_.empty() || state_.load(std::memory_order_relaxed) != PythonRuntimeState::Accepting;
     });
@@ -178,6 +183,11 @@ PythonRuntimeState PythonRuntimeCoordinator::state() const noexcept {
 std::size_t PythonRuntimeCoordinator::pending_count() const {
     std::lock_guard lock(mutex_);
     return pending_.size();
+}
+
+bool PythonRuntimeCoordinator::is_consumer_thread() const {
+    std::lock_guard lock(mutex_);
+    return consumer_thread_id_ == std::this_thread::get_id();
 }
 
 PythonRuntimeCoordinator* active_python_runtime_coordinator() noexcept {

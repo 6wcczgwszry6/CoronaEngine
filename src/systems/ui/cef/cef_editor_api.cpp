@@ -1,9 +1,11 @@
 ﻿#include "cef_editor_api.h"
 
 #include <corona/kernel/core/i_logger.h>
+#include <corona/systems/script/python_runtime_coordinator.h>
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -1173,50 +1175,36 @@ void clear_python_script_callbacks() {
 
 NativeResult invoke_python_script_service(const NativeRequest& request, const char* route) {
     const std::string route_name = route && *route ? route : "python-script";
-    if (!Py_IsInitialized()) {
+    auto* coordinator = Script::Python::active_python_runtime_coordinator();
+    if (!coordinator) {
         return native_failure("Python script runtime is not initialized",
                               503,
                               route_name);
     }
 
-    PyGILState_STATE state = PyGILState_Ensure();
-    PyObject* dispatcher = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
-        dispatcher = g_python_script_service_dispatcher;
-        Py_XINCREF(dispatcher);
-    }
-    if (!dispatcher) {
-        PyGILState_Release(state);
-        return native_failure("Python script service dispatcher is not registered",
-                              503,
+    Script::Python::PythonRuntimeRequest runtime_request;
+    runtime_request.kind = Script::Python::PythonRuntimeRequestKind::ServiceCall;
+    runtime_request.source = route_name;
+    runtime_request.module = request.module;
+    runtime_request.function = request.function;
+    runtime_request.payload_json = python_script_request_json(request);
+    const auto response = coordinator->submit_and_wait(std::move(runtime_request),
+                                                       std::chrono::seconds(2));
+    if (response.status != Script::Python::PythonRuntimeResponseStatus::Success) {
+        int error_code = 500;
+        if (response.status == Script::Python::PythonRuntimeResponseStatus::Timeout) {
+            error_code = 504;
+        } else if (response.status == Script::Python::PythonRuntimeResponseStatus::QueueFull) {
+            error_code = 429;
+        } else if (response.status == Script::Python::PythonRuntimeResponseStatus::RuntimeStopping) {
+            error_code = 503;
+        }
+        return native_failure(response.error.empty() ? "Python script function call failed" : response.error,
+                              error_code,
                               route_name);
     }
 
-    PyObject* py_request = PyUnicode_FromString(python_script_request_json(request).c_str());
-    PyObject* py_args = py_request ? PyTuple_Pack(1, py_request) : nullptr;
-    Py_XDECREF(py_request);
-
-    PyObject* object = py_args ? PyObject_CallObject(dispatcher, py_args) : nullptr;
-    Py_DECREF(dispatcher);
-    Py_XDECREF(py_args);
-
-    if (!object) {
-        PyErr_Print();
-        PyGILState_Release(state);
-        return native_failure("Python script function call failed",
-                              500,
-                              route_name);
-    }
-
-    PyObject* string_object = PyUnicode_Check(object) ? object : PyObject_Str(object);
-    const char* result_chars = string_object ? PyUnicode_AsUTF8(string_object) : nullptr;
-    const std::string result_text = result_chars ? result_chars : "";
-    if (string_object != object) {
-        Py_XDECREF(string_object);
-    }
-    Py_DECREF(object);
-    PyGILState_Release(state);
+    const auto& result_text = response.payload_json;
 
     const auto parsed = nlohmann::json::parse(result_text, nullptr, false);
     if (parsed.is_discarded()) {

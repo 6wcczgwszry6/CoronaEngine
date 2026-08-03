@@ -83,6 +83,7 @@ corona_add_system(ui
         corona::resource::manager
         assimp::assimp
         nlohmann_json::nlohmann_json
+        corona::python::runtime
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/cef
