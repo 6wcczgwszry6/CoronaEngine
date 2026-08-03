@@ -1,11 +1,12 @@
-# script_manager.py
-import os
-from typing import Dict, Optional, Type, Any
-import logging
-from pathlib import Path
 import importlib.util
+import logging
+import os
+from pathlib import Path
 import sys
-from .script_base import ScriptBase
+import threading
+import time
+from typing import Dict, Optional
+
 from .entities.actor_script import ActorScript
 from .entities.project_script import ProjectScript
 from .entities.scene_script import SceneScript
@@ -14,190 +15,259 @@ from ..entities import Scene
 
 
 class ScriptsManager:
-    """
-    脚本管理器：负责加载、管理和分发所有脚本
-    """
+    """Own project, scene and actor script instances and their reload lifecycle."""
 
-    _instances: list = []  # 所有实例的列表，供外部查找
+    _instances: list = []
 
     def __init__(self):
         self.project_script: Optional[ProjectScript] = None
         self.current_scene_script: Optional[SceneScript] = None
-        self.actor_scripts: Dict[str, ActorScript] = {}  # actor_name -> ActorScript
+        self.actor_scripts: Dict[str, ActorScript] = {}
         self.logger = logging.getLogger("ScriptManager")
         self.state = "created"
         self.shutdown_requested = False
+        self._lifecycle_lock = threading.RLock()
+        self._reload_in_progress = False
+        self._script_records: list[dict] = []
         ScriptsManager._instances.append(self)
 
-    def initialize_project(self, project_script_path: str, scene: Scene) -> bool:
-        """
-        初始化项目脚本系统
-        Args:
-            project_script_path: project_script.py路径
-            scene: 场景对象
-        Returns:
-            bool: 初始化是否成功
-        """
-        if self.shutdown_requested or self.state == "stopped":
-            return False
-        if self.state in ("initializing", "ready", "updating"):
-            return self.state == "ready"
-        self.state = "initializing"
+    @staticmethod
+    def _mtime_ns(path: str) -> int:
         try:
-            self.logger.info(f"Initializing script system with global script: {project_script_path}")
+            return os.stat(path).st_mtime_ns
+        except OSError:
+            return 0
 
-            if project_script_path and os.path.exists(project_script_path):
-                # 动态导入全局脚本模块
-                module_name = f"project_script_module_{Path(project_script_path).stem}"
-                spec = importlib.util.spec_from_file_location(module_name, project_script_path)
-                if spec and spec.loader:
-                    module = importlib.util.module_from_spec(spec)
-                    spec.loader.exec_module(module)
+    @staticmethod
+    def _resolve_path(path: str, scene: Scene) -> str:
+        if not path or os.path.isabs(path):
+            return path
+        project_dir = os.path.dirname(os.path.dirname(scene.route))
+        return os.path.join(project_dir, path)
 
-                    # 查找模块中的ProjectScript子类
-                    for attr_name in dir(module):
-                        attr = getattr(module, attr_name)
-                        if (isinstance(attr, type) and
-                                issubclass(attr, ProjectScript) and
-                                attr != ProjectScript):
-                            # 找到ProjectScript子类，实例化并初始化
-                            self.project_script = attr(f"Project_{Path(project_script_path).stem}")
-                            self.project_script.initialize()
-                            self.project_script.is_initialized = True
-                            self.project_script.on_start()
-                            self.logger.debug("Global script loaded: %s", self.project_script.name)
-                            break
+    def _load_instance(self, record: dict):
+        path = record["path"]
+        module_name = f"{record['module_name']}_reload_{time.monotonic_ns()}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"cannot load script module: {path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            source = Path(path).read_bytes()
+            exec(compile(source, path, "exec"), module.__dict__)
+            base_class = record["base_class"]
+            script_class = next(
+                (
+                    value for value in vars(module).values()
+                    if isinstance(value, type)
+                    and issubclass(value, base_class)
+                    and value is not base_class
+                ),
+                None,
+            )
+            if script_class is None:
+                raise RuntimeError(f"no {base_class.__name__} subclass in {path}")
+            instance = script_class(record["instance_name"], *record["constructor_args"])
+            instance.initialize()
+            instance.is_initialized = True
+            instance.on_start()
+            instance._corona_script_module_name = module_name
+            return instance
+        except Exception:
+            sys.modules.pop(module_name, None)
+            raise
 
-            if scene.script_path:
-                scene_script_path = scene.script_path
-                if not os.path.isabs(scene_script_path):
-                    # scene.route 指向 项目/Scene/场景.scene，脚本在 项目/Scripts/
-                    project_dir = os.path.dirname(os.path.dirname(scene.route))
-                    scene_script_path = os.path.join(project_dir, scene_script_path)
-                if os.path.exists(scene_script_path):
-                    # 动态导入场景脚本模块
-                    module_name = f"scene_script_module_{Path(scene_script_path).stem}"
-                    spec = importlib.util.spec_from_file_location(module_name, scene_script_path)
-                    if spec and spec.loader:
-                        module = importlib.util.module_from_spec(spec)
-                        spec.loader.exec_module(module)
+    def _add_record(
+        self,
+        *,
+        kind: str,
+        path: str,
+        module_name: str,
+        base_class,
+        instance_name: str,
+        constructor_args=(),
+        actor_name: str = "",
+    ):
+        record = {
+            "kind": kind,
+            "path": path,
+            "module_name": module_name,
+            "base_class": base_class,
+            "instance_name": instance_name,
+            "constructor_args": tuple(constructor_args),
+            "actor_name": actor_name,
+            "mtime_ns": self._mtime_ns(path),
+            "failed_mtime_ns": 0,
+            "instance": None,
+        }
+        instance = self._load_instance(record)
+        record["instance"] = instance
+        self._script_records.append(record)
+        self._assign_record_instance(record, instance)
 
-                        # 查找模块中的SceneScript子类
-                        for attr_name in dir(module):
-                            attr = getattr(module, attr_name)
-                            if (isinstance(attr, type) and
-                                    issubclass(attr, SceneScript) and
-                                    attr != SceneScript):
-                                # 找到SceneScript子类，实例化并初始化
-                                self.current_scene_script = attr(f"Scene_{scene.name}", scene)
-                                self.current_scene_script.initialize()
-                                self.current_scene_script.is_initialized = True
-                                self.current_scene_script.on_start()
-                                self.logger.debug(
-                                    "Scene script loaded for %s: %s", scene.name, self.current_scene_script.name)
-                                break
+    def _assign_record_instance(self, record: dict, instance) -> None:
+        if record["kind"] == "project":
+            self.project_script = instance
+        elif record["kind"] == "scene":
+            self.current_scene_script = instance
+        else:
+            self.actor_scripts[record["actor_name"]] = instance
+            actor = record["constructor_args"][0]
+            if isinstance(instance, CameraLockedObject) and hasattr(actor, "set_camera_locked_script"):
+                actor.set_camera_locked_script(instance)
 
-            for actor in scene._actors:
-                if hasattr(actor, 'script_path') and actor.script_path:
-                    actor_script_path = actor.script_path
-                    if not os.path.isabs(actor_script_path):
-                        project_dir = os.path.dirname(os.path.dirname(scene.route))
-                        actor_script_path = os.path.join(project_dir, actor_script_path)
-                    if os.path.exists(actor_script_path):
-                        # 动态导入Actor脚本模块
-                        module_name = f"actor_script_module_{Path(actor_script_path).stem}_{actor.name}"
-                        spec = importlib.util.spec_from_file_location(module_name, actor_script_path)
-                        if spec and spec.loader:
-                            module = importlib.util.module_from_spec(spec)
-                            spec.loader.exec_module(module)
+    def initialize_project(self, project_script_path: str, scene: Scene) -> bool:
+        with self._lifecycle_lock:
+            if self.shutdown_requested or self.state == "stopped":
+                return False
+            if self.state in ("initializing", "ready", "updating"):
+                return self.state == "ready"
+            self.state = "initializing"
+            try:
+                if project_script_path and os.path.exists(project_script_path):
+                    self._add_record(
+                        kind="project",
+                        path=project_script_path,
+                        module_name=f"project_script_module_{Path(project_script_path).stem}",
+                        base_class=ProjectScript,
+                        instance_name=f"Project_{Path(project_script_path).stem}",
+                    )
 
-                            for attr_name in dir(module):
-                                attr = getattr(module, attr_name)
-                                if (isinstance(attr, type) and
-                                        issubclass(attr, ActorScript) and
-                                        attr != ActorScript):
-                                    # 找到ActorScript子类，实例化并初始化
-                                    actor_script = attr(f"Actor_{actor.name}", actor)
-                                    actor_script.initialize()
-                                    actor_script.is_initialized = True
-                                    actor_script.on_start()
-                                    self.actor_scripts[actor.name] = actor_script
-                                    # 如果是 CameraLockedObject，关联到 Actor
-                                    if isinstance(actor_script, CameraLockedObject):
-                                        actor.set_camera_locked_script(actor_script)
-                                    self.logger.debug("Actor script loaded for %s: %s", actor.name, actor_script.name)
-                                    break
+                scene_script_path = self._resolve_path(getattr(scene, "script_path", ""), scene)
+                if scene_script_path and os.path.exists(scene_script_path):
+                    self._add_record(
+                        kind="scene",
+                        path=scene_script_path,
+                        module_name=f"scene_script_module_{Path(scene_script_path).stem}",
+                        base_class=SceneScript,
+                        instance_name=f"Scene_{scene.name}",
+                        constructor_args=(scene,),
+                    )
 
-            self.logger.info("Script system initialized successfully")
-            self.state = "ready"
-            return True
+                for actor in scene._actors:
+                    actor_script_path = self._resolve_path(getattr(actor, "script_path", ""), scene)
+                    if not actor_script_path or not os.path.exists(actor_script_path):
+                        continue
+                    self._add_record(
+                        kind="actor",
+                        path=actor_script_path,
+                        module_name=f"actor_script_module_{Path(actor_script_path).stem}_{actor.name}",
+                        base_class=ActorScript,
+                        instance_name=f"Actor_{actor.name}",
+                        constructor_args=(actor,),
+                        actor_name=actor.name,
+                    )
+                self.state = "ready"
+                self.logger.info("Script system initialized successfully")
+                return True
+            except Exception:
+                self.logger.exception("Failed to initialize script system")
+                self._shutdown_initialized_scripts()
+                self.state = "stopped"
+                return False
 
-        except Exception as e:
-            self.logger.error(f"Failed to initialize script system: {e}", exc_info=True)
-            self._shutdown_initialized_scripts()
-            self.state = "stopped"
+    @staticmethod
+    def _service_initialization_active() -> bool:
+        try:
+            from backend import registry
+            return any(getattr(service, "state", "") == "initializing" for service in registry._managed_services)
+        except Exception:
             return False
+
+    def reload_changed_scripts(self) -> bool:
+        with self._lifecycle_lock:
+            if (
+                self.shutdown_requested
+                or self.state not in ("ready", "updating")
+                or self._reload_in_progress
+                or self._service_initialization_active()
+            ):
+                return False
+            changed = [
+                record for record in self._script_records
+                if self._mtime_ns(record["path"]) > record["mtime_ns"]
+                and self._mtime_ns(record["path"]) != record["failed_mtime_ns"]
+            ]
+            if not changed:
+                return False
+            self._reload_in_progress = True
+            replaced = False
+            try:
+                for record in changed:
+                    if self.shutdown_requested:
+                        break
+                    mtime_ns = self._mtime_ns(record["path"])
+                    try:
+                        candidate = self._load_instance(record)
+                    except Exception:
+                        record["failed_mtime_ns"] = mtime_ns
+                        self.logger.exception("Script reload failed; keeping old instance: %s", record["path"])
+                        continue
+                    if self.shutdown_requested:
+                        candidate.shutdown()
+                        sys.modules.pop(
+                            getattr(candidate, "_corona_script_module_name", ""), None
+                        )
+                        break
+                    previous = record["instance"]
+                    try:
+                        previous.shutdown()
+                    except Exception:
+                        self.logger.exception("Old script cleanup failed during reload: %s", record["path"])
+                    sys.modules.pop(getattr(previous, "_corona_script_module_name", ""), None)
+                    record["instance"] = candidate
+                    record["mtime_ns"] = mtime_ns
+                    record["failed_mtime_ns"] = 0
+                    self._assign_record_instance(record, candidate)
+                    replaced = True
+                    self.logger.info("Reloaded managed script: %s", record["path"])
+                return replaced
+            finally:
+                self._reload_in_progress = False
 
     def update(self, delta_time: float):
-        """更新所有脚本"""
-        if self.shutdown_requested or self.state not in ("ready", "updating"):
-            return False
-        self.state = "updating"
-        # 更新全局脚本
-        if self.project_script and self.project_script.is_initialized:
-            try:
-                self.project_script.update(delta_time)
-                self.project_script.on_update(delta_time)
-            except Exception:
-                self.logger.exception("Project script update failed")
-
-        # 更新场景脚本
-        if self.current_scene_script and self.current_scene_script.is_initialized:
-            try:
-                self.current_scene_script.update(delta_time)
-                self.current_scene_script.on_update(delta_time)
-            except Exception:
-                self.logger.exception("Scene script update failed")
-
-        # 更新单位脚本
-        for script in self.actor_scripts.values():
-            if script.is_initialized:
+        with self._lifecycle_lock:
+            if self.shutdown_requested or self.state not in ("ready", "updating"):
+                return False
+            self.reload_changed_scripts()
+            if self.shutdown_requested:
+                return False
+            self.state = "updating"
+            callbacks = [self.project_script, self.current_scene_script, *self.actor_scripts.values()]
+            for script in callbacks:
+                if script is None or not script.is_initialized:
+                    continue
                 try:
                     script.update(delta_time)
                     script.on_update(delta_time)
                 except Exception:
-                    self.logger.exception("Actor script update failed: %s", script.name)
-
-        self.state = "ready"
-        return True
+                    self.logger.exception("Script update failed: %s", script.name)
+            self.state = "ready"
+            return True
 
     def _shutdown_initialized_scripts(self):
-        for script in list(self.actor_scripts.values())[::-1]:
+        for record in reversed(self._script_records):
+            instance = record.get("instance")
+            if instance is None:
+                continue
             try:
-                script.shutdown()
+                instance.shutdown()
             except Exception:
-                self.logger.exception("Actor script shutdown failed: %s", script.name)
+                self.logger.exception("Script shutdown failed: %s", instance.name)
+            sys.modules.pop(getattr(instance, "_corona_script_module_name", ""), None)
+        self._script_records.clear()
         self.actor_scripts.clear()
-        if self.current_scene_script:
-            try:
-                self.current_scene_script.shutdown()
-            except Exception:
-                self.logger.exception("Scene script shutdown failed")
-            self.current_scene_script = None
-        if self.project_script:
-            try:
-                self.project_script.shutdown()
-            except Exception:
-                self.logger.exception("Project script shutdown failed")
-            self.project_script = None
+        self.current_scene_script = None
+        self.project_script = None
 
     def shutdown(self):
-        """关闭脚本系统"""
-        if self.state == "stopped":
+        with self._lifecycle_lock:
+            if self.state == "stopped":
+                return True
+            self.shutdown_requested = True
+            self.state = "stopping"
+            self._shutdown_initialized_scripts()
+            self.state = "stopped"
+            self.logger.debug("Script system shutdown")
             return True
-        self.shutdown_requested = True
-        self.state = "stopping"
-        self._shutdown_initialized_scripts()
-        self.state = "stopped"
-        self.logger.debug("Script system shutdown")
-        return True

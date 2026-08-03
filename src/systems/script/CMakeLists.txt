@@ -30,7 +30,6 @@ corona_add_system(script
         python/corona_engine_module.cpp
         python/engine_bindings.cpp
         python/python_api.cpp
-        python/python_hotfix.cpp
         python/python_path_config.cpp
         python/python_error_handler.cpp
         camera_follow_controller.cpp

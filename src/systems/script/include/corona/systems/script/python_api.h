@@ -1,7 +1,6 @@
 #pragma once
 
 #include <Python.h>
-#include <corona/systems/script/python_hotfix.h>
 #include <corona/systems/script/python_lifecycle.h>
 #include <corona/systems/script/python_runtime_coordinator.h>
 #include <nanobind/nanobind.h>
@@ -41,8 +40,6 @@ struct PythonAPI {
 
     bool initializeInterpreter();
     void runPythonScript();
-    static void checkPythonScriptChange();
-    void checkReleaseScriptChange();
     void sendMessage(const std::string& message) const;
 
     /**
@@ -59,12 +56,7 @@ struct PythonAPI {
    private:
     static const std::string codePath;
 
-    PythonHotfix hotfixManger;
     mutable std::mutex initMtx;
-    mutable std::shared_mutex queMtx;
-
-    int64_t lastHotReloadTime = 0;  // ms
-    bool hasHotReload = false;
     std::atomic<bool> shutting_down_{false};  // 标记是否正在关闭
     std::atomic<bool> backend_initialized_{false};
     std::atomic<int64_t> last_overrun_log_ms_{0};
@@ -86,7 +78,6 @@ struct PythonAPI {
 
     bool ensureInitialized();
     bool initializeInterpreterLocked();
-    bool performHotReload();
     void invokeEntry(bool isReload) const;
     void process_runtime_requests();
     PythonRuntimeResponse execute_runtime_request(const PythonRuntimeRequest& request);
@@ -94,8 +85,5 @@ struct PythonAPI {
     static int64_t nowMsec();
     static std::wstring str2wstr(const std::string& str);
     static std::string wstr2str(const std::wstring& wstr);
-    static void copyModifiedFiles(const std::filesystem::path& sourceDir,
-                                  const std::filesystem::path& destDir,
-                                  int64_t checkTimeMs);
 };
 }  // namespace Corona::Script::Python

@@ -314,59 +314,6 @@ bool PythonAPI::ensureInitialized() {
     return true;
 }
 
-bool PythonAPI::performHotReload() {
-    int64_t currentTime = PythonHotfix::GetCurrentTimeMsec();  // ms
-    constexpr int64_t kHotReloadIntervalMs = 100;              // 100ms
-    if (currentTime - lastHotReloadTime <= kHotReloadIntervalMs || hotfixManger.packageSet.empty()) {
-        return false;
-    }
-
-    CFW_LOG_DEBUG("PythonAPI: performHotReload triggered. packageSet.size={}", hotfixManger.packageSet.size());
-
-    bool reloadedDeps = hotfixManger.ReloadPythonFile();
-    if (!reloadedDeps) {
-        CFW_LOG_DEBUG("PythonAPI: hotfixManger.ReloadPythonFile returned false");
-        return false;
-    }
-
-    nanobind::gil_scoped_acquire gil;
-    CFW_LOG_DEBUG("PythonAPI: reloading 'main' module (via importlib.reload)");
-
-    try {
-        nanobind::module_ importlib = nanobind::module_::import_("importlib");
-        nanobind::object reload_func = nanobind::getattr(importlib, "reload");
-
-        nanobind::module_ mod = nanobind::module_::import_("main");
-        (void)reload_func(mod);
-
-        nanobind::object editor = nanobind::getattr(mod, "editor");
-        nanobind::object start_attr = nanobind::getattr(mod, "run");
-        nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
-        pStartFunc = std::move(start_attr);
-        messageFunc = std::move(log_attr);
-        pEditor = editor;
-        /*  nanobind::object newFunc = nanobind::getattr(mod, "run");
-          if (!nanobind::callable::check_(newFunc)) {
-              CFW_LOG_WARNING("PythonAPI: new run attribute is not callable");
-              return false;
-          }
-          nanobind::object newMsg = nanobind::getattr(mod, "put_queue");
-
-          pModule = std::move(mod);
-          pFunc = std::move(newFunc);
-          messageFunc = std::move(newMsg);*/
-    } catch (const nanobind::python_error& e) {
-        CFW_LOG_ERROR("PythonAPI: reload(main) failed");
-        log_python_error(e);
-        return false;
-    }
-
-    lastHotReloadTime = currentTime;
-    hasHotReload = true;
-    CFW_LOG_DEBUG("PythonAPI: performHotReload finished successfully");
-    return true;
-}
-
 void PythonAPI::invokeEntry(bool isReload) const {
     // 如果正在关闭，不执行
     if (shutting_down_.load()) {
@@ -422,21 +369,12 @@ void PythonAPI::runPythonScript() {
         return;
     }
 
-    bool reloaded = false;
-    {
-        std::unique_lock lk(queMtx);
-        reloaded = performHotReload();
-        if (!reloaded && !hotfixManger.packageSet.empty()) {
-            hasHotReload = false;
-        }
-    }
-
     // 再次检查是否正在关闭
     if (shutting_down_.load()) {
         return;
     }
 
-    invokeEntry(reloaded);
+    invokeEntry(false);
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - frame_start).count();
@@ -508,80 +446,6 @@ PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequ
     }
 }
 
-void PythonAPI::checkPythonScriptChange() {
-    const std::string& sourcePath = PathCfg::editor_backend_abs();
-    const std::string runtimePath = PathCfg::runtime_backend_abs();
-    int64_t checkTime = PythonHotfix::GetCurrentTimeMsec();
-    CFW_LOG_DEBUG("PythonAPI: checkPythonScriptChange: src={}, dst={}, t={}", sourcePath, runtimePath, checkTime);
-    copyModifiedFiles(sourcePath, runtimePath, checkTime);
-}
-
-void PythonAPI::checkReleaseScriptChange() {
-    static int64_t lastCheckTime = 0;
-    static std::unordered_map<std::string, int64_t> lastProcessedMtime;  // mod -> last mtime processed
-
-    int64_t currentTime = PythonHotfix::GetCurrentTimeMsec();
-    if (currentTime - lastCheckTime < 100) {
-        return;
-    }
-    lastCheckTime = currentTime;
-
-    std::queue<std::unordered_set<std::string>> messageQue;
-    const std::string runtimePathStr = Corona::Script::Python::PathCfg::runtime_backend_abs();
-    const std::filesystem::path runtimePath(runtimePathStr);
-    PythonHotfix::TraverseDirectory(runtimePathStr, messageQue, currentTime);
-
-    if (messageQue.empty()) {
-        return;
-    }
-
-    std::unique_lock lk(queMtx);
-    const auto& mods = messageQue.front();
-
-    // Build module list string for logging
-    std::string moduleListStr;
-    bool first = true;
-    for (const auto& m : mods) {
-        if (!first) moduleListStr += ", ";
-        moduleListStr += m;
-        first = false;
-    }
-    CFW_LOG_DEBUG("PythonAPI: detected modified modules ({}): {}", mods.size(), moduleListStr);
-
-    auto modToPath = [&](const std::string& mod) {
-        std::string rel = mod;  // replace '.' with '/'
-        std::ranges::replace(rel, '.', '/');
-        return runtimePath / (rel + ".py");
-    };
-
-    for (const auto& mod : mods) {
-        int64_t fileMtimeMs = 0;
-        std::error_code ec;
-        const auto filePath = modToPath(mod);
-        auto ftime = std::filesystem::last_write_time(filePath, ec);
-        if (!ec) {
-            auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
-            fileMtimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(sysTime.time_since_epoch()).count();
-        }
-
-        auto it = lastProcessedMtime.find(mod);
-        if (it != lastProcessedMtime.end() && fileMtimeMs > 0 && fileMtimeMs <= it->second) {
-            CFW_LOG_DEBUG("PythonAPI: skip duplicate module in window: '{}' mtime={} lastProcessed={}", mod, fileMtimeMs, it->second);
-            continue;
-        }
-
-        if (!hotfixManger.packageSet.contains(mod)) {
-            hotfixManger.packageSet.emplace(mod, currentTime);
-            CFW_LOG_DEBUG("PythonAPI: packageSet.emplace: '{}' @{}", mod, currentTime);
-        } else {
-            CFW_LOG_DEBUG("PythonAPI: packageSet already contains: '{}' (skip)", mod);
-        }
-        if (fileMtimeMs > 0) {
-            lastProcessedMtime[mod] = fileMtimeMs;
-        }
-    }
-}
-
 std::wstring PythonAPI::str2wstr(const std::string& str) {
     if (str.empty()) {
         return {};
@@ -595,55 +459,4 @@ std::wstring PythonAPI::str2wstr(const std::string& str) {
     return w;
 }
 
-void PythonAPI::copyModifiedFiles(const std::filesystem::path& sourceDir,
-                                  const std::filesystem::path& destDir,
-                                  int64_t checkTimeMs) {
-    static const std::set<std::string> skip = {
-        "__pycache__", "__init__.py", ".pyc", "StaticComponents.py"};
-    static std::unordered_map<std::string, int64_t> lastCopiedMtime;
-
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(sourceDir)) {
-        if (!entry.is_regular_file()) {
-            continue;
-        }
-        const auto& filePath = entry.path();
-        std::string fileName = filePath.filename().string();
-        if (!PythonHotfix::EndsWith(fileName, ".py")) {
-            continue;
-        }
-        bool skipFile = std::ranges::any_of(skip, [&](const std::string& s) {
-            return PythonHotfix::EndsWith(fileName, s);
-        });
-        if (skipFile) {
-            continue;
-        }
-
-        try {
-            auto ftime = std::filesystem::last_write_time(filePath);
-            auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
-            int64_t modifyMs = std::chrono::duration_cast<std::chrono::milliseconds>(sysTime.time_since_epoch()).count();
-
-            auto srcKey = filePath.string();
-            auto it = lastCopiedMtime.find(srcKey);
-            bool newerThanLastCopy = (it == lastCopiedMtime.end()) || (modifyMs > it->second);
-            if (checkTimeMs - modifyMs <= PythonHotfix::kFileRecentWindowMs && newerThanLastCopy) {
-                auto relativePath = std::filesystem::relative(filePath, sourceDir);
-                auto destFilePath = destDir / relativePath;
-                std::filesystem::create_directories(destFilePath.parent_path());
-                std::filesystem::copy_file(filePath, destFilePath,
-                                           std::filesystem::copy_options::overwrite_existing);
-                std::filesystem::last_write_time(destFilePath, ftime);
-
-                lastCopiedMtime[srcKey] = modifyMs;
-
-                std::string modName = destFilePath.string();
-                PythonHotfix::NormalizeModuleName(modName);
-                CFW_LOG_DEBUG("PythonAPI: copied recent file: {} -> {}, module='{}' src_mtime={}",
-                              filePath.string(), destFilePath.string(), modName, modifyMs);
-            }
-        } catch (const std::exception& e) {
-            CFW_LOG_ERROR("PythonAPI: File copy error: {}", e.what());
-        }
-    }
-}
 }  // namespace Corona::Script::Python
