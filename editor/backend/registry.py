@@ -1,5 +1,6 @@
 import logging
 import threading
+import time
 from importlib import import_module
 
 from CoronaCore.core.corona_editor import CoronaEditor
@@ -23,6 +24,8 @@ PYTHON_SCRIPT_SERVICES = {
 
 CORE_PYTHON_SCRIPT_SERVICES = {"ProjectArchive"}
 LAZY_PYTHON_SCRIPT_SERVICES = {"AITool"}
+_managed_services = []
+_registry_shutdown_requested = threading.Event()
 
 
 class PythonScriptService:
@@ -32,6 +35,22 @@ class PythonScriptService:
 
     def __getattr__(self, name):
         return getattr(self._target, name)
+
+    def request_shutdown(self):
+        callback = getattr(self._target, "request_shutdown", None)
+        if callable(callback):
+            callback()
+
+    def shutdown(self, _timeout=0.0):
+        callback = getattr(self._target, "cleanup", None)
+        if not callable(callback):
+            callback = getattr(self._target, "shutdown", None)
+        if callable(callback):
+            callback()
+        return {"service": self.module_name, "state": "stopped", "thread_alive": False}
+
+    def snapshot(self):
+        return {"service": self.module_name, "state": "ready", "thread_alive": False}
 
 
 class LazyPythonScriptService:
@@ -44,15 +63,23 @@ class LazyPythonScriptService:
         self._initialization_error = None
         self._state_lock = threading.Lock()
         self._initialization_finished = threading.Event()
+        self._stop_requested = threading.Event()
+        self._worker = None
+        self._cleaned = False
 
     @property
     def state(self):
         with self._state_lock:
             return self._state
 
+    @property
+    def target(self):
+        with self._state_lock:
+            return self._target
+
     def start_background_load(self):
         with self._state_lock:
-            if self._state != "cold":
+            if self._state != "cold" or self._stop_requested.is_set():
                 return
             self._state = "initializing"
             worker = threading.Thread(
@@ -60,6 +87,7 @@ class LazyPythonScriptService:
                 name=f"{self.module_name}Initializer",
                 daemon=True,
             )
+            self._worker = worker
         worker.start()
 
     def wait_for_initialization(self, timeout=None):
@@ -73,6 +101,11 @@ class LazyPythonScriptService:
             if callable(initializer):
                 initializer()
             target = getattr(module, self._class_name)
+            if self._stop_requested.is_set():
+                self._cleanup_target(target)
+                with self._state_lock:
+                    self._state = "stopped"
+                return
             with self._state_lock:
                 self._target = target
                 self._state = "ready"
@@ -92,6 +125,55 @@ class LazyPythonScriptService:
             )
         finally:
             self._initialization_finished.set()
+
+    def _cleanup_target(self, target):
+        with self._state_lock:
+            if self._cleaned:
+                return
+            self._cleaned = True
+        callback = getattr(target, "cleanup", None)
+        if not callable(callback):
+            callback = getattr(target, "shutdown", None)
+        if callable(callback):
+            callback()
+
+    def request_shutdown(self):
+        self._stop_requested.set()
+        with self._state_lock:
+            target = self._target
+            if self._state == "cold":
+                self._state = "stopped"
+                self._initialization_finished.set()
+            elif self._state not in ("stopped", "degraded"):
+                self._state = "stop_requested"
+        callback = getattr(target, "request_shutdown", None) if target is not None else None
+        if callable(callback):
+            callback()
+
+    def shutdown(self, timeout=2.0):
+        self.request_shutdown()
+        worker = self._worker
+        if worker and worker is not threading.current_thread() and worker.is_alive():
+            worker.join(timeout=max(0.0, float(timeout)))
+        with self._state_lock:
+            target = self._target
+            worker_alive = bool(worker and worker.is_alive())
+        if target is not None:
+            self._cleanup_target(target)
+        with self._state_lock:
+            self._target = None
+            self._state = "stop_timeout" if worker_alive else "stopped"
+        return self.snapshot()
+
+    def snapshot(self):
+        worker = self._worker
+        with self._state_lock:
+            return {
+                "service": self.module_name,
+                "state": self._state,
+                "thread_alive": bool(worker and worker.is_alive()),
+                "error": str(self._initialization_error or ""),
+            }
 
     def _unavailable_result(self, state, error):
         if state == "degraded":
@@ -125,6 +207,8 @@ class LazyPythonScriptService:
 def _register_python_script_services(service_names):
     registered = []
     for service_name in service_names:
+        if _registry_shutdown_requested.is_set():
+            break
         if service_name not in PYTHON_SCRIPT_SERVICES:
             continue
         module_path, class_name = PYTHON_SCRIPT_SERVICES[service_name]
@@ -143,6 +227,7 @@ def _register_python_script_services(service_names):
                 service_name,
                 service,
             )
+            _managed_services.append(service)
             registered.append(service_name)
             if isinstance(service, LazyPythonScriptService):
                 service.start_background_load()
@@ -174,3 +259,29 @@ def register_remaining_python_script_services():
         for name in PYTHON_SCRIPT_SERVICES
         if name not in CORE_PYTHON_SCRIPT_SERVICES
     )
+
+
+def shutdown_python_script_services(timeout=2.0):
+    _registry_shutdown_requested.set()
+    services = list(reversed(_managed_services))
+    for service in services:
+        try:
+            service.request_shutdown()
+        except Exception:
+            logger.exception("Failed to request shutdown for %s", getattr(service, "module_name", service))
+
+    deadline = time.monotonic() + max(0.0, float(timeout))
+    snapshots = []
+    for service in services:
+        try:
+            snapshots.append(service.shutdown(max(0.0, deadline - time.monotonic())))
+        except Exception as error:
+            logger.exception("Failed to shutdown %s", getattr(service, "module_name", service))
+            snapshots.append({
+                "service": getattr(service, "module_name", type(service).__name__),
+                "state": "error",
+                "thread_alive": True,
+                "error": str(error),
+            })
+    _managed_services.clear()
+    return snapshots

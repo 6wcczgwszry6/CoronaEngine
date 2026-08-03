@@ -126,6 +126,14 @@ class CoronaEditor:
             return True
         cls.request_shutdown()
         cls._runtime_state = "stopping"
+        try:
+            from backend import registry as _service_registry
+            snapshots = _service_registry.shutdown_python_script_services(2.0)
+            alive = [item for item in snapshots if item.get("thread_alive")]
+            if alive:
+                logger.error("Python services still alive during shutdown: %s", alive)
+        except Exception:
+            logger.exception("Python service registry shutdown failed")
         if cls.scripts_mgr is not None:
             try:
                 cls.scripts_mgr.shutdown()
@@ -133,6 +141,11 @@ class CoronaEditor:
                 logger.exception("ScriptsManager shutdown failed")
             cls.scripts_mgr = None
         cls._scripts_initialized = False
+        try:
+            cls.unregister_script_dispatcher()
+        except Exception:
+            logger.exception("Python dispatcher unregister failed")
+        cls.module_list.clear()
         cls._runtime_started = False
         cls._runtime_state = "stopped"
         return True

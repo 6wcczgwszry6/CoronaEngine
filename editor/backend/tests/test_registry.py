@@ -157,6 +157,55 @@ class PythonScriptServiceRegistryTests(unittest.TestCase):
             },
         )
 
+    def test_lazy_service_shutdown_prevents_late_target_publication(self):
+        registry = self._load_registry()
+        import_started = threading.Event()
+        allow_import = threading.Event()
+        cleanup_calls = []
+        target = SimpleNamespace(cleanup=lambda: cleanup_calls.append("cleanup"))
+
+        def import_service(_module_path):
+            import_started.set()
+            self.assertTrue(allow_import.wait(2.0))
+            return SimpleNamespace(AITool=target)
+
+        service = registry.LazyPythonScriptService("AITool", "services.ai", "AITool")
+        with patch.object(registry, "import_module", side_effect=import_service):
+            service.start_background_load()
+            self.assertTrue(import_started.wait(1.0))
+            service.request_shutdown()
+            allow_import.set()
+            snapshot = service.shutdown(2.0)
+
+        self.assertEqual(service.state, "stopped")
+        self.assertIsNone(service.target)
+        self.assertEqual(cleanup_calls, ["cleanup"])
+        self.assertFalse(snapshot["thread_alive"])
+
+    def test_registered_services_shutdown_in_reverse_order(self):
+        registry = self._load_registry()
+        shutdown_order = []
+
+        class Service:
+            def __init__(self, name):
+                self.name = name
+
+            def request_shutdown(self):
+                shutdown_order.append(f"request:{self.name}")
+
+            def shutdown(self, _deadline):
+                shutdown_order.append(f"shutdown:{self.name}")
+                return {"service": self.name, "state": "stopped"}
+
+        registry._managed_services[:] = [Service("first"), Service("second")]
+        snapshots = registry.shutdown_python_script_services(1.0)
+
+        self.assertEqual(
+            shutdown_order,
+            ["request:second", "request:first", "shutdown:second", "shutdown:first"],
+        )
+        self.assertEqual([item["service"] for item in snapshots], ["second", "first"])
+
 
 if __name__ == "__main__":
     unittest.main()

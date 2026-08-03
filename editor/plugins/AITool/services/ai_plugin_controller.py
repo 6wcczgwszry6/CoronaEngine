@@ -81,8 +81,9 @@ class AIPluginController:
 
 
     def cleanup(self, executor):
+        self._cai_client.shutdown()
         self._event_loop_runner.shutdown()
-        executor.shutdown(wait=True, cancel_futures=True)
+        executor.shutdown(wait=False, cancel_futures=True)
         logger.info("AI 插件资源已清理")
 
     async def _process_ai_message_stream(self, ai_message: str, request_id: str | None = None) -> None:
