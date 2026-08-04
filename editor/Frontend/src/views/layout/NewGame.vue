@@ -81,7 +81,7 @@
           </button>
 
           <button
-            :disabled="creating"
+            :disabled="creating || !archiveReady"
             class="px-14 py-3 bg-[#d8b86c] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                    rounded-lg font-bold text-base transition-all shadow-lg
                    inline-flex items-center gap-2"
@@ -89,7 +89,7 @@
           >
             <svg v-if="!creating" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 12h18"/><path d="M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/></svg>
             <svg v-else class="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-            {{ creating ? '创造中…' : '创造世界' }}
+            {{ creating ? '创造中…' : (archiveReady ? '创造世界' : '存档服务正在初始化…') }}
           </button>
         </div>
       </div>
@@ -98,7 +98,7 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { projectLauncherService, projectSettingsService } from '@/utils/bridge';
 import { initializeWorldTasks } from '@/services/cabbageAssistantContextService.js';
@@ -110,7 +110,30 @@ const router = useRouter();
 const worldPrompt = ref('');
 const mode = ref('story'); // 'story' 剧情模式 | 'creative' 创造模式
 const creating = ref(false);
+const archiveReady = ref(false);
 const promptRef = ref(null);
+let archiveStatusTimer = null;
+
+const refreshArchiveReady = async () => {
+  try {
+    const response = await projectLauncherService.getProjectLoadStatus();
+    const status = response?.data ?? response;
+    archiveReady.value = status?.archive_service_ready === true;
+  } catch {
+    archiveReady.value = false;
+  }
+};
+
+onMounted(() => {
+  refreshArchiveReady();
+  archiveStatusTimer = window.setInterval(refreshArchiveReady, 250);
+});
+
+onUnmounted(() => {
+  if (archiveStatusTimer !== null) {
+    window.clearInterval(archiveStatusTimer);
+  }
+});
 
 const modes = [
   { id: 'story', label: '剧情模式' },
@@ -166,7 +189,7 @@ const waitForPythonProjectActivation = async (expectedPath, timeoutMs = 7000) =>
 };
 
 const handleCreate = async () => {
-  if (creating.value) return;
+  if (creating.value || !archiveReady.value) return;
   const prompt = worldPrompt.value.trim(); // 允许为空：无提示词也可创建
 
   creating.value = true;
@@ -180,7 +203,12 @@ const handleCreate = async () => {
 
     if (info && info.path) {
       const opened = await projectLauncherService.openProject(info.path);
-      if (opened?.data) {
+      const openResult = opened?.data ?? opened;
+      if (openResult?.status === 'service_initializing') {
+        alert('存档服务正在初始化，请稍后重试');
+        return;
+      }
+      if (openResult?.ok) {
         // Never send a world description or task request until Python confirms
         // that the newly created world is the active project. Otherwise the old
         // world can receive the new task plan and a stale node request can cross over.

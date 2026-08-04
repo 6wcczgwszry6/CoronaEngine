@@ -135,6 +135,7 @@ std::size_t emit_python_script_event(std::string_view event_name, const nlohmann
 
 void register_python_script_service_dispatcher(PyObject* dispatcher);
 void unregister_python_script_service_dispatcher();
+bool python_script_service_dispatcher_registered();
 std::uint64_t register_python_script_callback_callable(const std::string& event_name,
                                                        PyObject* callback);
 void clear_python_script_callbacks();

@@ -420,6 +420,28 @@
     </div>
 
     <div
+      v-if="projectResourceLoadStatus?.loading"
+      class="fixed left-1/2 top-14 z-[90] w-[360px] max-w-[calc(100vw-2rem)] -translate-x-1/2 pointer-events-none rounded-lg border border-[#84a65b]/40 bg-[#151a16]/90 px-4 py-3 shadow-xl backdrop-blur-sm"
+    >
+      <div class="flex items-center justify-between gap-3 text-xs">
+        <span class="text-[#d9e6cf]">场景已打开，资源后台加载中</span>
+        <span class="font-mono text-[#9fc276]">
+          {{ Math.round(projectResourceLoadStatus.progress || 0) }}%
+        </span>
+      </div>
+      <div class="mt-2 h-1.5 overflow-hidden rounded-full bg-black/40">
+        <div
+          class="h-full rounded-full bg-[#84a65b] transition-all duration-300"
+          :style="{ width: `${projectResourceLoadStatus.progress || 0}%` }"
+        ></div>
+      </div>
+      <div class="mt-1.5 text-[11px] text-[#8f9b8a]">
+        已就绪 {{ projectResourceLoadStatus.ready || 0 }} /
+        {{ projectResourceLoadStatus.total || 0 }}
+      </div>
+    </div>
+
+    <div
       v-if="showLocalModal"
       class="fixed inset-0 bg-black/70 flex items-center justify-center z-[9999]"
     >
@@ -534,7 +556,15 @@ import { computed, ref, onMounted, onUnmounted, reactive, watch, nextTick } from
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
-import { Bridge, editorApi, appService, sceneService, projectService, scriptingService } from '@/utils/bridge.js';
+import {
+  Bridge,
+  editorApi,
+  appService,
+  sceneService,
+  projectService,
+  projectLauncherService,
+  scriptingService,
+} from '@/utils/bridge.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
@@ -669,6 +699,8 @@ const showLocalModal = ref(false);
 const localModalTitle = ref('');
 const localModalMessage = ref('');
 const localModalProgress = ref(0);
+const projectResourceLoadStatus = ref(null);
+let projectResourceLoadPollTimer = null;
 
 const activeTab = ref(0); // 当前激活的标签页
 
@@ -2357,6 +2389,34 @@ const toggleViewTool = (tool) => {
 
 const unwrapBridgeData = (result) => result?.data ?? result;
 
+const stopProjectResourceLoadPolling = () => {
+  if (projectResourceLoadPollTimer !== null) {
+    window.clearTimeout(projectResourceLoadPollTimer);
+    projectResourceLoadPollTimer = null;
+  }
+};
+
+const pollProjectResourceLoadStatus = async () => {
+  stopProjectResourceLoadPolling();
+  try {
+    const status = unwrapBridgeData(
+      await projectLauncherService.getProjectLoadStatus(),
+    );
+    projectResourceLoadStatus.value = status?.active ? status : null;
+    if (status?.loading) {
+      projectResourceLoadPollTimer = window.setTimeout(
+        pollProjectResourceLoadStatus,
+        250,
+      );
+    } else {
+      projectResourceLoadStatus.value = null;
+    }
+  } catch (error) {
+    projectResourceLoadStatus.value = null;
+    logWarn('Failed to query project resource load status', error);
+  }
+};
+
 const clearPreviewPoll = () => {
   if (previewPollTimer) {
     clearTimeout(previewPollTimer);
@@ -2930,6 +2990,7 @@ onMounted(async () => {
   const initData = result?.data ?? result;
   const scenes = initData?.scenes ?? [];
   const activeIndex = Number(initData?.active_index ?? 0);
+  await pollProjectResourceLoadStatus();
   try {
     const visionResult = unwrapBridgeData(await sceneService.isVisionAvailable());
     visionAvailable.value = !!visionResult?.available;
@@ -3036,6 +3097,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  stopProjectResourceLoadPolling();
   clearPreviewPoll();
   clearKnownEditorCameraInputLocks();
   unregisterEditorControls();

@@ -1,9 +1,10 @@
 import os
 import datetime
 import logging
+from pathlib import Path
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaCore.utils.file_handler import FileHandler
-from utils.settings import settings_manager
+from utils.settings import core_path, settings_manager
 logger = logging.getLogger(__name__)
 
 
@@ -26,6 +27,20 @@ class ProjectLauncher(PluginBase):
         # 假设 FileHandler 有选择目录的方法，若没有可调用底层 QFileDialog
         path = FileHandler.open_directory(caption="选择项目保存位置",default_dir=default_path)
         return path if path else ""
+
+    @staticmethod
+    def choose_portable_scene_target() -> str:
+        """选择另存为便携场景的新目录路径。"""
+        default_dir = settings_manager.get_default_path().strip()
+        if not default_dir:
+            # 新建世界和新建项目默认都存放在运行目录的 data/ 下。
+            default_dir = str(Path(core_path.repo_root) / "data")
+        os.makedirs(default_dir, exist_ok=True)
+        return FileHandler.choose_new_directory(
+            caption="另存为便携场景",
+            default_dir=default_dir,
+            default_name="PortableScene",
+        )
 
     @staticmethod
     def get_recent_projects() -> list:
@@ -64,14 +79,14 @@ class ProjectLauncher(PluginBase):
     @staticmethod
     def open_project_file() -> dict:
         """
-        弹出文件选择框，可选 project.ini 项目，或 Vision 场景 .json。
+        弹出文件选择框，可选旧 project.ini、新 scene.ini 或 Vision 场景 .json。
         Python 侧只负责文件对话框。返回的 path 交给 C++ ProjectLauncher.open_project
         处理 .ini 复制、目录打开或 Vision .json 导入。
         """
         # 1. 弹出对话框：项目 .ini 或 Vision 场景 .json
         _, file_path = FileHandler.open_file(
             caption="打开项目或 Vision 场景",
-            file_types="项目或 Vision 场景 (*.ini *.json)",
+            file_types="场景、旧项目或 Vision 场景 (*.ini *.scene *.json)",
             default_dir=settings_manager.get_default_path(),
             read_content=False
         )
