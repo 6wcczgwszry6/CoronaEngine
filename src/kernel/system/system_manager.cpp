@@ -81,17 +81,8 @@ class SystemManager : public ISystemManager {
     }
 
     bool initialize_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-
-        if (!systems_sorted_) {
-            std::sort(systems_.begin(), systems_.end(),
-                      [](const auto& a, const auto& b) {
-                          return a->get_priority() > b->get_priority();
-                      });
-            systems_sorted_ = true;
-        }
-
-        for (auto& system : systems_) {
+        auto systems = snapshot_systems(true);
+        for (auto& system : systems) {
             if (!system->initialize(context_.get())) {
                 CFW_LOG_ERROR("Failed to initialize system: {}", system->get_name());
                 return false;
@@ -104,34 +95,34 @@ class SystemManager : public ISystemManager {
     }
 
     void start_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& system : systems_) {
+        auto systems = snapshot_systems();
+        for (auto& system : systems) {
             system->start();
             CFW_LOG_INFO("Started system: {}", system->get_name());
         }
     }
 
     void pause_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& system : systems_) {
+        auto systems = snapshot_systems();
+        for (auto& system : systems) {
             system->pause();
         }
     }
 
     void resume_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& system : systems_) {
+        auto systems = snapshot_systems();
+        for (auto& system : systems) {
             system->resume();
         }
     }
 
     void stop_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
+        auto systems = snapshot_systems();
         // UI produces frames consumed by Display. Stop that producer first, then
         // stop Display immediately so it cannot continue presenting while the
         // remaining systems are draining.
         auto stop_named = [&](std::string_view name) {
-            for (const auto& system : systems_) {
+            for (const auto& system : systems) {
                 if (system->get_name() == name) {
                     system->stop();
                     CFW_LOG_INFO("Stopped system: {}", system->get_name());
@@ -142,7 +133,7 @@ class SystemManager : public ISystemManager {
         stop_named("UI");
         stop_named("Display");
 
-        for (auto it = systems_.rbegin(); it != systems_.rend(); ++it) {
+        for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
             const auto name = (*it)->get_name();
             if (name == "UI" || name == "Display") {
                 continue;
@@ -153,16 +144,16 @@ class SystemManager : public ISystemManager {
     }
 
     void shutdown_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto it = systems_.rbegin(); it != systems_.rend(); ++it) {
+        auto systems = snapshot_systems();
+        for (auto it = systems.rbegin(); it != systems.rend(); ++it) {
             (*it)->shutdown();
             CFW_LOG_INFO("Shutdown system: {}", (*it)->get_name());
         }
     }
 
     void sync_all() override {
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (auto& system : systems_) {
+        auto systems = snapshot_systems();
+        for (auto& system : systems) {
             system->sync();
         }
     }
@@ -220,6 +211,18 @@ class SystemManager : public ISystemManager {
     }
 
    private:
+    std::vector<std::shared_ptr<ISystem>> snapshot_systems(bool ensure_sorted = false) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (ensure_sorted && !systems_sorted_) {
+            std::sort(systems_.begin(), systems_.end(),
+                      [](const auto& a, const auto& b) {
+                          return a->get_priority() > b->get_priority();
+                      });
+            systems_sorted_ = true;
+        }
+        return systems_;
+    }
+
     std::shared_ptr<ISystem> get_system_unlocked(std::string_view name) {
         auto it = systems_by_name_.find(std::string(name));
         if (it != systems_by_name_.end()) {
