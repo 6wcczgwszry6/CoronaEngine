@@ -89,8 +89,18 @@ class CoronaEditorLifecycleTests(unittest.TestCase):
             '"idle"',
         ):
             self.assertIn(f"_set_native_runtime_phase({phase})", update_body)
+        self.assertIn("def _arm_runtime_watchdog", update_body)
         self.assertIn("faulthandler.dump_traceback_later", update_body)
+        self.assertIn("def _cancel_runtime_watchdog", update_body)
         self.assertIn("faulthandler.cancel_dump_traceback_later", update_body)
+        update_runtime_start = update_body.index("    def update_runtime(cls):")
+        update_runtime_body = update_body[update_runtime_start:]
+        self.assertIn("cls._arm_runtime_watchdog()", update_runtime_body)
+
+        shutdown_start = source.index("    def shutdown_runtime(cls):")
+        shutdown_end = source.index("\n    @classmethod", shutdown_start + 1)
+        shutdown_body = source[shutdown_start:shutdown_end]
+        self.assertIn("cls._cancel_runtime_watchdog()", shutdown_body)
 
         cpp_source = (
             repo_root / "src" / "systems" / "script" / "python" / "python_api.cpp"

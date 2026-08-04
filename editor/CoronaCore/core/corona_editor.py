@@ -123,6 +123,7 @@ class CoronaEditor:
 
     @classmethod
     def shutdown_runtime(cls):
+        cls._cancel_runtime_watchdog()
         if cls._runtime_state == "stopped":
             return cls._shutdown_snapshot or {
                 "runtime_state": "stopped",
@@ -538,6 +539,22 @@ class CoronaEditor:
         except Exception:
             logger.debug("Unable to update native Python runtime phase", exc_info=True)
 
+    @staticmethod
+    def _cancel_runtime_watchdog():
+        import faulthandler
+
+        if faulthandler.is_enabled():
+            faulthandler.cancel_dump_traceback_later()
+
+    @classmethod
+    def _arm_runtime_watchdog(cls):
+        import faulthandler
+
+        if not faulthandler.is_enabled() or cls._shutdown_requested:
+            return
+        faulthandler.cancel_dump_traceback_later()
+        faulthandler.dump_traceback_later(2.0, repeat=False)
+
     @classmethod
     def _update_runtime_impl(cls):
         import time as _time
@@ -619,19 +636,17 @@ class CoronaEditor:
 
     @classmethod
     def update_runtime(cls):
-        import faulthandler
-
-        watchdog_armed = False
         cls._set_native_runtime_phase("update_entry")
+        cls._arm_runtime_watchdog()
         try:
-            if faulthandler.is_enabled():
-                faulthandler.dump_traceback_later(2.0, repeat=False)
-                watchdog_armed = True
             return cls._update_runtime_impl()
         finally:
-            if watchdog_armed:
-                faulthandler.cancel_dump_traceback_later()
             cls._set_native_runtime_phase("idle")
+            # Keep the watchdog armed between frames. If another Python thread
+            # takes the GIL and blocks in native code, the next C++ update cannot
+            # enter Python to arm a new timer; this outstanding timer still dumps
+            # every Python thread without requiring the GIL.
+            cls._arm_runtime_watchdog()
 
     @classmethod
     def show_log_on_js(cls):
