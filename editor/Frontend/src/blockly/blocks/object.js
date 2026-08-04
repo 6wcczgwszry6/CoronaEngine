@@ -68,6 +68,33 @@ export const defineObjectBlocks = () => {
     },
   };
 
+  Blockly.Blocks['object_move_direction'] = {
+    init: function () {
+      this.appendDummyInput('TARGET')
+        .appendField('\u8ba9\u5bf9\u8c61')
+        .appendField(new Blockly.FieldTextInput(''), 'NAME')
+        .appendField('\u6301\u7eed\u79fb\u52a8');
+      this.appendDummyInput('MOVEMENT')
+        .appendField('\u65b9\u5411')
+        .appendField(
+          new Blockly.FieldDropdown([
+            ['\u5411\u524d', 'FORWARD'],
+            ['\u5411\u540e', 'BACKWARD'],
+            ['\u5411\u5de6', 'LEFT'],
+            ['\u5411\u53f3', 'RIGHT'],
+            ['\u5411\u4e0a', 'UP'],
+            ['\u5411\u4e0b', 'DOWN'],
+          ]),
+          'DIRECTION',
+        )
+        .appendField('\u901f\u5ea6')
+        .appendField(new Blockly.FieldNumber(1, 0, 1000, 0.1), 'SPEED')
+        .appendField('\u5355\u4f4d/\u79d2');
+      setStatementBlock(this, '\u8ba9\u6307\u5b9a\u5bf9\u8c61\u4ee5\u56fa\u5b9a\u901f\u5ea6\u6301\u7eed\u5411\u4e00\u4e2a\u65b9\u5411\u79fb\u52a8');
+      this.setInputsInline(false);
+    },
+  };
+
   Blockly.Blocks['object_get_x'] = {
     init: function () {
       this.appendValueInput('NAME')
@@ -488,6 +515,7 @@ export const defineObjectBlocks = () => {
 
   applyStyleToBlocks([
     'object_set_position',
+    'object_move_direction',
     'object_get_x',
     'object_get_y',
     'object_get_z',

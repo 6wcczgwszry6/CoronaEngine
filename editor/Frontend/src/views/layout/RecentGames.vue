@@ -1,10 +1,10 @@
 <template>
   <div
-    class="relative h-screen border-2 border-[#84a65b] bg-[#282828]/95 text-white overflow-hidden flex flex-col font-sans"
+    class="relative h-screen border-2 border-[#d8b86c] bg-[#282828]/95 text-white overflow-hidden flex flex-col font-sans"
   >
     <div class="flex-1 min-h-0 p-20 bg-[#1e1e1e] flex flex-col">
       <div class="mb-10 shrink-0">
-        <h2 class="text-5xl font-bold text-[#84a65b] mb-2">Corona Editor</h2>
+        <h2 class="text-5xl font-bold text-[#d8b86c] mb-2">Corona Editor</h2>
         <p class="text-base text-gray-500">版本: {{ appVersion }}</p>
       </div>
 
@@ -25,7 +25,7 @@
                 ? 'cursor-pointer hover:bg-[#3d3d3d]'
                 : 'cursor-not-allowed opacity-60',
               selectedProject === proj.path
-                ? 'border border-[#84a65b]'
+                ? 'border border-[#d8b86c]'
                 : 'border border-transparent',
             ]"
             @click="proj.if_exists && (selectedProject = proj.path)"
@@ -79,7 +79,7 @@
         </button>
         <button
           class="py-3 px-10 text-base rounded flex items-center justify-center gap-2 transition-colors shrink-0"
-          :class="selectedProject && archiveReady ? 'bg-[#84a65b] text-white hover:bg-[#9bc46d]' : 'bg-[#333] text-gray-500 cursor-not-allowed'"
+          :class="selectedProject && archiveReady ? 'bg-[#d8b86c] text-white hover:bg-[#9bc46d]' : 'bg-[#333] text-gray-500 cursor-not-allowed'"
           :disabled="!selectedProject || !archiveReady"
           @click="openSelectedProject"
         >
@@ -268,6 +268,6 @@ const handleImport = async () => {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

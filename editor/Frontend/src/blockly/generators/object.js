@@ -40,6 +40,22 @@ export const defineObjectGenerators = () => {
     return `CoronaEngine.object_set_position(${name}, ${x}, ${y}, ${z})\n`;
   };
 
+  pythonGenerator.forBlock['object_move_direction'] = function (block) {
+    const name = pyString(block.getFieldValue('NAME') || '');
+    const speed = Number(block.getFieldValue('SPEED') || 0);
+    const step = Number.isFinite(speed) ? Math.max(0, speed) * 0.05 : 0;
+    const direction = String(block.getFieldValue('DIRECTION') || 'FORWARD').toUpperCase();
+    const delta = {
+      RIGHT: [step, 0, 0],
+      LEFT: [-step, 0, 0],
+      UP: [0, step, 0],
+      DOWN: [0, -step, 0],
+      FORWARD: [0, 0, -step],
+      BACKWARD: [0, 0, step],
+    }[direction] || [0, 0, -step];
+    return `CoronaEngine.object_set_position(${name}, CoronaEngine.object_x(${name}) + ${delta[0]}, CoronaEngine.object_y(${name}) + ${delta[1]}, CoronaEngine.object_z(${name}) + ${delta[2]})\n`;
+  };
+
   pythonGenerator.forBlock['object_get_x'] = function (block) {
     return [`CoronaEngine.object_x(${valueOrLegacyText(block, 'NAME')})`, pythonGenerator.ORDER_FUNCTION_CALL];
   };

@@ -1463,16 +1463,6 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             / "sidebar"
             / "Network.vue"
         ).read_text(encoding="utf-8")
-        room_panel_source = (
-            self._repo_root()
-            / "editor"
-            / "Frontend"
-            / "src"
-            / "views"
-            / "sidebar"
-            / "lanchat"
-            / "RoomPanel.vue"
-        ).read_text(encoding="utf-8")
         event_bus_source = (
             self._repo_root()
             / "editor"
@@ -1497,11 +1487,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "editorApi.events.onNetworkActorSyncBroadcastRequested(onNetworkActorSyncBroadcastRequested)",
             network_source,
         )
-        self.assertIn("onNetworkActorSyncBroadcastRequested(handleActorSyncBroadcast)", room_panel_source)
         self.assertIn("editorApi.off(networkActorSyncBroadcastCallbackToken)", network_source)
-        self.assertIn("editorApi.off(actorSyncBroadcastCallbackToken)", room_panel_source)
-        self.assertNotIn("coronaEventBus.on('actor-sync-broadcast'", network_source + room_panel_source)
-        self.assertNotIn("coronaEventBus.off('actor-sync-broadcast'", network_source + room_panel_source)
+        self.assertNotIn("coronaEventBus.on('actor-sync-broadcast'", network_source)
+        self.assertNotIn("coronaEventBus.off('actor-sync-broadcast'", network_source)
         self.assertNotIn("event === 'actor-sync-broadcast'", event_bus_source)
 
     def test_network_actor_mutation_broadcasts_are_cpp_defined_events(self):
@@ -1741,20 +1729,20 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertNotIn("__coronaEmit('lanchat-event')", bridge_source)
 
     def test_lanchat_frontend_consumer_uses_cpp_defined_event_wrapper(self):
-        ai_talk_source = (
+        app_source = (
             self._repo_root()
             / "editor"
             / "Frontend"
             / "src"
-            / "views"
-            / "sidebar"
-            / "AITalkBar.vue"
+            / "App.vue"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("editorApi.events.onLanChatEvent(onLanchatEvent)", ai_talk_source)
-        self.assertIn("editorApi.off(lanChatEventCallbackToken)", ai_talk_source)
-        self.assertNotIn("coronaEventBus.on('lanchat-event'", ai_talk_source)
-        self.assertNotIn("coronaEventBus.off('lanchat-event'", ai_talk_source)
+        self.assertIn("editorApi.events.onLanChatEvent(onLanChatEvent)", app_source)
+        self.assertIn("lanchat.handleEvent(payload)", app_source)
+        self.assertIn("if (!isStandalonePanel.value)", app_source)
+        self.assertIn("editorApi.off(callbackToken)", app_source)
+        self.assertNotIn("coronaEventBus.on('lanchat-event'", app_source)
+        self.assertNotIn("coronaEventBus.off('lanchat-event'", app_source)
 
     def test_realtime_focus_and_pick_events_are_defined_and_emitted_by_cpp_callback_registry(self):
         source = self._editor_api_source()
@@ -4219,6 +4207,29 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             (repo_root / "editor" / "Frontend" / "src" / "views" / "layout" / "ProjectLauncher.vue").exists()
         )
         self.assertNotIn("ProjectLauncher.vue", router_source)
+
+    def test_frontend_merge_preserves_archive_guards_and_ui_workflows(self):
+        repo_root = self._repo_root()
+        frontend = repo_root / "editor" / "Frontend" / "src" / "views"
+        new_game = (frontend / "layout" / "NewGame.vue").read_text(encoding="utf-8")
+        recent_games = (frontend / "layout" / "RecentGames.vue").read_text(encoding="utf-8")
+        object_panel = (frontend / "sidebar" / "Object.vue").read_text(encoding="utf-8")
+
+        for source in (new_game, recent_games, object_panel):
+            self.assertNotIn("<<<<<<<", source)
+            self.assertNotIn("=======", source)
+            self.assertNotIn(">>>>>>>", source)
+
+        self.assertIn(':disabled="creating || !archiveReady"', new_game)
+        self.assertIn("waitForPythonProjectActivation", new_game)
+        self.assertIn("openResult?.status === 'service_initializing'", new_game)
+        self.assertIn("lanchat.openRoom", new_game)
+        self.assertIn("selectedProject && archiveReady", recent_games)
+        self.assertIn("@click=\"openSelectedProject\"", recent_games)
+        self.assertIn("bg-[#d8b86c]", recent_games)
+        self.assertIn("actor.loadStatus === 'loaded'", object_panel)
+        self.assertIn("collapsedSections.physics", object_panel)
+        self.assertIn(".placeholder-warning", object_panel)
 
     def test_recent_project_entries_mark_legacy_projects_for_recent_games(self):
         source = self._handler_source()

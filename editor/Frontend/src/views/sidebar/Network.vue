@@ -5,7 +5,7 @@
     <DockTitleBar
       v-if="!isDocked"
       title="局域网聊天"
-      extraClass="bg-[#84A65B]"
+      extraClass="bg-[#D8B86C]"
       routePath="/Network"
       @close="closeFloat"
     />
@@ -99,7 +99,7 @@
         <button
           @click="doConnectToPeer"
           :disabled="!remoteIp.trim() || connectStatus === 'connecting'"
-          class="px-4 py-1.5 bg-[#84A65B] hover:bg-[#6f8d4a] rounded text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          class="px-4 py-1.5 bg-[#D8B86C] hover:bg-[#6f8d4a] rounded text-white font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
         >
           加入房间
         </button>
