@@ -49,7 +49,7 @@ void PythonAPI::begin_shutdown() {
         request.source = "ScriptSystem::stop";
         request.function = "shutdown";
         const auto response = runtime_coordinator_.submit_and_wait(
-            std::move(request), std::chrono::milliseconds(1500));
+            std::move(request), std::chrono::milliseconds(2500));
         if (response.status != PythonRuntimeResponseStatus::Success) {
             CFW_LOG_ERROR("PythonAPI: cooperative shutdown request failed: {}", response.error);
         }

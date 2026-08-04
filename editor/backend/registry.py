@@ -1,4 +1,5 @@
 import logging
+import inspect
 import threading
 import time
 from importlib import import_module
@@ -103,7 +104,11 @@ class LazyPythonScriptService:
             module = import_module(self._module_path)
             initializer = getattr(module, "initialize_script_service", None)
             if callable(initializer):
-                initializer()
+                parameters = inspect.signature(initializer).parameters
+                if "stop_token" in parameters:
+                    initializer(stop_token=self._stop_requested)
+                else:
+                    initializer()
             target = getattr(module, self._class_name)
             if self._stop_requested.is_set():
                 self._cleanup_target(target)

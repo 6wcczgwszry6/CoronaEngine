@@ -182,6 +182,30 @@ class PythonScriptServiceRegistryTests(unittest.TestCase):
         self.assertEqual(cleanup_calls, ["cleanup"])
         self.assertFalse(snapshot["thread_alive"])
 
+    def test_lazy_service_passes_stop_token_to_cooperative_initializer(self):
+        registry = self._load_registry()
+        initializer_started = threading.Event()
+        cleanup_calls = []
+        target = SimpleNamespace(cleanup=lambda: cleanup_calls.append("cleanup"))
+
+        def initialize_script_service(stop_token):
+            initializer_started.set()
+            stop_token.wait(2.0)
+
+        module = SimpleNamespace(
+            AITool=target,
+            initialize_script_service=initialize_script_service,
+        )
+        service = registry.LazyPythonScriptService("AITool", "services.ai", "AITool")
+        with patch.object(registry, "import_module", return_value=module):
+            service.start_background_load()
+            self.assertTrue(initializer_started.wait(1.0))
+            snapshot = service.shutdown(0.5)
+
+        self.assertEqual(snapshot["state"], "stopped")
+        self.assertFalse(snapshot["thread_alive"])
+        self.assertEqual(cleanup_calls, ["cleanup"])
+
     def test_registered_services_shutdown_in_reverse_order(self):
         registry = self._load_registry()
         shutdown_order = []

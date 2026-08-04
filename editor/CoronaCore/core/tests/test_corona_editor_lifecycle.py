@@ -63,6 +63,17 @@ class CoronaEditorLifecycleTests(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertNotIn("Py_IsInitialized()", source)
 
+    def test_cpp_shutdown_receipt_outlives_python_service_deadline(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        source = (
+            repo_root / "src" / "systems" / "script" / "python" / "python_api.cpp"
+        ).read_text(encoding="utf-8")
+        shutdown_start = source.index("void PythonAPI::begin_shutdown()")
+        shutdown_end = source.index("PythonLifecycleSnapshot", shutdown_start)
+        shutdown_body = source[shutdown_start:shutdown_end]
+        self.assertIn("milliseconds(2500)", shutdown_body)
+        self.assertNotIn("milliseconds(1500)", shutdown_body)
+
 
 if __name__ == "__main__":
     unittest.main()
