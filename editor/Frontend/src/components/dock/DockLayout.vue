@@ -1,13 +1,16 @@
 <template>
   <div class="dock-root">
     <div class="dock-workspace">
-      <!-- Left column spans the full editor height. Scene and object panels stack here. -->
-      <template v-if="leftPanels.length > 0 || isDragging">
+      <section class="dock-viewport-region" :style="overlayStyles.viewport">
+        <router-view />
+      </section>
+
+      <template v-if="leftVisible">
         <aside
           class="dock-zone dock-zone-side dock-zone-left"
           data-dock-zone="left"
           :class="{ 'dock-zone-dragover': dragOverZone === 'left', 'dock-zone-empty': leftPanels.length === 0 }"
-          :style="{ width: leftWidth + 'px' }"
+          :style="overlayStyles.left"
         >
           <DockPanel
             v-for="p in leftPanels"
@@ -17,45 +20,48 @@
           />
           <div v-if="leftPanels.length === 0" class="dock-zone-placeholder">{{ t('dock.dropHere') }}</div>
         </aside>
-        <div class="dock-sep dock-sep-v" @mousedown="startResize('left', $event)"></div>
+        <div
+          class="dock-sep dock-sep-v"
+          :style="overlayStyles.leftSeparator"
+          @mousedown="startResize('left', $event)"
+        ></div>
       </template>
 
-      <!-- The scene viewport and node graph share the middle column. This keeps the node
-           editor below the scene instead of pushing the left/right tool columns upward. -->
-      <main class="dock-center-stack">
-        <section class="dock-viewport-region">
-          <router-view />
+      <template v-if="bottomVisible">
+        <div
+          class="dock-sep dock-sep-h"
+          :style="overlayStyles.bottomSeparator"
+          @mousedown="startResize('bottom', $event)"
+        ></div>
+        <section
+          class="dock-zone dock-zone-bottom"
+          data-dock-zone="bottom"
+          :class="{ 'dock-zone-dragover': dragOverZone === 'bottom', 'dock-zone-empty': bottomPanels.length === 0 }"
+          :style="overlayStyles.bottom"
+        >
+          <div class="dock-bottom-row">
+            <DockPanel
+              v-for="p in bottomPanels"
+              :key="p.id"
+              :panel-id="p.id"
+              :component="getComponent(p.id)"
+            />
+            <div v-if="bottomPanels.length === 0" class="dock-zone-placeholder">{{ t('dock.dropHere') }}</div>
+          </div>
         </section>
+      </template>
 
-        <template v-if="bottomPanels.length > 0 || isDragging">
-          <div class="dock-sep dock-sep-h" @mousedown="startResize('bottom', $event)"></div>
-          <section
-            class="dock-zone dock-zone-bottom"
-            data-dock-zone="bottom"
-            :class="{ 'dock-zone-dragover': dragOverZone === 'bottom', 'dock-zone-empty': bottomPanels.length === 0 }"
-            :style="{ height: bottomHeight + 'px' }"
-          >
-            <div class="dock-bottom-row">
-              <DockPanel
-                v-for="p in bottomPanels"
-                :key="p.id"
-                :panel-id="p.id"
-                :component="getComponent(p.id)"
-              />
-              <div v-if="bottomPanels.length === 0" class="dock-zone-placeholder">{{ t('dock.dropHere') }}</div>
-            </div>
-          </section>
-        </template>
-      </main>
-
-      <!-- Right column also spans the full editor height, matching the reference layout. -->
-      <template v-if="rightPanels.length > 0 || isDragging">
-        <div class="dock-sep dock-sep-v" @mousedown="startResize('right', $event)"></div>
+      <template v-if="rightVisible">
+        <div
+          class="dock-sep dock-sep-v"
+          :style="overlayStyles.rightSeparator"
+          @mousedown="startResize('right', $event)"
+        ></div>
         <aside
           class="dock-zone dock-zone-side dock-zone-right"
           data-dock-zone="right"
           :class="{ 'dock-zone-dragover': dragOverZone === 'right', 'dock-zone-empty': rightPanels.length === 0 }"
-          :style="{ width: rightWidth + 'px' }"
+          :style="overlayStyles.right"
         >
           <DockPanel
             v-for="p in rightPanels"
@@ -76,6 +82,7 @@ import { useI18n } from 'vue-i18n';
 import { useDockStore } from '@/stores/dockStore.js';
 import { getPluginManifest } from '@/config/pluginManifest.js';
 import DockPanel from './DockPanel.vue';
+import { createDockOverlayStyles } from './dockOverlayLayout.js';
 
 const { t } = useI18n();
 const dockStore = useDockStore();
@@ -85,6 +92,9 @@ const rightPanels = computed(() => dockStore.panelsByZone('right'));
 const bottomPanels = computed(() => dockStore.panelsByZone('bottom'));
 const isDragging = computed(() => dockStore.draggingId !== null);
 const dragOverZone = computed(() => dockStore.dragOverZone);
+const leftVisible = computed(() => leftPanels.value.length > 0 || isDragging.value);
+const rightVisible = computed(() => rightPanels.value.length > 0 || isDragging.value);
+const bottomVisible = computed(() => bottomPanels.value.length > 0 || isDragging.value);
 
 const leftWidth = ref(360);
 const rightWidth = ref(400);
@@ -94,6 +104,16 @@ const MIN_SIDE = 260;
 const MIN_CENTER = 520;
 const MIN_BOTTOM = 180;
 const MIN_VIEWPORT_HEIGHT = 260;
+const DOCK_SEPARATOR_SIZE = 4;
+
+const overlayStyles = computed(() => createDockOverlayStyles({
+  leftVisible: leftVisible.value,
+  rightVisible: rightVisible.value,
+  leftWidth: leftWidth.value,
+  rightWidth: rightWidth.value,
+  bottomHeight: bottomHeight.value,
+  separatorSize: DOCK_SEPARATOR_SIZE,
+}));
 
 function getComponent(panelId) {
   return getPluginManifest(panelId)?.component ?? null;
@@ -170,7 +190,7 @@ onUnmounted(() => {
 }
 
 .dock-workspace {
-  display: flex;
+  position: relative;
   width: 100%;
   height: 100%;
   min-width: 0;
@@ -178,22 +198,11 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.dock-center-stack {
-  display: flex;
-  flex: 1 1 auto;
-  min-width: 0;
-  min-height: 0;
-  flex-direction: column;
-  overflow: hidden;
-  background: transparent;
-  contain: layout style;
-}
-
 .dock-viewport-region {
-  position: relative;
+  position: absolute;
+  z-index: 0;
   background: transparent;
   display: flex;
-  flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
@@ -201,17 +210,17 @@ onUnmounted(() => {
 }
 
 .dock-zone {
-  position: relative;
+  position: absolute;
+  z-index: 20;
   min-width: 0;
   min-height: 0;
   overflow: hidden;
-  background: #11100d;
+  background: transparent;
   contain: layout style;
 }
 
 .dock-zone-side {
   display: flex;
-  flex: 0 0 auto;
   flex-direction: column;
 }
 
@@ -224,7 +233,6 @@ onUnmounted(() => {
 }
 
 .dock-zone-bottom {
-  flex: 0 0 auto;
   border-top: 1px solid #30281c;
 }
 
@@ -262,7 +270,7 @@ onUnmounted(() => {
 }
 
 .dock-sep {
-  position: relative;
+  position: absolute;
   z-index: 30;
   flex: 0 0 auto;
   background: #30281c;
