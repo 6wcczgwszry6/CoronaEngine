@@ -3893,6 +3893,18 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         on_move_end = actor_source.index("\n    def enable_collision_callback", on_move_start)
         self.assertNotIn("self.save_data()", actor_source[on_move_start:on_move_end])
 
+    def test_synchronous_screenshot_wait_releases_the_python_gil(self):
+        repo_root = self._repo_root()
+        bindings_source = (
+            repo_root / "src" / "systems" / "script" / "python" / "engine_bindings.cpp"
+        ).read_text(encoding="utf-8")
+
+        binding_start = bindings_source.index('.def("save_screenshot_sync"')
+        binding_end = bindings_source.index("\n        .def(", binding_start + 1)
+        screenshot_binding = bindings_source[binding_start:binding_end]
+
+        self.assertIn("nb::call_guard<nb::gil_scoped_release>()", screenshot_binding)
+
     def test_portable_scene_folder_is_wired_through_project_and_frontend_apis(self):
         repo_root = self._repo_root()
         handler_source = (
