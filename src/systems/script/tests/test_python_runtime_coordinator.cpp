@@ -64,6 +64,9 @@ int main() {
                      "snapshot should distinguish pending from queued work") ||
             !require(active.consumer_thread_bound,
                      "snapshot should report the bound consumer thread")) return 1;
+        coordinator.set_execution_phase("callback:running");
+        if (!require(coordinator.snapshot().execution_phase == "callback:running",
+                     "snapshot should preserve the current Python execution phase")) return 1;
         auto response = queued->handler(*queued);
         coordinator.complete(queued->request_id, response);
         if (!require(!coordinator.snapshot().current_request.has_value(),

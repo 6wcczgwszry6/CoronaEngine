@@ -1140,6 +1140,12 @@ void BindAll(nanobind::module_& m) {
         return Corona::Systems::UI::drain_input_events();
     }, "Drain all pending input events from the CEF InputInject queue");
 
+    m.def("python_runtime_phase", [](const std::string& phase) {
+        if (auto* coordinator = Corona::Script::Python::active_python_runtime_coordinator()) {
+            coordinator->set_execution_phase(phase);
+        }
+    }, nb::arg("phase"), "Update the native Python runtime diagnostic phase");
+
 }
 
 }  // namespace EngineScripts

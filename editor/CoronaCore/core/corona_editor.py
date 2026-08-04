@@ -530,13 +530,23 @@ class CoronaEditor:
         ]
 
     @classmethod
-    def update_runtime(cls):
+    def _set_native_runtime_phase(cls, phase):
+        try:
+            setter = getattr(cls.CoronaEngine, "python_runtime_phase", None)
+            if callable(setter):
+                setter(str(phase))
+        except Exception:
+            logger.debug("Unable to update native Python runtime phase", exc_info=True)
+
+    @classmethod
+    def _update_runtime_impl(cls):
         import time as _time
         runtime_start = _time.perf_counter()
         if cls._shutdown_requested or not cls._runtime_started:
             return False
         cls.checkpoint()
         if not cls._scripts_initialized and cls.CoronaEngine is not None:
+            cls._set_native_runtime_phase("script_initialize")
             init_start = _time.perf_counter()
             try:
                 project_path = getattr(cls.CoronaEngine, 'active_project_path', None)
@@ -565,6 +575,7 @@ class CoronaEditor:
 
         cls.checkpoint()
         if cls.scripts_mgr is not None:
+            cls._set_native_runtime_phase("script_update")
             update_start = _time.perf_counter()
             try:
                 import time as _time
@@ -581,6 +592,7 @@ class CoronaEditor:
 
         # ── Input 事件队列消费：CEF InputInject → 队列 → Python─ ─
         # 每帧批量消费积攒的键盘/鼠标注入事件，消除逐事件 cefQuery 开销
+        cls._set_native_runtime_phase("input_dispatch")
         input_start = _time.perf_counter()
         try:
             import CoronaEngine
@@ -604,6 +616,22 @@ class CoronaEditor:
         elapsed_ms = (_time.perf_counter() - runtime_start) * 1000.0
         cls._warn_runtime_phase("update", elapsed_ms, 50.0)
         return True
+
+    @classmethod
+    def update_runtime(cls):
+        import faulthandler
+
+        watchdog_armed = False
+        cls._set_native_runtime_phase("update_entry")
+        try:
+            if faulthandler.is_enabled():
+                faulthandler.dump_traceback_later(2.0, repeat=False)
+                watchdog_armed = True
+            return cls._update_runtime_impl()
+        finally:
+            if watchdog_armed:
+                faulthandler.cancel_dump_traceback_later()
+            cls._set_native_runtime_phase("idle")
 
     @classmethod
     def show_log_on_js(cls):

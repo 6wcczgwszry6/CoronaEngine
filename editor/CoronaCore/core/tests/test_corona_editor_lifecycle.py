@@ -74,6 +74,39 @@ class CoronaEditorLifecycleTests(unittest.TestCase):
         self.assertIn("milliseconds(2500)", shutdown_body)
         self.assertNotIn("milliseconds(1500)", shutdown_body)
 
+    def test_runtime_update_has_native_phase_markers_and_stack_watchdog(self):
+        repo_root = Path(__file__).resolve().parents[4]
+        source = (
+            repo_root / "editor" / "CoronaCore" / "core" / "corona_editor.py"
+        ).read_text(encoding="utf-8")
+        update_start = source.index("    def _set_native_runtime_phase(cls, phase):")
+        update_end = source.index("\n    def show_log_on_js", update_start)
+        update_body = source[update_start:update_end]
+        for phase in (
+            '"script_initialize"',
+            '"script_update"',
+            '"input_dispatch"',
+            '"idle"',
+        ):
+            self.assertIn(f"_set_native_runtime_phase({phase})", update_body)
+        self.assertIn("faulthandler.dump_traceback_later", update_body)
+        self.assertIn("faulthandler.cancel_dump_traceback_later", update_body)
+
+        cpp_source = (
+            repo_root / "src" / "systems" / "script" / "python" / "python_api.cpp"
+        ).read_text(encoding="utf-8")
+        invoke_start = cpp_source.index("void PythonAPI::invokeEntry")
+        invoke_end = cpp_source.index("void PythonAPI::sendMessage", invoke_start)
+        invoke_body = cpp_source[invoke_start:invoke_end]
+        self.assertLess(
+            invoke_body.index('set_execution_phase("gil_wait:editor_update")'),
+            invoke_body.index("nanobind::gil_scoped_acquire gil"),
+        )
+        self.assertGreater(
+            invoke_body.index('set_execution_phase("editor_update")'),
+            invoke_body.index("nanobind::gil_scoped_acquire gil"),
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -214,7 +214,13 @@ PythonRuntimeSnapshot PythonRuntimeCoordinator::snapshot() const {
     result.consumer_thread_bound = consumer_thread_id_ != std::thread::id{};
     result.consumer_thread_token = std::hash<std::thread::id>{}(consumer_thread_id_);
     result.current_request = current_request_;
+    result.execution_phase = execution_phase_;
     return result;
+}
+
+void PythonRuntimeCoordinator::set_execution_phase(std::string phase) {
+    std::lock_guard lock(mutex_);
+    execution_phase_ = std::move(phase);
 }
 
 bool PythonRuntimeCoordinator::bind_consumer_thread() {

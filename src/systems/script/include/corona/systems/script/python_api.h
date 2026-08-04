@@ -81,7 +81,7 @@ struct PythonAPI {
 
     bool ensureInitialized();
     bool initializeInterpreterLocked();
-    void invokeEntry(bool isReload) const;
+    void invokeEntry(bool isReload);
     void process_runtime_requests();
     PythonRuntimeResponse execute_runtime_request(const PythonRuntimeRequest& request);
     std::size_t detach_python_objects_without_decref();

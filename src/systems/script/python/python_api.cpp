@@ -82,7 +82,8 @@ std::string PythonAPI::shutdown_diagnostics() const {
         << " coordinator_state=" << static_cast<int>(runtime.state)
         << " queued=" << runtime.queued_count
         << " pending=" << runtime.pending_count
-        << " consumer_thread=" << runtime.consumer_thread_token;
+        << " consumer_thread=" << runtime.consumer_thread_token
+        << " execution_phase=" << runtime.execution_phase;
     if (runtime.current_request) {
         out << " request_id=" << runtime.current_request->request_id
             << " request_kind=" << static_cast<int>(runtime.current_request->kind)
@@ -323,7 +324,7 @@ bool PythonAPI::ensureInitialized() {
     return true;
 }
 
-void PythonAPI::invokeEntry(bool isReload) const {
+void PythonAPI::invokeEntry(bool isReload) {
     // 如果正在关闭，不执行
     if (shutting_down_.load()) {
         return;
@@ -332,12 +333,16 @@ void PythonAPI::invokeEntry(bool isReload) const {
     if (!messageFunc.is_valid()) {
         return;
     }
+    runtime_coordinator_.set_execution_phase("gil_wait:editor_update");
     nanobind::gil_scoped_acquire gil;
+    runtime_coordinator_.set_execution_phase("editor_update");
 
     try {
         //(void)pFunc(isReload ? 1 : 0);
         messageFunc();
+        runtime_coordinator_.set_execution_phase("idle");
     } catch (const nanobind::python_error& e) {
+        runtime_coordinator_.set_execution_phase("editor_update_error");
         log_python_error(e);
     }
 }
@@ -403,8 +408,10 @@ void PythonAPI::process_runtime_requests() {
         if (!request) {
             return;
         }
+        runtime_coordinator_.set_execution_phase("coordinator_request:" + request->source + ":" + request->function);
         auto response = execute_runtime_request(*request);
         runtime_coordinator_.complete(request->request_id, std::move(response));
+        runtime_coordinator_.set_execution_phase("idle");
         if (std::chrono::steady_clock::now() >= deadline) {
             return;
         }
@@ -412,7 +419,9 @@ void PythonAPI::process_runtime_requests() {
 }
 
 PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequest& request) {
+    runtime_coordinator_.set_execution_phase("gil_wait:coordinator_request");
     nanobind::gil_scoped_acquire gil;
+    runtime_coordinator_.set_execution_phase("coordinator_request");
     try {
         if (request.kind == PythonRuntimeRequestKind::LifecycleControl &&
             request.function == "shutdown") {

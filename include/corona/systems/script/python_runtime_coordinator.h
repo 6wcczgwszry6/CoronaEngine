@@ -73,6 +73,7 @@ struct PythonRuntimeSnapshot {
     bool consumer_thread_bound = false;
     std::size_t consumer_thread_token = 0;
     std::optional<PythonRuntimeRequest> current_request;
+    std::string execution_phase;
 };
 
 namespace Detail {
@@ -110,6 +111,7 @@ class PythonRuntimeCoordinator {
     PythonRuntimeState state() const noexcept;
     std::size_t pending_count() const;
     PythonRuntimeSnapshot snapshot() const;
+    void set_execution_phase(std::string phase);
     bool bind_consumer_thread();
     bool is_consumer_thread() const;
 
@@ -126,6 +128,7 @@ class PythonRuntimeCoordinator {
     std::unordered_map<std::uint64_t, std::shared_ptr<Detail::PythonRuntimeTicketState>> pending_;
     std::thread::id consumer_thread_id_;
     std::optional<PythonRuntimeRequest> current_request_;
+    std::string execution_phase_ = "created";
 };
 
 PythonRuntimeCoordinator* active_python_runtime_coordinator() noexcept;
