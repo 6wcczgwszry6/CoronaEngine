@@ -495,6 +495,23 @@ def _native_scene_snapshot(scene_name):
     return None, errors
 
 
+def _normalize_native_collision_type(value):
+    if isinstance(value, dict):
+        value = value.get("type", value.get("shape"))
+    if isinstance(value, str):
+        candidate = value.strip().lower()
+        if candidate in ("none", "box", "mesh"):
+            return candidate
+        if candidate in ("off", "disabled", "false", "0"):
+            return "none"
+        return "box"
+    if value in (False, 0, None):
+        return "none"
+    if value == 2:
+        return "mesh"
+    return "box"
+
+
 class _NativeEditorActorProxy:
     def __init__(self, scene, data):
         self.scene = scene
@@ -520,6 +537,9 @@ class _NativeEditorActorProxy:
         self._restitution = float(mechanics.get("restitution", 0.8) or 0.0)
         self._damping = float(mechanics.get("damping", 0.99) or 0.0)
         self._physics_enabled = bool(mechanics.get("physics_enabled", False))
+        self._collision_type = _normalize_native_collision_type(
+            self._data.get("collision", mechanics.get("collision_type", "box"))
+        )
         self._geometry = self
         self._kinematics = self
         self._optics = self
@@ -601,7 +621,10 @@ class _NativeEditorActorProxy:
     def get_damping(self): return self._damping
     def set_physics_enabled(self, value): self._physics_enabled = bool(value); return self._operation("SetPhysicsEnabled", [self._physics_enabled])
     def get_physics_enabled(self): return self._physics_enabled
-    def set_collision_enabled(self, value): return self._operation("SetCollision", [bool(value)])
+    def set_collision_enabled(self, value):
+        self._collision_type = _normalize_native_collision_type(value)
+        return self._operation("SetCollision", [self._collision_type])
+    def get_collision_enabled(self): return self._collision_type
     def set_linear_lock(self, x, y, z): return self._operation("SetLinearLock", [bool(x), bool(y), bool(z)])
     def set_angular_lock(self, x, y, z): return self._operation("SetAngularLock", [bool(x), bool(y), bool(z)])
 
@@ -687,7 +710,103 @@ def resolve_runtime_target(target_type="actor", scene_name="", actor_name=""):
         "python_scenes": [], "native_scene": "", "actor_candidates": [], "binding_mode": "",
     }
     if normalized_type == "project":
-        return {"status": "ok", "target_type": "project", "scene_name": "", "actor_name": "", **base_diag}
+        # Project-level node graphs still execute against the scene that is open in
+        # the native editor. An empty scene name means "the current editor scene",
+        # not "there is no scene".
+        native_payload, native_errors = _native_scene_snapshot(scene_name)
+        if native_payload is not None:
+            native_route = str(
+                native_payload.get("scene")
+                or native_payload.get("scene_id")
+                or native_payload.get("id")
+                or scene_name
+                or ""
+            )
+            native_name = str(
+                native_payload.get("scene_name")
+                or native_payload.get("name")
+                or native_route
+                or ""
+            )
+            if scene_name and not _native_scene_matches(native_payload, scene_name):
+                return {
+                    "status": "error",
+                    "message": f"\u539f\u751f\u573a\u666f\u8fd4\u56de\u300c{native_route or native_name}\u300d\uff0c\u4e0e\u8bf7\u6c42\u573a\u666f\u300c{scene_name}\u300d\u4e0d\u4e00\u81f4",
+                    **base_diag,
+                }
+            resolved_route = native_route or native_name
+            actor_payloads = (
+                native_payload.get("actors")
+                if isinstance(native_payload.get("actors"), list)
+                else []
+            )
+            scene_proxy = _NativeEditorSceneProxy(
+                resolved_route, native_name, actor_payloads, native_payload
+            )
+            return {
+                "status": "ok",
+                "target_type": "project",
+                "scene_name": resolved_route,
+                "actor_name": "",
+                "scene": scene_proxy,
+                **base_diag,
+                "native_scene": resolved_route or native_name,
+                "binding_mode": "native_editor",
+            }
+
+        scenes = {}
+        try:
+            from CoronaCore.core.managers import scene_manager
+            scenes = scene_manager.get_all() or {}
+        except Exception as exc:
+            base_diag["python_scene_error"] = str(exc)
+        base_diag["python_scenes"] = [
+            str(getattr(scene, "route", key) or key) for key, scene in scenes.items()
+        ]
+        selected_key = ""
+        selected_scene = None
+        if scene_name:
+            matches = [
+                (key, scene)
+                for key, scene in scenes.items()
+                if _scene_matches(key, scene, scene_name)
+            ]
+            if len(matches) == 1:
+                selected_key, selected_scene = matches[0]
+            elif len(matches) > 1:
+                names = [str(getattr(scene, "route", key) or key) for key, scene in matches]
+                return {
+                    "status": "error",
+                    "message": f"\u573a\u666f\u300c{scene_name}\u300d\u5339\u914d\u5230\u591a\u4e2a Python \u573a\u666f: {', '.join(names)}",
+                    **base_diag,
+                }
+        elif len(scenes) == 1:
+            selected_key, selected_scene = next(iter(scenes.items()))
+
+        if selected_scene is not None:
+            route = str(
+                getattr(selected_scene, "route", selected_key or scene_name)
+                or selected_key
+                or scene_name
+            )
+            return {
+                "status": "ok",
+                "target_type": "project",
+                "scene_name": route,
+                "actor_name": "",
+                "scene": selected_scene,
+                **base_diag,
+                "binding_mode": "python_scene",
+            }
+
+        if native_errors:
+            base_diag["native_errors"] = native_errors
+        requested_label = f"\u300c{scene_name}\u300d" if scene_name else "\u5f53\u524d\u7f16\u8f91\u5668\u573a\u666f"
+        return {
+            "status": "error",
+            "message": f"\u672a\u627e\u5230\u53ef\u8fd0\u884c\u7684{requested_label}\uff0c\u8bf7\u5148\u6253\u5f00\u6216\u521b\u5efa\u4e00\u4e2a\u573a\u666f",
+            **base_diag,
+        }
     if normalized_type != "actor":
         return {"status": "error", "message": f"\u4e0d\u652f\u6301\u7684\u8fd0\u884c\u76ee\u6807\u7c7b\u578b: {target_type}", **base_diag}
     if not actor_name:
@@ -782,10 +901,48 @@ def capture_runtime_scene_state(scene_name="", scene=None, binding_mode=""):
         payload, errors = _native_scene_snapshot(route)
         if payload is None:
             raise RuntimeError("\u65e0\u6cd5\u8bfb\u53d6\u539f\u751f\u573a\u666f\u5feb\u7167" + (f": {'; '.join(errors)}" if errors else ""))
-        return {"binding_mode": "native_editor", "scene_name": route, "payload": payload}
+        resolved_route = str(
+            payload.get("scene")
+            or payload.get("scene_id")
+            or payload.get("id")
+            or route
+            or payload.get("scene_name")
+            or payload.get("name")
+            or ""
+        )
+        return {"binding_mode": "native_editor", "scene_name": resolved_route, "payload": payload}
 
     if scene is None:
-        raise RuntimeError(f"\u672a\u627e\u5230\u53ef\u6062\u590d\u7684 Python \u573a\u666f\u300c{scene_name}\u300d")
+        # Older project-level calls may still arrive without a resolved binding.
+        # Empty scene names intentionally ask the native editor for its active scene.
+        payload, errors = _native_scene_snapshot(scene_name)
+        if payload is not None:
+            if scene_name and not _native_scene_matches(payload, scene_name):
+                actual = str(
+                    payload.get("scene")
+                    or payload.get("scene_id")
+                    or payload.get("id")
+                    or payload.get("scene_name")
+                    or payload.get("name")
+                    or ""
+                )
+                raise RuntimeError(
+                    f"\u539f\u751f\u573a\u666f\u8fd4\u56de\u300c{actual}\u300d\uff0c\u4e0e\u8bf7\u6c42\u573a\u666f\u300c{scene_name}\u300d\u4e0d\u4e00\u81f4"
+                )
+            route = str(
+                payload.get("scene")
+                or payload.get("scene_id")
+                or payload.get("id")
+                or scene_name
+                or payload.get("scene_name")
+                or payload.get("name")
+                or ""
+            )
+            return {"binding_mode": "native_editor", "scene_name": route, "payload": payload}
+        detail = f": {'; '.join(errors)}" if errors else ""
+        label = f"\u300c{scene_name}\u300d" if scene_name else "\u5f53\u524d\u7f16\u8f91\u5668\u573a\u666f"
+        raise RuntimeError(f"\u672a\u627e\u5230\u53ef\u6062\u590d\u7684{label}{detail}")
+
     actors = []
     for actor in _iter_scene_actors(scene):
         actors.append({
@@ -908,7 +1065,12 @@ def _restore_native_actor_state(scene_route, actor_data):
         scene_route, actor_name, "SetVisible", [bool(actor_data.get("visible", True))]
     )
     _native_restore_operation(
-        scene_route, actor_name, "SetCollision", [bool(actor_data.get("collision", True))]
+        scene_route,
+        actor_name,
+        "SetCollision",
+        [_normalize_native_collision_type(
+            actor_data.get("collision", mechanics.get("collision_type", "box"))
+        )],
     )
     if "mass" in mechanics:
         _native_restore_operation(scene_route, actor_name, "SetMass", [mechanics.get("mass")])
@@ -1377,7 +1539,14 @@ def _apply_rotation():
 
 
 # Engine / motion
-def move(steps):
+def move(steps, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        pos = _actor_position(actor)
+        if actor is None or pos is None:
+            return False
+        pos[0] += float(steps)
+        return _set_actor_position(actor, pos)
     if _actor_only("move"):
         return
     _init_engine()
@@ -1386,7 +1555,12 @@ def move(steps):
     _sync_position()
 
 
-def rotateX(angle):
+def rotateX(angle, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[0] += float(angle)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("rotateX"):
         return
     _init_engine()
@@ -1400,7 +1574,12 @@ def rotateX(angle):
     _apply_rotation()
 
 
-def rotateY(angle):
+def rotateY(angle, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[1] += float(angle)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("rotateY"):
         return
     _init_engine()
@@ -1414,7 +1593,12 @@ def rotateY(angle):
     _apply_rotation()
 
 
-def rotateZ(angle):
+def rotateZ(angle, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[2] += float(angle)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("rotateZ"):
         return
     _init_engine()
@@ -1428,7 +1612,12 @@ def rotateZ(angle):
     _apply_rotation()
 
 
-def face(direction):
+def face(direction, actor_name=""):
+    if str(actor_name or "").strip():
+        actor = _resolve_actor(actor_name)
+        rotation = _actor_vector(actor, "get_rotation", [0.0, 0.0, 0.0])
+        rotation[1] = float(direction)
+        return _set_actor_vector(actor, "set_rotation", rotation)
     if _actor_only("face"):
         return
     _init_engine()
@@ -1436,22 +1625,45 @@ def face(direction):
     _apply_rotation()
 
 
-def rotationX():
+def rotationX(actor_name=""):
+    if str(actor_name or "").strip():
+        return _actor_vector(_resolve_actor(actor_name), "get_rotation", [0.0, 0.0, 0.0])[0]
     _init_engine()
     return _current_context().rot_x
 
 
-def rotationY():
+def rotationY(actor_name=""):
+    if str(actor_name or "").strip():
+        return _actor_vector(_resolve_actor(actor_name), "get_rotation", [0.0, 0.0, 0.0])[1]
     _init_engine()
     return _current_context().rot_y
 
 
-def rotationZ():
+def rotationZ(actor_name=""):
+    if str(actor_name or "").strip():
+        return _actor_vector(_resolve_actor(actor_name), "get_rotation", [0.0, 0.0, 0.0])[2]
     _init_engine()
     return _current_context().rot_z
 
 
-def moveto(position):
+def moveto(position, actor_name=""):
+    explicit_target = str(actor_name or "").strip()
+    if explicit_target:
+        actor = _resolve_actor(explicit_target)
+        if actor is None:
+            return False
+        if position == "random_position":
+            target = [
+                _random.uniform(-10, 10),
+                _random.uniform(-5, 5),
+                _random.uniform(-10, 10),
+            ]
+        elif position == "sight_position":
+            target = [0.0, 0.0, 0.0]
+        else:
+            _logger.warning("[ScratchWrapper] unknown moveto position: %s", position)
+            return False
+        return _set_actor_position(actor, target)
     if _actor_only("moveto"):
         return
     _init_engine()
@@ -1468,18 +1680,21 @@ def moveto(position):
     _sync_position()
 
 
-def movetoXYZ(position):
-    if _actor_only("movetoXYZ"):
-        return False
-    _init_engine()
+def movetoXYZ(position, actor_name=""):
     try:
         values = position
         if isinstance(position, str):
             values = [item.strip() for item in position.split(',')]
         if len(values) < 3:
             return False
+        target = [float(values[0]), float(values[1]), float(values[2])]
+        if str(actor_name or "").strip():
+            return _set_actor_position(_resolve_actor(actor_name), target)
+        if _actor_only("movetoXYZ"):
+            return False
+        _init_engine()
         ctx = _current_context()
-        ctx.x, ctx.y, ctx.z = (float(values[0]), float(values[1]), float(values[2]))
+        ctx.x, ctx.y, ctx.z = target
         _sync_position()
         return True
     except (TypeError, ValueError):
@@ -1487,16 +1702,30 @@ def movetoXYZ(position):
         return False
 
 
-def movetoXYZtime(t, x1, x2, x3):
+def movetoXYZtime(t, x1, x2, x3, actor_name=""):
+    target = [float(x1), float(x2), float(x3)]
+    if str(actor_name or "").strip():
+        return _set_actor_position(_resolve_actor(actor_name), target)
     if _actor_only("movetoXYZtime"):
         return
     _init_engine()
     ctx = _current_context()
-    ctx.x, ctx.y, ctx.z = float(x1), float(x2), float(x3)
+    ctx.x, ctx.y, ctx.z = target
     _sync_position()
 
 
-def Xset(x):
+def _set_or_add_actor_axis(actor_name, axis, value, add=False):
+    actor = _resolve_actor(actor_name)
+    pos = _actor_position(actor)
+    if actor is None or pos is None:
+        return False
+    pos[axis] = pos[axis] + float(value) if add else float(value)
+    return _set_actor_position(actor, pos)
+
+
+def Xset(x, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 0, x)
     if _actor_only("Xset"):
         return
     _init_engine()
@@ -1504,7 +1733,9 @@ def Xset(x):
     _sync_position()
 
 
-def Yset(y):
+def Yset(y, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 1, y)
     if _actor_only("Yset"):
         return
     _init_engine()
@@ -1512,7 +1743,9 @@ def Yset(y):
     _sync_position()
 
 
-def Zset(z):
+def Zset(z, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 2, z)
     if _actor_only("Zset"):
         return
     _init_engine()
@@ -1520,7 +1753,9 @@ def Zset(z):
     _sync_position()
 
 
-def Xadd(dx):
+def Xadd(dx, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 0, dx, True)
     if _actor_only("Xadd"):
         return
     _init_engine()
@@ -1528,7 +1763,9 @@ def Xadd(dx):
     _sync_position()
 
 
-def Yadd(dy):
+def Yadd(dy, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 1, dy, True)
     if _actor_only("Yadd"):
         return
     _init_engine()
@@ -1536,7 +1773,9 @@ def Yadd(dy):
     _sync_position()
 
 
-def Zadd(dz):
+def Zadd(dz, actor_name=""):
+    if str(actor_name or "").strip():
+        return _set_or_add_actor_axis(actor_name, 2, dz, True)
     if _actor_only("Zadd"):
         return
     _init_engine()
@@ -1544,17 +1783,26 @@ def Zadd(dz):
     _sync_position()
 
 
-def X():
+def X(actor_name=""):
+    if str(actor_name or "").strip():
+        pos = _actor_position(_resolve_actor(actor_name))
+        return pos[0] if pos is not None else 0.0
     _init_engine()
     return _current_context().x
 
 
-def Y():
+def Y(actor_name=""):
+    if str(actor_name or "").strip():
+        pos = _actor_position(_resolve_actor(actor_name))
+        return pos[1] if pos is not None else 0.0
     _init_engine()
     return _current_context().y
 
 
-def Z():
+def Z(actor_name=""):
+    if str(actor_name or "").strip():
+        pos = _actor_position(_resolve_actor(actor_name))
+        return pos[2] if pos is not None else 0.0
     _init_engine()
     return _current_context().z
 

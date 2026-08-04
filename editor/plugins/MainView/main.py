@@ -106,10 +106,21 @@ class MainView(PluginBase):
             logger.debug("Failed to discard Python runtime scene %s", scene_name, exc_info=True)
 
     @staticmethod
-    def on_init():
+    def on_init(project_path: str = ""):
+        requested_path = os.path.abspath(os.path.expanduser(str(project_path or "").strip())) if project_path else ""
+        current_path = settings_manager.active_project_path or ""
+        if requested_path:
+            current_id = os.path.normcase(os.path.abspath(current_path)) if current_path else ""
+            requested_id = os.path.normcase(requested_path)
+            if current_id != requested_id and not settings_manager.set_active_project(requested_path):
+                raise ValueError(f"无法激活目标项目: {requested_path}")
+
         project_path = settings_manager.active_project_path
-        ini_path = os.path.join(project_path, 'project.ini') if project_path else None
-        project_config = settings_manager.active_project_config['Project']
+        project_config_root = settings_manager.active_project_config
+        if not project_path or project_config_root is None or 'Project' not in project_config_root:
+            raise ValueError("当前项目尚未完成激活")
+        ini_path = os.path.join(project_path, 'project.ini')
+        project_config = project_config_root['Project']
         default_scene = MainView._normalize_scene_path(project_config.get('entrance_scene', ''))
         active_scene = MainView._normalize_scene_path(project_config.get('active_scene', default_scene))
 

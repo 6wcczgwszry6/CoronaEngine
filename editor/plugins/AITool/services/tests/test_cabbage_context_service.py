@@ -1,0 +1,969 @@
+import json
+import pathlib
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+EDITOR_ROOT = pathlib.Path(__file__).resolve().parents[4]
+if str(EDITOR_ROOT) not in sys.path:
+    sys.path.insert(0, str(EDITOR_ROOT))
+
+from plugins.AITool.services.cabbage_context_service import CabbageContextService
+from plugins.AITool.services.node_graph_review_service import NodeGraphReviewService
+
+
+class CabbageContextServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.world = pathlib.Path(self.temp_dir.name) / "story_world_test"
+        self.world.mkdir(parents=True)
+        (self.world / "project.ini").write_text("[Project]\nname=story_world_test\n", encoding="utf-8")
+        self.service = CabbageContextService()
+        self.path_patch = mock.patch.object(
+            CabbageContextService,
+            "_active_project_path",
+            return_value=self.world,
+        )
+        self.path_patch.start()
+
+    def tearDown(self):
+        self.path_patch.stop()
+        self.service.shutdown()
+        self.temp_dir.cleanup()
+
+    def active_task_keys(self, context):
+        return {task.get("taskKey") for task in context.get("activeTasks", [])}
+
+    def history_task(self, context, task_key):
+        return next(
+            (task for task in context.get("taskHistory", []) if task.get("taskKey") == task_key),
+            None,
+        )
+
+    def visible_tutorial_keys(self, context):
+        return {
+            task.get("taskKey")
+            for task in context.get("activeTasks", [])
+            if task.get("type") == "tutorial" and task.get("status") in {"active", "pending"}
+        }
+
+    def test_new_world_contains_node_interaction_tutorials(self):
+        response = self.service.load()
+        self.assertTrue(response["success"])
+        keys = self.active_task_keys(response["context"])
+        self.assertIn("tutorial.move_node", keys)
+        self.assertIn("tutorial.connect_nodes", keys)
+        self.assertIn("tutorial.drag_block", keys)
+
+    def test_new_world_shows_one_scene_task_and_one_node_task(self):
+        context = self.service.load()["context"]
+        self.assertEqual(
+            {"tutorial.import_model", "tutorial.create_node"},
+            self.visible_tutorial_keys(context),
+        )
+        visible = {
+            task.get("track")
+            for task in context.get("activeTasks", [])
+            if task.get("status") == "active" and task.get("type") == "tutorial"
+        }
+        self.assertEqual({"scene", "node"}, visible)
+
+    def test_legacy_pending_tutorials_are_migrated_to_two_visible_slots(self):
+        context = self.service._default_context(self.world)
+        for task in context["activeTasks"]:
+            if task.get("type") == "tutorial":
+                task["status"] = "pending"
+        context_path = self.service._context_path(self.world)
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+        loaded = self.service.load()["context"]
+        self.assertEqual(
+            {"tutorial.import_model", "tutorial.create_node"},
+            self.visible_tutorial_keys(loaded),
+        )
+        queued = {
+            task.get("taskKey")
+            for task in loaded.get("activeTasks", [])
+            if task.get("type") == "tutorial" and task.get("status") == "queued"
+        }
+        self.assertIn("tutorial.transform_model", queued)
+        self.assertIn("tutorial.move_node", queued)
+
+    def test_completing_a_task_reveals_next_task_in_same_track(self):
+        imported = self.service.record_event({
+            "type": "model_imported",
+            "category": "scene",
+            "success": True,
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["tutorial.import_model"], imported["completedTaskKeys"])
+        self.assertEqual(
+            {"tutorial.transform_model", "tutorial.create_node"},
+            self.visible_tutorial_keys(imported["context"]),
+        )
+
+        created = self.service.record_event({
+            "type": "node_created",
+            "category": "node",
+            "success": True,
+            "details": {"nodeId": "state_2"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["tutorial.create_node"], created["completedTaskKeys"])
+        self.assertEqual(
+            {"tutorial.transform_model", "tutorial.move_node"},
+            self.visible_tutorial_keys(created["context"]),
+        )
+
+    def test_any_transform_parameter_completes_adjust_object_task(self):
+        for event_type in ("transform_position", "transform_rotation", "transform_scale"):
+            with self.subTest(event_type=event_type):
+                context_path = self.service._context_path(self.world)
+                if context_path.exists():
+                    context_path.unlink()
+                response = self.service.record_event({
+                    "type": event_type,
+                    "category": "scene",
+                    "success": True,
+                    "details": {"actorName": "Player"},
+                    "worldId": self.world.name,
+                })
+                self.assertEqual(["tutorial.transform_model"], response["completedTaskKeys"])
+                self.assertIsNotNone(self.history_task(response["context"], "tutorial.transform_model"))
+
+    def test_supplementary_tutorial_events_are_recognized(self):
+        cases = (
+            ("block_parameter_changed", {"blockId": "speed", "fieldName": "VALUE"}, "tutorial.edit_block_parameter"),
+            ("block_added", {"workspaceRole": "condition", "interaction": "pick"}, "tutorial.set_transition_condition"),
+            ("run_started", {"source": "node_graph"}, "tutorial.run_node_graph"),
+            ("run_succeeded", {"source": "node_graph"}, "tutorial.run_node_graph"),
+        )
+        for event_type, details, task_key in cases:
+            with self.subTest(event_type=event_type):
+                context_path = self.service._context_path(self.world)
+                if context_path.exists():
+                    context_path.unlink()
+                response = self.service.record_event({
+                    "type": event_type,
+                    "category": "node" if "block" in event_type else "runtime",
+                    "success": True,
+                    "details": details,
+                    "worldId": self.world.name,
+                })
+                self.assertIn(task_key, response["completedTaskKeys"])
+                self.assertIsNotNone(self.history_task(response["context"], task_key))
+
+    def test_retired_rotate_task_is_removed_from_existing_world(self):
+        context = self.service._default_context(self.world)
+        context["activeTasks"].append({
+            "taskKey": "tutorial.rotate_model",
+            "type": "tutorial",
+            "track": "scene",
+            "status": "active",
+            "createdAt": 1,
+            "updatedAt": 1,
+        })
+        context_path = self.service._context_path(self.world)
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+        loaded = self.service.load()["context"]
+        self.assertNotIn("tutorial.rotate_model", self.active_task_keys(loaded))
+
+    def test_first_score_update_clamps_and_persists_model_score(self):
+        context = self.service.load()["context"]
+        settings = type("Settings", (), {"api_key": "configured"})()
+        response_text = json.dumps({
+            "score": 126,
+            "reasonCodes": ["fast_issue_resolution"],
+        })
+        with mock.patch.object(NodeGraphReviewService, "_resolve_settings", return_value=settings), \
+             mock.patch.object(NodeGraphReviewService, "_call_deepseek", return_value=response_text):
+            result = self.service._compute_score(self.world, context)
+
+        self.assertTrue(result["success"])
+        self.assertEqual(100, result["profile"]["score"])
+        persisted = self.service.load()["context"]["profile"]
+        self.assertEqual(100, persisted["score"])
+        self.assertNotIn("role", persisted)
+        self.assertNotIn("fluencyTier", persisted)
+
+    def test_later_score_can_rise_with_recent_performance(self):
+        context = self.service.load()["context"]
+        context["profile"].update({"score": 20, "updatedAt": 1000})
+        self.service._write_locked(self.world, context)
+        settings = type("Settings", (), {"api_key": "configured"})()
+        with mock.patch.object(NodeGraphReviewService, "_resolve_settings", return_value=settings), \
+             mock.patch.object(NodeGraphReviewService, "_call_deepseek", return_value='{"score":100,"reasonCodes":["recent_success"]}'):
+            result = self.service._compute_score(self.world, context)
+
+        self.assertEqual(72, result["profile"]["score"])
+        history = self.service.load()["context"]["profileHistory"]
+        self.assertEqual(20, history[-1]["score"])
+
+    def test_later_score_can_fall_with_recent_failures(self):
+        context = self.service.load()["context"]
+        context["profile"].update({"score": 80, "updatedAt": 1000})
+        self.service._write_locked(self.world, context)
+        settings = type("Settings", (), {"api_key": "configured"})()
+        with mock.patch.object(NodeGraphReviewService, "_resolve_settings", return_value=settings), \
+             mock.patch.object(NodeGraphReviewService, "_call_deepseek", return_value='{"score":20,"reasonCodes":["recent_failures"]}'):
+            result = self.service._compute_score(self.world, context)
+
+        self.assertEqual(41, result["profile"]["score"])
+        history = self.service.load()["context"]["profileHistory"]
+        self.assertEqual(80, history[-1]["score"])
+
+    def test_legacy_profile_is_migrated_to_score_only(self):
+        context = self.service._default_context(self.world)
+        context["profile"] = {
+            "role": "programmer",
+            "confidence": 0.9,
+            "fluencyScore": 68,
+            "fluencyTier": "intermediate",
+            "fluencyReasonCodes": ["legacy_reason"],
+            "updatedAt": 123,
+        }
+        context_path = self.service._context_path(self.world)
+        context_path.parent.mkdir(parents=True, exist_ok=True)
+        context_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
+
+        profile = self.service.load()["context"]["profile"]
+        self.assertEqual(68, profile["score"])
+        self.assertEqual(["legacy_reason"], profile["reasonCodes"])
+        self.assertNotIn("role", profile)
+        self.assertNotIn("confidence", profile)
+        self.assertNotIn("fluencyTier", profile)
+
+    def test_repeated_issue_and_related_chat_are_remembered(self):
+        task = {
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "missing_actor_target|start|move",
+                "type": "node-issue",
+                "code": "missing_actor_target",
+                "nodeId": "start",
+                "blockId": "move",
+                "title": "Missing actor",
+            },
+        }
+        self.service.update_task(task)
+        self.service.append_message({
+            "worldId": self.world.name,
+            "role": "user",
+            "content": "How should this actor reference be connected?",
+            "taskKey": task["task"]["taskKey"],
+        })
+        self.service.append_message({
+            "worldId": self.world.name,
+            "role": "assistant",
+            "content": "Connect an object-reference block.",
+            "taskKey": task["task"]["taskKey"],
+        })
+        self.service.update_task({**task, "action": "resolve"})
+        self.service.update_task(task)
+
+        memory = self.service.load()["context"]["issueMemory"]["missing_actor_target"]
+        self.assertEqual(2, memory["occurrences"])
+        self.assertEqual(1, memory["resolvedCount"])
+        self.assertEqual(1, memory["chatDiscussionCount"])
+
+    def test_node_move_completes_only_move_tutorial(self):
+        response = self.service.record_event({
+            "type": "node_moved",
+            "category": "node",
+            "success": True,
+            "details": {"nodeId": "start"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["tutorial.move_node"], response["completedTaskKeys"])
+        self.assertIsNotNone(self.history_task(response["context"], "tutorial.move_node"))
+        self.assertEqual(1, response["context"]["metrics"]["nodeEdits"])
+        self.assertIn("tutorial.connect_nodes", self.active_task_keys(response["context"]))
+        self.assertIn("tutorial.drag_block", self.active_task_keys(response["context"]))
+
+    def test_connection_requires_two_different_nodes(self):
+        same_node = self.service.record_event({
+            "type": "node_connected",
+            "category": "node",
+            "success": True,
+            "details": {"sourceNodeId": "loop", "targetNodeId": "loop"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual([], same_node["completedTaskKeys"])
+        self.assertIn("tutorial.connect_nodes", self.active_task_keys(same_node["context"]))
+
+        different_nodes = self.service.record_event({
+            "type": "node_connected",
+            "category": "node",
+            "success": True,
+            "details": {"sourceNodeId": "start", "targetNodeId": "play"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["tutorial.connect_nodes"], different_nodes["completedTaskKeys"])
+
+    def test_block_tutorial_requires_drag_interaction(self):
+        picked = self.service.record_event({
+            "type": "block_added",
+            "category": "node",
+            "success": True,
+            "details": {"blockType": "logic_boolean", "interaction": "pick"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual([], picked["completedTaskKeys"])
+        self.assertIn("tutorial.drag_block", self.active_task_keys(picked["context"]))
+
+        dragged = self.service.record_event({
+            "type": "block_added",
+            "category": "node",
+            "success": True,
+            "details": {"blockType": "logic_boolean", "interaction": "drag"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["tutorial.drag_block"], dragged["completedTaskKeys"])
+
+    def test_late_event_from_another_world_is_rejected(self):
+        response = self.service.record_event({
+            "type": "node_moved",
+            "success": True,
+            "worldId": "another_world",
+        })
+        self.assertFalse(response["success"])
+        self.assertEqual("INVALID_CONTEXT_EVENT", response["error"])
+        self.assertIn("其他世界", response["message"])
+
+
+    def test_node_issue_persists_edge_pattern_without_double_counting_active_upsert(self):
+        payload = {
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "invalid_edge_endpoint|start||edge_1",
+                "type": "node-issue",
+                "code": "invalid_edge_endpoint",
+                "nodeId": "start",
+                "edgeId": "edge_1",
+                "pattern": {
+                    "relationType": "transition",
+                    "edgeId": "edge_1",
+                },
+                "title": "repair edge",
+            },
+        }
+        first = self.service.update_task(payload)
+        second = self.service.update_task(payload)
+        task = next(item for item in second["context"]["activeTasks"] if item["taskKey"] == payload["task"]["taskKey"])
+        memory = second["context"]["issueMemory"]["invalid_edge_endpoint"]
+        self.assertEqual("edge_1", task["edgeId"])
+        self.assertEqual("transition", task["pattern"]["relationType"])
+        self.assertEqual("edge_1", task["pattern"]["edgeId"])
+        self.assertEqual(1, memory["occurrences"])
+        self.assertEqual(1, first["context"]["issueMemory"]["invalid_edge_endpoint"]["occurrences"])
+
+    def test_assistant_showcase_metadata_is_persisted_and_invalid_intent_is_rejected(self):
+        valid = self.service.append_message({
+            "worldId": self.world.name,
+            "role": "assistant",
+            "content": "Follow these steps.",
+            "needsShowcase": True,
+            "guidanceIntent": "connect_object_reference",
+            "steps": ["Open Node Dock", "repair edge"],
+        })
+        self.assertTrue(valid["message"]["needsShowcase"])
+        self.assertEqual("connect_object_reference", valid["message"]["guidanceIntent"])
+        self.assertEqual(["Open Node Dock", "repair edge"], valid["message"]["steps"])
+
+        invalid = self.service.append_message({
+            "worldId": self.world.name,
+            "role": "assistant",
+            "content": "Reject unknown guidance.",
+            "needsShowcase": True,
+            "guidanceIntent": "querySelector:anything",
+            "steps": ["Unknown action"],
+        })
+        self.assertFalse(invalid["message"]["needsShowcase"])
+        self.assertEqual("", invalid["message"]["guidanceIntent"])
+
+
+    @staticmethod
+    def goal_plan_payload():
+        effects = [
+            {
+                "effectId": "player_move_jump",
+                "title": "player movement and jump",
+                "description": "the player moves with WASD and jumps between platforms",
+                "trigger": "keyboard input",
+                "outcome": "the player changes position and can leave the ground",
+                "recommendedBlockTypes": ["object_third_person_move", "object_arcade_jump"],
+                "verification": "the player can move and jump after running the graph",
+            },
+            {
+                "effectId": "rabbit_behavior",
+                "title": "rabbit behavior",
+                "description": "the rabbit changes its position inside the play area",
+                "trigger": "gameplay update",
+                "outcome": "the rabbit appears to roam",
+                "recommendedBlockTypes": ["object_set_random_position"],
+                "verification": "the rabbit changes position in the allowed area",
+            },
+            {
+                "effectId": "mechanism_collision",
+                "title": "mechanism collision",
+                "description": "the mechanism participates in logical collision",
+                "trigger": "player contact",
+                "outcome": "the mechanism can be used by collision gameplay",
+                "recommendedBlockTypes": ["object_set_logical_collision"],
+                "verification": "the node graph runs with collision behavior enabled",
+            },
+        ]
+        task_specs = [
+            ("player_move_jump", "node_created", []),
+            ("player_move_jump", "block_added", ["object_third_person_move"]),
+            ("player_move_jump", "block_added", ["object_arcade_jump"]),
+            ("rabbit_behavior", "block_added", ["object_set_random_position"]),
+            ("mechanism_collision", "block_added", ["object_set_logical_collision"]),
+            ("mechanism_collision", "run_succeeded", []),
+        ]
+        return {
+            "logicBlueprint": {
+                "worldSummary": "an ink-style fantasy exploration world",
+                "coreLoop": "move and jump across platforms, observe the rabbit, and avoid mechanisms",
+                "requiredActors": ["player", "rabbit", "mechanism", "platform"],
+                "nodeEffects": effects,
+                "flow": ["initialize", "move and jump", "rabbit behavior", "collision", "run verification"],
+            },
+            "tasks": [
+                {
+                    "phase": "node-logic",
+                    "effectId": effect_id,
+                    "title": f"goal step {index}",
+                    "message": f"build gameplay effect {effect_id}",
+                    "suggestion": f"finish the {effect_id} node logic",
+                    "completionCriteria": f"signal {signal} is observed for the requested effect",
+                    "completionSignal": signal,
+                    "requiredBlockTypes": block_types,
+                }
+                for index, (effect_id, signal, block_types) in enumerate(task_specs, start=1)
+            ],
+        }
+
+    def test_empty_world_prompt_keeps_default_tutorial_tasks(self):
+        response = self.service.start_goal_plan({"prompt": "", "mode": "story"})
+        self.assertTrue(response["success"])
+        self.assertEqual("completed", response["status"])
+        context = response["context"]
+        self.assertEqual("default", context["worldGoal"]["source"])
+        self.assertTrue(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+        self.assertFalse(any(task.get("type") == "goal" for task in context["activeTasks"]))
+
+    def test_context_load_rejects_a_different_world_id(self):
+        response = self.service.load({"worldId": "another_world"})
+        self.assertFalse(response["success"])
+        self.assertEqual("CONTEXT_LOAD_FAILED", response["error"])
+        self.assertFalse(self.service._context_path(self.world).exists())
+
+    def test_goal_plan_rejects_a_different_world_id_without_writing_context(self):
+        response = self.service.start_goal_plan({
+            "worldId": "another_world",
+            "prompt": "a world that must not leak into this project",
+            "mode": "story",
+        })
+        self.assertFalse(response["success"])
+        self.assertEqual("GOAL_PLAN_START_FAILED", response["error"])
+        self.assertFalse(self.service._context_path(self.world).exists())
+
+    def test_goal_plan_prompt_only_requests_personalized_guidance_tasks(self):
+        description = "一间会随音乐改变颜色的抽象几何空间"
+        prompt = self.service._goal_plan_prompt(description, "story")
+        self.assertIn("个性化搭建任务", prompt)
+        self.assertIn("不能直接修改当前节点区", prompt)
+        self.assertIn("不是替用户生成一套节点积木", prompt)
+        self.assertIn("一步一步引导用户亲自完成世界", prompt)
+        self.assertIn("每个任务只能对应一个可由 completionSignal 验证的操作目标", prompt)
+        self.assertIn("不要把光照和物理", prompt)
+        self.assertIn("任意语言、任意题材、任意详细程度", prompt)
+        self.assertIn("不得使用固定题材模板或按关键词套用预制任务", prompt)
+        self.assertIn(
+            json.dumps(
+                {"mode": "story", "description": description},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            prompt,
+        )
+        self.assertNotIn('"effectId":"player_move_jump"', prompt)
+        self.assertNotIn(
+            '"recommendedBlockTypes":["object_third_person_move"]',
+            prompt,
+        )
+
+    def test_goal_plan_prompt_preserves_arbitrary_world_descriptions(self):
+        descriptions = [
+            "一个可以控制飞船采集陨石的太空世界",
+            "一间可以开关灯和移动家具的房间",
+            "暴雨中的赛车计时挑战",
+            "抽象几何音乐可视化空间",
+            "No characters; only fog, sound, and a slowly changing light.\nKeep it calm.",
+            '包含引号“测试”、符号 #[]{} 与完全自定义名词 Zeta-42',
+        ]
+        for description in descriptions:
+            with self.subTest(description=description):
+                prompt = self.service._goal_plan_prompt(description, "creative")
+                request_data = json.dumps(
+                    {"mode": "creative", "description": description},
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                self.assertIn(request_data, prompt)
+                self.assertIn("唯一的世界语义来源", prompt)
+                self.assertIn("只代表可选能力，不是必须加入世界的内容", prompt)
+
+    def test_goal_plan_rejects_unknown_completion_signal(self):
+        context = self.service._default_context(self.world)
+        payload = self.goal_plan_payload()
+        payload["tasks"][0]["completionSignal"] = "write_python_script"
+        with self.assertRaises(ValueError):
+            self.service._normalize_goal_plan_tasks(payload, context, self.service._now_ms())
+
+
+    def test_goal_plan_rejects_unknown_block_type(self):
+        context = self.service._default_context(self.world)
+        payload = self.goal_plan_payload()
+        payload["tasks"][1]["requiredBlockTypes"] = ["invented_collision_block"]
+        with self.assertRaises(ValueError):
+            self.service._normalize_goal_plan_tasks(payload, context, self.service._now_ms())
+
+    def test_goal_plan_requires_node_tasks_before_scene_polish(self):
+        context = self.service._default_context(self.world)
+        payload = self.goal_plan_payload()
+        payload["tasks"][1].update({
+            "phase": "scene-polish",
+            "effectId": "",
+            "completionSignal": "object_transformed",
+            "requiredBlockTypes": [],
+        })
+        with self.assertRaises(ValueError):
+            self.service._normalize_goal_plan_tasks(payload, context, self.service._now_ms())
+
+    def test_goal_block_task_ignores_unrelated_block_type(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "ink fantasy world with a rabbit and mechanisms",
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": self.service._now_ms(),
+            "generationError": "",
+        }
+        context["activeTasks"] = self.service._normalize_goal_plan_tasks(
+            self.goal_plan_payload(), context, self.service._now_ms(),
+        )
+        self.service._ensure_task_slots_locked(context, self.service._now_ms())
+        self.service._write_locked(self.world, context)
+
+        unrelated = self.service.record_event({
+            "type": "block_added",
+            "category": "node",
+            "success": True,
+            "details": {"blockType": "logic_boolean", "interaction": "drag"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual([], unrelated["completedTaskKeys"])
+        move_task = next(
+            task for task in unrelated["context"]["activeTasks"]
+            if task.get("taskKey") == "goal.ai.02"
+        )
+        self.assertEqual([], move_task["observedBlockTypes"])
+
+        matched = self.service.record_event({
+            "type": "block_added",
+            "category": "node",
+            "success": True,
+            "details": {"blockType": "object_third_person_move", "interaction": "drag"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["goal.ai.02"], matched["completedTaskKeys"])
+        archived = self.history_task(matched["context"], "goal.ai.02")
+        self.assertEqual(["object_third_person_move"], archived["observedBlockTypes"])
+
+    def test_load_recovers_personalized_plan_from_project_ini(self):
+        self.world.joinpath("project.ini").write_text(
+            "[Project]\nname=story_world_test\nmode=creative\n"
+            "world_prompt=an ink fantasy world with rabbits and mechanisms\n",
+            encoding="utf-8",
+        )
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            return_value=self.goal_plan_payload(),
+        ):
+            response = self.service.load()
+            task_id = response["goalPlan"]["taskId"]
+            deadline = time.monotonic() + 3
+            result = None
+            while time.monotonic() < deadline:
+                status = self.service.goal_plan_status(task_id)
+                if status.get("status") == "completed":
+                    result = status.get("result")
+                    break
+                time.sleep(0.02)
+
+        self.assertTrue(response["success"])
+        self.assertIsNotNone(result)
+        self.assertTrue(result["success"])
+        context = result["context"]
+        self.assertEqual("creative", context["worldGoal"]["mode"])
+        self.assertEqual(
+            "an ink fantasy world with rabbits and mechanisms",
+            context["worldGoal"]["prompt"],
+        )
+        self.assertEqual(2, len([
+            task for task in context["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "active"
+        ]))
+        self.assertFalse(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+
+    def test_load_does_not_restart_matching_personalized_plan(self):
+        prompt = "a completed personalized world"
+        self.world.joinpath("project.ini").write_text(
+            f"[Project]\nname=story_world_test\nmode=story\nworld_prompt={prompt}\n",
+            encoding="utf-8",
+        )
+        context = self.service._default_context(self.world)
+        now = self.service._now_ms()
+        tasks = self.service._normalize_goal_plan_tasks(self.goal_plan_payload(), context, now)
+        context["worldGoal"] = {
+            "prompt": prompt,
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": now,
+            "generationError": "",
+            "generationId": "",
+        }
+        context["activeTasks"] = tasks
+        self.service._ensure_task_slots_locked(context, now)
+        self.service._write_locked(self.world, context)
+
+        with mock.patch.object(self.service, "start_goal_plan") as start_goal_plan:
+            response = self.service.load()
+
+        self.assertTrue(response["success"])
+        start_goal_plan.assert_not_called()
+        self.assertEqual(prompt, response["context"]["worldGoal"]["prompt"])
+
+    def test_ai_goal_plan_replaces_tutorials_and_shows_two_tasks(self):
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            return_value=self.goal_plan_payload(),
+        ):
+            started = self.service.start_goal_plan({
+                "prompt": "a puzzle world across floating islands",
+                "mode": "story",
+            })
+            self.assertTrue(started["success"])
+            self.assertEqual("pending", started["status"])
+            deadline = time.monotonic() + 3
+            result = None
+            while time.monotonic() < deadline:
+                status = self.service.goal_plan_status(started["taskId"])
+                if status.get("status") == "completed":
+                    result = status.get("result")
+                    break
+                time.sleep(0.02)
+
+        self.assertIsNotNone(result)
+        self.assertTrue(result["success"])
+        context = result["context"]
+        self.assertEqual("ai", context["worldGoal"]["source"])
+        self.assertEqual(2, context["goalTaskPlan"]["schemaVersion"])
+        self.assertEqual(6, context["goalTaskPlan"]["taskCount"])
+        self.assertEqual(6, context["goalTaskPlan"]["nodeTaskCount"])
+        self.assertEqual(0, context["goalTaskPlan"]["sceneTaskCount"])
+        self.assertEqual(
+            "an ink-style fantasy exploration world",
+            context["goalTaskPlan"]["logicBlueprint"]["worldSummary"],
+        )
+        self.assertFalse(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+        visible = [
+            task for task in context["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "active"
+        ]
+        queued = [
+            task for task in context["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "queued"
+        ]
+        self.assertEqual(2, len(visible))
+        self.assertEqual(4, len(queued))
+
+        self.assertFalse(
+            (self.world / "Scripts" / "blockly").exists(),
+            "World-description planning must not create or modify Blockly graph files",
+        )
+
+    def test_completing_goal_task_reveals_next_ai_task(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "a puzzle world across floating islands",
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": self.service._now_ms(),
+            "generationError": "",
+        }
+        context["activeTasks"] = self.service._normalize_goal_plan_tasks(
+            self.goal_plan_payload(), context, self.service._now_ms(),
+        )
+        self.service._ensure_task_slots_locked(context, self.service._now_ms())
+        self.service._write_locked(self.world, context)
+
+        response = self.service.record_event({
+            "type": "node_created",
+            "category": "node",
+            "success": True,
+            "details": {"nodeId": "start"},
+            "worldId": self.world.name,
+        })
+        self.assertEqual(["goal.ai.01"], response["completedTaskKeys"])
+        self.assertIsNotNone(self.history_task(response["context"], "goal.ai.01"))
+        visible_keys = {
+            task.get("taskKey")
+            for task in response["context"]["activeTasks"]
+            if task.get("type") == "goal" and task.get("status") == "active"
+        }
+        self.assertEqual({"goal.ai.02", "goal.ai.03"}, visible_keys)
+
+
+    def test_generating_goal_without_tasks_keeps_default_tutorials_visible(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "a world that still needs planning",
+            "mode": "story",
+            "source": "ai",
+            "status": "generating",
+            "generatedAt": 0,
+            "generationError": "",
+        }
+        context["goalTaskPlan"] = {
+            "schemaVersion": 2,
+            "generatedAt": 0,
+            "taskCount": 0,
+            "nodeTaskCount": 0,
+            "sceneTaskCount": 0,
+            "logicBlueprint": {},
+        }
+        context["activeTasks"] = []
+
+        self.service._ensure_task_slots_locked(context, self.service._now_ms())
+
+        self.assertEqual(
+            {"tutorial.import_model", "tutorial.create_node"},
+            self.visible_tutorial_keys(context),
+        )
+
+    def test_failed_goal_generation_restores_default_tutorial_tasks(self):
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            side_effect=ValueError("invalid generated plan"),
+        ):
+            started = self.service.start_goal_plan({
+                "prompt": "a personalized world whose plan fails",
+                "mode": "story",
+            })
+            deadline = time.monotonic() + 3
+            result = None
+            while time.monotonic() < deadline:
+                status = self.service.goal_plan_status(started["taskId"])
+                if status.get("status") == "completed":
+                    result = status.get("result")
+                    break
+                time.sleep(0.02)
+
+        self.assertIsNotNone(result)
+        self.assertFalse(result["success"])
+        self.assertIn("context", result)
+        context = result["context"]
+        self.assertEqual("error", context["worldGoal"]["status"])
+        self.assertEqual("invalid generated plan", context["worldGoal"]["generationError"])
+        self.assertEqual(
+            {"tutorial.import_model", "tutorial.create_node"},
+            self.visible_tutorial_keys(context),
+        )
+        self.assertFalse(any(task.get("type") == "goal" for task in context["activeTasks"]))
+
+    def test_completed_ai_goal_plan_does_not_restart_default_tutorials(self):
+        context = self.service._default_context(self.world)
+        now = self.service._now_ms()
+        tasks = self.service._normalize_goal_plan_tasks(self.goal_plan_payload(), context, now)
+        context["worldGoal"] = {
+            "prompt": "a completed personalized world",
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": now,
+            "generationError": "",
+        }
+        context["goalTaskPlan"] = {
+            "schemaVersion": 2,
+            "generatedAt": now,
+            "taskCount": len(tasks),
+            "nodeTaskCount": len(tasks),
+            "sceneTaskCount": 0,
+            "logicBlueprint": self.goal_plan_payload()["logicBlueprint"],
+        }
+        context["activeTasks"] = []
+        context["taskHistory"].extend([
+            {**task, "status": "completed", "completedAt": now, "updatedAt": now}
+            for task in tasks
+        ])
+
+        self.service._ensure_task_slots_locked(context, now)
+
+        self.assertFalse(any(task.get("type") == "tutorial" for task in context["activeTasks"]))
+
+
+    def test_completed_goal_plan_is_reused_after_all_tasks_finish(self):
+        context = self.service._default_context(self.world)
+        now = self.service._now_ms()
+        tasks = self.service._normalize_goal_plan_tasks(self.goal_plan_payload(), context, now)
+        context["worldGoal"] = {
+            "prompt": "a completed personalized world",
+            "mode": "story",
+            "source": "ai",
+            "status": "ready",
+            "generatedAt": now,
+            "generationError": "",
+            "generationId": "finished-plan",
+        }
+        context["activeTasks"] = []
+        context["taskHistory"].extend([
+            {**task, "status": "completed", "completedAt": now, "updatedAt": now}
+            for task in tasks
+        ])
+        self.service._write_locked(self.world, context)
+
+        with mock.patch.object(
+            CabbageContextService, "_call_deepseek_for_goal_plan",
+        ) as generate:
+            response = self.service.start_goal_plan({
+                "prompt": "a completed personalized world",
+                "mode": "story",
+            })
+
+        self.assertTrue(response["success"])
+        self.assertEqual("completed", response["status"])
+        generate.assert_not_called()
+        self.assertFalse(any(
+            task.get("type") == "goal" for task in response["context"]["activeTasks"]
+        ))
+
+    def test_old_running_request_with_same_prompt_is_not_reused_after_goal_changed(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "a different current goal",
+            "mode": "story",
+            "source": "ai",
+            "status": "generating",
+            "generatedAt": 0,
+            "generationError": "",
+            "generationId": "different-request",
+        }
+        self.service._write_locked(self.world, context)
+        self.service._goal_plan_tasks["old-request"] = {
+            "taskId": "old-request",
+            "status": "running",
+            "projectPath": str(self.world),
+            "prompt": "the repeated prompt",
+            "mode": "story",
+            "createdAt": time.time(),
+            "result": None,
+        }
+
+        class PendingFuture:
+            def add_done_callback(self, callback):
+                self.callback = callback
+
+        with mock.patch.object(
+            self.service._executor, "submit", return_value=PendingFuture(),
+        ) as submit:
+            response = self.service.start_goal_plan({
+                "prompt": "the repeated prompt",
+                "mode": "story",
+            })
+
+        self.assertTrue(response["success"])
+        self.assertEqual("pending", response["status"])
+        self.assertNotEqual("old-request", response["taskId"])
+        submit.assert_called_once()
+        loaded = self.service.load()["context"]
+        self.assertEqual(response["taskId"], loaded["worldGoal"]["generationId"])
+        self.assertEqual("the repeated prompt", loaded["worldGoal"]["prompt"])
+
+
+    def test_stale_generation_id_cannot_replace_a_newer_goal_request(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "the same visible prompt",
+            "mode": "story",
+            "source": "ai",
+            "status": "generating",
+            "generatedAt": 0,
+            "generationError": "",
+            "generationId": "new-request",
+        }
+        self.service._write_locked(self.world, context)
+
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            return_value=self.goal_plan_payload(),
+        ):
+            result = self.service._generate_goal_plan(
+                self.world, "the same visible prompt", "story", "old-request",
+            )
+
+        self.assertFalse(result["success"])
+        self.assertEqual("GOAL_PLAN_STALE", result["error"])
+        loaded = self.service.load()["context"]
+        self.assertEqual("generating", loaded["worldGoal"]["status"])
+        self.assertEqual("new-request", loaded["worldGoal"]["generationId"])
+        self.assertFalse(any(task.get("type") == "goal" for task in loaded["activeTasks"]))
+
+    def test_stale_generation_failure_cannot_mark_newer_request_as_error(self):
+        context = self.service._default_context(self.world)
+        context["worldGoal"] = {
+            "prompt": "the same visible prompt",
+            "mode": "story",
+            "source": "ai",
+            "status": "generating",
+            "generatedAt": 0,
+            "generationError": "",
+            "generationId": "new-request",
+        }
+        self.service._write_locked(self.world, context)
+
+        with mock.patch.object(
+            CabbageContextService,
+            "_call_deepseek_for_goal_plan",
+            side_effect=ValueError("old request failed"),
+        ):
+            result = self.service._generate_goal_plan(
+                self.world, "the same visible prompt", "story", "old-request",
+            )
+
+        self.assertFalse(result["success"])
+        self.assertNotIn("context", result)
+        loaded = self.service.load()["context"]
+        self.assertEqual("generating", loaded["worldGoal"]["status"])
+        self.assertEqual("", loaded["worldGoal"]["generationError"])
+        self.assertEqual("new-request", loaded["worldGoal"]["generationId"])
+
+
+if __name__ == "__main__":
+    unittest.main()

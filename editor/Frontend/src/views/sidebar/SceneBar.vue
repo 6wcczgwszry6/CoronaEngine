@@ -3,86 +3,13 @@
     <DockTitleBar
       v-if="!isDocked"
       title="场景管理"
-      extraClass="bg-[#84A65B] rounded-t-md"
+      extraClass="bg-[#D8B86C] rounded-t-md"
       routePath="/SceneBar"
       @close="CloseFloat"
     />
 
     <!-- 主内容区域 -->
     <div class="flex flex-col flex-1 min-h-0">
-      <div class="flex items-center gap-2 p-2 bg-[#1a1a1a]/50 border-b border-[#333]">
-        <div class="text-[10px] text-gray-400 truncate flex-1">
-          <span class="text-[#84a65b] font-bold">{{ currentSceneName }}</span>
-          <span
-            v-if="visionModeLabel"
-            class="ml-2 px-1.5 py-0.5 rounded bg-[#264f78]/70 text-[#9cdcfe] border border-[#3c6f99]/60"
-            :title="visionStatusTitle"
-            data-testid="scene-vision-status"
-          >
-            {{ visionModeLabel }}
-          </span>
-          <span
-            v-if="sceneVision.unsupported_count"
-            class="ml-1 px-1.5 py-0.5 rounded bg-[#5a3a1f]/70 text-[#f0c674] border border-[#8a5a2b]/60"
-            :title="visionUnsupportedTitle"
-            data-testid="scene-vision-unsupported"
-          >
-            unsupported {{ sceneVision.unsupported_count }}
-          </span>
-        </div>
-        <span
-          v-if="scenePreviewSummary"
-          class="scene-preview-summary"
-          :class="{ error: scenePreviewHasError }"
-          :title="scenePreviewDetailTitle"
-          data-testid="scene-global-run-status"
-        >
-          {{ scenePreviewSummary }}
-        </span>
-        <button
-          type="button"
-          class="scene-preview-button"
-          :class="{ running: scenePreviewStopAvailable }"
-          :disabled="scenePreviewButtonDisabled"
-          :title="scenePreviewButtonTitle"
-          data-testid="scene-global-run-button"
-          @pointerdown.stop
-          @click.stop.prevent="toggleSceneScripts($event)"
-        >
-          {{ scenePreviewButtonLabel }}
-        </button>
-      </div>
-
-      <div class="viewport-control-strip" data-testid="scenebar-viewport-controls">
-        <div class="viewport-control-group" role="group" aria-label="视口 UI 模式">
-          <button
-            v-for="item in viewportControlState.viewportUiModes"
-            :key="item.mode"
-            class="viewport-mode-button"
-            :class="{ active: viewportControlState.viewportUiMode === item.mode }"
-            type="button"
-            :title="item.title"
-            @click="setViewportUiModeFromSceneBar(item.mode)"
-          >
-            {{ item.label }}
-          </button>
-        </div>
-        <div class="viewport-speed-control">
-          <span>速度</span>
-          <input
-            v-model.number="viewportControlState.cameraSpeed"
-            type="range"
-            min="0.01"
-            max="2"
-            step="0.01"
-            title="摄像头移动速度"
-            @input="handleCameraSpeedInput"
-          />
-          <strong>{{ cameraSpeedLabel }}</strong>
-        </div>
-      </div>
-
-      <!-- 资源搜索栏(B-2 竞态保护 + 防抖 + 错误兜底) -->
       <div
         v-if="RESOURCE_SEARCH_ENABLED"
         class="flex items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
@@ -92,7 +19,7 @@
             v-model="searchInput"
             type="text"
             placeholder="🔍 搜索资源(名称/中文/拼音,支持模糊)"
-            class="w-full pl-2 pr-7 py-1 text-xs bg-[#1e1e1e] text-[#e0e0e0] border border-[#3a3a3a] rounded focus:border-[#84a65b] focus:outline-none"
+            class="w-full pl-2 pr-7 py-1 text-xs bg-[#1e1e1e] text-[#e0e0e0] border border-[#3a3a3a] rounded focus:border-[#d8b86c] focus:outline-none"
             data-testid="resource-search-input"
             @input="onSearchInput"
             @keydown.enter="onSearchEnter"
@@ -108,7 +35,7 @@
           </button>
           <span
             v-if="searchLoading"
-            class="absolute right-1 top-1/2 -translate-y-1/2 text-[#84a65b] text-[10px] animate-pulse"
+            class="absolute right-1 top-1/2 -translate-y-1/2 text-[#d8b86c] text-[10px] animate-pulse"
           >
             ⌛
           </span>
@@ -157,9 +84,9 @@
         </div>
         <!-- 命中计数 -->
         <div v-else class="px-2 py-1 text-[10px] text-[#909090] border-b border-[#1a1a1a]/30">
-          <span v-if="searchIndexing" class="text-[#84a65b]">正在准备资源索引...</span>
+          <span v-if="searchIndexing" class="text-[#d8b86c]">正在准备资源索引...</span>
           <template v-else>
-            找到 <span class="text-[#84a65b] font-bold">{{ searchResults.length }}</span> 项
+            找到 <span class="text-[#d8b86c] font-bold">{{ searchResults.length }}</span> 项
             <span v-if="searchLastQuery" class="ml-2">query=“{{ searchLastQuery }}”</span>
             <span v-if="searchElapsedMs" class="ml-2 text-[#666]">{{ searchElapsedMs }}ms</span>
           </template>
@@ -168,8 +95,8 @@
         <div
           v-for="item in searchResults"
           :key="item.path"
-          class="group flex items-center px-2 py-1 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#84a65b] text-xs"
-          :class="{ 'bg-[#264f78]/60': selectedItem === 'search:' + item.path }"
+          class="group flex items-center px-2 py-1 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c] text-xs"
+          :class="{ 'bg-[#4b391c]/60': selectedItem === 'search:' + item.path }"
           data-testid="resource-search-item"
           @click="selectedItem = 'search:' + item.path"
           @dblclick="OnLocateSearchItem(item)"
@@ -185,13 +112,13 @@
           </span>
           <span
             v-if="item.score != null"
-            class="text-[10px] text-[#84a65b] mr-1"
+            class="text-[10px] text-[#d8b86c] mr-1"
             :title="'相似度'"
           >
             {{ Math.round(item.score * 100) }}%
           </span>
           <button
-            class="w-5 h-5 flex items-center justify-center text-[#666] hover:text-[#84a65b] rounded opacity-0 group-hover:opacity-100"
+            class="w-5 h-5 flex items-center justify-center text-[#666] hover:text-[#d8b86c] rounded opacity-0 group-hover:opacity-100"
             title="定位到资源"
             @click.stop="OnLocateSearchItem(item)"
           >
@@ -213,7 +140,7 @@
       <!-- 工具栏 -->
       <div class="flex items-center gap-1 px-2 py-1.5 bg-[#3c3c3c]/60 border-b border-[#1a1a1a]/30">
         <!-- 导入下拉 -->
-        <div class="relative">
+        <div class="relative" data-guidance="scene-import-model">
           <button
             class="p-1.5 hover:bg-[#545454] rounded text-[#e0e0e0] text-xs flex items-center gap-1"
             title="导入"
@@ -323,7 +250,7 @@
         <button
           v-if="visionAvailable"
           class="p-1.5 hover:bg-[#545454] rounded flex items-center gap-0.5"
-          :class="activeRenderBackend === 'vision' ? 'text-[#34d399]' : 'text-[#e0e0e0]'"
+          :class="activeRenderBackend === 'vision' ? 'text-[#d8b86c]' : 'text-[#e0e0e0]'"
           :title="activeRenderBackend === 'vision' ? '当前: Vision (路径追踪)，点击切换到 Native' : '当前: Native (光栅化)，点击切换到 Vision'"
           @click.stop="ToggleRenderBackend"
         >
@@ -337,111 +264,6 @@
           </svg>
         </button>
         <!-- GBuffer 输出模式切换 -->
-        <div class="relative">
-          <button
-            class="p-1.5 hover:bg-[#545454] rounded flex items-center gap-0.5"
-            :class="activeOutputMode === 'final_color' ? 'text-[#e0e0e0]' : 'text-[#c084fc]'"
-            title="输出通道"
-            @click.stop="ShowGBufferDropdown = !ShowGBufferDropdown"
-          >
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M4 6h16M4 10h16M4 14h10M4 18h6"
-              />
-            </svg>
-            <svg class="w-2.5 h-2.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path
-                stroke-linecap="round"
-                stroke-linejoin="round"
-                stroke-width="2"
-                d="M19 9l-7 7-7-7"
-              />
-            </svg>
-          </button>
-          <div
-            v-if="ShowGBufferDropdown"
-            v-click-outside="() => (ShowGBufferDropdown = false)"
-            class="absolute z-20 right-0 mt-1 w-36 bg-[#3c3c3c] rounded shadow-lg border border-[#1a1a1a]"
-          >
-            <div class="px-2 py-1 text-[10px] text-gray-500 border-b border-[#1a1a1a]">
-              输出通道
-            </div>
-            <button
-              v-for="buf in outputModes"
-              :key="buf.type"
-              class="w-full px-3 py-1.5 text-xs hover:bg-[#545454] text-left flex items-center gap-2"
-              :class="activeOutputMode === buf.type ? 'text-white bg-[#4a4a4a]' : 'text-[#e0e0e0]'"
-              @click.stop="SetOutputMode(buf.type)"
-            >
-              <span :style="{ color: buf.color }">■</span>
-              {{ buf.label }}
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- 输出模式快捷切换 & 截图测试 -->
-      <div
-        class="flex flex-wrap items-center gap-1 px-2 py-1.5 bg-[#2a2a2a]/55 border-b border-[#1a1a1a]"
-      >
-        <button
-          v-for="buf in outputModes"
-          :key="'quick-' + buf.type"
-          class="px-1.5 py-0.5 text-[10px] rounded border"
-          :class="
-            activeOutputMode === buf.type
-              ? 'border-current font-bold'
-              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
-          "
-          :style="activeOutputMode === buf.type ? { color: buf.color, borderColor: buf.color } : {}"
-          :title="'切换到 ' + buf.label"
-          @click="SetOutputMode(buf.type)"
-        >
-          {{ buf.label }}
-        </button>
-        <div class="w-px h-4 bg-[#444] mx-0.5"></div>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border"
-          :class="
-            shadowCascadeDebug
-              ? 'border-[#f59e0b] text-[#fff7c2] bg-[#4a3512]'
-              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
-          "
-          title="显示 CSM cascade 分级颜色"
-          @click="ToggleShadowCascadeDebug"
-        >
-          CSM
-        </button>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border"
-          :class="
-            ssaoEnabled
-              ? 'border-[#22c55e] text-[#dcfce7] bg-[#12351f]'
-              : 'border-[#555] text-[#999] hover:text-[#ccc] hover:border-[#777]'
-          "
-          title="Toggle Native SSAO"
-          @click="ToggleSsaoEnabled"
-        >
-          SSAO
-        </button>
-        <div class="w-px h-4 bg-[#444] mx-0.5"></div>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border border-[#555] text-[#4ec9b0] hover:bg-[#3a3a3a]"
-          title="快速截图（保存当前输出模式到桌面）"
-          @click="QuickScreenshot"
-        >
-          📷 快速截图
-        </button>
-        <button
-          class="px-1.5 py-0.5 text-[10px] rounded border border-[#555] text-[#dcdcaa] hover:bg-[#3a3a3a]"
-          title="依次切换所有通道并逐一截图保存"
-          @click="SaveAllBuffers"
-        >
-          📦 全部保存
-        </button>
       </div>
 
       <!-- 场景树 -->
@@ -460,14 +282,14 @@
             >
               <path d="M10 6l6 6-6 6z" />
             </svg>
-            <svg class="w-3.5 h-3.5 text-[#90caf9] mr-1" fill="currentColor" viewBox="0 0 24 24">
+            <svg class="w-3.5 h-3.5 text-[#d8b86c] mr-1" fill="currentColor" viewBox="0 0 24 24">
               <path
                 d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
               />
             </svg>
             <span class="text-xs text-[#e0e0e0] font-medium">Cameras</span>
             <button
-              class="ml-auto mr-2 text-sm leading-none text-[#90caf9] hover:text-white"
+              class="ml-auto mr-2 text-sm leading-none text-[#d8b86c] hover:text-white"
               title="Create camera view"
               aria-label="Create camera view"
               @click.stop="ImportCamera"
@@ -478,14 +300,14 @@
             <div v-for="cam in sceneCameras" :key="'cam-' + (cam.camera_id || cam.name)">
               <!-- Camera 行 -->
               <div
-                class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#90caf9]"
-                :class="{ 'bg-[#264f78]/60': selectedItem === 'cam:' + cam.name }"
+                class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c]"
+                :class="{ 'bg-[#4b391c]/60': selectedItem === 'cam:' + cam.name }"
                 @mouseenter="RefreshCameraListOnHover"
                 @click="SelectCamera(cam)"
                 @dblclick="isCameraDeletable(cam) && OpenCameraView(cam)"
               >
                 <span class="w-5 flex-shrink-0">
-                  <svg class="w-4 h-4 text-[#90caf9]" fill="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-[#d8b86c]" fill="currentColor" viewBox="0 0 24 24">
                     <path
                       d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
                     />
@@ -537,8 +359,8 @@
             <div
               v-for="scene in sceneImages"
               :key="scene.name"
-              class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#84a65b]"
-              :class="{ 'bg-[#264f78]/60': selectedItem === scene.name }"
+              class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c]"
+              :class="{ 'bg-[#4b391c]/60': selectedItem === scene.name }"
               @click="onActorRowClick(scene, $event)"
               @dblclick="onActorRowDoubleClick(scene, $event)"
             >
@@ -552,7 +374,7 @@
                   </svg>
                 </template>
                 <template v-else-if="scene.type === 'camera'">
-                  <svg class="w-4 h-4 text-[#90caf9]" fill="currentColor" viewBox="0 0 24 24">
+                  <svg class="w-4 h-4 text-[#d8b86c]" fill="currentColor" viewBox="0 0 24 24">
                     <path
                       d="M17 10.5V7c0-.55-.45-1-1-1H4c-.55 0-1 .45-1 1v10c0 .55.45 1 1 1h12c.55 0 1-.45 1-1v-3.5l4 4v-11l-4 4z"
                     />
@@ -584,9 +406,18 @@
               <span class="text-xs text-[#e0e0e0] truncate flex-1" :title="scene.name">
                 {{ scene.name }}
               </span>
+              <button
+                v-if="scene.load_status && scene.load_status !== 'loaded'"
+                class="text-[10px] text-[#f0c674] mr-1"
+                :title="scene.load_error?.message || '资源加载失败，点击重新绑定'"
+                data-testid="actor-load-warning"
+                @click.stop="RebindActorResource(scene)"
+              >
+                ⚠ 重新绑定
+              </button>
               <span
                 v-if="scene.vision_proxy"
-                class="text-[10px] text-[#9cdcfe] mr-1 hidden group-hover:inline"
+                class="text-[10px] text-[#e5c77f] mr-1 hidden group-hover:inline"
                 :title="scene.vision_binding?.shape_guid || 'Vision proxy actor'"
                 data-testid="actor-vision-proxy"
               >
@@ -706,10 +537,9 @@
 
       <!-- 底部状态栏 -->
       <div
-        class="flex items-center justify-between px-2 py-1 bg-[#3c3c3c]/60 border-t border-[#1a1a1a]/30 text-[10px] text-[#909090]"
+        class="flex items-center px-2 py-1 bg-[#3c3c3c]/60 border-t border-[#1a1a1a]/30 text-[10px] text-[#909090]"
       >
         <span>对象: {{ sceneImages.length }}</span>
-        <span>{{ currentSceneName }}</span>
       </div>
     </div>
   </div>
@@ -719,316 +549,22 @@
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
-import { editorApi, appService, sceneService, projectService, resourceService, scriptingService } from '@/utils/bridge.js';
+import { editorApi, appService, sceneService, projectService, resourceService } from '@/utils/bridge.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
+import { cabbageContextService } from '@/services/cabbageAssistantContextService.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 
 const { error: logError, warn: logWarn } = useErrorHandler('SceneBar');
 
-const EDITOR_CONTROLS_KEY = '__coronaEditorControls';
-const defaultViewportControls = {
-  available: false,
-  previewRunning: false,
-  previewBusy: false,
-  previewStatusText: '',
-  preview: {},
-  viewportUiMode: 'flat2d',
-  viewportUiModes: [
-    { mode: 'flat2d', label: '2D UI', title: '普通屏幕 UI', active: true },
-    { mode: 'stereo3d', label: '3D UI', title: '光场屏立体 UI', active: false },
-  ],
-  cameraSpeed: 0.2,
-};
 const currentSceneName = ref('');
-const viewportControlState = ref({ ...defaultViewportControls });
-const cameraSpeedLabel = computed(() =>
-  Number(viewportControlState.value.cameraSpeed || 0).toFixed(2)
-);
-let viewportControlPollTimer = null;
-let speedApplyTimer = null;
 let actorChangedCallbackToken = null;
 let focusPoseResultCallbackToken = null;
 let sceneTreeChangedCallbackToken = null;
-let directPreviewPollTimer = null;
-
-const normalizeViewportControls = (state = {}) => {
-  const modes = Array.isArray(state.viewportUiModes) && state.viewportUiModes.length > 0
-    ? state.viewportUiModes
-    : defaultViewportControls.viewportUiModes;
-  const speed = Number(state.cameraSpeed);
-  return {
-    available: Boolean(state.available),
-    previewRunning: Boolean(state.previewRunning),
-    previewBusy: Boolean(state.previewBusy),
-    previewStatusText: String(state.previewStatusText || ''),
-    preview: state.preview && typeof state.preview === 'object' ? { ...state.preview } : {},
-    viewportUiMode: state.viewportUiMode || defaultViewportControls.viewportUiMode,
-    viewportUiModes: modes.map((item) => ({
-      mode: item.mode,
-      label: item.label,
-      title: item.title || item.label,
-      active: Boolean(item.active),
-    })),
-    cameraSpeed: Number.isFinite(speed) ? Math.min(2, Math.max(0.01, speed)) : defaultViewportControls.cameraSpeed,
-  };
-};
-
-const getEditorControls = () => {
-  if (typeof window === 'undefined') return null;
-  return window[EDITOR_CONTROLS_KEY] || null;
-};
-
-const syncViewportControls = (state = {}) => {
-  viewportControlState.value = normalizeViewportControls(state);
-};
-
-const requestViewportControlsState = () => {
-  const controls = getEditorControls();
-  if (controls && typeof controls.getState === 'function') {
-    try {
-      syncViewportControls(controls.getState());
-      return;
-    } catch (error) {
-      logWarn('读取视口控制状态失败', error);
-    }
-  }
-  appService
-    .crossTabBroadcast('viewport-controls-request', { action: 'getState' })
-    .catch(() => {});
-};
-
-const setViewportUiModeFromSceneBar = async (mode) => {
-  const controls = getEditorControls();
-  if (controls && typeof controls.setViewportUiMode === 'function') {
-    const nextState = await controls.setViewportUiMode(mode);
-    if (nextState !== false) syncViewportControls(nextState);
-    return;
-  }
-  appService
-    .crossTabBroadcast('viewport-controls-request', { action: 'setViewportUiMode', mode })
-    .catch((error) => logWarn('切换视口 UI 模式失败', error));
-};
-
-const applyCameraSpeedFromSceneBar = async (value) => {
-  const speed = Math.min(2, Math.max(0.01, Number(value) || defaultViewportControls.cameraSpeed));
-  const controls = getEditorControls();
-  if (controls && typeof controls.setCameraSpeed === 'function') {
-    const nextState = await controls.setCameraSpeed(speed);
-    if (nextState !== false) syncViewportControls(nextState);
-    return;
-  }
-  appService
-    .crossTabBroadcast('viewport-controls-request', { action: 'setCameraSpeed', value: speed })
-    .catch((error) => logWarn('设置摄像头速度失败', error));
-};
-
-const handleCameraSpeedInput = () => {
-  if (speedApplyTimer) {
-    clearTimeout(speedApplyTimer);
-  }
-  speedApplyTimer = window.setTimeout(() => {
-    speedApplyTimer = null;
-    applyCameraSpeedFromSceneBar(viewportControlState.value.cameraSpeed);
-  }, 60);
-};
-
-const onViewportControlsState = (state) => {
-  syncViewportControls(state);
-};
-
-const scenePreviewActionBusy = ref(false);
-const sceneIdTokens = (value) => {
-  const text = String(value || '').trim().replace(/\\/g, '/').toLowerCase();
-  if (!text) return new Set();
-  const name = text.split('/').pop() || text;
-  const stem = name.includes('.') ? name.slice(0, name.lastIndexOf('.')) : name;
-  return new Set([text, name, stem]);
-};
-const isSameSceneId = (left, right) => {
-  const leftTokens = sceneIdTokens(left);
-  const rightTokens = sceneIdTokens(right);
-  return Array.from(leftTokens).some((token) => rightTokens.has(token));
-};
-const activePreview = computed(() => viewportControlState.value.preview || {});
-const anyPreviewActive = computed(() =>
-  Boolean(viewportControlState.value.previewRunning || activePreview.value.hasSnapshot || activePreview.value.has_snapshot)
-);
-// 场景运行启动后，即使用户切换了场景，或后端返回的是 route 而前端保存的是
-// scene id，也必须保留停止入口。否则按钮会因标识不完全一致而永久禁用。
-const scenePreviewStopAvailable = computed(() =>
-  anyPreviewActive.value && activePreview.value.scope === 'scene'
-);
-const scenePreviewHasError = computed(() =>
-  Number(activePreview.value.errorCount ?? activePreview.value.error_count ?? 0) > 0
-  || activePreview.value.status === 'error'
-);
-const scenePreviewButtonDisabled = computed(() =>
-  scenePreviewActionBusy.value
-  || viewportControlState.value.previewBusy
-  || (!currentSceneName.value && !scenePreviewStopAvailable.value)
-  || (anyPreviewActive.value && !scenePreviewStopAvailable.value)
-);
-const scenePreviewButtonLabel = computed(() =>
-  scenePreviewStopAvailable.value ? '停止并恢复' : '全局运行'
-);
-const scenePreviewButtonTitle = computed(() => {
-  if (scenePreviewStopAvailable.value) return '停止正在运行的场景脚本并恢复运行前状态';
-  if (!currentSceneName.value) return '请先打开场景';
-  if (anyPreviewActive.value) return '项目预览正在运行';
-  return '运行当前场景全部物体的积木和节点图脚本';
-});
-const scenePreviewSummary = computed(() => {
-  const preview = activePreview.value;
-  const state = preview.status || '';
-  const running = Number(preview.runningCount ?? preview.running_count ?? 0);
-  const started = Number(preview.startedCount ?? preview.started_count ?? 0);
-  const blockly = Number(preview.blocklyCount ?? preview.blockly_count ?? 0);
-  const nodeGraph = Number(preview.nodeGraphCount ?? preview.node_graph_count ?? 0);
-  const errors = Number(preview.errorCount ?? preview.error_count ?? 0);
-  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return '处理中...';
-  if (anyPreviewActive.value && !scenePreviewStopAvailable.value) {
-    return '项目预览运行中';
-  }
-  if (scenePreviewStopAvailable.value) {
-    return `运行 ${running || started}（积木 ${blockly} / 节点 ${nodeGraph}）`;
-  }
-  const previewScene = preview.sceneName || preview.scene_name || '';
-  if (preview.scope !== 'scene' || !isSameSceneId(previewScene, currentSceneName.value)) return '';
-  if (state === 'completed') return errors ? `已完成，${errors} 个错误` : '已完成';
-  if (state === 'stopped') return '已停止并恢复';
-  if (state === 'error') return (preview.restoreError || preview.restore_error) ? '场景恢复失败' : (errors ? `${errors} 个脚本错误` : '运行失败');
-  if (!started && Array.isArray(preview.warnings) && preview.warnings.length) return '无可运行脚本';
-  return viewportControlState.value.previewStatusText || '';
-});
-const scenePreviewDetailTitle = computed(() => {
-  const preview = activePreview.value;
-  const details = [preview.restoreError || preview.restore_error, ...(preview.errors || []), ...(preview.warnings || [])].filter(Boolean);
-  return details.length ? details.join('\n') : scenePreviewSummary.value;
-});
-
-const unwrapBridgeData = (result) => result?.data ?? result;
-
-const publishGamePreviewStatus = (preview = {}) => {
-  if (typeof window === 'undefined') return;
-  window.__coronaGamePreviewState = preview;
-  window.dispatchEvent(new CustomEvent('corona-game-preview-status', { detail: preview }));
-};
-
-const applyDirectPreviewStatus = (payload = {}) => {
-  const preview = {
-    ...payload,
-    scope: payload.scope || 'project',
-    sceneName: payload.sceneName ?? payload.scene_name ?? '',
-    runningCount: Number(payload.runningCount ?? payload.running_count ?? 0),
-    startedCount: Number(payload.startedCount ?? payload.started_count ?? 0),
-    errorCount: Number(payload.errorCount ?? payload.error_count ?? 0),
-    blocklyCount: Number(payload.blocklyCount ?? payload.blockly_count ?? 0),
-    nodeGraphCount: Number(payload.nodeGraphCount ?? payload.node_graph_count ?? 0),
-    hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
-    stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
-  };
-  const active = ['starting', 'running', 'stopping'].includes(preview.status)
-    || preview.runningCount > 0
-    || preview.hasSnapshot;
-  viewportControlState.value = {
-    ...viewportControlState.value,
-    available: true,
-    previewRunning: active,
-    previewBusy: false,
-    preview,
-  };
-  publishGamePreviewStatus(preview);
-  return preview;
-};
-
-const pollDirectPreviewStatus = () => {
-  if (directPreviewPollTimer) clearTimeout(directPreviewPollTimer);
-  const poll = async () => {
-    try {
-      const preview = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.getGamePreviewStatus()));
-      if (['starting', 'running', 'stopping'].includes(preview.status) || preview.stopPending) {
-        directPreviewPollTimer = window.setTimeout(poll, 500);
-      } else {
-        directPreviewPollTimer = null;
-      }
-    } catch (error) {
-      directPreviewPollTimer = null;
-      logWarn('查询全局运行状态失败', error);
-    }
-  };
-  directPreviewPollTimer = window.setTimeout(poll, 150);
-};
-
-const refreshPreviewStateSoon = () => {
-  requestViewportControlsState();
-  window.setTimeout(requestViewportControlsState, 250);
-  window.setTimeout(requestViewportControlsState, 900);
-};
-
-const toggleSceneScripts = async (event = null) => {
-  // Remove button focus immediately so the game's Space input cannot retrigger
-  // the preview button after global execution starts.
-  event?.currentTarget?.blur?.();
-  if (scenePreviewActionBusy.value || viewportControlState.value.previewBusy) return;
-  const controls = getEditorControls();
-  window.__coronaPreviewActionPendingCount = Number(window.__coronaPreviewActionPendingCount || 0) + 1;
-  window.__coronaPreviewActionPending = true;
-  window.__coronaPreviewPendingScope = 'scene';
-  scenePreviewActionBusy.value = true;
-  let stopping = false;
-  try {
-    // 始终以后端状态决定本次点击是启动还是停止，避免场景栏轮询稍慢时
-    // 第二次点击再次发送 start，或第一次启动后仍显示成“全局运行”。
-    const live = applyDirectPreviewStatus(
-      unwrapBridgeData(await scriptingService.getGamePreviewStatus())
-    );
-    const liveActive = ['starting', 'running', 'stopping'].includes(live.status)
-      || live.runningCount > 0
-      || live.hasSnapshot;
-    stopping = liveActive && live.scope === 'scene';
-
-    if (stopping) {
-      if (controls && typeof controls.stopPreview === 'function') {
-        await controls.stopPreview();
-      } else {
-        applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.stopGamePreview()));
-        pollDirectPreviewStatus();
-      }
-    } else if (liveActive) {
-      throw new Error('项目预览正在运行，请先在主视口停止');
-    } else {
-      const request = { scope: 'scene', scene_name: currentSceneName.value };
-      let started;
-      if (controls && typeof controls.startPreview === 'function') {
-        started = await controls.startPreview(request);
-      } else {
-        started = applyDirectPreviewStatus(unwrapBridgeData(await scriptingService.startGamePreview(request)));
-        pollDirectPreviewStatus();
-      }
-      if (started === false) {
-        const refreshed = applyDirectPreviewStatus(
-          unwrapBridgeData(await scriptingService.getGamePreviewStatus())
-        );
-        const message = refreshed.message || refreshed.errors?.[0] || '全局运行启动失败';
-        throw new Error(message);
-      }
-    }
-  } catch (error) {
-    logError(stopping ? '停止并恢复失败' : '全局运行失败', error);
-  } finally {
-    window.__coronaPreviewActionPendingCount = Math.max(0, Number(window.__coronaPreviewActionPendingCount || 1) - 1);
-    window.__coronaPreviewActionPending = window.__coronaPreviewActionPendingCount > 0;
-    if (!window.__coronaPreviewActionPending) window.__coronaPreviewPendingScope = '';
-    scenePreviewActionBusy.value = false;
-    refreshPreviewStateSoon();
-    pollDirectPreviewStatus();
-  }
-};
 
 const showLoading = (title, message, progress = 0) => {
   coronaEventBus.emit('loading-show', { title, message, progress });
@@ -1122,25 +658,6 @@ const searchActive = computed(() => {
     || !!searchError.value || !!searchLastQuery.value;
 });
 
-const visionModeLabel = computed(() => {
-  const mode = sceneVision.value?.import_mode || '';
-  if (mode === 'external_live') return 'Vision Live';
-  if (mode === 'external') return 'Vision External';
-  return '';
-});
-
-const visionStatusTitle = computed(() => {
-  const mode = sceneVision.value?.import_mode || 'none';
-  const source = sceneVision.value?.source_path || '';
-  const count = sceneVision.value?.binding_count ?? 0;
-  return `mode=${mode}; bindings=${count}${source ? `; source=${source}` : ''}`;
-});
-
-const visionUnsupportedTitle = computed(() => {
-  const byType = sceneVision.value?.unsupported_by_type || {};
-  const details = Object.entries(byType).map(([type, count]) => `${type}: ${count}`);
-  return details.length ? details.join(', ') : 'Unsupported Vision shapes';
-});
 
 const typeIcon = (type) => ({
   model: '📦', actor: '👤', scene: '🎬',
@@ -1148,12 +665,12 @@ const typeIcon = (type) => ({
 })[type] || '📄';
 
 const typeColorClass = (type) => ({
-  model: 'text-[#9cdcfe]',
+  model: 'text-[#e5c77f]',
   actor: 'text-[#ce9178]',
   scene: 'text-[#c586c0]',
   multimedia: 'text-[#dcdcaa]',
-  terrain: 'text-[#4ec9b0]',
-  script: 'text-[#b5cea8]',
+  terrain: 'text-[#c9a958]',
+  script: 'text-[#c9bea0]',
   other: 'text-[#808080]',
 })[type] || 'text-[#808080]';
 
@@ -1473,9 +990,6 @@ const SelectActor = (scene) => {
 const SelectCamera = (cam) => {
   selectedItem.value = 'cam:' + cam.name;
   selectedCameraName.value = cam.name;
-  activeOutputMode.value = cam.output_mode || 'final_color';
-  shadowCascadeDebug.value = !!cam.shadow_cascade_debug;
-  ssaoEnabled.value = cam.ssao_enabled !== false;
   RefreshRenderBackendState();
 };
 
@@ -1736,9 +1250,45 @@ const ToggleVisible = async (scene) => {
 
 const SaveScene = async () => {
   try {
-    await projectService.sceneSave(currentSceneName.value);
+    const unresolvedCount = sceneImages.value.filter(
+      (item) => item.load_status && item.load_status !== 'loaded',
+    ).length;
+    if (unresolvedCount > 0 && !window.confirm(
+      `当前场景仍有 ${unresolvedCount} 个资源未解决。存档会保留原资源引用和对象数据，是否仍然保存？`,
+    )) return;
+    const result = await projectService.sceneSave(currentSceneName.value);
+    const saved = result?.data ?? result;
+    if (saved?.unresolved_actor_count > 0) {
+      logWarn(`Scene saved with ${saved.unresolved_actor_count} unresolved actors`);
+    }
   } catch (e) {
     logError('Failed to save scene', e);
+  }
+};
+
+const RebindActorResource = async (scene) => {
+  try {
+    const selected = await sceneService.selectModelFileDialog(
+      currentSceneName.value,
+      scene.name,
+      'model',
+    );
+    const path = selected?.data ?? selected;
+    if (!path) return;
+    const result = await sceneService.rebindActorResource(
+      currentSceneName.value,
+      scene.actor_guid,
+      path,
+    );
+    const rebound = result?.data ?? result;
+    if (!rebound?.ok) {
+      const message = rebound?.diagnostics?.[0]?.message || '资源重新绑定失败';
+      window.alert(message);
+      return;
+    }
+    await OnInitObjTree();
+  } catch (e) {
+    logError('Failed to rebind actor resource', e);
   }
 };
 
@@ -1787,20 +1337,6 @@ const TakeScreenshot = async () => {
   }
 };
 
-const outputModes = [
-  { type: 'final_color', label: 'Final Color', color: '#e0e0e0' },
-  { type: 'base_color', label: 'Base Color', color: '#60a5fa' },
-  { type: 'normal', label: 'Normal', color: '#34d399' },
-  { type: 'position', label: 'Position', color: '#fbbf24' },
-  { type: 'object_id', label: 'Object ID', color: '#c084fc' },
-  { type: 'visibility_buffer', label: 'Visibility', color: '#f472b6' },
-  { type: 'ssao', label: 'SSAO', color: '#22c55e' },
-];
-const ShowGBufferDropdown = ref(false);
-const activeOutputMode = ref('final_color');
-const shadowCascadeDebug = ref(false);
-const ssaoEnabled = ref(true);
-
 // Vision / Native 渲染后端切换状态
 const visionAvailable = ref(false);
 const activeRenderBackend = ref('native');
@@ -1844,152 +1380,6 @@ const ToggleRenderBackend = async () => {
     }
   } catch (e) {
     logError('Failed to switch render backend', e);
-  }
-};
-
-const SetOutputMode = async (mode) => {
-  ShowGBufferDropdown.value = false;
-  try {
-    const cameraName = getTargetCameraName();
-    const result = await sceneService.setOutputMode(currentSceneName.value, cameraName, mode);
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      logError(`Set output mode failed`, payload?.message || result?.error || 'unknown error');
-    } else {
-      activeOutputMode.value = mode;
-      const target = getTargetCamera();
-      if (target) {
-        target.output_mode = mode;
-      }
-    }
-  } catch (e) {
-    logError('Failed to set output mode', e);
-  }
-};
-
-const ToggleShadowCascadeDebug = async () => {
-  const next = !shadowCascadeDebug.value;
-  shadowCascadeDebug.value = next;
-  try {
-    const cameraName = getTargetCameraName();
-    const result = await sceneService.setShadowCascadeDebug(currentSceneName.value, cameraName, next);
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      shadowCascadeDebug.value = !next;
-      logError('Set CSM cascade debug failed', payload?.message || result?.error || 'unknown error');
-    } else {
-      shadowCascadeDebug.value = !!payload?.enabled;
-      const target = getTargetCamera();
-      if (target) {
-        target.shadow_cascade_debug = shadowCascadeDebug.value;
-      }
-    }
-  } catch (e) {
-    shadowCascadeDebug.value = !next;
-    logError('Failed to set CSM cascade debug', e);
-  }
-};
-
-const ToggleSsaoEnabled = async () => {
-  const next = !ssaoEnabled.value;
-  ssaoEnabled.value = next;
-  try {
-    const cameraName = getTargetCameraName();
-    const result = await sceneService.setSsaoEnabled(currentSceneName.value, cameraName, next);
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      ssaoEnabled.value = !next;
-      logError('Set SSAO failed', payload?.message || result?.error || 'unknown error');
-    } else {
-      ssaoEnabled.value = payload?.enabled !== false;
-      const target = getTargetCamera();
-      if (target) {
-        target.ssao_enabled = ssaoEnabled.value;
-      }
-    }
-  } catch (e) {
-    ssaoEnabled.value = !next;
-    logError('Failed to set SSAO', e);
-  }
-};
-
-const QuickScreenshot = async () => {
-  try {
-    const cameraName = getTargetCameraName();
-    const selectResult = await sceneService.selectScreenshotPath(
-      currentSceneName.value,
-      cameraName
-    );
-    const selectPayload = selectResult?.data ?? selectResult;
-    if (!selectPayload || selectPayload.status === 'canceled' || !selectPayload.path) {
-      return;
-    }
-    // Insert current mode name before file extension
-    const path = selectPayload.path;
-    const dotIdx = path.lastIndexOf('.');
-    const taggedPath =
-      dotIdx > 0
-        ? path.slice(0, dotIdx) + '_' + activeOutputMode.value + path.slice(dotIdx)
-        : path + '_' + activeOutputMode.value + '.png';
-
-    const result = await sceneService.saveScreenshot(
-      currentSceneName.value,
-      taggedPath,
-      cameraName
-    );
-    const payload = result?.data ?? result;
-    if (result?.success === false || payload?.status === 'error') {
-      logError('Quick screenshot failed', payload?.message || result?.error || 'unknown error');
-    }
-  } catch (e) {
-    logError('Failed to take quick screenshot', e);
-  }
-};
-
-const SaveAllBuffers = async () => {
-  try {
-    const cameraName = getTargetCameraName();
-    const selectResult = await sceneService.selectScreenshotPath(
-      currentSceneName.value,
-      cameraName
-    );
-    const selectPayload = selectResult?.data ?? selectResult;
-    if (!selectPayload || selectPayload.status === 'canceled' || !selectPayload.path) {
-      return;
-    }
-    const basePath = selectPayload.path;
-    const dotIdx = basePath.lastIndexOf('.');
-    const stem = dotIdx > 0 ? basePath.slice(0, dotIdx) : basePath;
-    const ext = dotIdx > 0 ? basePath.slice(dotIdx) : '.png';
-
-    const previousMode = activeOutputMode.value;
-
-    for (const buf of outputModes) {
-      // Switch mode
-      await sceneService.setOutputMode(currentSceneName.value, cameraName, buf.type);
-      activeOutputMode.value = buf.type;
-
-      // Wait one frame for GPU to render with new mode
-      await new Promise((resolve) => setTimeout(resolve, 200));
-
-      // Save screenshot
-      const filePath = stem + '_' + buf.type + ext;
-      const result = await sceneService.saveScreenshot(
-        currentSceneName.value,
-        filePath,
-        cameraName
-      );
-      const payload = result?.data ?? result;
-      if (result?.success === false || payload?.status === 'error') {
-        logError(`Save ${buf.label} failed`, payload?.message || result?.error || 'unknown error');
-      }
-    }
-
-    // Restore previous mode
-    await sceneService.setOutputMode(currentSceneName.value, cameraName, previousMode);
-    activeOutputMode.value = previousMode;
-  } catch (e) {
-    logError('Failed to save all buffers', e);
   }
 };
 
@@ -2053,6 +1443,18 @@ const createActorFromSelectedFile = async (payload, actorType, logLabel) => {
     selectedItem.value = actor.name;
   }
   updateLoading('导入完成', 100);
+  if (actorType === 'model') {
+    void cabbageContextService.recordEvent({
+      type: 'model_imported',
+      category: 'scene',
+      success: true,
+      details: {
+        sceneName: currentSceneName.value,
+        actorName: String(actor?.name || ''),
+        actorType: 'model',
+      },
+    });
+  }
   return actor || null;
 };
 
@@ -2263,6 +1665,7 @@ const OnInitObjTree = async () => {
         data.actors.forEach((item) => {
           sceneImages.value.push({
             name: item.name,
+            actor_guid: item.actor_guid || '',
             path: item.path,
             type: item.type || 'obj',
             visible: item.visible !== false,
@@ -2270,6 +1673,8 @@ const OnInitObjTree = async () => {
             audioResourceId: item.audio_resource_id || '',
             vision_proxy: item.vision_proxy === true,
             vision_binding: item.vision_binding || null,
+            load_status: item.load_status || 'loaded',
+            load_error: item.load_error || null,
           });
         });
       }
@@ -2300,11 +1705,7 @@ onMounted(async () => {
 
   await OnInitObjTree();
   await RefreshRenderBackendState();
-  requestViewportControlsState();
-  viewportControlPollTimer = window.setInterval(requestViewportControlsState, 1000);
-
   // 后端对象变化：场景切换/物体变化时重新加载场景树
-  coronaEventBus.on('viewport-controls-state', onViewportControlsState);
   actorChangedCallbackToken = await editorApi.events.onActorChanged(onActorChangeEvent);
   sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onSceneTreeChangedEvent);
   focusPoseResultCallbackToken = await editorApi.events.onFocusPoseResult(handleFocusPoseResult);
@@ -2352,10 +1753,6 @@ const applyCameraList = (cameras) => {
   if (!sceneCameras.value.some((cam) => cam.name === selectedCameraName.value)) {
     selectedCameraName.value = sceneCameras.value[0]?.name || null;
   }
-  const target = getTargetCamera();
-  activeOutputMode.value = target?.output_mode || 'final_color';
-  shadowCascadeDebug.value = !!target?.shadow_cascade_debug;
-  ssaoEnabled.value = target?.ssao_enabled !== false;
 };
 
 const RefreshCameraListOnly = async () => {
@@ -2394,18 +1791,6 @@ onUnmounted(() => {
     clearTimeout(searchIndexRetry);
     searchIndexRetry = null;
   }
-  if (viewportControlPollTimer) {
-    clearInterval(viewportControlPollTimer);
-    viewportControlPollTimer = null;
-  }
-  if (speedApplyTimer) {
-    clearTimeout(speedApplyTimer);
-    speedApplyTimer = null;
-  }
-  if (directPreviewPollTimer) {
-    clearTimeout(directPreviewPollTimer);
-    directPreviewPollTimer = null;
-  }
   clearFocusPoseCache();
   clearActorSingleClickTimer();
   actorFocusSeq++;
@@ -2417,7 +1802,6 @@ onUnmounted(() => {
   pendingFocusCameraMoveFrames.forEach((rafId) => window.cancelAnimationFrame(rafId));
   pendingFocusCameraMoveFrames.clear();
 
-  coronaEventBus.off('viewport-controls-state', onViewportControlsState);
   if (actorChangedCallbackToken) {
     editorApi.off(actorChangedCallbackToken).catch((error) => {
       logError('Failed to unregister actor changed callback', error);
@@ -2440,50 +1824,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
-.scene-preview-button {
-  flex: 0 0 auto;
-  min-width: 72px;
-  padding: 4px 8px;
-  border: 1px solid rgba(132, 166, 91, 0.65);
-  border-radius: 5px;
-  background: rgba(73, 96, 49, 0.72);
-  color: #e8f4dc;
-  font-size: 10px;
-  line-height: 1.2;
-  transition: background 120ms ease, border-color 120ms ease, opacity 120ms ease;
-}
 
-.scene-preview-button:hover:not(:disabled) {
-  background: rgba(105, 137, 71, 0.9);
-  border-color: #9bc46a;
-}
-
-.scene-preview-button.running {
-  border-color: rgba(211, 103, 86, 0.85);
-  background: rgba(117, 48, 42, 0.82);
-  color: #ffd9d2;
-}
-
-.scene-preview-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.scene-preview-summary {
-  max-width: 150px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: #b9d79d;
-  font-size: 10px;
-}
-
-.scene-preview-summary.error {
-  color: #ff9b8f;
-}
 
 .scene-tools-panel {
-  background: linear-gradient(180deg, rgba(38, 42, 38, 0.54), rgba(28, 31, 29, 0.48));
+  background: linear-gradient(180deg, rgba(33, 29, 18, 0.66), rgba(17, 16, 13, 0.58));
   border: 1px solid rgba(255, 255, 255, 0.08);
   box-shadow: 0 18px 42px rgba(0, 0, 0, 0.34);
 }
@@ -2492,93 +1836,4 @@ onUnmounted(() => {
   background: rgba(40, 40, 40, 0.24);
 }
 
-.viewport-control-strip {
-  display: grid;
-  grid-template-columns: minmax(124px, auto) minmax(0, 1fr);
-  align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.34);
-  background:
-    linear-gradient(180deg, rgba(31, 35, 31, 0.58), rgba(24, 27, 24, 0.52)),
-    rgba(27, 31, 27, 0.5);
-}
-
-.viewport-control-group {
-  display: inline-grid;
-  grid-template-columns: repeat(2, minmax(52px, 1fr));
-  gap: 4px;
-  padding: 3px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 6px;
-  background: rgba(11, 13, 12, 0.58);
-}
-
-.viewport-mode-button {
-  height: 25px;
-  padding: 0 8px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  color: #b9c5b2;
-  background: transparent;
-  font-size: 11px;
-  font-weight: 600;
-  white-space: nowrap;
-  transition:
-    background-color 140ms ease,
-    border-color 140ms ease,
-    color 140ms ease,
-    transform 140ms ease;
-}
-
-.viewport-mode-button:hover {
-  color: #ffffff;
-  background: rgba(255, 255, 255, 0.08);
-}
-
-.viewport-mode-button.active {
-  color: #ffffff;
-  border-color: rgba(138, 166, 106, 0.5);
-  background: rgba(138, 166, 106, 0.24);
-}
-
-.viewport-mode-button:active {
-  transform: translateY(1px);
-}
-
-.viewport-mode-button:focus-visible {
-  outline: 2px solid rgba(138, 166, 106, 0.72);
-  outline-offset: 1px;
-}
-
-.viewport-speed-control {
-  min-width: 0;
-  display: grid;
-  grid-template-columns: auto minmax(72px, 1fr) 34px;
-  align-items: center;
-  gap: 8px;
-  color: #aeb9aa;
-  font-size: 11px;
-}
-
-.viewport-speed-control input[type='range'] {
-  width: 100%;
-  height: 3px;
-  accent-color: #8aa66a;
-  cursor: pointer;
-}
-
-.viewport-speed-control strong {
-  color: #dfe8da;
-  font-variant-numeric: tabular-nums;
-  font-size: 11px;
-  font-weight: 600;
-  text-align: right;
-}
-
-@media (max-width: 380px) {
-  .viewport-control-strip {
-    grid-template-columns: 1fr;
-  }
-}
 </style>

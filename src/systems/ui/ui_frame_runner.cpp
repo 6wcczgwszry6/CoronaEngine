@@ -178,6 +178,17 @@ std::vector<PanelLayoutInput> collect_layout_inputs(void* host_filter) {
         in.initial_y = tab->initial_y;
         inputs.push_back(std::move(in));
     }
+    // compute_panel_layout preserves input order, and both the compositor and hit-test use
+    // placement order as z-order. Keep the main surface at the bottom, then sort floating
+    // panels by their explicit priority and creation id for deterministic stacking.
+    std::stable_sort(inputs.begin(), inputs.end(), [](const PanelLayoutInput& lhs, const PanelLayoutInput& rhs) {
+        const auto* lhs_tab = BrowserManager::instance().get_tab(lhs.tab_id);
+        const auto* rhs_tab = BrowserManager::instance().get_tab(rhs.tab_id);
+        const int lhs_priority = lhs_tab ? lhs_tab->z_priority : 0;
+        const int rhs_priority = rhs_tab ? rhs_tab->z_priority : 0;
+        if (lhs_priority != rhs_priority) return lhs_priority < rhs_priority;
+        return lhs.tab_id < rhs.tab_id;
+    });
     return inputs;
 }
 

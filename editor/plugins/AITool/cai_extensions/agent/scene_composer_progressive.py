@@ -84,6 +84,113 @@ class VlmCheckpointPolicy:
         return "", []
 
 
+@dataclass
+class _ProgressiveSceneNote:
+    text: str
+    kind: str
+    source_agent: str = ""
+    source_user_id: str = ""
+
+
+def _runtime_status_to_scene_mode(value: Any) -> str:
+    """Map AgentRuntime status payloads to SceneSession boundary modes.
+
+    SceneSession only understands a small legacy mode vocabulary at batch
+    boundaries.  This adapter lets RuntimeState become the preferred state
+    source without forcing progressive composition to know Runtime internals.
+    """
+
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        raw = value.strip()
+    elif isinstance(value, dict):
+        payload = value.get("status") if isinstance(value.get("status"), dict) else value
+        raw = str(
+            payload.get("runtime_mode")
+            or payload.get("mode")
+            or payload.get("scene_runtime_mode")
+            or ""
+        ).strip()
+        if not raw:
+            plan_summary = payload.get("plan_summary")
+            if isinstance(plan_summary, dict):
+                raw = str(plan_summary.get("status") or "").strip()
+        if not raw:
+            command_summary = payload.get("runtime_command_summary")
+            if isinstance(command_summary, dict):
+                commands = command_summary.get("latest_commands")
+                if isinstance(commands, list) and commands:
+                    latest = commands[-1]
+                    if isinstance(latest, dict):
+                        command = str(latest.get("command") or "").strip().lower()
+                        new_status = str(latest.get("new_status") or "").strip()
+                        if command == "pause" or new_status.lower() == "paused":
+                            raw = "paused"
+                        elif command == "cancel" or new_status.lower() == "cancelled":
+                            raw = "cancelled"
+                        elif command in {"resume", "retry"}:
+                            raw = ""
+    else:
+        raw = str(value).strip()
+
+    normalized = str(raw or "").strip().upper()
+    if normalized in {"PAUSED", "DISCUSSING"}:
+        return normalized
+    if normalized == "CANCELLED":
+        return "PAUSED"
+    return ""
+
+
+def _runtime_status_to_scene_notes(
+    value: Any,
+    *,
+    seen_keys: Optional[set[str]] = None,
+) -> List[_ProgressiveSceneNote]:
+    """Convert RuntimeState pending interventions to progressive batch notes."""
+
+    if not isinstance(value, dict):
+        return []
+    payload = value.get("status") if isinstance(value.get("status"), dict) else value
+    summary = payload.get("intervention_summary")
+    if not isinstance(summary, dict):
+        return []
+    pending = summary.get("latest_absorbable_pending")
+    if not isinstance(pending, list):
+        pending = summary.get("latest_pending")
+    if not isinstance(pending, list):
+        return []
+
+    notes: List[_ProgressiveSceneNote] = []
+    for item in pending:
+        if not isinstance(item, dict):
+            continue
+        status = str(item.get("status") or "").strip().lower()
+        if status and status != "pending":
+            continue
+        text = str(item.get("text") or "").strip()
+        items = [str(value).strip() for value in (item.get("items") or []) if str(value).strip()]
+        if not text and items:
+            text = "、".join(items)
+        if not text:
+            continue
+        patch_type = str(item.get("patch_type") or "").strip().lower()
+        kind = "generation_delta"
+        if "delete" in patch_type or "remove" in patch_type:
+            kind = "generation_delta"
+        elif "modify" in patch_type or "layout" in patch_type or "adjust" in patch_type:
+            kind = "layout_constraint"
+        elif "edit" in patch_type:
+            kind = "edit_existing"
+        key = f"{patch_type}|{text}"
+        if seen_keys is not None:
+            if key in seen_keys:
+                continue
+            seen_keys.add(key)
+        notes.append(_ProgressiveSceneNote(text=text, kind=kind))
+    return notes
+
+
 def run_progressive_workflow(
     composer: Any,  # SceneComposer 实例
     prompt: str,
@@ -180,11 +287,33 @@ def run_progressive_workflow(
     phase_sequence, phase_metadata, micro_phase_assets = _build_micro_batch_phase_plan(phase_assets)
     _refresh_micro_batch_metadata(phase_sequence, phase_metadata, micro_phase_assets)
     batch_size = max(1, int(os.getenv("CORONA_PROGRESSIVE_BATCH_SIZE", "3") or "3"))
+    runtime_status_source = getattr(composer, "_runtime_status_provider", None)
+    if not callable(runtime_status_source):
+        runtime_status_source = getattr(composer, "runtime_status_provider", None)
+    if not callable(runtime_status_source):
+        runtime_status_source = getattr(composer, "_runtime_mode_provider", None)
+    if not callable(runtime_status_source):
+        runtime_status_source = getattr(composer, "runtime_mode_provider", None)
+    consumed_runtime_note_keys: set[str] = set()
+
+    def consume_scene_notes() -> List[Any]:
+        runtime_notes: List[Any] = []
+        if callable(runtime_status_source):
+            try:
+                runtime_notes = _runtime_status_to_scene_notes(
+                    runtime_status_source(),
+                    seen_keys=consumed_runtime_note_keys,
+                )
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[ProgressiveWorkflow] runtime pending interventions skipped: %s", exc)
+        if runtime_notes:
+            return runtime_notes
+        return _consume_runtime_scene_notes()
 
     def make_phase_gen(phase: str):
         def gen(sess: SceneSession, ph: str) -> List[Dict[str, Any]]:
             assets = list(micro_phase_assets.get(phase, []) or [])
-            notes = _consume_runtime_scene_notes()
+            notes = consume_scene_notes()
             if notes:
                 assets = _apply_pending_notes_to_batch(
                     assets,
@@ -219,6 +348,13 @@ def run_progressive_workflow(
                         if micro_phase_assets.get(ph)}
 
     def runtime_mode_provider() -> str:
+        if callable(runtime_status_source):
+            try:
+                mode = _runtime_status_to_scene_mode(runtime_status_source())
+                if mode:
+                    return mode
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("[ProgressiveWorkflow] runtime status provider skipped: %s", exc)
         try:
             from plugins.AITool.services.lanchat_scene_runtime import get_lanchat_scene_runtime
         except Exception:  # noqa: BLE001

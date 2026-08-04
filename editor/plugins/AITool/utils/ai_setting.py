@@ -4,6 +4,9 @@ from typing import Dict, Any, List
 
 
 try:
+    # AITool adds its directory to sys.path and executes Quasar as a top-level
+    # package. Register settings in that same namespace so chat and Runtime
+    # tools do not observe different collector singletons.
     from Quasar.ai_service.entrance import ai_entrance
     from Quasar.ai_config.ai_config import reload_ai_config
 
@@ -23,13 +26,13 @@ try:
                 "name": "deepseek",
                 "type": "openai-compatible",
                 "base_url": "https://api.deepseek.com/v1",
-                "api_key": "sk-94033d0c8aee425c802a07689cad69d6",
+                "api_key": "sk-f3a2455ca5ab406f896995a1bc397ce6",
             },
             {
                 "name": "dmx_image",
                 "type": "dmx",
                 "base_url": "https://www.dmxapi.cn/v1/images/generations",
-                "api_key": "sk-qWQZAs7rbZewSJ78Ac50qjtPU4Dwln8XYMnmOCJzg0hGR4FA",
+                "api_key": "sk-rXnByZNBJ00vyRfjE4DBeqNRm3gdqdFH3a440099bsFcU5gy",
             },
             # {
             #     "name": "grsai_image",
@@ -41,7 +44,7 @@ try:
                 "name": "dmxapi",
                 "type": "openai-compatible",
                 "base_url": "https://www.dmxapi.cn/v1",
-                "api_key": "sk-qWQZAs7rbZewSJ78Ac50qjtPU4Dwln8XYMnmOCJzg0hGR4FA",
+                "api_key": "sk-rXnByZNBJ00vyRfjE4DBeqNRm3gdqdFH3a440099bsFcU5gy",
             },
         ]
 
@@ -68,10 +71,10 @@ try:
     def HUNYUAN_3D_SETTINGS() -> Dict[str, Any]:
         return {
             "enable": True,
-            "api_key": "sk-y41uwqZkTgipsViywZNh3NtjOBQHWizKivmNJI72R8qGj8MJ",
+            "api_key": "sk-S1bc5LI8kFJ8ZgK1QDLUQEf5IiGZydZS5eBQSe8CNleZ1i1B",
             "api_keys": [
-                "sk-JW5sgRCe3XSlgTXh5Xt25WVOsDG3os6eg19jutpvjYG0kBrM",
-                "sk-KfygRCIuidGhv1aMD9txpzbukwUIn2fGCw1cxQAp7yv3OTcD"
+                "sk-1RH8TDkGYaa8ZyOY8gZNnrwtOSfvkgwQ9KViyQbFxJuinK1m",
+                "sk-z2rIl9cCvOp9oSQouogE0UB9nwRzgKBpfaupWHMYWgj4hcXb"
             ],
             "region": "ap-guangzhou",
             "endpoint": "api.ai3d.cloud.tencent.com",

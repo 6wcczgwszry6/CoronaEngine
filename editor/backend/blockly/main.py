@@ -6,6 +6,7 @@ import logging
 import os
 from pathlib import Path
 import sys
+import tempfile
 import threading
 import time
 from typing import Any, Optional
@@ -94,6 +95,7 @@ class ScratchTool:
     }
     _exec_state_snapshot: Optional[dict[str, Any]] = None
     _exec_input_locked = False
+    _persistence_lock = threading.RLock()
 
     _preview_lock = threading.RLock()
     _preview_threads: list[dict[str, Any]] = []
@@ -157,19 +159,40 @@ class ScratchTool:
             raise RuntimeError("No project is open; Blockly cannot be saved or run")
         return Path(project_path)
 
+    @staticmethod
+    def _project_identity(path: Path | str) -> str:
+        """Return a stable, case-insensitive identity for a Windows project path."""
+        return os.path.normcase(str(Path(path).expanduser().resolve()))
+
     @classmethod
-    def _blockly_dir(cls) -> Path:
-        directory = cls._active_project_path() / "Scripts" / "blockly"
+    def _request_project_context(cls, data: dict) -> tuple[Path, Optional[dict]]:
+        """Pin one request to the active project and reject stale frontend requests."""
+        project_path = cls._active_project_path().resolve()
+        expected_raw = str(data.get("project_path") or "").strip()
+        if expected_raw:
+            expected_path = Path(expected_raw).expanduser().resolve()
+            if cls._project_identity(expected_path) != cls._project_identity(project_path):
+                return project_path, {
+                    "status": "error",
+                    "code": "PROJECT_CONTEXT_CHANGED",
+                    "message": "active project changed; stale Blockly request was ignored",
+                    "project_path": str(project_path),
+                }
+        return project_path, None
+
+    @classmethod
+    def _blockly_dir(cls, project_path: Optional[Path] = None) -> Path:
+        directory = (project_path or cls._active_project_path()) / "Scripts" / "blockly"
         directory.mkdir(parents=True, exist_ok=True)
         return directory
 
     @classmethod
-    def _manifest_path(cls) -> Path:
-        return cls._blockly_dir() / "manifest.json"
+    def _manifest_path(cls, project_path: Optional[Path] = None) -> Path:
+        return cls._blockly_dir(project_path) / "manifest.json"
 
     @classmethod
-    def _load_manifest(cls) -> dict:
-        path = cls._manifest_path()
+    def _load_manifest(cls, project_path: Optional[Path] = None) -> dict:
+        path = cls._manifest_path(project_path)
         if not path.exists():
             return {"targets": []}
         try:
@@ -185,11 +208,44 @@ class ScratchTool:
             logger.exception("[ScratchTool] failed to load manifest: %s", path)
             return {"targets": []}
 
+    @staticmethod
+    def _atomic_write_text(path: Path, content: str) -> None:
+        """Atomically replace a project file so concurrent floating panels never see it half-written."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        temp_path: Optional[Path] = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                newline="",
+                dir=path.parent,
+                prefix=f".{path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temp_path = Path(handle.name)
+                handle.write(content)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_path, path)
+            temp_path = None
+        finally:
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     @classmethod
-    def _write_manifest(cls, manifest: dict) -> None:
-        path = cls._manifest_path()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(manifest, f, ensure_ascii=False, indent=2)
+    def _atomic_write_json(cls, path: Path, payload: Any) -> None:
+        cls._atomic_write_text(
+            path,
+            json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+
+    @classmethod
+    def _write_manifest(cls, manifest: dict, project_path: Optional[Path] = None) -> None:
+        cls._atomic_write_json(cls._manifest_path(project_path), manifest)
 
     @staticmethod
     def _normalize_script_kind(script_kind: Any) -> str:
@@ -239,6 +295,9 @@ class ScratchTool:
         """Save generated Python and workspace JSON for one Blockly or node-graph target."""
         try:
             data = cls._normalize_payload(payload)
+            project_path, project_error = cls._request_project_context(data)
+            if project_error:
+                return project_error
             target_type = "actor" if data.get("target_type") == "model" else (data.get("target_type") or "actor")
             if target_type not in ("project", "actor"):
                 return {"status": "error", "message": f"unsupported target_type: {target_type}"}
@@ -258,18 +317,13 @@ class ScratchTool:
                 prefix = "node_graph_project" if target_type == "project" else "node_graph_actor"
             else:
                 prefix = "project_global" if target_type == "project" else "actor"
-            blockly_dir = cls._blockly_dir()
+            blockly_dir = cls._blockly_dir(project_path)
             code_path = blockly_dir / f"{prefix}_{digest}.py"
             workspace_path = blockly_dir / f"{prefix}_{digest}.blockly.json"
-            project_path = cls._active_project_path()
 
             code = cls._with_context_prelude(
                 str(data.get("code") or ""), target_type, scene_name, actor_name
             )
-            with open(code_path, "w", encoding="utf-8") as f:
-                f.write(code)
-            with open(workspace_path, "w", encoding="utf-8") as f:
-                json.dump(data.get("workspace") or {}, f, ensure_ascii=False, indent=2)
 
             def _rel(path: Path) -> str:
                 return path.relative_to(project_path).as_posix()
@@ -291,20 +345,27 @@ class ScratchTool:
                 "validation_errors": [str(item) for item in validation_errors if str(item)],
             }
 
-            manifest = cls._load_manifest()
-            targets = [t for t in manifest.get("targets", []) if t.get("id") != target_id]
-            targets.append(target)
-            targets.sort(
-                key=lambda t: (
-                    0 if t.get("target_type") == "project" else 1,
-                    t.get("scene_name", ""),
-                    t.get("actor_name", ""),
-                    cls._normalize_script_kind(t.get("script_kind")),
+            # NodeGraph can be opened in a detached CEF panel. Serialize the complete
+            # workspace/code/manifest transaction and atomically replace every file so
+            # another panel can never interpret a temporarily truncated manifest as an
+            # empty world and overwrite the user's graph.
+            with cls._persistence_lock:
+                cls._atomic_write_text(code_path, code)
+                cls._atomic_write_json(workspace_path, data.get("workspace") or {})
+                manifest = cls._load_manifest(project_path)
+                targets = [t for t in manifest.get("targets", []) if t.get("id") != target_id]
+                targets.append(target)
+                targets.sort(
+                    key=lambda t: (
+                        0 if t.get("target_type") == "project" else 1,
+                        t.get("scene_name", ""),
+                        t.get("actor_name", ""),
+                        cls._normalize_script_kind(t.get("script_kind")),
+                    )
                 )
-            )
-            manifest["targets"] = targets
-            cls._write_manifest(manifest)
-            return {"status": "saved", "target": target}
+                manifest["targets"] = targets
+                cls._write_manifest(manifest, project_path)
+            return {"status": "saved", "target": target, "project_path": str(project_path)}
         except Exception as exc:
             logger.exception("[ScratchTool] save_blockly_target failed")
             return {"status": "error", "message": str(exc)}
@@ -314,6 +375,9 @@ class ScratchTool:
         """Load a saved Blockly or node-graph workspace for one target."""
         try:
             data = cls._normalize_payload(payload)
+            project_path, project_error = cls._request_project_context(data)
+            if project_error:
+                return project_error
             target_type = "actor" if data.get("target_type") == "model" else (data.get("target_type") or "actor")
             if target_type not in ("project", "actor"):
                 return {"status": "error", "message": f"unsupported target_type: {target_type}"}
@@ -328,38 +392,51 @@ class ScratchTool:
                 return {"status": "error", "message": "actor target requires scene_name and actor_name"}
 
             target_id = cls._target_id(target_type, scene_name, actor_name, script_kind)
-            manifest = cls._load_manifest()
-            target = next((item for item in manifest.get("targets", []) if item.get("id") == target_id), None)
-            if not target:
-                return {
-                    "status": "missing",
-                    "target": {
-                        "id": target_id,
-                        "target_type": target_type,
-                        "script_kind": script_kind,
-                        "scene_name": scene_name,
-                        "actor_name": actor_name,
-                    },
-                    "workspace": {},
-                }
+            with cls._persistence_lock:
+                manifest = cls._load_manifest(project_path)
+                target = next((item for item in manifest.get("targets", []) if item.get("id") == target_id), None)
+                if not target:
+                    return {
+                        "status": "missing",
+                        "target": {
+                            "id": target_id,
+                            "target_type": target_type,
+                            "script_kind": script_kind,
+                            "scene_name": scene_name,
+                            "actor_name": actor_name,
+                        },
+                        "workspace": {},
+                        "project_path": str(project_path),
+                    }
 
-            workspace_rel = target.get("workspace_path") or ""
-            workspace_path = (cls._active_project_path() / workspace_rel).resolve()
-            project_path = cls._active_project_path().resolve()
-            try:
-                workspace_path.relative_to(project_path)
-            except ValueError:
-                return {"status": "error", "message": "workspace_path escapes active project"}
-            if not workspace_path.exists():
-                return {"status": "missing", "target": target, "workspace": {}}
-            with open(workspace_path, "r", encoding="utf-8") as f:
-                workspace = json.load(f)
+                workspace_rel = target.get("workspace_path") or ""
+                workspace_path = (project_path / workspace_rel).resolve()
+                try:
+                    workspace_path.relative_to(project_path)
+                except ValueError:
+                    return {"status": "error", "message": "workspace_path escapes active project"}
+                if not workspace_path.exists():
+                    return {
+                        "status": "missing",
+                        "target": target,
+                        "workspace": {},
+                        "project_path": str(project_path),
+                    }
+                with open(workspace_path, "r", encoding="utf-8") as f:
+                    workspace = json.load(f)
             if not isinstance(workspace, dict):
                 workspace = {}
-            return {"status": "loaded", "target": target, "workspace": workspace}
+            return {
+                "status": "loaded",
+                "target": target,
+                "workspace": workspace,
+                "project_path": str(project_path),
+            }
         except Exception as exc:
             logger.exception("[ScratchTool] load_blockly_target failed")
             return {"status": "error", "message": str(exc)}
+
+
 
     # ------------------------------------------------------------------
     # Legacy single-code execution
@@ -536,9 +613,13 @@ class ScratchTool:
             state_snapshot, snapshot_error = cls._capture_exec_snapshot(resolved)
             if state_snapshot is None:
                 message = f"\u65e0\u6cd5\u521b\u5efa\u8fd0\u884c\u524d\u573a\u666f\u5feb\u7167: {snapshot_error or '\u672a\u77e5\u9519\u8bef'}"
+                with cls._exec_lock:
+                    cls._exec_state_snapshot = None
+                cls._set_exec_input_locked(False)
                 cls._replace_exec_state(
                     status="error", outcome="snapshot_error", error=message,
-                    snapshotCaptured=False, restoreStatus="error", restoreError=message,
+                    inputLocked=False, snapshotCaptured=False,
+                    restoreStatus="idle", restoreError="",
                     finishedAt=time.time(),
                 )
                 return {"status": "error", "message": message, "outcome": "snapshot_error"}
@@ -616,6 +697,7 @@ class ScratchTool:
                         "target_type": target_type,
                         "scene_name": scene_name,
                         "actor_name": actor_name,
+                        "_resolved": resolved,
                     },
                     single_exec=True,
                 )
@@ -751,6 +833,9 @@ class ScratchTool:
             state["snapshotCaptured"] = cls._exec_state_snapshot is not None
             context_id = cls._exec_context_id or state.get("contextId")
             thread_alive = bool(cls._exec_thread and cls._exec_thread.is_alive())
+            if cls._exec_thread is not None and not thread_alive:
+                cls._exec_thread = None
+        state["threadAlive"] = thread_alive
         snapshot = corona_engine_scratch.runtime_context_snapshot(context_id) if context_id else None
         if snapshot:
             state.update(
@@ -762,8 +847,35 @@ class ScratchTool:
             binding_error = snapshot.get("binding_error", "")
             if binding_error and not state.get("error"):
                 state["error"] = binding_error
-        if thread_alive and state.get("status") not in ("starting", "running"):
+        status_name = str(state.get("status") or "idle")
+        started_at = float(state.get("startedAt") or 0.0)
+        starting_recently = (
+            status_name == "starting"
+            and started_at > 0.0
+            and (time.time() - started_at) < 1.0
+        )
+        if thread_alive and status_name not in ("starting", "running"):
             state["status"] = "running"
+        elif not thread_alive and not starting_recently:
+            # A status string can survive a project switch or an interrupted worker.
+            # Only a live worker may own the node-graph camera input lock.
+            cls._set_exec_input_locked(False)
+            state["inputLocked"] = False
+            if status_name in ("starting", "running", "stopping"):
+                terminal_status = "stopped" if status_name == "stopping" else "completed"
+                terminal_outcome = str(state.get("outcome") or terminal_status)
+                with cls._exec_lock:
+                    cls._exec_state.update(
+                        status=terminal_status,
+                        outcome=terminal_outcome,
+                        finishedAt=float(state.get("finishedAt") or time.time()),
+                        inputLocked=False,
+                    )
+                state.update(
+                    status=terminal_status,
+                    outcome=terminal_outcome,
+                    finishedAt=float(state.get("finishedAt") or time.time()),
+                )
         return state
 
     # ------------------------------------------------------------------
@@ -874,11 +986,19 @@ class ScratchTool:
         if preview_active:
             return {"status": "error", "message": "已有预览或全局运行正在进行，请先停止并恢复"}
 
+        try:
+            project_path = cls._active_project_path().resolve()
+        except Exception as exc:
+            logger.exception("[ScratchTool] preview project resolution failed")
+            return {"status": "error", "message": str(exc)}
+
         from CoronaCore.utils import corona_engine_scratch
         corona_engine_scratch.clear_runtime_state_snapshots()
         try:
             flush_pending_auto_saves()
-            targets, warnings = cls._prepare_preview_targets(scope, requested_scene)
+            targets, warnings = cls._prepare_preview_targets(
+                scope, requested_scene, project_path
+            )
             flush_pending_auto_saves()
         except Exception as exc:
             logger.exception("[ScratchTool] start_game_preview prepare failed")
@@ -924,11 +1044,26 @@ class ScratchTool:
 
         if not targets:
             cls._set_preview_input_locked(False)
+            target_label = "项目全局节点图" if scope == "project" else "当前场景脚本"
+            message = f"没有可运行的{target_label}"
+            if warnings:
+                message += f"：{warnings[0]}"
+            logger.warning(
+                "[ScratchTool] preview start rejected: scope=%s scene=%s reason=%s",
+                scope, requested_scene, message,
+            )
             with cls._preview_lock:
-                return cls._preview_payload_locked()
+                cls._preview_status = "error"
+                cls._preview_errors = [message]
+                payload = cls._preview_payload_locked()
+                payload["message"] = message
+                payload["outcome"] = "no_runnable_targets"
+                return payload
 
         try:
-            state_snapshot = cls._create_scoped_preview_snapshot(scope, targets)
+            state_snapshot = cls._create_scoped_preview_snapshot(
+                scope, targets, project_path
+            )
         except Exception as exc:
             logger.exception("[ScratchTool] preview state snapshot failed")
             with cls._preview_lock:
@@ -943,7 +1078,7 @@ class ScratchTool:
 
         pending_threads = []
         for target in targets:
-            code_path = cls._active_project_path() / target["code_path"]
+            code_path = project_path / target["code_path"]
             thread = threading.Thread(
                 target=cls._run_preview_target,
                 args=(code_path, target),
@@ -1122,7 +1257,27 @@ class ScratchTool:
         if should_restore:
             cls._complete_preview_restore()
         with cls._preview_lock:
+            live_threads = any(
+                info.get("thread") and info["thread"].is_alive()
+                for info in cls._preview_threads
+            )
+            stop_thread_alive = bool(
+                cls._preview_stop_thread and cls._preview_stop_thread.is_alive()
+            )
+            preview_work_active = bool(
+                live_threads
+                or stop_thread_alive
+                or cls._preview_restore_pending
+                or cls._preview_restore_in_progress
+            )
+        if not preview_work_active:
+            # Terminal/idle previews must never keep the editor camera disabled.
+            # Call even when the Python flag is already false to re-sync native state.
+            cls._set_preview_input_locked(False)
+        with cls._preview_lock:
             status = cls._preview_payload_locked()
+        status["worker_active"] = preview_work_active
+        status["workerActive"] = preview_work_active
         status["runtime_states"] = corona_engine_scratch.runtime_state_snapshots()
         return status
 
@@ -1167,39 +1322,69 @@ class ScratchTool:
 
     @classmethod
     def _prepare_preview_targets(
-        cls, scope: str = "project", requested_scene: str = ""
+        cls,
+        scope: str = "project",
+        requested_scene: str = "",
+        project_path: Optional[Path] = None,
     ) -> tuple[list[dict], list[str]]:
-        manifest = cls._load_manifest()
+        project_path = (project_path or cls._active_project_path()).resolve()
+        manifest = cls._load_manifest(project_path)
         targets: list[dict] = []
         warnings: list[str] = []
+        project_graph_found = False
         from CoronaCore.utils import corona_engine_scratch
 
         for raw in manifest.get("targets", []):
             target = dict(raw)
-            target["script_kind"] = cls._normalize_script_kind(target.get("script_kind"))
-            target_type = "actor" if target.get("target_type") == "model" else target.get("target_type")
+            target["script_kind"] = cls._normalize_script_kind(
+                target.get("script_kind")
+            )
+            target_type = (
+                "actor"
+                if target.get("target_type") == "model"
+                else target.get("target_type")
+            )
             target["target_type"] = target_type
-            if scope == "scene":
+
+            if scope == "project":
+                is_global_project_graph = (
+                    target.get("id") == "node_graph:project:global"
+                    and target_type == "project"
+                    and target["script_kind"] == "node_graph"
+                )
+                if not is_global_project_graph:
+                    continue
+                project_graph_found = True
+            else:
                 if target_type != "actor":
                     continue
-                if not cls._scene_names_match(target.get("scene_name", ""), requested_scene):
+                if not cls._scene_names_match(
+                    target.get("scene_name", ""), requested_scene
+                ):
                     continue
+
             if not target.get("enabled", True):
+                warnings.append(
+                    f"项目全局节点图已禁用，已跳过: {target.get('id')}"
+                )
                 continue
             if not target.get("runnable", True):
                 errors = target.get("validation_errors") or ["脚本配置无效"]
-                warnings.append(f"脚本不可运行，已跳过: {target.get('id')} ({'; '.join(map(str, errors))})")
+                warnings.append(
+                    f"节点图不可运行，已跳过: {target.get('id')} "
+                    f"({'; '.join(map(str, errors))})"
+                )
                 continue
             code_path = target.get("code_path")
-            if not code_path or not (cls._active_project_path() / code_path).exists():
-                warnings.append(f"积木代码不存在，已跳过: {target.get('id')}")
+            if not code_path or not (project_path / code_path).exists():
+                warnings.append(f"节点图生成代码不存在，已跳过: {target.get('id')}")
                 continue
-            if target_type == "project":
-                if scope == "project":
-                    targets.append(target)
+
+            if scope == "project":
+                targets.append(target)
                 continue
             if target_type != "actor":
-                warnings.append(f"未知积木目标，已跳过: {target.get('id')}")
+                warnings.append(f"未知节点图目标，已跳过: {target.get('id')}")
                 continue
 
             requested_target_scene = str(target.get("scene_name") or "")
@@ -1213,7 +1398,7 @@ class ScratchTool:
                     f"({resolved.get('message') or '未知错误'})"
                 )
                 continue
-            if scope == "scene" and not cls._scene_names_match(
+            if not cls._scene_names_match(
                 resolved.get("scene_name", ""), requested_scene
             ):
                 warnings.append(
@@ -1231,6 +1416,9 @@ class ScratchTool:
             })
             targets.append(target)
 
+        if scope == "project" and not project_graph_found:
+            warnings.append('当前项目还没有已保存的全局节点图')
+
         targets.sort(key=lambda item: (
             0 if item.get("target_type") == "project" else 1,
             item.get("scene_name", ""),
@@ -1240,7 +1428,12 @@ class ScratchTool:
         return targets, warnings
 
     @classmethod
-    def _create_scoped_preview_snapshot(cls, scope: str, targets: list[dict]) -> dict[str, Any]:
+    def _create_scoped_preview_snapshot(
+        cls,
+        scope: str,
+        targets: list[dict],
+        project_path: Optional[Path] = None,
+    ) -> dict[str, Any]:
         from CoronaCore.utils import corona_engine_scratch
         snapshots: list[dict[str, Any]] = []
         seen: set[tuple[str, str]] = set()
@@ -1259,15 +1452,17 @@ class ScratchTool:
             ))
         snapshot: dict[str, Any] = {"kind": "runtime", "scope": scope, "snapshots": snapshots}
         if scope == "project" and any(item.get("target_type") == "project" for item in targets):
-            snapshot["legacy"] = cls._create_preview_state_snapshot()
+            snapshot["legacy"] = cls._create_preview_state_snapshot(project_path)
         return snapshot
 
     @classmethod
-    def _create_preview_state_snapshot(cls) -> dict[str, Any]:
+    def _create_preview_state_snapshot(
+        cls, project_path: Optional[Path] = None
+    ) -> dict[str, Any]:
         from CoronaCore.core.managers import scene_manager
 
         snapshot: dict[str, Any] = {"scenes": {}}
-        for route in cls._project_scene_routes():
+        for route in cls._project_scene_routes(project_path):
             scene = scene_manager.get_or_create(route)
             scene_state: dict[str, Any] = {
                 "actors": {},
@@ -1448,8 +1643,10 @@ class ScratchTool:
             logger.exception("[ScratchTool] failed to notify frontend after preview state restore")
 
     @classmethod
-    def _project_scene_routes(cls) -> list[str]:
-        project_path = cls._active_project_path()
+    def _project_scene_routes(
+        cls, project_path: Optional[Path] = None
+    ) -> list[str]:
+        project_path = (project_path or cls._active_project_path()).resolve()
         ini_path = project_path / "project.ini"
         scenes = get_project_scenes(str(ini_path)) if ini_path.exists() else []
         if not scenes and (project_path / "Scene").is_dir():
@@ -1570,6 +1767,14 @@ class ScratchTool:
             scene_name=target.get("scene_name", ""),
             actor_name=target.get("actor_name", ""),
         )
+        resolved = target.get("_resolved") if isinstance(target.get("_resolved"), dict) else {}
+        if ctx.target_type == "project" and resolved.get("scene") is not None:
+            # Keep project-global semantics while attaching the active scene so
+            # explicit object blocks can resolve native editor actors by name.
+            ctx.scene = resolved.get("scene")
+            ctx.target_scene = ctx.scene
+            ctx.scene_name = str(resolved.get("scene_name") or ctx.scene_name or "")
+            ctx.target_scene_name = ctx.scene_name
         corona_engine_scratch.bind_context(ctx)
 
         module_name = f"blockly_runtime_{cls._target_digest(context_id)}_{int(time.time() * 1000)}"

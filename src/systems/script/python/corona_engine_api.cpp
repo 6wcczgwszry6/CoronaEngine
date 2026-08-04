@@ -1105,6 +1105,37 @@ std::uint64_t Corona::API::Geometry::get_model_id() const {
     return 0;
 }
 
+Corona::API::GeometryRenderStatus Corona::API::Geometry::get_render_status() const {
+    GeometryRenderStatus status;
+    status.gpu_build_state = get_gpu_build_state();
+    status.mesh_count = get_mesh_count();
+    status.failed = status.gpu_build_state == "Failed";
+    if (handle_ == 0) {
+        return status;
+    }
+
+    auto* system_manager = Kernel::KernelContext::instance().system_manager();
+    if (!system_manager) {
+        return status;
+    }
+    auto geometry_system = std::dynamic_pointer_cast<Systems::GeometrySystem>(
+        system_manager->get_system("Geometry"));
+    if (!geometry_system) {
+        return status;
+    }
+
+    const auto slots = geometry_system->query_mesh_slots(handle_);
+    status.observed = true;
+    status.renderable_mesh_count = static_cast<std::size_t>(std::count_if(
+        slots.begin(), slots.end(), [](const auto& slot) { return slot.valid; }));
+    status.invalid_mesh_count = slots.size() - status.renderable_mesh_count;
+    status.ready = status.gpu_build_state == "Ready" &&
+                   status.mesh_count > 0 &&
+                   slots.size() == status.mesh_count &&
+                   status.invalid_mesh_count == 0;
+    return status;
+}
+
 std::array<float, 6> Corona::API::Geometry::get_aabb() const {
     if (auto geom = SharedDataHub::instance().geometry_storage().try_acquire_read(handle_)) {
         if (auto res = SharedDataHub::instance().model_resource_storage().try_acquire_read(geom->model_resource_handle)) {
@@ -2238,6 +2269,12 @@ void Corona::API::Camera::set_output_mode(const std::string& mode) {
         output_mode = CameraOutputMode::VisibilityBuffer;
     } else if (mode == "ssao") {
         output_mode = CameraOutputMode::SSAO;
+    } else if (mode == "ssao_raw") {
+        output_mode = CameraOutputMode::SSAORaw;
+    } else if (mode == "shadow_mask_raw") {
+        output_mode = CameraOutputMode::ShadowMaskRaw;
+    } else if (mode == "shadow_mask") {
+        output_mode = CameraOutputMode::ShadowMask;
     } else if (mode != "final_color") {
         CFW_LOG_WARNING("[Camera::set_output_mode] Unknown mode '{}', defaulting to final_color", mode);
     }
@@ -2268,6 +2305,12 @@ std::string Corona::API::Camera::get_output_mode() const {
                 return "visibility_buffer";
             case CameraOutputMode::SSAO:
                 return "ssao";
+            case CameraOutputMode::SSAORaw:
+                return "ssao_raw";
+            case CameraOutputMode::ShadowMaskRaw:
+                return "shadow_mask_raw";
+            case CameraOutputMode::ShadowMask:
+                return "shadow_mask";
             case CameraOutputMode::FinalColor:
                 [[fallthrough]];
             default:

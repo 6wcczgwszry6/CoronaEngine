@@ -234,7 +234,16 @@ const NODE_MOUSE_HATS = new Set([
   'event_mouse_contextmenu',
 ]);
 const NODE_PROCEDURE_BLOCKS = new Set(['procedures_defnoreturn', 'procedures_defreturn']);
-const GLOBAL_WORKSPACE_ROOT_TYPES = new Set(['variable_define', 'list_define', 'variable_show', 'variable_hide', 'list_show', 'list_hide']);
+const GLOBAL_WORKSPACE_ROOT_TYPES = new Set([
+  'variable_define',
+  'variable_set',
+  'variable_add',
+  'variable_show',
+  'variable_hide',
+  'list_define',
+  'list_show',
+  'list_hide',
+]);
 const BLOCKING_ACTIVE_LOOP_TYPES = new Set(['control_for', 'control_until', 'controls_whileUntil']);
 
 function hasWorkspaceBlocks(state) {
@@ -386,9 +395,20 @@ export function nodeGraphToCode(rawGraph) {
   const mouseChunks = [];
   const runtimeDefinitions = [];
   const runtimeRegistrations = [];
+  const generatorImports = new Set();
+  const generatorDefinitions = new Set();
   const nodeLifecycle = new Map();
   const conditionFunctions = new Map();
   let runtimeIndex = 0;
+
+  const collectGeneratorDefinitions = () => {
+    for (const value of Object.values(pythonGenerator.definitions_ || {})) {
+      const definition = String(value || '').trim();
+      if (!definition) continue;
+      if (/^(from\s+\S+\s+)?import\s+\S+/.test(definition)) generatorImports.add(definition);
+      else generatorDefinitions.add(definition);
+    }
+  };
 
   const codeAfterHat = (block) => {
     let code = block.getInput?.('DO') ? pythonGenerator.statementToCode(block, 'DO') : '';
@@ -458,6 +478,7 @@ export function nodeGraphToCode(rawGraph) {
         if (code.trim()) lifecycle.enter.push(code);
       }
     } finally {
+      collectGeneratorDefinitions();
       workspace.dispose();
     }
     return lifecycle;
@@ -487,6 +508,7 @@ export function nodeGraphToCode(rawGraph) {
       if (!expression) throw new Error(`\u8fde\u7ebf\u201c${label}\u201d\u6ca1\u6709\u751f\u6210\u6709\u6548\u6761\u4ef6`);
       conditionFunctions.set(index, { functionName: safePythonId(edge?.id || index, '_node_condition'), expression });
     } finally {
+      collectGeneratorDefinitions();
       workspace.dispose();
     }
   });
@@ -495,7 +517,9 @@ export function nodeGraphToCode(rawGraph) {
   const preludeRunPrologue = renderPreludeAt('runPrologue');
   const preludeRunEpilogue = renderPreludeAt('runEpilogue');
   const parts = ['# -*- coding: utf-8 -*-', '# Generated from node graph by CabbageEditor', PYTHON_IMPORTS.ENGINE_IMPORT];
+  if (generatorImports.size) parts.push(...generatorImports);
   if (preludeGlobal.trim()) parts.push('', preludeGlobal.trimEnd());
+  if (generatorDefinitions.size) parts.push('', ...generatorDefinitions);
   parts.push('', '_node_graph_state = None');
   if (procedureChunks.length) parts.push('', procedureChunks.join('\n\n'));
   if (runtimeDefinitions.length) parts.push('', runtimeDefinitions.join('\n\n'));

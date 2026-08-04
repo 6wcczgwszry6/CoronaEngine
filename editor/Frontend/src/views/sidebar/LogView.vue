@@ -2,7 +2,7 @@
   <div
     class="flex-1 min-h-0 w-full rounded-lg overflow-hidden flex flex-col bg-[#1e1e1e] text-gray-300 font-mono text-xs"
   >
-    <DockTitleBar v-if="!isDocked" title="日志" extraClass="bg-[#84A65B]" routePath="/LogView" @close="closeFloat" />
+    <DockTitleBar v-if="!isDocked" title="日志" extraClass="bg-[#D8B86C]" routePath="/LogView" @close="closeFloat" />
 
     <div class="p-2 bg-[#2d2d2d] flex gap-4 items-center border-b border-black">
       <div class="flex gap-2">

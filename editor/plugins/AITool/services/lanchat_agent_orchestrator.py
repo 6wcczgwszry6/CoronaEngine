@@ -161,6 +161,35 @@ class LanChatAgentOrchestrator:
             proposal=False,
         )
 
+    def handle_control_trigger(self, trigger: dict[str, Any]) -> AgentOrchestrationResult | None:
+        """Resolve GM confirmations without falling through to an LLM reply."""
+
+        if not self._is_gm_trigger(trigger):
+            return None
+        history = self._history_from_trigger(trigger)
+        self._remember_plans_from_history(history, trigger)
+        text = str(trigger.get("text") or "").strip()
+        metadata = self._metadata_from_trigger(trigger)
+        decision = str(metadata.get("decision") or "").strip().lower()
+        is_confirmation = (
+            decision in {"confirm", "confirmed", "yes", "accept", "reject", "rejected", "no", "cancel"}
+            or any(word in text for word in (*self._CONFIRM_WORDS, *self._REJECT_WORDS))
+        )
+        if not is_confirmation:
+            return None
+        state = self._summary_service.monitor(history)
+        confirmation = self._consume_confirmation(text, trigger)
+        if confirmation is None:
+            confirmation = "【GM】当前没有可确认或拒绝的待处理事项；系统没有执行新的场景写入。"
+        return AgentOrchestrationResult(
+            text=confirmation,
+            sender_id=self._system_sender_id,
+            sender_name=self._system_sender_name,
+            discussion_state=state,
+            proposal=False,
+            action_payload=self._last_confirmed_action,
+        )
+
     def _needs_gm_proposal(self, trigger: dict[str, Any], state: DiscussionState) -> bool:
         if isinstance(trigger.get("_resolved_plan"), dict):
             return True
@@ -420,6 +449,14 @@ class LanChatAgentOrchestrator:
             replay_id, status = proposal_status_matches[0]
             self._processed_proposals[replay_id] = str(status or "processed")
             return f"【GM】提案 {replay_id} 已处理（{status}），不会重复入队。"
+        if not mentioned_ids:
+            pending_ids = [
+                str(item.get("proposal_id") or "")
+                for item in self._proposals.values()
+                if item.get("status") == "pending" and str(item.get("proposal_id") or "")
+            ]
+            if len(pending_ids) > 1:
+                return "【GM】当前有多个待确认事项，请指定确认编号：" + "、".join(pending_ids[-3:])
         proposal = self._find_confirmation_proposal(mentioned_ids)
         if proposal is None:
             return None

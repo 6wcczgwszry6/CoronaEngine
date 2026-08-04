@@ -26,7 +26,7 @@ const props = defineProps({
   workspaceRole: { type: String, default: 'node' },
 });
 
-const emit = defineEmits(['change', 'ready', 'reject']);
+const emit = defineEmits(['change', 'ready', 'reject', 'block-added', 'block-changed']);
 
 const { t, locale } = useI18n();
 const { error: logError } = useErrorHandler('MiniBlocklyWorkspace');
@@ -36,7 +36,16 @@ const loadingLabel = ref('');
 const dropActive = ref(false);
 const dropInvalid = ref(false);
 const validationMessage = ref('');
-const GLOBAL_ROOT_TYPES = new Set(['variable_define', 'list_define', 'variable_show', 'variable_hide', 'list_show', 'list_hide']);
+const GLOBAL_ROOT_TYPES = new Set([
+  'variable_define',
+  'variable_set',
+  'variable_add',
+  'variable_show',
+  'variable_hide',
+  'list_define',
+  'list_show',
+  'list_hide',
+]);
 
 let workspace = null;
 let BlocklyLib = null;
@@ -45,8 +54,36 @@ let blocklyEN = null;
 let resizeObserver = null;
 let isLoadingWorkspace = false;
 let changeListener = null;
+let readyResolved = false;
+let resolveReady;
+const readyPromise = new Promise((resolve) => {
+  resolveReady = resolve;
+});
 
 let blocksRegistered = false;
+
+function loadedBlockSummary() {
+  const blocks = workspace?.getAllBlocks?.(false) || [];
+  return {
+    blockCount: blocks.length,
+    blockIds: blocks.map((block) => String(block?.id || '')).filter(Boolean),
+  };
+}
+
+function settleReady(result) {
+  if (readyResolved) return;
+  readyResolved = true;
+  resolveReady?.(result);
+}
+
+function isReady() {
+  return Boolean(workspace && BlocklyLib);
+}
+
+function whenReady() {
+  if (isReady()) return Promise.resolve({ success: true, ready: true, ...loadedBlockSummary() });
+  return readyPromise;
+}
 
 function hasSerializedWorkspaceContent(state) {
   if (!state || typeof state !== 'object') return false;
@@ -123,6 +160,21 @@ async function registerBlocks() {
   blocksRegistered = true;
 }
 
+function applyRoleVisualStyle(block) {
+  if (!block) return;
+  if (props.workspaceRole === 'condition' && block.outputConnection) {
+    try {
+      block.setStyle('condition_blocks');
+      if (block.rendered) block.render?.();
+    } catch {}
+  }
+}
+
+function applyWorkspaceRoleVisualStyles() {
+  if (!workspace) return;
+  for (const block of workspace.getAllBlocks?.(false) || []) applyRoleVisualStyle(block);
+}
+
 function getState() {
   if (!workspace || !BlocklyLib) return {};
   try {
@@ -134,7 +186,15 @@ function getState() {
 }
 
 function loadState(state) {
-  if (!workspace || !BlocklyLib) return;
+  if (!workspace || !BlocklyLib) {
+    return {
+      success: false,
+      ready: false,
+      error: '积木工作区尚未初始化完成',
+      blockCount: 0,
+      blockIds: [],
+    };
+  }
   isLoadingWorkspace = true;
   try {
     workspace.clear();
@@ -143,8 +203,17 @@ function loadState(state) {
     if (hasSerializedWorkspaceContent(nextState)) {
       BlocklyLib.serialization.workspaces.load(nextState, workspace);
     }
+    applyWorkspaceRoleVisualStyles();
+    window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
+    return { success: true, ready: true, ...loadedBlockSummary() };
   } catch (e) {
     logError('加载子工作区状态失败', e);
+    return {
+      success: false,
+      ready: true,
+      error: String(e?.message || e),
+      ...loadedBlockSummary(),
+    };
   } finally {
     isLoadingWorkspace = false;
     resizeBlockly();
@@ -206,6 +275,31 @@ function resizeBlockly() {
   } catch {}
 }
 
+function syncGuidanceBlockMetadata() {
+  if (!workspace) return;
+  for (const block of workspace.getAllBlocks?.(false) || []) {
+    const root = block.getSvgRoot?.();
+    if (!root) continue;
+    root.setAttribute('data-block-id', String(block.id || ''));
+    root.setAttribute('data-block-type', String(block.type || ''));
+  }
+}
+
+function focusBlock(blockId) {
+  if (!workspace || !blockId) return false;
+  const block = workspace.getBlockById?.(String(blockId));
+  if (!block) return false;
+  syncGuidanceBlockMetadata();
+  try {
+    workspace.centerOnBlock?.(block.id);
+  } catch {}
+  window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
+  return true;
+}
+
+function hasBlock(blockId) {
+  return Boolean(workspace?.getBlockById?.(String(blockId || '')));
+}
 
 function hitTest(clientX, clientY) {
   const rect = blockdiv.value?.getBoundingClientRect?.();
@@ -290,6 +384,7 @@ function addBlock(blockType, clientX, clientY) {
       window.setTimeout(() => { if (validationMessage.value === acceptance.message) validationMessage.value = ''; }, 2400);
       return false;
     }
+    applyRoleVisualStyle(block);
     block.initSvg();
     block.render();
 
@@ -302,6 +397,12 @@ function addBlock(blockType, clientX, clientY) {
     block.moveBy(Math.max(0, x), Math.max(0, y));
     workspace.setSelected?.(block);
     emitChange();
+    emit('block-added', {
+      blockId: String(block.id || ''),
+      blockType: String(block.type || blockType),
+      workspaceRole: props.workspaceRole,
+      interaction: hasScreenPoint ? 'drag' : 'pick',
+    });
     return true;
   } catch (e) {
     logError(`创建积木失败: ${blockType}`, e);
@@ -346,20 +447,53 @@ async function initBlockly() {
     workspace = BlocklyLib.inject(container, config);
     changeListener = (event) => {
       maybeDeleteClickedBlock(event);
+      if (!isLoadingWorkspace) {
+        const blockChangeType = BlocklyLib.Events?.BLOCK_CHANGE || 'change';
+        if (
+          (event?.type === blockChangeType || event?.type === 'change')
+          && event?.element === 'field'
+          && event?.oldValue !== event?.newValue
+        ) {
+          const block = workspace?.getBlockById?.(event.blockId);
+          emit('block-changed', {
+            blockId: String(event.blockId || ''),
+            blockType: String(block?.type || ''),
+            fieldName: String(event.name || ''),
+            workspaceRole: props.workspaceRole,
+          });
+        }
+      }
+      if (props.workspaceRole === 'condition') applyWorkspaceRoleVisualStyles();
+      window.requestAnimationFrame(() => syncGuidanceBlockMetadata());
       emitChange();
       validateWorkspace();
     };
     workspace.addChangeListener(changeListener);
-    loadState(props.initialState);
+    const initialLoad = loadState(props.initialState);
 
     resizeObserver = new ResizeObserver(() => resizeBlockly());
     resizeObserver.observe(container);
     await nextTick();
     resizeBlockly();
-    emit('ready');
+    syncGuidanceBlockMetadata();
+    const readyResult = {
+      success: true,
+      ready: true,
+      initialLoad,
+      ...loadedBlockSummary(),
+    };
+    settleReady(readyResult);
+    emit('ready', readyResult);
   } catch (e) {
     logError('初始化子 Blockly 工作区失败', e);
     loadingLabel.value = '积木工作区加载失败';
+    settleReady({
+      success: false,
+      ready: false,
+      error: String(e?.message || e),
+      blockCount: 0,
+      blockIds: [],
+    });
     return;
   }
   loadingLabel.value = '';
@@ -402,6 +536,11 @@ defineExpose({
   validateWorkspace,
   deleteBlockById,
   resizeBlockly,
+  focusBlock,
+  hasBlock,
+  isReady,
+  whenReady,
+  loadedBlockSummary,
 });
 </script>
 

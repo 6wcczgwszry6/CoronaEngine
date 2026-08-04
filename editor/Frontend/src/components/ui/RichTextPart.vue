@@ -30,7 +30,7 @@
 
         <blockquote
           v-else-if="block.type === 'blockquote'"
-          class="border-l-4 border-[#84A65B] pl-3 py-1 bg-white/50 text-gray-600 rounded-r"
+          class="border-l-4 border-[#D8B86C] pl-3 py-1 bg-white/50 text-gray-600 rounded-r"
           v-html="block.html"
         />
 

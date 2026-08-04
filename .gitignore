@@ -26,6 +26,8 @@ Makefile
 .vs/
 .venv/
 .claude/
+.agents/
+.superpowers/
 codex.md
 AGENTS.md
 implementation.md

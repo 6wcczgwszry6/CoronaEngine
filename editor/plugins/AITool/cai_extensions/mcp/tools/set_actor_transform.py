@@ -47,16 +47,32 @@ def _build_set_actor_transform_tool(scene_manager) -> StructuredTool:
                     overlap_result = resolve_actor_overlaps(actor, obstacles)
                     actor.refresh()
                     updated = actor.data
+            actor_data = updated or actor.data
+            if isinstance(actor_data, dict):
+                actor_data = dict(actor_data)
+                actor_data.setdefault("sync_status", "engine_transformed")
+                actor_data.setdefault("sync_lifecycle_status", "engine_transformed")
+            actor_id = ""
+            if isinstance(actor_data, dict):
+                actor_id = str(
+                    actor_data.get("actor_guid")
+                    or actor_data.get("actor_id")
+                    or actor_data.get("guid")
+                    or ""
+                )
             payload = {
+                "actor_id": actor_id,
                 "actor": actor.name,
                 "position": actor.get_position(),
                 "rotation": actor.get_rotation(),
                 "scale": actor.get_scale(),
                 "bounds_ready": actor.bounds_ready,
+                "sync_status": "engine_transformed",
+                "sync_lifecycle_status": "engine_transformed",
                 "ground_snapped": snap_position is not None,
                 "overlap_resolved": bool(overlap_result and overlap_result.get("changed")),
                 "skipped_reason": skipped_reason,
-                "actor_data": updated or actor.data,
+                "actor_data": actor_data,
             }
             part = build_part(content_type="text", content_text=json.dumps(payload, ensure_ascii=False))
             return build_success_result(parts=[part]).to_envelope(interface_type="scene")

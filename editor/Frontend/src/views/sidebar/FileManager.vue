@@ -5,15 +5,23 @@
     <DockTitleBar
       v-if="!isDocked"
       title="文件管理"
-      extraClass="bg-[#84A65B]"
+      extraClass="bg-[#D8B86C]"
       routePath="/FileManager"
       @close="closeFloat"
     />
 
     <div class="flex items-center gap-2 p-2 bg-[#1a1a1a]/50 border-b border-[#333]">
       <div class="text-[10px] text-gray-400 truncate flex-1">
-        <span class="text-[#84a65b] font-bold">{{ projectName }}</span>
+        <span class="text-[#d8b86c] font-bold">{{ projectName }}</span>
       </div>
+      <button
+        v-if="legacyProject"
+        class="px-2 py-1 text-[10px] rounded bg-[#84a65b] hover:bg-[#95b86c]"
+        title="另存为便携场景"
+        @click="migrateLegacyScene"
+      >
+        另存为便携场景
+      </button>
     </div>
 
     <div class="flex-1 overflow-y-auto custom-scrollbar p-2">
@@ -28,7 +36,7 @@
       />
 
       <div v-else-if="loading" class="flex justify-center items-center h-32">
-        <div class="text-[#84a65b]">加载中...</div>
+        <div class="text-[#d8b86c]">加载中...</div>
       </div>
 
       <div
@@ -48,17 +56,17 @@
     >
       <!-- 文件夹特有菜单 -->
       <template v-if="contextMenu.item?.isDirectory">
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleNewFolder">
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleNewFolder">
           新建文件夹
         </div>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleNewScene">
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleNewScene">
           新建场景
         </div>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleNewActor">
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleNewActor">
           新建单位
         </div>
         <div class="h-[1px] bg-[#333] my-1"></div>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleRename">重命名</div>
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleRename">重命名</div>
         <div
           class="px-4 py-2 hover:bg-red-600 cursor-pointer text-red-400 hover:text-white"
           @click="handleDelete"
@@ -69,9 +77,9 @@
 
       <!-- 文件特有菜单 -->
       <template v-else-if="contextMenu.item">
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleOpenFile">打开</div>
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleOpenFile">打开</div>
         <div class="h-[1px] bg-[#333] my-1"></div>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleRename">重命名</div>
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleRename">重命名</div>
         <div
           class="px-4 py-2 hover:bg-red-600 cursor-pointer text-red-400 hover:text-white"
           @click="handleDelete"
@@ -82,13 +90,13 @@
 
       <!-- 空白区域菜单 -->
       <template v-else>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleNewFolder">
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleNewFolder">
           新建文件夹
         </div>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleNewScene">
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleNewScene">
           新建场景
         </div>
-        <div class="px-4 py-2 hover:bg-[#84a65b] cursor-pointer" @click="handleNewActor">
+        <div class="px-4 py-2 hover:bg-[#d8b86c] cursor-pointer" @click="handleNewActor">
           新建单位
         </div>
       </template>
@@ -100,11 +108,11 @@
       class="fixed inset-0 bg-black/50 flex items-center justify-center z-[200]"
     >
       <div class="bg-[#1e1e1e] border border-[#444] p-4 rounded w-80">
-        <div class="text-[#84a65b] font-bold mb-3">{{ dialog.title }}</div>
+        <div class="text-[#d8b86c] font-bold mb-3">{{ dialog.title }}</div>
         <input
           v-model="dialog.value"
           type="text"
-          class="w-full bg-[#333] border border-[#555] px-3 py-2 text-sm text-white rounded outline-none focus:border-[#84a65b]"
+          class="w-full bg-[#333] border border-[#555] px-3 py-2 text-sm text-white rounded outline-none focus:border-[#d8b86c]"
           :placeholder="dialog.placeholder"
           @keyup.enter="handleDialogConfirm"
         />
@@ -116,7 +124,7 @@
             取消
           </button>
           <button
-            class="px-3 py-1 text-sm bg-[#84a65b] hover:bg-[#6b8a4a] rounded"
+            class="px-3 py-1 text-sm bg-[#d8b86c] hover:bg-[#6b8a4a] rounded"
             @click="handleDialogConfirm"
           >
             确认
@@ -129,7 +137,7 @@
 
 <script setup>
 import { ref, onMounted, nextTick } from 'vue';
-import { fileService } from '@/utils/bridge';
+import { fileService, projectLauncherService } from '@/utils/bridge';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import FileTreeNode from '@/components/ui/FileTreeNode.vue';
@@ -139,6 +147,7 @@ const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const projectName = ref('Corona Project');
 const fileTree = ref({ children: [] });
 const loading = ref(false);
+const legacyProject = ref(window.localStorage?.getItem('corona.activeProjectLegacy') === 'true');
 const contextMenu = ref({ show: false, x: 0, y: 0, item: null });
 const dialog = ref({
   show: false,
@@ -148,6 +157,31 @@ const dialog = ref({
   type: '', // 'newFolder', 'newScene', 'newActor', 'rename'
   targetPath: '',
 });
+
+const migrateLegacyScene = async () => {
+  const sourcePath = window.localStorage?.getItem('corona.activeProjectPath') || '';
+  if (!sourcePath) return;
+  const selected = await projectLauncherService.choosePortableSceneTarget();
+  const targetPath = selected?.data ?? selected;
+  if (!targetPath) return;
+  const result = await projectLauncherService.migrateLegacyScene({
+    sourcePath,
+    targetPath,
+    sceneName: projectName.value || 'PortableScene',
+  });
+  const migrated = result?.data ?? result;
+  if (!migrated?.ok) {
+    const details = (migrated?.diagnostics || [])
+      .map((item) => `${item.actor || 'scene'}: ${item.path} — ${item.message}`)
+      .join('\n');
+    window.alert(`迁移失败：\n${details}`);
+    return;
+  }
+  legacyProject.value = false;
+  window.localStorage?.setItem('corona.activeProjectLegacy', 'false');
+  window.localStorage?.setItem('corona.activeProjectPath', migrated.path);
+  await loadFileTree();
+};
 
 // 加载文件树
 const loadFileTree = async () => {
@@ -353,6 +387,6 @@ onMounted(() => {
   border-radius: 10px;
 }
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

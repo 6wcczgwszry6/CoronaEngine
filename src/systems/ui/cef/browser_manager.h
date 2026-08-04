@@ -68,6 +68,8 @@ struct BrowserTab {
     // draggable by its title bar within the main window. Distinct from host_surface detach
     // (own OS window), which is disabled pending the multi-surface fix.
     bool floating = false;
+    // Higher values are composed and hit-tested above ordinary floating panels.
+    int z_priority = 0;
 
     bool open = true;
     bool minimized = false;  // 新增：是否最小化

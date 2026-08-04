@@ -386,7 +386,7 @@ void BindAll(nanobind::module_& m) {
         .def("save_screenshot_sync", &Camera::save_screenshot_sync, nb::arg("path"),
              "Save a screenshot and block until it completes. Returns True on success.")
         .def("set_output_mode", &Camera::set_output_mode, nb::arg("mode"),
-             "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id', 'visibility_buffer', 'ssao'")
+             "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id', 'visibility_buffer', 'ssao_raw', 'ssao', 'shadow_mask_raw', 'shadow_mask'")
         .def("get_output_mode", &Camera::get_output_mode,
              "Get current camera output mode as string")
         .def("set_render_backend", &Camera::set_render_backend, nb::arg("mode"))
@@ -730,6 +730,23 @@ void BindAll(nanobind::module_& m) {
             item["room_id"] = event->room_id;
             return nb::object(item);
         }, "Pop one LANChat room lifecycle event for Python scheduler/Coordinator cleanup.");
+
+        m.def("network_pop_lanchat_sync_event", []() -> nb::object {
+            auto sys = get_network_system();
+            if (!sys) {
+                return nb::none();
+            }
+            auto event = sys->lanchat_pop_sync_event();
+            if (!event.has_value()) {
+                return nb::none();
+            }
+            nb::dict item;
+            item["channel"] = "lanchat_sync";
+            item["event"] = event->event;
+            item["room_id"] = event->room_id;
+            item["payload_json"] = event->payload_json;
+            return nb::object(item);
+        }, "Pop one LANChat actor/asset sync fact for AgentRuntime reconciliation.");
 
 		    m.def("network_lanchat_history_snapshot", [](int limit) -> nb::list {
 	        nb::list history;

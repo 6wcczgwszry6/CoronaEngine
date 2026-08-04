@@ -228,6 +228,9 @@ enum class CameraOutputMode : uint8_t {
     ObjectID,
     VisibilityBuffer,
     SSAO,
+    SSAORaw,
+    ShadowMaskRaw,
+    ShadowMask,
 };
 
 enum class CameraRenderBackend : uint8_t {

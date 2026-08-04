@@ -1660,6 +1660,7 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             std::string route = command.value("routePath", "");
             int width = command.value("width", 400);
             int height = command.value("height", 600);
+            int z_priority = command.value("zPriority", 0);
             std::string docking_pos = command.value("dockingPos", "right_top");
             if (docking_pos != "right_top" &&
                 docking_pos != "right_bottom" &&
@@ -1679,12 +1680,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             // Phase 10: a popped-out panel is an in-main-window floating, draggable rectangle.
             // Seed an initial position from its anchor so multiple pop-outs don't stack at 0,0;
             // the user can then drag it by its title bar. Done on the UI thread.
-            bm.enqueue_main_thread_task([tab_id, docking_pos, width, height] {
+            bm.enqueue_main_thread_task([tab_id, docking_pos, width, height, z_priority] {
                 auto* tab = BrowserManager::instance().get_tab(tab_id);
                 if (!tab) {
                     return;
                 }
                 tab->floating = true;
+                tab->z_priority = z_priority;
                 // Spread anchors a bit so default panels are visible and not overlapping.
                 int ix = 80;
                 int iy = 80;

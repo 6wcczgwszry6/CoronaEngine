@@ -21,6 +21,7 @@ _active_transaction: ContextVar[Optional["_TransactionState"]] = ContextVar(
     default=None,
 )
 _preserved_entries_by_key: dict[str, list["_QueuedActorCreate"]] = {}
+_published_actor_create_ids: set[str] = set()
 _sync_pause_depth = 0
 _DEFAULT_TRANSACTION_KEY = "__default__"
 _AI_SCENE_FRAMEWORK_SYNC_NAMES = {
@@ -184,6 +185,13 @@ def publish_actor_created(
     _emit_actor_create(actor, prepare, emit)
 
 
+def _actor_create_identity_key(actor: object) -> str:
+    parent = getattr(actor, "parent", None)
+    scene = str(getattr(parent, "route", "") or getattr(parent, "name", "") or "")
+    actor_guid = str(getattr(actor, "actor_guid", "") or "")
+    return f"{scene}:{actor_guid}" if scene and actor_guid else ""
+
+
 def set_engine_sync_paused(paused: bool) -> None:
     """Best-effort request for the frontend Network bridge to pause dirty sync."""
     global _sync_pause_depth
@@ -334,6 +342,12 @@ def _emit_actor_create(
     prepare: Optional[PrepareActorCreate],
     emit: EmitActorCreate,
 ) -> None:
+    identity_key = _actor_create_identity_key(actor)
+    if identity_key:
+        with _lock:
+            if identity_key in _published_actor_create_ids:
+                logger.debug("Actor create network sync deduped: key=%s", identity_key)
+                return
     if prepare is not None:
         prepare(actor)
     actor_data = actor.to_dict()
@@ -342,11 +356,15 @@ def _emit_actor_create(
         _log_filtered_actor_create(reason, actor, actor_data)
         return
     emit(actor_data)
+    if identity_key:
+        with _lock:
+            _published_actor_create_ids.add(identity_key)
 
 
 def reset_for_tests() -> None:
-    global _preserved_entries_by_key, _sync_pause_depth
+    global _preserved_entries_by_key, _published_actor_create_ids, _sync_pause_depth
     with _lock:
         _active_transaction.set(None)
         _preserved_entries_by_key = {}
+        _published_actor_create_ids = set()
         _sync_pause_depth = 0

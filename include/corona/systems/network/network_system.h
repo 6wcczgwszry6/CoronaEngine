@@ -57,6 +57,12 @@ public:
         std::string room_id;
     };
 
+    struct LanChatSyncEvent {
+        std::string event;
+        std::string room_id;
+        std::string payload_json;
+    };
+
     NetworkSystem();
     ~NetworkSystem() override;
 
@@ -187,6 +193,7 @@ public:
     [[nodiscard]] std::optional<Network::LanChatAgentTrigger> lanchat_pop_agent_trigger();
     [[nodiscard]] std::optional<Network::LanChatMessage> lanchat_pop_coordinator_sync_message();
     [[nodiscard]] std::optional<LanChatRoomEvent> lanchat_pop_room_event();
+    [[nodiscard]] std::optional<LanChatSyncEvent> lanchat_pop_sync_event();
 
     Network::LanChatResult lanchat_lock_object(const std::string& object_id,
                                                const std::string& user_id,
@@ -330,6 +337,8 @@ private:
     bool is_message_from_connected_host(const std::string& sender_peer_id) const;
     bool send_to_connected_host_peer(const std::vector<uint8_t>& packet);
     void notify_lanchat_room_closed();
+    void enqueue_lanchat_sync_event(const std::string& event,
+                                    const std::string& payload_json);
     void clear_lanchat_room_state();
     void persist_lanchat_message(const Network::LanChatMessage& message);
     void persist_lanchat_agents(const std::string& room_id);

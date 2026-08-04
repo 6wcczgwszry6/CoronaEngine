@@ -2649,22 +2649,19 @@ class SceneComposer:
         # 仍需兜底围合——box 是那个万能退化围合。无圆模型后方盒单独存在不撕裂。
         degraded = self._degrade_failed_shells_to_box(set(shell_failed_gen)) if shell_failed_gen else []
 
-        # 突击方案接入：渐进式工作流默认开启；如需回退旧清场式路径，
-        # 显式设置 USE_PROGRESSIVE_COMPOSE=0。
-        use_progressive = os.getenv("USE_PROGRESSIVE_COMPOSE", "1") != "0"
+        # Agent-native migration: compose() no longer honors the old
+        # environment escape hatch.  The legacy clear-and-import
+        # workflow remains in this file for historical comparison and later
+        # A/B/C/D classification, but user/runtime entry must not route to it.
         emit_stage(62, "开始组装场景", "会先放主体和场地，再把物件摆到合理位置。")
-        if use_progressive:
-            from .scene_composer_progressive import run_progressive_workflow
-            result = run_progressive_workflow(self, generation_text, furniture, items, do_import,
-                                              reviews=reviews,
-                                              progress_sink=progress_sink,
-                                              interaction_coordinator=interaction_coordinator,
-                                              room_id=room_id,
-                                              plan_id=plan_id,
-                                              session_id=session_id)
-        else:
-            result = self._run_original_workflow(generation_text, furniture, items, do_import,
-                                                  reviews=reviews)
+        from .scene_composer_progressive import run_progressive_workflow
+        result = run_progressive_workflow(self, generation_text, furniture, items, do_import,
+                                          reviews=reviews,
+                                          progress_sink=progress_sink,
+                                          interaction_coordinator=interaction_coordinator,
+                                          room_id=room_id,
+                                          plan_id=plan_id,
+                                          session_id=session_id)
 
         result["extracted_count"] = extracted_total
         result["truncated"] = truncated

@@ -57,6 +57,7 @@ class CoronaEngineConan(ConanFile):
         self.requires("vulkan-memory-allocator/3.4.0", transitive_headers=True)
         self.requires("quill/11.0.2", transitive_headers=True, transitive_libs=True)
         self.requires("slang/2026.10", transitive_headers=True, transitive_libs=True)
+        self.requires("tracy/0.13.1", options={"on_demand": True})
         self.requires("assimp/5.4.3", transitive_headers=True, transitive_libs=True)
         self.requires("stb/cci.20230920", transitive_headers=True)
         self.requires("nanobind/2.9.2", transitive_headers=True, transitive_libs=True)

@@ -1,10 +1,6 @@
+include(windows-msvc-base)
+
 [settings]
-os=Windows
-arch=x86_64
-compiler=msvc
-compiler.version=194
-compiler.cppstd=20
-compiler.runtime=dynamic
 compiler.runtime_type=Release
 build_type=RelWithDebInfo
 
@@ -12,6 +8,3 @@ build_type=RelWithDebInfo
 *:shared=False
 ffmpeg/*:shared=True
 hwloc/*:shared=True
-
-[conf]
-tools.cmake.cmaketoolchain:generator=Ninja Multi-Config

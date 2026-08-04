@@ -149,6 +149,6 @@ onMounted(apply);
 
 .lfd-calib__reset:hover {
   background: #353535;
-  border-color: #84a65b;
+  border-color: #d8b86c;
 }
 </style>

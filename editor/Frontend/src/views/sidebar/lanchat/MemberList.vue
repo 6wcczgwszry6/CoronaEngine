@@ -30,11 +30,11 @@
       </button>
     </div>
     <button
-      class="mx-1 mt-1 flex w-[calc(100%-0.5rem)] items-center gap-1.5 rounded border border-dashed border-[#84A65B]/45 px-2 py-1.5 text-left text-xs text-[#B8D58D] hover:border-[#84A65B] hover:bg-[#84A65B]/10"
+      class="mx-1 mt-1 flex w-[calc(100%-0.5rem)] items-center gap-1.5 rounded border border-dashed border-[#D8B86C]/45 px-2 py-1.5 text-left text-xs text-[#d8b86c] hover:border-[#D8B86C] hover:bg-[#D8B86C]/10"
       title="添加 AI 助手"
       @click="$emit('add-agent')"
     >
-      <span class="inline-flex h-4 w-4 items-center justify-center rounded bg-[#84A65B]/20 text-[13px] leading-none">+</span>
+      <span class="inline-flex h-4 w-4 items-center justify-center rounded bg-[#D8B86C]/20 text-[13px] leading-none">+</span>
       <span class="truncate">添加助手</span>
     </button>
   </div>

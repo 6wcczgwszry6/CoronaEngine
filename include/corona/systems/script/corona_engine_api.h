@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -15,6 +16,16 @@ namespace Corona {
 class Model;
 
 namespace API {
+struct GeometryRenderStatus {
+    bool observed{false};
+    bool ready{false};
+    bool failed{false};
+    std::string gpu_build_state{"Unavailable"};
+    std::size_t mesh_count{0};
+    std::size_t renderable_mesh_count{0};
+    std::size_t invalid_mesh_count{0};
+};
+
 // ============================================================================
 // UI 侧可设置当前默认显示 surface（例如 SDL 原生窗口句柄）。
 // ============================================================================
@@ -62,6 +73,7 @@ class Geometry {
     [[nodiscard]] std::string get_gpu_build_state() const;
     [[nodiscard]] std::size_t get_mesh_count() const;
     [[nodiscard]] std::uint64_t get_model_id() const;
+    [[nodiscard]] GeometryRenderStatus get_render_status() const;
 
    private:
     friend class Mechanics;

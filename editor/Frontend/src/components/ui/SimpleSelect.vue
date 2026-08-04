@@ -99,7 +99,7 @@ onBeforeUnmount(() => {
   background: #555;
 }
 .select-option.selected {
-  background: #84a65b;
+  background: #d8b86c;
   color: white;
 }
 </style>

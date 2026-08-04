@@ -492,7 +492,7 @@ onUnmounted(() => {
   flex-direction: column;
   overflow: hidden;
   border-radius: 14px;
-  border: 2px solid #84a65b;
+  border: 2px solid #d8b86c;
   box-shadow: -8px 0 40px rgba(0, 0, 0, 0.4);
   contain: layout style paint;
 }
