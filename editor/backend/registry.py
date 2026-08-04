@@ -1,5 +1,6 @@
 import logging
 import inspect
+import sys
 import threading
 import time
 from importlib import import_module
@@ -27,6 +28,72 @@ CORE_PYTHON_SCRIPT_SERVICES = {"ProjectArchive"}
 LAZY_PYTHON_SCRIPT_SERVICES = {"AITool"}
 _managed_services = []
 _registry_shutdown_requested = threading.Event()
+_initializer_monitor_lock = threading.Lock()
+_initializer_monitor_targets = {}
+_initializer_monitor_tool_id = None
+
+
+class _ServiceInitializationCancelled(BaseException):
+    """Internal cooperative cancellation that ordinary import handlers do not swallow."""
+
+
+def _initializer_cancel_monitor(code, line):
+    del code, line
+    thread_id = threading.get_ident()
+    stop_token = _initializer_monitor_targets.get(thread_id)
+    if stop_token is not None and stop_token.is_set():
+        # Monitoring callbacks can run while registry management code owns its
+        # lock. The mapping itself is protected by the GIL, so do not re-enter
+        # the non-recursive management mutex here.
+        _initializer_monitor_targets.pop(thread_id, None)
+        raise _ServiceInitializationCancelled()
+
+
+def _install_initializer_cancel_monitor(thread_id, stop_token):
+    global _initializer_monitor_tool_id
+    if thread_id is None or not hasattr(sys, "monitoring"):
+        return
+    install = False
+    tool_id = None
+    with _initializer_monitor_lock:
+        _initializer_monitor_targets[thread_id] = stop_token
+        if _initializer_monitor_tool_id is None:
+            for candidate in range(5, -1, -1):
+                if sys.monitoring.get_tool(candidate) is None:
+                    tool_id = candidate
+                    _initializer_monitor_tool_id = candidate
+                    install = True
+                    break
+    if install:
+        try:
+            sys.monitoring.use_tool_id(tool_id, "corona-service-shutdown")
+            sys.monitoring.register_callback(
+                tool_id, sys.monitoring.events.LINE, _initializer_cancel_monitor)
+            sys.monitoring.set_events(tool_id, sys.monitoring.events.LINE)
+        except Exception:
+            with _initializer_monitor_lock:
+                _initializer_monitor_targets.pop(thread_id, None)
+                if _initializer_monitor_tool_id == tool_id:
+                    _initializer_monitor_tool_id = None
+            try:
+                sys.monitoring.free_tool_id(tool_id)
+            except Exception:
+                pass
+            logger.exception("Unable to install Python service cancellation monitor")
+
+
+def _remove_initializer_cancel_monitor(thread_id):
+    global _initializer_monitor_tool_id
+    tool_id = None
+    with _initializer_monitor_lock:
+        _initializer_monitor_targets.pop(thread_id, None)
+        if _initializer_monitor_tool_id is not None and not _initializer_monitor_targets:
+            tool_id = _initializer_monitor_tool_id
+            _initializer_monitor_tool_id = None
+    if tool_id is not None:
+        sys.monitoring.set_events(tool_id, 0)
+        sys.monitoring.register_callback(tool_id, sys.monitoring.events.LINE, None)
+        sys.monitoring.free_tool_id(tool_id)
 
 
 class PythonScriptService:
@@ -70,6 +137,7 @@ class LazyPythonScriptService:
         self._initialization_finished = threading.Event()
         self._stop_requested = threading.Event()
         self._worker = None
+        self._worker_ident = None
         self._cleaned = False
 
     @property
@@ -100,7 +168,13 @@ class LazyPythonScriptService:
         return self._initialization_finished.wait(timeout)
 
     def _load_target(self):
+        worker_ident = threading.get_ident()
+        module = None
+        with self._state_lock:
+            self._worker_ident = worker_ident
         try:
+            if self._stop_requested.is_set():
+                raise _ServiceInitializationCancelled()
             module = import_module(self._module_path)
             initializer = getattr(module, "initialize_script_service", None)
             if callable(initializer):
@@ -122,6 +196,12 @@ class LazyPythonScriptService:
                 "Python script service %s initialized in background",
                 self.module_name,
             )
+        except _ServiceInitializationCancelled:
+            target = getattr(module, self._class_name, None) if module is not None else None
+            if target is not None:
+                self._cleanup_target(target)
+            with self._state_lock:
+                self._state = "stopped"
         except Exception as error:
             with self._state_lock:
                 self._initialization_error = error
@@ -133,6 +213,9 @@ class LazyPythonScriptService:
                 self._class_name,
             )
         finally:
+            _remove_initializer_cancel_monitor(worker_ident)
+            with self._state_lock:
+                self._worker_ident = None
             self._initialization_finished.set()
 
     def _cleanup_target(self, target):
@@ -150,6 +233,7 @@ class LazyPythonScriptService:
         self._stop_requested.set()
         with self._state_lock:
             target = self._target
+            worker_ident = self._worker_ident
             if self._state == "cold":
                 self._state = "stopped"
                 self._initialization_finished.set()
@@ -158,6 +242,8 @@ class LazyPythonScriptService:
         callback = getattr(target, "request_shutdown", None) if target is not None else None
         if callable(callback):
             callback()
+        if worker_ident is not None:
+            _install_initializer_cancel_monitor(worker_ident, self._stop_requested)
 
     def shutdown(self, timeout=2.0):
         self.request_shutdown()

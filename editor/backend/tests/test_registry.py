@@ -179,7 +179,9 @@ class PythonScriptServiceRegistryTests(unittest.TestCase):
 
         self.assertEqual(service.state, "stopped")
         self.assertIsNone(service.target)
-        self.assertEqual(cleanup_calls, ["cleanup"])
+        # Cancellation happened before import_service returned the module, so
+        # the service never took ownership of its target and must not clean it.
+        self.assertEqual(cleanup_calls, [])
         self.assertFalse(snapshot["thread_alive"])
 
     def test_lazy_service_passes_stop_token_to_cooperative_initializer(self):
@@ -205,6 +207,26 @@ class PythonScriptServiceRegistryTests(unittest.TestCase):
         self.assertEqual(snapshot["state"], "stopped")
         self.assertFalse(snapshot["thread_alive"])
         self.assertEqual(cleanup_calls, ["cleanup"])
+
+    def test_lazy_service_shutdown_cancels_python_module_import(self):
+        registry = self._load_registry()
+        import_started = threading.Event()
+
+        def import_service(_module_path):
+            import_started.set()
+            value = 0
+            while True:
+                value += 1
+
+        service = registry.LazyPythonScriptService("AITool", "services.ai", "AITool")
+        with patch.object(registry, "import_module", side_effect=import_service):
+            service.start_background_load()
+            self.assertTrue(import_started.wait(1.0))
+            snapshot = service.shutdown(1.0)
+
+        self.assertEqual(snapshot["state"], "stopped")
+        self.assertFalse(snapshot["thread_alive"])
+        self.assertEqual(snapshot["error"], "")
 
     def test_registered_services_shutdown_in_reverse_order(self):
         registry = self._load_registry()
