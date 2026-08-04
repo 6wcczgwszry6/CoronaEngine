@@ -3065,7 +3065,6 @@ onMounted(async () => {
   // floating tab left by the previous project before resetting the shortcut state.
   for (const panelId of [
     ...dockShortcuts.map((item) => item.id),
-    'AITalkBar',
     'SceneDatas',
     'CabbageChatPanel',
   ]) {

@@ -6,7 +6,6 @@ import SceneBar from '../views/sidebar/SceneBar.vue';
 import ObjectPanel from '../views/sidebar/Object.vue';
 import LogView from '../views/sidebar/LogView.vue';
 import FileManager from '../views/sidebar/FileManager.vue';
-import AITalkBar from '../views/sidebar/AITalkBar.vue';
 import NodeGraphPanel from '../views/sidebar/NodeGraphPanel.vue';
 import CabbageChatPanel from '../views/sidebar/CabbageChatPanel.vue';
 import Pet from '../views/tools/Pet.vue';
@@ -41,11 +40,6 @@ const routes = [
     path: '/RecentGames',
     name: 'RecentGames',
     component: () => import('../views/layout/RecentGames.vue'),
-  },
-  {
-    path: '/AITalkBar',
-    name: 'AITalkBar',
-    component: AITalkBar,
   },
   {
     path: '/SceneBar',

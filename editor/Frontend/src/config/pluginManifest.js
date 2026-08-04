@@ -8,7 +8,6 @@ import Pet from '@/views/tools/Pet.vue';
 import LogView from '@/views/sidebar/LogView.vue';
 import FileManager from '@/views/sidebar/FileManager.vue';
 import ProjectSettings from '@/views/sidebar/ProjectSettings.vue';
-import AITalkBar from '@/views/sidebar/AITalkBar.vue';
 import NodeGraphPanel from '@/views/sidebar/NodeGraphPanel.vue';
 import CabbageChatPanel from '@/views/sidebar/CabbageChatPanel.vue';
 import EditorSettings from '@/views/sidebar/EditorSettings.vue';
@@ -110,22 +109,6 @@ export const PLUGIN_MANIFEST = [
     defaultHeight: 800,
     autoInit: false,
     component: ProjectSettings,
-  },
-  {
-    id: 'AITalkBar',
-    routePath: '/AITalkBar',
-    displayNameKey: 'plugins.AITalkBar',
-    displayName: 'AI 对话',
-    pageType: 'plugin',
-    defaultDock: 'right',
-    defaultWidth: 400,
-    defaultHeight: 720,
-    autoInit: false,
-    defaultOpenMode: 'docked',
-    defaultFloatPosition: 'left_bottom',
-    minFloatWidth: 320,
-    minFloatHeight: 360,
-    component: AITalkBar,
   },
   {
     id: 'NodeGraphPanel',

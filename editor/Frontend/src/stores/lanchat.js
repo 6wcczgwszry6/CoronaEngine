@@ -4,10 +4,9 @@
  * 项目未使用 Pinia，这里用 Vue reactive 提供一个模块级单例，行为类似 store：
  * - 持有连接态、房间信息、成员、消息列表。
  * - 提供 open/join/leave/send 等动作（封装 lanChatService 调用）。
- * - 暴露 handleEvent(event) 供 AITalkBar 的 receiveAIMessageChunk 在
- *   channel === 'lanchat' 时分流调用，更新本 store。
+ * - 暴露 handleEvent(event) 供应用根组件的 LANChat 事件订阅调用，更新本 store。
  *
- * 不直接监听 window 回调；由 AITalkBar 统一分流，避免与 AI 流式回调争用。
+ * 不直接监听 window 回调；由应用根组件统一分流，避免重复订阅。
  */
 import { reactive, readonly } from 'vue';
 import { lanChatService, networkService } from '../utils/bridge.js';
@@ -754,7 +753,7 @@ async function removeAgent(agentId) {
   return { ok: true };
 }
 
-// ---- 事件分流（由 AITalkBar 调用）----------------------------------------
+// ---- 事件分流（由应用根组件调用）----------------------------------------
 
 /**
  * 处理来自 C++ NetworkSystem 的聊天室事件（channel === 'lanchat'）。

@@ -431,10 +431,7 @@ async function openChat(task) {
   dockStore.popIn(panelId);
   dockStore.setDockZone(panelId, 'right');
   dockStore.openPanel(panelId);
-  const rightIds = dockStore.panelsByZone('right').map((item) => item.id).filter((id) => id !== panelId);
-  const aiTalkIndex = rightIds.indexOf('AITalkBar');
-  const beforeId = aiTalkIndex >= 0 ? (rightIds[aiTalkIndex + 1] || null) : null;
-  dockStore.movePanel(panelId, 'right', beforeId);
+  dockStore.movePanel(panelId, 'right', null);
   window.dispatchEvent(new Event('resize'));
 }
 
