@@ -25,6 +25,7 @@ class CoronaEditor:
     _runtime_started = False
     _last_runtime_warning = {}
     _shutdown_snapshot = None
+    _runtime_watchdog_error_logged = False
 
     @classmethod
     def _dispatch_script_request(cls, json_str):
@@ -550,10 +551,17 @@ class CoronaEditor:
     def _arm_runtime_watchdog(cls):
         import faulthandler
 
-        if not faulthandler.is_enabled() or cls._shutdown_requested:
+        if cls._shutdown_requested:
             return
-        faulthandler.cancel_dump_traceback_later()
-        faulthandler.dump_traceback_later(2.0, repeat=False)
+        try:
+            if not faulthandler.is_enabled():
+                faulthandler.enable(all_threads=True)
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(2.0, repeat=False)
+        except Exception:
+            if not cls._runtime_watchdog_error_logged:
+                logger.exception("Unable to arm Python runtime watchdog")
+                cls._runtime_watchdog_error_logged = True
 
     @classmethod
     def _update_runtime_impl(cls):
