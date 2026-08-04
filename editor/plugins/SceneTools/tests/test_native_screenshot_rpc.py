@@ -1463,16 +1463,6 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             / "sidebar"
             / "Network.vue"
         ).read_text(encoding="utf-8")
-        room_panel_source = (
-            self._repo_root()
-            / "editor"
-            / "Frontend"
-            / "src"
-            / "views"
-            / "sidebar"
-            / "lanchat"
-            / "RoomPanel.vue"
-        ).read_text(encoding="utf-8")
         event_bus_source = (
             self._repo_root()
             / "editor"
@@ -1497,11 +1487,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "editorApi.events.onNetworkActorSyncBroadcastRequested(onNetworkActorSyncBroadcastRequested)",
             network_source,
         )
-        self.assertIn("onNetworkActorSyncBroadcastRequested(handleActorSyncBroadcast)", room_panel_source)
         self.assertIn("editorApi.off(networkActorSyncBroadcastCallbackToken)", network_source)
-        self.assertIn("editorApi.off(actorSyncBroadcastCallbackToken)", room_panel_source)
-        self.assertNotIn("coronaEventBus.on('actor-sync-broadcast'", network_source + room_panel_source)
-        self.assertNotIn("coronaEventBus.off('actor-sync-broadcast'", network_source + room_panel_source)
+        self.assertNotIn("coronaEventBus.on('actor-sync-broadcast'", network_source)
+        self.assertNotIn("coronaEventBus.off('actor-sync-broadcast'", network_source)
         self.assertNotIn("event === 'actor-sync-broadcast'", event_bus_source)
 
     def test_network_actor_mutation_broadcasts_are_cpp_defined_events(self):
@@ -1741,20 +1729,20 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertNotIn("__coronaEmit('lanchat-event')", bridge_source)
 
     def test_lanchat_frontend_consumer_uses_cpp_defined_event_wrapper(self):
-        ai_talk_source = (
+        app_source = (
             self._repo_root()
             / "editor"
             / "Frontend"
             / "src"
-            / "views"
-            / "sidebar"
-            / "AITalkBar.vue"
+            / "App.vue"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("editorApi.events.onLanChatEvent(onLanchatEvent)", ai_talk_source)
-        self.assertIn("editorApi.off(lanChatEventCallbackToken)", ai_talk_source)
-        self.assertNotIn("coronaEventBus.on('lanchat-event'", ai_talk_source)
-        self.assertNotIn("coronaEventBus.off('lanchat-event'", ai_talk_source)
+        self.assertIn("editorApi.events.onLanChatEvent(onLanChatEvent)", app_source)
+        self.assertIn("lanchat.handleEvent(payload)", app_source)
+        self.assertIn("if (!isStandalonePanel.value)", app_source)
+        self.assertIn("editorApi.off(callbackToken)", app_source)
+        self.assertNotIn("coronaEventBus.on('lanchat-event'", app_source)
+        self.assertNotIn("coronaEventBus.off('lanchat-event'", app_source)
 
     def test_realtime_focus_and_pick_events_are_defined_and_emitted_by_cpp_callback_registry(self):
         source = self._editor_api_source()

@@ -293,6 +293,7 @@
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
             : 'border-green-500/50 text-green-200 bg-green-700/20 hover:bg-green-600/30'"
           :disabled="previewRunning || previewBusy"
+          data-guidance="preview-start"
           title="开始项目预览"
           @click="handleStartGamePreview"
         >
@@ -304,6 +305,7 @@
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
             : 'border-red-500/50 text-red-200 bg-red-700/20 hover:bg-red-600/30'"
           :disabled="!previewRunning || previewBusy"
+          data-guidance="preview-stop"
           title="结束项目预览"
           @click="handleStopGamePreview"
         >
@@ -322,6 +324,8 @@
       :class="{ 'viewport-cursor-hidden': nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' }"
       :style="nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
       data-viewport-pick-surface
+      data-guidance="main-viewport"
+      @focus="handleViewportFocus"
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
@@ -365,7 +369,8 @@
               type="number"
               step="0.1"
               :disabled="!sceneLightSettings.enabled || sceneLightBusy"
-              @change="updateSceneLight"
+              :data-guidance="axis === 'x' ? 'scene-light-x' : undefined"
+              @change="updateSceneLight(axis)"
             />
           </label>
         </div>
@@ -515,8 +520,9 @@
           pending: dockShortcutPending.has(shortcut.id),
         }"
         :aria-busy="dockShortcutPending.has(shortcut.id)"
+        :data-guidance="shortcut.id === 'SceneTools' ? 'scene-shortcut' : 'node-shortcut'"
         :title="`${isShortcutOpen(shortcut.id) ? '关闭' : '打开'}${shortcut.label}`"
-        @click.stop="toggleDockShortcut(shortcut.id)"
+        @click.stop="toggleDockShortcut(shortcut.id, { source: 'user' })"
       >
         <span class="dock-shortcut-icon">{{ shortcut.icon }}</span>
         <span>{{ shortcut.label }}</span>
@@ -594,6 +600,7 @@ import {
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 import { cancelActiveNodeGraphGeneration } from '@/services/nodeGraphGenerationService.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
+import { closeTutorialSessionChannel } from '@/services/cabbageTutorialSessionService.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
@@ -643,11 +650,20 @@ const detachResidentCabbageChat = async () => {
   }
 };
 
-const toggleDockShortcut = async (id) => {
+const recordPanelOpened = (id, source = 'user') => cabbageContextService.recordEvent({
+  type: 'panel_opened',
+  category: 'panel',
+  success: true,
+  details: { panelId: id, source },
+});
+
+const toggleDockShortcut = async (id, { source = 'user' } = {}) => {
+  const wasOpen = Boolean(dockStore.panels[id]?.open);
   if (id === 'NodeGraphPanel') {
     dockShortcutPending.add(id);
     try {
       await toggleFloatingPanel(dockStore, id);
+      if (!wasOpen && dockStore.panels[id]?.open) void recordPanelOpened(id, source);
     } finally {
       dockShortcutPending.delete(id);
     }
@@ -666,6 +682,7 @@ const toggleDockShortcut = async (id) => {
     return;
   }
   openDockedPanel(id);
+  if (!wasOpen && dockStore.panels[id]?.open) void recordPanelOpened(id, source);
 };
 const handleNodeGraphPanelOpenRequest = async () => {
   // AI generation must use the same centered in-editor floating surface as the
@@ -753,6 +770,17 @@ const mouseRotate = reactive({
   active: false,
   lastX: 0,
   lastY: 0,
+  startForward: null,
+  moved: false,
+});
+const cameraMovementGestures = new Map();
+const movementAxisGroups = Object.freeze({
+  w: 'forward_back',
+  s: 'forward_back',
+  a: 'left_right',
+  d: 'left_right',
+  q: 'up_down',
+  e: 'up_down',
 });
 
 const MAX_CAMERA_VIEWPORT_RENDER_PIXELS = 1920 * 1080;
@@ -1020,6 +1048,7 @@ const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
 const previewDetails = ref({});
+let tutorialPreviewObservedRunning = false;
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
@@ -1454,7 +1483,7 @@ const syncSceneCameraBinding = async (sceneId, { preservePose = false } = {}) =>
   }
 };
 
-const updateSceneLight = async () => {
+const updateSceneLight = async (axis = '') => {
   if (sceneLightBusy.value) return false;
   const sceneId = cameraBindingState.value.sceneId
     || tabs.value[activeTab.value]?.id
@@ -1471,7 +1500,12 @@ const updateSceneLight = async () => {
       type: 'lighting_changed',
       category: 'lighting',
       success: true,
-      details: { sceneName: sceneId },
+      details: {
+        sceneName: sceneId,
+        axis: String(axis || '').toLowerCase(),
+        value: axis ? Number(direction[axis]) || 0 : undefined,
+        source: 'property_panel',
+      },
     });
     return true;
   } catch (error) {
@@ -1535,6 +1569,10 @@ const sendScratchPointerEvent = (type, event, pickedActor = '') => {
     pickedActor || ''
   ).catch(() => {});
 };
+const vectorDistance = (left = [], right = []) => Math.sqrt(
+  left.reduce((sum, value, index) => sum + ((Number(value) || 0) - (Number(right[index]) || 0)) ** 2, 0)
+);
+
 const handleWheel = (event) => {
   sendScratchPointerEvent('wheel', event);
   if (isGamePreviewInputLocked()) return;
@@ -1546,8 +1584,27 @@ const handleWheel = (event) => {
     event.preventDefault();
     return;
   }
+  const before = [...cameraState.value.position];
   const direction = event.deltaY > 0 ? 'backward' : 'forward';
   handleCameraMove(direction);
+  const actualDelta = vectorDistance(before, cameraState.value.position);
+  if (actualDelta > 1e-6) {
+    void cabbageContextService.recordEvent({
+      type: 'camera_moved',
+      category: 'camera',
+      success: true,
+      details: { interaction: 'wheel', actualDelta },
+    });
+  }
+};
+
+const handleViewportFocus = () => {
+  void cabbageContextService.recordEvent({
+    type: 'viewport_focused',
+    category: 'viewport',
+    success: true,
+    details: { source: 'user' },
+  });
 };
 
 const focusViewportInput = () => {
@@ -1586,6 +1643,9 @@ const handleKeyDown = (event) => {
   if (movementKeys[key] !== undefined) {
     event.preventDefault();
     if (!movementKeys[key]) {
+      if (movementAxisGroups[key]) {
+        cameraMovementGestures.set(key, [...cameraState.value.position]);
+      }
       // A project/scene reload recreates native cameras and invalidates their old
       // handles. Refresh once when a new movement gesture starts instead of
       // continuing to publish WASD/QE updates to a released camera.
@@ -1614,6 +1674,20 @@ const handleKeyUp = (event) => {
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
     movementKeys[key] = false;
+    const gestureStart = cameraMovementGestures.get(key);
+    cameraMovementGestures.delete(key);
+    const axisGroup = movementAxisGroups[key];
+    if (gestureStart && axisGroup) {
+      const actualDelta = vectorDistance(gestureStart, cameraState.value.position);
+      if (actualDelta > 1e-6) {
+        void cabbageContextService.recordEvent({
+          type: 'camera_moved',
+          category: 'camera',
+          success: true,
+          details: { key: key.toUpperCase(), axisGroup, actualDelta },
+        });
+      }
+    }
     if (!hasActiveMovementKeys()) {
       stopMoveLoop();
       scheduleCameraUpdate();
@@ -1663,7 +1737,10 @@ const resetRealtimeCameraInput = () => {
     movementKeys[key] = false;
   });
   stopMoveLoop();
+  cameraMovementGestures.clear();
   mouseRotate.active = false;
+  mouseRotate.startForward = null;
+  mouseRotate.moved = false;
 };
 
 const setEditorCameraInputLock = (reason, locked) => {
@@ -2012,6 +2089,8 @@ const onMouseDown = (event) => {
     mouseRotate.active = true;
     mouseRotate.lastX = event.clientX;
     mouseRotate.lastY = event.clientY;
+    mouseRotate.startForward = [...cameraState.value.forward];
+    mouseRotate.moved = false;
     event.preventDefault();
     return;
   }
@@ -2032,6 +2111,7 @@ const onMouseMove = (event) => {
 
   if (dx === 0 && dy === 0) return;
   handleMouseRotate(dx, dy);
+  mouseRotate.moved = true;
   scheduleCameraUpdate();
 };
 
@@ -2042,6 +2122,19 @@ const onMouseUp = (event) => {
   }
   if (event.button === 2 && mouseRotate.active) {
     mouseRotate.active = false;
+    const actualDelta = mouseRotate.startForward
+      ? vectorDistance(mouseRotate.startForward, cameraState.value.forward)
+      : 0;
+    if (mouseRotate.moved && actualDelta > 1e-6) {
+      void cabbageContextService.recordEvent({
+        type: 'camera_rotated',
+        category: 'camera',
+        success: true,
+        details: { interaction: 'right_mouse_drag', actualDelta },
+      });
+    }
+    mouseRotate.startForward = null;
+    mouseRotate.moved = false;
     if (!sendCameraUpdateFast()) {
       const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
       syncSceneCameraBinding(sceneId);
@@ -2345,7 +2438,10 @@ const normalizePreviewDetails = (payload = {}) => ({
   hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
   restoreStatus: payload.restoreStatus ?? payload.restore_status ?? 'idle',
   restoreError: payload.restoreError ?? payload.restore_error ?? '',
-  restored: Boolean(payload.restored),
+  restored: Boolean(
+    payload.restored
+    ?? ['restored', 'completed', 'success'].includes(String(payload.restoreStatus ?? payload.restore_status ?? '').toLowerCase())
+  ),
   stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
   workerActive: Boolean(payload.workerActive ?? payload.worker_active),
   errors: Array.isArray(payload.errors) ? payload.errors : [],
@@ -2375,6 +2471,28 @@ const applyPreviewStatus = (payload = {}) => {
   else if (state === 'error') previewStatusText.value = details.restoreError ? `场景恢复失败：${details.restoreError}` : (details.errors[0] || details.message || '预览出错');
   else previewStatusText.value = details.startedCount === 0 && details.warnings.length ? '没有可运行脚本' : '';
   publishGamePreviewStatus(details);
+  if (state === 'running' && !tutorialPreviewObservedRunning) {
+    tutorialPreviewObservedRunning = true;
+    void cabbageContextService.recordEvent({
+      type: 'preview_started',
+      category: 'preview',
+      success: true,
+      details: { status: 'running' },
+    });
+  } else if (
+    state === 'stopped'
+    && tutorialPreviewObservedRunning
+    && details.restored
+    && !details.restoreError
+  ) {
+    tutorialPreviewObservedRunning = false;
+    void cabbageContextService.recordEvent({
+      type: 'preview_stopped',
+      category: 'preview',
+      success: true,
+      details: { status: 'stopped', restored: true, restoreError: '' },
+    });
+  }
   return details;
 };
 
@@ -2947,7 +3065,6 @@ onMounted(async () => {
   // floating tab left by the previous project before resetting the shortcut state.
   for (const panelId of [
     ...dockShortcuts.map((item) => item.id),
-    'AITalkBar',
     'SceneDatas',
     'CabbageChatPanel',
   ]) {
@@ -2995,6 +3112,7 @@ onUnmounted(() => {
   void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
+  closeTutorialSessionChannel();
   coronaEventBus.off('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   for (const timer of pendingPanelRedocks.values()) window.clearTimeout(timer);

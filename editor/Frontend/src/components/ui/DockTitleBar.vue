@@ -144,7 +144,6 @@ const ROUTE_TO_PANEL_ID = {
   '/FileManager': 'FileManager',
   '/ProjectSettings': 'ProjectSettings',
   '/ScratchTool': 'ScratchTool',
-  '/AITalkBar': 'AITalkBar',
   '/NodeGraph': 'NodeGraphPanel',
   '/CabbageChat': 'CabbageChatPanel',
   '/Network': 'Network',

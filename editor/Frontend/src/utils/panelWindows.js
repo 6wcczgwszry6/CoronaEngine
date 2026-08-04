@@ -4,7 +4,6 @@ import { getPluginManifest, PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
 export const FLOATING_PANEL_IDS = [
   'SceneTools',
   'SceneDatas',
-  'AITalkBar',
   'NodeGraphPanel',
   'CabbageChatPanel',
 ];

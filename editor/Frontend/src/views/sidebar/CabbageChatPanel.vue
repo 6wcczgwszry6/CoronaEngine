@@ -5,28 +5,36 @@
   >
     <DockTitleBar
       v-if="!props.resident && !isDocked"
-      title="包菜答疑"
+      title="AI 创作助手"
       routePath="/CabbageChat"
       @close="closeFloat"
     />
 
     <div v-if="props.resident" class="resident-chat-title">
-      <span>包菜答疑</span>
+      <span>AI 创作助手</span>
       <button
         type="button"
         class="resident-float-button"
         :title="'弹出为可拖动窗口'"
         :disabled="assistant.chatBusy"
         @click.stop="emit('detach')"
-      >&#x29C9;</button>
+      >
+        &#x29C9;
+      </button>
     </div>
 
     <div class="context-strip">
       <div class="context-title">当前任务</div>
       <select v-model="selectedKey" :disabled="!contextTasks.length" class="context-select">
-        <option value="">{{ assistant.tasks.length ? '全部待处理任务' : '当前没有待处理任务' }}</option>
-        <option v-for="task in contextTasks" :key="task.taskKey || task.issueKey" :value="task.taskKey || task.issueKey">
-          {{ task.title }}
+        <option value="">
+          {{ assistant.tasks.length ? '全部待处理任务' : '当前没有待处理任务' }}
+        </option>
+        <option
+          v-for="task in contextTasks"
+          :key="task.taskKey || task.issueKey"
+          :value="task.taskKey || task.issueKey"
+        >
+          {{ localizedTaskField(task, 'title') }}
         </option>
       </select>
       <span class="context-count">{{ contextTasks.length }}</span>
@@ -34,9 +42,8 @@
 
     <div ref="historyRef" class="chat-history">
       <div v-if="!assistant.messages.length" class="chat-empty">
-        <img src="@/assets/cabbage.png" alt="" />
-        <strong>继续问包菜</strong>
-        <p>可以询问当前任务为什么发生、积木应该接在哪里，或怎样确认已经修好。</p>
+        <strong>开始使用 AI 创作助手</strong>
+        <p>可以询问当前任务、让 AI 修改节点图，或根据你的描述生成节点逻辑。</p>
       </div>
       <article
         v-for="message in assistant.messages"
@@ -44,11 +51,19 @@
         class="chat-message"
         :class="message.role"
       >
-        <div class="chat-role">{{ message.role === 'assistant' ? '包菜' : '你' }}</div>
+        <div class="chat-role">{{ message.role === 'assistant' ? 'AI' : '你' }}</div>
         <div class="chat-content">
-          <div>{{ message.role === 'assistant' ? cleanAssistantText(message.content) : message.content }}</div>
+          <div>
+            {{
+              message.role === 'assistant'
+                ? localizedAssistantText(message.content)
+                : message.content
+            }}
+          </div>
           <ol v-if="message.role === 'assistant' && message.steps?.length" class="guidance-steps">
-            <li v-for="(item, index) in message.steps" :key="`${message.id}_step_${index}`">{{ item }}</li>
+            <li v-for="(item, index) in message.steps" :key="`${message.id}_step_${index}`">
+              {{ item }}
+            </li>
           </ol>
           <button
             v-if="message.role === 'assistant' && message.needsShowcase && message.guidanceIntent"
@@ -61,11 +76,11 @@
         </div>
       </article>
       <article v-if="streamingContent" class="chat-message assistant streaming">
-        <div class="chat-role">包菜</div>
+        <div class="chat-role">AI</div>
         <div class="chat-content">{{ cleanedStreamingContent }}</div>
       </article>
       <div v-if="assistant.chatBusy && !streamingContent" class="chat-pending">
-        包菜正在查看当前世界与任务…
+        AI 正在查看当前世界与任务…
       </div>
     </div>
 
@@ -75,17 +90,25 @@
       <textarea
         ref="composerInputRef"
         v-model="input"
+        data-guidance="cabbage-chat-input"
         rows="3"
         maxlength="2000"
-        placeholder="可以答疑，也可以让包菜生成、制作或编辑游戏节点逻辑…"
+        @pointerdown="recordComposerPointerDown"
         @keydown.enter.exact.prevent="sendMessage"
       />
       <div class="composer-actions">
-        <button type="button" class="secondary" :disabled="assistant.chatBusy || !assistant.messages.length" @click="assistant.clearChat()">
+        <button
+          type="button"
+          class="secondary"
+          :disabled="assistant.chatBusy || !assistant.messages.length"
+          @click="assistant.clearChat()"
+        >
           清空会话
         </button>
-        <button v-if="assistant.chatBusy" type="button" class="danger" @click="stopWaiting">停止等待</button>
-        <button v-else type="submit" class="primary" :disabled="!input.trim()">发送</button>
+        <button v-if="assistant.chatBusy" type="button" class="danger" @click="stopWaiting">
+          停止等待
+        </button>
+        <button v-else type="submit" class="primary" data-guidance="cabbage-chat-send" :disabled="!input.trim()">发送</button>
       </div>
     </form>
   </div>
@@ -93,12 +116,14 @@
 
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import { aiService } from '@/utils/bridge.js';
 import { reviewScopeId } from '@/services/nodeGraphReviewService.js';
 import { guidanceService } from '@/services/cabbageGuidanceService.js';
+import { translateUiText } from '@/i18n/domTranslator.js';
 import {
   cancelActiveNodeGraphGeneration,
   generateNodeGraphFromInstruction,
@@ -117,6 +142,7 @@ const props = defineProps({
 const emit = defineEmits(['detach']);
 
 const assistant = useCabbageAssistantStore();
+const { locale } = useI18n();
 const { closePanel, isDocked } = useDockPanel();
 const input = ref('');
 const historyRef = ref(null);
@@ -128,6 +154,7 @@ let requestSequence = 0;
 let pollTimer = null;
 let unsubscribeAssistantContext = null;
 let activeMessageContext = null;
+let activePrompt = '';
 
 const selectedKey = computed({
   get: () => assistant.selectedTaskKey,
@@ -137,15 +164,23 @@ const selectedKey = computed({
   },
 });
 
+function localizedTaskField(task, field) {
+  const source = String(task?.[field] || '');
+  if (locale.value !== 'en-US') return source;
+  const english = String(task?.[`${field}En`] || '').trim();
+  return english || translateUiText(source);
+}
+
 const contextTasks = computed(() => {
   const tasks = assistant.tasks.map((task) => ({ ...task, __history: false }));
-  const selected = assistant.completedTasks.find((task) => task.taskKey === assistant.selectedTaskKey);
+  const selected = assistant.completedTasks.find(
+    (task) => task.taskKey === assistant.selectedTaskKey
+  );
   if (selected && !tasks.some((task) => task.taskKey === selected.taskKey)) {
     tasks.push({ ...selected, __history: true });
   }
-  const selectedWarning = assistant.preWarning?.taskKey === assistant.selectedTaskKey
-    ? assistant.preWarning
-    : null;
+  const selectedWarning =
+    assistant.preWarning?.taskKey === assistant.selectedTaskKey ? assistant.preWarning : null;
   if (selectedWarning && !tasks.some((task) => task.taskKey === selectedWarning.taskKey)) {
     tasks.unshift({ ...selectedWarning, __transient: true });
   }
@@ -167,26 +202,39 @@ function cleanAssistantText(value = '') {
     .trim();
 }
 
-const cleanedStreamingContent = computed(() => cleanAssistantText(streamingContent.value));
+function localizedAssistantText(value = '') {
+  return cleanAssistantText(value)
+    .split('\n')
+    .map((line) => translateUiText(line))
+    .join('\n');
+}
+
+const cleanedStreamingContent = computed(() => localizedAssistantText(streamingContent.value));
 
 const NODE_GRAPH_OPERATION_COPY = Object.freeze({
   create: {
-    progress: '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026',
+    progress:
+      'AI \u6b63\u5728\u8bfb\u53d6\u79ef\u6728\u6587\u6863\u5e76\u751f\u6210\u5f53\u524d\u8282\u70b9\u903b\u8f91\u2026',
     success: '\u8282\u70b9\u903b\u8f91\u5df2\u7ecf\u751f\u6210\u5e76\u4fdd\u5b58\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u751f\u6210\u5931\u8d25\u3002',
   },
   extend: {
-    progress: '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8865\u5145\u903b\u8f91\u2026',
-    success: '\u5df2\u5728\u73b0\u6709\u8282\u70b9\u56fe\u4e2d\u8865\u5145\u5e76\u4fdd\u5b58\u6240\u9700\u903b\u8f91\u3002',
+    progress:
+      'AI \u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8865\u5145\u903b\u8f91\u2026',
+    success:
+      '\u5df2\u5728\u73b0\u6709\u8282\u70b9\u56fe\u4e2d\u8865\u5145\u5e76\u4fdd\u5b58\u6240\u9700\u903b\u8f91\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u8865\u5145\u5931\u8d25\u3002',
   },
   edit: {
-    progress: '\u5305\u83dc\u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8fdb\u884c\u5c40\u90e8\u4fee\u6539\u2026',
-    success: '\u5df2\u4fdd\u7559\u65e0\u5173\u903b\u8f91\u5e76\u5b8c\u6210\u5c40\u90e8\u4fee\u6539\u3002',
+    progress:
+      'AI \u6b63\u5728\u8bfb\u53d6\u73b0\u6709\u8282\u70b9\u5e76\u8fdb\u884c\u5c40\u90e8\u4fee\u6539\u2026',
+    success:
+      '\u5df2\u4fdd\u7559\u65e0\u5173\u903b\u8f91\u5e76\u5b8c\u6210\u5c40\u90e8\u4fee\u6539\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u4fee\u6539\u5931\u8d25\u3002',
   },
   delete: {
-    progress: '\u5305\u83dc\u6b63\u5728\u5b9a\u4f4d\u5e76\u5220\u9664\u6307\u5b9a\u8282\u70b9\u903b\u8f91\u2026',
+    progress:
+      'AI \u6b63\u5728\u5b9a\u4f4d\u5e76\u5220\u9664\u6307\u5b9a\u8282\u70b9\u903b\u8f91\u2026',
     success: '\u5df2\u5220\u9664\u6307\u5b9a\u903b\u8f91\u5e76\u4fdd\u5b58\u8282\u70b9\u56fe\u3002',
     failure: '\u8282\u70b9\u903b\u8f91\u5220\u9664\u5931\u8d25\u3002',
   },
@@ -202,18 +250,25 @@ function scrollToBottom() {
   });
 }
 
+function recordComposerPointerDown(event) {
+  if (Number(event?.button ?? 0) !== 0) return;
+  void cabbageContextService.recordEvent({
+    type: 'ai_composer_focused',
+    category: 'tutorial',
+    success: true,
+    details: { source: 'user' },
+  });
+}
+
 function clearPollTimer() {
   if (pollTimer) window.clearTimeout(pollTimer);
   pollTimer = null;
 }
 
-function finishRequest(requestId, {
-  error = '',
-  keepPartial = false,
-  needsShowcase = false,
-  guidanceIntent = '',
-  steps = [],
-} = {}) {
+function finishRequest(
+  requestId,
+  { error = '', keepPartial = false, needsShowcase = false, guidanceIntent = '', steps = [] } = {}
+) {
   if (assistant.activeRequestId !== requestId) return;
   clearPollTimer();
   const completedContent = cleanAssistantText(streamingContent.value);
@@ -235,6 +290,7 @@ function finishRequest(requestId, {
   assistant.chatBusy = false;
   assistant.chatError = error;
   activeMessageContext = null;
+  activePrompt = '';
   scrollToBottom();
 }
 
@@ -249,7 +305,9 @@ async function pollStatus(requestId, taskId) {
     const response = await aiService.getNodeGraphReviewChatStatus(taskId);
     if (assistant.activeRequestId !== requestId || activeTaskId.value !== taskId) return;
     if (response?.success !== true) {
-      finishRequest(requestId, { error: String(response?.message || '包菜答疑暂时不可用，请稍后再试。') });
+      finishRequest(requestId, {
+        error: String(response?.message || 'AI 创作助手暂时不可用，请稍后再试。'),
+      });
       return;
     }
 
@@ -260,6 +318,16 @@ async function pollStatus(requestId, taskId) {
         finishRequest(requestId, { error: 'DeepSeek 没有返回可显示的内容。' });
         return;
       }
+      void cabbageContextService.recordEvent({
+        type: 'ai_question_answered',
+        category: 'tutorial',
+        success: true,
+        details: {
+          prompt: activePrompt,
+          mode: 'ask',
+          responseReceived: true,
+        },
+      });
       finishRequest(requestId, {
         keepPartial: true,
         needsShowcase: response?.needsShowcase === true,
@@ -273,18 +341,23 @@ async function pollStatus(requestId, taskId) {
       return;
     }
     if (response.status === 'error') {
-      finishRequest(requestId, { error: String(response?.message || '包菜答疑暂时不可用，请稍后再试。') });
+      finishRequest(requestId, {
+        error: String(response?.message || 'AI 创作助手暂时不可用，请稍后再试。'),
+      });
       return;
     }
     scheduleStatusPoll(requestId, taskId);
   } catch (error) {
     if (assistant.activeRequestId === requestId) {
-      finishRequest(requestId, { error: String(error?.message || '包菜答疑暂时不可用，请稍后再试。') });
+      finishRequest(requestId, {
+        error: String(error?.message || 'AI 创作助手暂时不可用，请稍后再试。'),
+      });
     }
   }
 }
 
-const DETAIL_GUIDANCE_PATTERN = /(不理解|看不懂|不会|怎么做|怎么连接|放在哪里|为什么还是不行|一步一步|具体步骤|展示|演示)/i;
+const DETAIL_GUIDANCE_PATTERN =
+  /(不理解|看不懂|不会|怎么做|怎么连接|放在哪里|为什么还是不行|一步一步|具体步骤|展示|演示)/i;
 
 function requestsDetailedGuidance(content = '') {
   return DETAIL_GUIDANCE_PATTERN.test(String(content || ''));
@@ -303,6 +376,7 @@ async function sendMessage() {
   const content = input.value.trim();
   if (!content || assistant.chatBusy) return;
   input.value = '';
+  activePrompt = content;
   const selectedTask = assistant.selectedTask;
   const messageContext = {
     taskKey: String(selectedTask?.taskKey || ''),
@@ -328,8 +402,22 @@ async function sendMessage() {
     streamingContent.value = operationCopy.progress;
     try {
       const generated = await generateNodeGraphFromInstruction(content, generationIntent.operation);
-      if (assistant.activeRequestId !== requestId || activeRequestKind.value !== 'generation') return;
+      if (assistant.activeRequestId !== requestId || activeRequestKind.value !== 'generation')
+        return;
       streamingContent.value = String(generated.summary || operationCopy.success);
+      void cabbageContextService.recordEvent({
+        type: 'ai_node_graph_changed',
+        category: 'tutorial',
+        success: true,
+        details: {
+          prompt: activePrompt,
+          mode: generationIntent.operation === 'edit' ? 'modify' : 'generate',
+          operation: generationIntent.operation,
+          applied: true,
+          createdNodeIds: Array.isArray(generated.createdNodeIds) ? generated.createdNodeIds : [],
+          createdEdgeIds: Array.isArray(generated.createdEdgeIds) ? generated.createdEdgeIds : [],
+        },
+      });
       finishRequest(requestId, { keepPartial: true });
     } catch (error) {
       if (assistant.activeRequestId === requestId) {
@@ -347,6 +435,7 @@ async function sendMessage() {
   try {
     const response = await aiService.startNodeGraphReviewChat({
       requestId,
+      locale: locale.value,
       worldId: assistant.worldId,
       projectScopeId: assistant.projectScopeId,
       graphRevision: assistant.graphRevision,
@@ -360,14 +449,24 @@ async function sendMessage() {
     });
     if (assistant.activeRequestId !== requestId) return;
     if (response?.success !== true || !String(response?.taskId || '').trim()) {
-      finishRequest(requestId, { error: String(response?.message || '\u5305\u83dc\u7b54\u7591\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002') });
+      finishRequest(requestId, {
+        error: String(
+          response?.message ||
+            'AI \u521b\u4f5c\u52a9\u624b\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002'
+        ),
+      });
       return;
     }
     activeTaskId.value = String(response.taskId);
     scheduleStatusPoll(requestId, activeTaskId.value, 0);
   } catch (error) {
     if (assistant.activeRequestId === requestId) {
-      finishRequest(requestId, { error: String(error?.message || '\u5305\u83dc\u7b54\u7591\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002') });
+      finishRequest(requestId, {
+        error: String(
+          error?.message ||
+            'AI \u521b\u4f5c\u52a9\u624b\u6682\u65f6\u4e0d\u53ef\u7528\uff0c\u8bf7\u7a0d\u540e\u518d\u8bd5\u3002'
+        ),
+      });
     }
   }
 }
@@ -386,14 +485,21 @@ async function stopWaiting() {
   assistant.chatBusy = false;
   assistant.chatError = '\u5df2\u505c\u6b62\u7b49\u5f85\u672c\u6b21\u56de\u7b54\u3002';
   if (partial) {
-    const message = assistant.appendMessage({ role: 'assistant', content: partial, ...(activeMessageContext || {}) });
+    const message = assistant.appendMessage({
+      role: 'assistant',
+      content: partial,
+      ...(activeMessageContext || {}),
+    });
     if (message) void cabbageContextService.appendMessage(message);
   }
   activeMessageContext = null;
+  activePrompt = '';
   if (requestKind === 'generation') {
     await cancelActiveNodeGraphGeneration();
   } else if (taskId) {
-    try { await aiService.cancelNodeGraphReviewChat(taskId); } catch (_) {}
+    try {
+      await aiService.cancelNodeGraphReviewChat(taskId);
+    } catch (_) {}
   }
   scrollToBottom();
 }
@@ -413,6 +519,7 @@ function resetChatForProjectChange() {
   assistant.chatBusy = false;
   assistant.chatError = '';
   activeMessageContext = null;
+  activePrompt = '';
   if (requestKind === 'generation') cancelActiveNodeGraphGeneration().catch(() => {});
   else if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
 }
@@ -443,9 +550,8 @@ onMounted(() => {
   }
   window.addEventListener('corona-active-project-changed', resetChatForProjectChange);
   window.addEventListener('storage', resetChatForProjectStorageChange);
-  const currentProjectScopeId = () => reviewScopeId(
-    String(window.localStorage?.getItem('corona.activeProjectPath') || '')
-  );
+  const currentProjectScopeId = () =>
+    reviewScopeId(String(window.localStorage?.getItem('corona.activeProjectPath') || ''));
   unsubscribeAssistantContext = subscribeCabbageAssistantContext(
     (snapshot) => assistant.hydrateContext(snapshot),
     { projectScopeId: currentProjectScopeId, emitCurrent: true }
@@ -466,6 +572,7 @@ onBeforeUnmount(() => {
   activeRequestKind.value = '';
   streamingContent.value = '';
   assistant.chatBusy = false;
+  activePrompt = '';
   if (requestKind === 'generation') cancelActiveNodeGraphGeneration().catch(() => {});
   else if (taskId) aiService.cancelNodeGraphReviewChat(taskId).catch(() => {});
 });
@@ -512,7 +619,10 @@ onBeforeUnmount(() => {
   color: #d7cba9;
   font-size: 14px;
   line-height: 1;
-  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease;
 }
 
 .resident-float-button:hover:not(:disabled) {
@@ -613,23 +723,14 @@ onBeforeUnmount(() => {
 
 .chat-empty {
   margin: auto;
-  max-width: 280px;
-  padding: 22px 18px;
+  max-width: 300px;
+  padding: 14px 18px;
   text-align: center;
   color: #b9ad8f;
   font-size: 12px;
   line-height: 1.7;
 }
 
-.chat-empty img {
-  width: 64px;
-  height: 64px;
-  margin: 0 auto 11px;
-  border: 1px solid rgba(255, 255, 255, 0.14);
-  border-radius: 50%;
-  background: #d8b86c;
-  box-shadow: 0 9px 24px rgba(0, 0, 0, 0.26);
-}
 
 .chat-empty strong {
   display: block;
@@ -639,7 +740,7 @@ onBeforeUnmount(() => {
 }
 
 .chat-empty p {
-  margin: 6px 0 0;
+  margin: 8px 0 0;
 }
 
 .chat-message {
@@ -759,11 +860,10 @@ onBeforeUnmount(() => {
   font-size: 12px;
   line-height: 1.55;
   outline: none;
-  transition: border-color 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
-}
-
-.chat-composer textarea::placeholder {
-  color: #9d9278;
+  transition:
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    background-color 140ms ease;
 }
 
 .chat-composer textarea:hover {
@@ -790,7 +890,11 @@ onBeforeUnmount(() => {
   color: #e9dfc5;
   font-size: 11px;
   font-weight: 600;
-  transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
+  transition:
+    background-color 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    transform 140ms ease;
 }
 
 .composer-actions button:disabled {
@@ -833,7 +937,14 @@ onBeforeUnmount(() => {
 }
 
 @keyframes cabbage-pulse {
-  0%, 100% { opacity: 0.45; transform: scale(0.86); }
-  50% { opacity: 1; transform: scale(1); }
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.86);
+  }
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 </style>

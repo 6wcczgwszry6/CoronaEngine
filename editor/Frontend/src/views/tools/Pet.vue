@@ -6,7 +6,6 @@
         src="@/assets/cabbage.png"
         class="h-20 w-20 fixed left-10 bottom-10 cursor-move z-50"
         @contextmenu="openContextMenu($event)"
-        @dblclick="controlAITalkBar"
       />
 
       <AIHintBubble
@@ -25,11 +24,9 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, nextTick } from 'vue';
 import { projectService } from '@/utils/bridge.js';
-import { useDockStore } from '@/stores/dockStore.js';
 import AIHintBubble from '@/components/ui/AIHintBubble.vue';
 
 const petImgRef = ref(null);
-const dockStore = useDockStore();
 const ROUTE_PATH = '/Pet';
 const PET_HINT_INTERVAL_MS = 10000;
 const PET_HINT_AUTO_HIDE_MS = 6000;
@@ -68,9 +65,6 @@ const throttledSend = throttle(sendDragRegion, 16);
 
 const openContextMenu = (e) => e.preventDefault();
 
-const controlAITalkBar = () => {
-  dockStore.openPanel('AITalkBar');
-};
 
 // ── Timed local hint logic ──
 const dismissHint = () => {

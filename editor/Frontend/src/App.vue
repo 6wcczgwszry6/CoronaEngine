@@ -5,7 +5,8 @@ import { useDockStore } from '@/stores/dockStore.js';
 import { getPluginManifest } from '@/config/pluginManifest.js';
 import DockLayout from '@/components/dock/DockLayout.vue';
 import DockPanel from '@/components/dock/DockPanel.vue';
-import { scriptingService } from '@/utils/bridge.js';
+import { editorApi, scriptingService } from '@/utils/bridge.js';
+import lanchat from '@/stores/lanchat.js';
 import '@/utils/eventBus.js'; // init window.__coronaEmit
 
 const route = useRoute();
@@ -27,6 +28,8 @@ const standaloneResizeHandles = [
 ];
 
 let gcTimer = null;
+let lanChatEventCallbackToken = null;
+let appUnmounted = false;
 const SCRATCH_KEY_FORWARDED = '__coronaScratchKeyForwarded';
 
 function isEscapeKey(event) {
@@ -119,7 +122,31 @@ function onGlobalKeyUp(event) {
   forwardScratchKey(event, true);
 }
 
+function onLanChatEvent(payload) {
+  lanchat.handleEvent(payload);
+}
+
+async function registerLanChatEvent() {
+  try {
+    const callbackToken = await editorApi.events.onLanChatEvent(onLanChatEvent);
+    if (appUnmounted) {
+      await editorApi.off(callbackToken);
+      return;
+    }
+    lanChatEventCallbackToken = callbackToken;
+  } catch (error) {
+    if (!appUnmounted) {
+      console.warn('[App] failed to subscribe to LANChat events', error);
+    }
+  }
+}
+
 onMounted(() => {
+  appUnmounted = false;
+  if (!isStandalonePanel.value) {
+    void registerLanChatEvent();
+  }
+
   gcTimer = setInterval(() => {
     if (typeof window.gc === 'function') {
       try {
@@ -133,6 +160,15 @@ onMounted(() => {
 });
 
 onUnmounted(() => {
+  appUnmounted = true;
+  if (lanChatEventCallbackToken) {
+    const callbackToken = lanChatEventCallbackToken;
+    lanChatEventCallbackToken = null;
+    editorApi.off(callbackToken).catch((error) => {
+      console.warn('[App] failed to unsubscribe from LANChat events', error);
+    });
+  }
+
   if (gcTimer) {
     clearInterval(gcTimer);
     gcTimer = null;

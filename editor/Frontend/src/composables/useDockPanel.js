@@ -42,7 +42,6 @@ function getPanelIdFromRoute() {
     '/FileManager': 'FileManager',
     '/ProjectSettings': 'ProjectSettings',
     '/ScratchTool': 'ScratchTool',
-    '/AITalkBar': 'AITalkBar',
     '/NodeGraph': 'NodeGraphPanel',
     '/CabbageChat': 'CabbageChatPanel',
     '/Network': 'Network',

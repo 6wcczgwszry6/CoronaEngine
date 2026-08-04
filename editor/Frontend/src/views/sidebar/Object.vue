@@ -85,9 +85,10 @@
                 v-model.number="actor.transform[group.key][axis]"
                 type="number"
                 :step="group.step"
+                :data-guidance="guidanceKeyForTransform(group.key, axis)"
                 :data-assistant-title="`${group.label} ${axis.toUpperCase()}`"
                 @input="scheduleTransform(group.operation)"
-                @change="applyTransform(group.operation)"
+                @change="applyTransform(group.operation, axis)"
               />
             </label>
           </div>
@@ -150,10 +151,10 @@
         <div v-show="!collapsedSections.physics" class="section-collapsible-body">
           <div class="physics-enable-row">
             <span>物理模拟</span>
-            <label class="switch-label"><input v-model="actor.mechanics.physicsEnabled" type="checkbox" @change="updateMechanic('SetPhysicsEnabled', actor.mechanics.physicsEnabled)" />启用</label>
+            <label class="switch-label"><input v-model="actor.mechanics.physicsEnabled" data-guidance="object-physics-enabled" type="checkbox" @change="updateMechanic('SetPhysicsEnabled', actor.mechanics.physicsEnabled)" />启用</label>
           </div>
           <div class="physics-grid" :class="{ disabled: !actor.mechanics.physicsEnabled }">
-            <label>质量<input v-model.number="actor.mechanics.mass" type="number" min="0" step="0.1" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetMass', actor.mechanics.mass)" /></label>
+            <label>质量<input v-model.number="actor.mechanics.mass" data-guidance="object-physics-mass" type="number" min="0" step="0.1" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetMass', actor.mechanics.mass)" /></label>
             <label>弹性<input v-model.number="actor.mechanics.restitution" type="number" min="0" max="1" step="0.05" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetRestitution', actor.mechanics.restitution)" /></label>
             <label>阻尼<input v-model.number="actor.mechanics.damping" type="number" min="0" max="1" step="0.01" :disabled="!actor.mechanics.physicsEnabled" @change="updateMechanic('SetDamping', actor.mechanics.damping)" /></label>
           </div>
@@ -208,6 +209,15 @@ const transformGroups = [
 const transformOperationCodes = Object.fromEntries(
   transformGroups.map((group) => [group.operation, group.operationCode])
 );
+
+function guidanceKeyForTransform(groupKey, axis) {
+  const keys = {
+    'position:x': 'object-position-x',
+    'rotation:y': 'object-rotation-y',
+    'scale:x': 'object-scale-x',
+  };
+  return keys[`${groupKey}:${axis}`] || undefined;
+}
 
 const selectedSceneName = ref(DEFAULT_SCENE_NAME);
 const selectedActorName = ref('');
@@ -440,7 +450,7 @@ function scheduleTransform(operation) {
   }
 }
 
-async function applyTransform(operation) {
+async function applyTransform(operation, axis = '') {
   if (!selectedActorName.value) return;
   // The native transform update emitted by this Dock is an echo, not a second viewport edit.
   syncViewportTransformBaseline();
@@ -463,6 +473,9 @@ async function applyTransform(operation) {
           sceneName: selectedSceneName.value,
           actorName: selectedActorName.value,
           actorType: actor.type || 'model',
+          axis: String(axis || '').toLowerCase(),
+          value: axis ? Number(actor.transform[operation === 'SetPosition' ? 'position' : operation === 'SetRotation' ? 'rotation' : 'scale']?.[axis]) : null,
+          source: 'property_panel',
         },
       });
     } catch (error) {
@@ -579,6 +592,8 @@ async function updateMechanic(operation, value) {
         sceneName: selectedSceneName.value,
         actorName: selectedActorName.value,
         operation,
+        value,
+        source: 'property_panel',
       },
     });
   } catch (error) {
@@ -698,8 +713,8 @@ function handleTransform(payload = {}) {
 function handleGuidancePrepare(event) {
   if (event?.detail?.panelId !== 'SceneDatas') return;
   const selectorKey = String(event.detail.selectorKey || '');
-  if (selectorKey === 'object-transform') collapsedSections.transform = false;
-  if (selectorKey === 'object-physics') collapsedSections.physics = false;
+  if (selectorKey === 'object-transform' || selectorKey.startsWith('object-position-') || selectorKey.startsWith('object-rotation-') || selectorKey.startsWith('object-scale-')) collapsedSections.transform = false;
+  if (selectorKey === 'object-physics' || selectorKey.startsWith('object-physics-')) collapsedSections.physics = false;
 }
 
 function closeFloat() {

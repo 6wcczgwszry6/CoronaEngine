@@ -120,6 +120,7 @@ export const TOOLBOX_CONFIG = {
         block('engine_rotationY'),
         block('engine_rotationZ'),
         block('object_set_position'),
+        block('object_move_direction'),
         block('object_get_x'),
         block('object_get_y'),
         block('object_get_z'),

@@ -81,7 +81,6 @@ function detectLandmark(el) {
 
   /* ── Dock panels & sidebars ── */
   if (cls.includes('docktitlebar')) return { label: '面板标题栏', area: 'dock-titlebar' };
-  if (id.includes('AITalkBar') || (cls.includes('aitalkbar'))) return { label: 'AI 对话面板', area: 'ai-talk' };
   if (id.includes('FileManager') || cls.includes('filemanager')) return { label: '文件管理器', area: 'file-manager' };
   if (id.includes('SceneBar') || cls.includes('scenebar')) return { label: '场景管理器', area: 'scene-manager' };
   if (id.includes('Object') || cls.includes('object-panel')) return { label: '对象属性面板', area: 'object-panel' };

@@ -117,6 +117,65 @@ class NodeGraphReviewChatService:
         ),
     }
 
+    GUIDANCE_STEP_TRANSLATIONS = {
+        "打开场景管理 Dock": "Open the Scene Manager dock",
+        "找到导入模型入口并选择模型文件": "Find Import Model and choose a model file",
+        "确认场景树中出现新的模型对象": "Confirm that the new model object appears in the scene tree",
+        "先在场景中选中一个模型": "Select a model in the scene",
+        "打开对象 Dock 并展开变换": "Open the Object dock and expand Transform",
+        "修改位置、旋转或缩放中的任意一个参数": "Change any Position, Rotation, or Scale value",
+        "找到场景光照设置": "Find the scene lighting settings",
+        "切换光照或修改光照方向的任意轴": "Toggle lighting or change any lighting direction axis",
+        "选择一个模型并打开对象 Dock": "Select a model and open the Object dock",
+        "展开物理区域": "Expand the Physics section",
+        "启用物理或修改质量、弹性、阻尼和锁轴": "Enable physics or change mass, restitution, damping, or axis locks",
+        "打开节点 Dock": "Open the Nodes dock",
+        "从左侧节点工具区选择节点": "Choose a node from the left node toolbox",
+        "将节点拖入中间画布": "Drag the node onto the center canvas",
+        "打开节点 Dock 并找到已有节点": "Open the Nodes dock and find an existing node",
+        "按住节点标题区域": "Hold the node title area",
+        "把节点拖到新的位置后松开": "Drag the node to a new position and release it",
+        "找到两个需要连接的节点": "Find the two nodes that need to be connected",
+        "从前一个节点的输出端口开始拖动": "Start dragging from the output port of the first node",
+        "拖到后一个节点的输入端口后松开": "Release on the input port of the second node",
+        "先选中一个节点": "Select a node first",
+        "从左侧微观积木工具箱选择积木": "Choose a block from the Micro Blocks toolbox on the left",
+        "把积木拖入节点内部编辑区": "Drag the block into the node's internal editor",
+        "选中包含目标积木的节点": "Select the node that contains the target block",
+        "找到需要修改的下拉项、数值或文本字段": "Find the dropdown, numeric, or text field to change",
+        "修改字段并等待节点图自动保存": "Edit the field and wait for the node graph to save automatically",
+        "选中需要设置条件的节点连线": "Select the node connection that needs a condition",
+        "在条件编辑区放入返回 Boolean 的积木": "Place a Boolean-returning block in the condition editor",
+        "确保条件区只有一个完整的返回表达式": "Keep exactly one complete return expression in the condition area",
+        "确认开始节点已经连接到后续节点": "Confirm that the Start node is connected to the following node",
+        "找到节点 Dock 顶部的运行按钮": "Find Run at the top of the Nodes dock",
+        "点击运行并观察逻辑是否正常执行": "Click Run and observe whether the logic executes correctly",
+        "打开节点 Dock 并选中包含操作积木的节点": "Open the Nodes dock and select the node containing the operation block",
+        "找到操作积木的对象输入口": "Find the object input on the operation block",
+        "连接“对象[]”积木并选择场景中的目标物体": "Connect an Object [] block and select the target object from the scene",
+        "运行节点逻辑确认目标物体能够响应": "Run the node logic and confirm that the target object responds",
+        "打开节点 Dock 并找到对象引用积木": "Open the Nodes dock and find the object reference block",
+        "展开对象选择项": "Open the object selector",
+        "改为当前场景中真实存在的物体": "Choose an object that actually exists in the current scene",
+        "打开节点 Dock 并查看整个节点图": "Open the Nodes dock and view the entire graph",
+        "只保留一个开始节点": "Keep only one Start node",
+        "将开始节点连接到第一个需要执行的节点": "Connect the Start node to the first node that should execute",
+        "定位到无效的节点连线": "Locate the invalid node connection",
+        "删除或断开这条连线": "Delete or disconnect it",
+        "从有效输出端口重新连接到有效输入端口": "Reconnect from a valid output port to a valid input port",
+        "选中对应节点连线": "Select the corresponding node connection",
+        "打开连线条件编辑区": "Open the connection condition editor",
+        "只保留一个完整的 Boolean 返回表达式": "Keep only one complete Boolean return expression",
+        "检查条件区最外层返回值": "Inspect the outermost return value in the condition area",
+        "改为比较、逻辑或其他返回 Boolean 的积木": "Replace it with a comparison, logic, or another Boolean-returning block",
+        "定位到当前不支持的积木": "Locate the unsupported block",
+        "移除这个积木": "Remove it",
+        "从左侧工具箱换成当前引擎提供的积木": "Choose a supported block from the left toolbox",
+        "定位到缺少输入的积木": "Locate the block with a missing input",
+        "找到未连接的关键输入口": "Find the unconnected required input",
+        "连接类型匹配的积木并补齐必要参数": "Connect a block with a matching type and fill in the required parameters",
+    }
+
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._tasks: dict[str, dict[str, Any]] = {}
@@ -129,6 +188,7 @@ class NodeGraphReviewChatService:
     def _normalize_payload(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise ValueError("包菜答疑请求格式不正确")
+        locale = "en-US" if str(payload.get("locale") or "").lower().startswith("en") else "zh-CN"
         messages = []
         for item in (payload.get("messages") or [])[-cls.MAX_MESSAGES :]:
             if not isinstance(item, dict):
@@ -153,9 +213,13 @@ class NodeGraphReviewChatService:
                 "issueKey": task_key,
                 "type": task_type,
                 "title": str(task.get("title") or "")[:160],
+                "titleEn": str(task.get("titleEn") or "")[:160],
                 "message": str(task.get("message") or "")[:800],
+                "messageEn": str(task.get("messageEn") or "")[:800],
                 "suggestion": str(task.get("suggestion") or "")[:800],
+                "suggestionEn": str(task.get("suggestionEn") or "")[:800],
                 "completionCriteria": str(task.get("completionCriteria") or "")[:600],
+                "completionCriteriaEn": str(task.get("completionCriteriaEn") or "")[:600],
                 "completionSignal": str(task.get("completionSignal") or "")[:80],
                 "guidanceIntent": str(task.get("guidanceIntent") or "")[:80],
                 "nodeId": str(task.get("nodeId") or "")[:160],
@@ -217,6 +281,7 @@ class NodeGraphReviewChatService:
         ) or bool(selected_task_key and same_task_user_messages >= 2)
         return {
             "requestId": str(payload.get("requestId") or f"node_chat_{uuid.uuid4().hex}"),
+            "locale": locale,
             "worldId": str(payload.get("worldId") or "")[:160],
             "projectScopeId": str(payload.get("projectScopeId") or "")[:160],
             "graphRevision": str(payload.get("graphRevision") or "")[:160],
@@ -281,19 +346,26 @@ class NodeGraphReviewChatService:
                 resolved = cls.GUIDANCE_BY_ISSUE.get(str(selected.get("code") or ""))
 
         if not resolved:
+            fallback_steps = [
+                "First confirm the current goal and where the problem appears",
+                "Check that the relevant object, node, block, or connection is selected and connected correctly",
+                "After editing, run again or wait for the next node review to confirm the result",
+            ] if request.get("locale") == "en-US" else [
+                "先确认当前要完成的目标和出现问题的位置",
+                "检查对应对象、节点、积木或连线是否已经选中并正确连接",
+                "完成修改后重新运行或等待下一次节点审查确认结果",
+            ]
             return {
                 "needsShowcase": False,
                 "guidanceIntent": "",
-                "steps": [
-                    "先确认当前要完成的目标和出现问题的位置",
-                    "检查对应对象、节点、积木或连线是否已经选中并正确连接",
-                    "完成修改后重新运行或等待下一次节点审查确认结果",
-                ],
+                "steps": fallback_steps,
             }
 
         intent, steps = resolved
         intent = intent if intent in cls.GUIDANCE_INTENTS else ""
         normalized_steps = [str(step).strip()[:500] for step in steps if str(step).strip()][:8]
+        if request.get("locale") == "en-US":
+            normalized_steps = [cls.GUIDANCE_STEP_TRANSLATIONS.get(step, step) for step in normalized_steps]
         return {
             "needsShowcase": bool(intent and normalized_steps),
             "guidanceIntent": intent,
@@ -306,6 +378,7 @@ class NodeGraphReviewChatService:
             (task for task in request["tasks"] if task["taskKey"] == request["selectedTaskKey"]),
             None,
         )
+        locale = "en-US" if request.get("locale") == "en-US" else "zh-CN"
         context = {
             "worldId": request["worldId"],
             "projectScopeId": request["projectScopeId"],
@@ -318,6 +391,57 @@ class NodeGraphReviewChatService:
         profile = request.get("assistanceProfile") or {}
         score = max(0, min(int(profile.get("score") or 0), 100))
         has_score = int(profile.get("updatedAt") or 0) > 0
+        if locale == "en-US":
+            if not has_score:
+                score_instruction = "There is not yet a stable interaction score. Use a calm, clear answer with moderate detail."
+            elif score >= 75:
+                score_instruction = (
+                    "The user has a high interaction score. Be concise and professional, and leave room for independent debugging. "
+                    "Only when directly relevant, mention state machines, control flow, data flow, Boolean evaluation, object references, "
+                    "real-time computer graphics, transforms, or physics. Do not expand into unrelated teaching."
+                )
+            elif score <= 45:
+                score_instruction = (
+                    "The user currently needs more concrete guidance. Use calm, plain language, minimize jargon, "
+                    "state exactly where to click, drag, connect, or edit, and include a verification method."
+                )
+            else:
+                score_instruction = (
+                    "Use moderate detail. Give the key correction first, then the necessary operation steps, "
+                    "and explain only terms directly related to the current issue."
+                )
+            detail_instruction = (
+                "The user explicitly said they do not understand or has asked repeatedly. Organize the solution into clear numbered steps, "
+                "including where to operate, the connection order, and how to verify completion. Do not claim you already changed the project."
+                if request.get("detailGuidanceRequested") is True else ""
+            )
+            return [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are Cabbage Help, the CoronaEngine assistant. Answer about the current world, active tasks, and node graph. "
+                        "For tutorials and world-building tasks, explain how to complete them in the engine. For node issues, explain the cause, "
+                        "where to edit, and how to verify the result. Never invent nodes, blocks, objects, or APIs; use conditional advice when context is incomplete. "
+                        "node_graph:project:global is the project-level node graph for the current Native Editor scene and already applies to that scene by default. "
+                        "An empty actorName means the graph is not fixed to one object; it does not mean the scene is unbound. "
+                        "Do not ask the user to select a native scene, binding mode, confirm binding, or click Apply. "
+                        "projectContext.actors lists objects already imported in Scene Manager. For movement, jumping, rotation, collision, and other object operations, "
+                        "prefer an exact object name from that list and tell the user to select it in the block's object parameter. "
+                        "If actorContextAvailable is false, only say that the object list is temporarily unavailable; do not invent a scene-binding panel. "
+                        "Do not expose internal scores or label the user as an artist, programmer, beginner, familiar, or advanced. "
+                        "Do not output JSON or generate or overwrite Python scripts. "
+                        "Reply in clean English plain text. Do not use Markdown headings, bold markers, backticks, code fences, or horizontal rules. "
+                        "When steps are needed, use only 1. 2. 3. numbering. Keep each step to one or two sentences and avoid decorative symbols. "
+                        + score_instruction
+                        + detail_instruction
+                    ),
+                },
+                {
+                    "role": "system",
+                    "content": "Current structured context:" + json.dumps(context, ensure_ascii=False),
+                },
+                *request["messages"],
+            ]
         if not has_score:
             score_instruction = (
                 "尚无稳定操作评分，请使用平和、清楚、适中详细度的回答。"

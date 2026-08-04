@@ -27,6 +27,10 @@ REQUIRED_RULE_SECTIONS = {
     "ProjectObjectBindingRules",
     "NodeLifecycleRootRules",
     "EdgeConditionRules",
+    "CapabilityTaxonomy",
+    "DynamicActorRelationRules",
+    "MacroEdgeSerializationRules",
+    "ContractRepairRules",
     "BlockSelectionPriority",
     "SafeCompositionPatterns",
     "GenerationScopingRules",
@@ -73,6 +77,25 @@ def contract_integrity_errors(path: str | Path = CONTRACT_PATH) -> list[str]:
     if missing_sections:
         errors.append("missing generation rule sections: " + ", ".join(missing_sections))
 
+    capability_nodes = root.findall("./CapabilityTaxonomy/Capability")
+    capability_names = [str(item.get("name") or "").strip() for item in capability_nodes]
+    duplicate_capabilities = sorted(
+        name for name, count in Counter(capability_names).items() if name and count > 1
+    )
+    if not capability_nodes:
+        errors.append("CapabilityTaxonomy must declare at least one Capability")
+    if any(not name for name in capability_names):
+        errors.append("CapabilityTaxonomy Capability name must not be empty")
+    if duplicate_capabilities:
+        errors.append("duplicate capability names: " + ", ".join(duplicate_capabilities))
+    capability_set = set(capability_names)
+    for capability in capability_nodes:
+        name = str(capability.get("name") or "").strip() or "<missing>"
+        if not str(capability.get("keywords") or "").strip():
+            errors.append(f"CapabilityTaxonomy {name}: keywords must not be empty")
+        if not str(capability.text or "").strip():
+            errors.append(f"CapabilityTaxonomy {name}: description must not be empty")
+
     blocks = root.findall("./Catalog/Blocks/Block")
     block_by_type = {str(block.get("type") or "").strip(): block for block in blocks}
     for block in blocks:
@@ -92,6 +115,16 @@ def contract_integrity_errors(path: str | Path = CONTRACT_PATH) -> list[str]:
             errors.append(f"{block_type}: dynamic must be true or false")
         if shape != "output" and output_check:
             errors.append(f"{block_type}: only output blocks may declare outputCheck")
+        block_capabilities = str(block.get("capabilities") or "").split()
+        unknown_capabilities = sorted(set(block_capabilities) - capability_set)
+        if unknown_capabilities:
+            errors.append(
+                f"{block_type}: unknown capabilities: {', '.join(unknown_capabilities)}"
+            )
+        if len(block_capabilities) != len(set(block_capabilities)):
+            errors.append(f"{block_type}: duplicate capabilities")
+        if block.get("aiUse") is not None and not str(block.get("aiUse") or "").strip():
+            errors.append(f"{block_type}: aiUse must not be empty when present")
 
         field_names = [str(item.get("name") or "").strip() for item in block.findall("./Field")]
         input_names = [str(item.get("name") or "").strip() for item in block.findall("./Input")]
