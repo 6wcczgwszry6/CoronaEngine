@@ -90,8 +90,9 @@ class CoronaEditorLifecycleTests(unittest.TestCase):
         ):
             self.assertIn(f"_set_native_runtime_phase({phase})", update_body)
         self.assertIn("def _arm_runtime_watchdog", update_body)
-        self.assertIn("faulthandler.enable(all_threads=True)", update_body)
+        self.assertIn("faulthandler.enable(file=cls._runtime_watchdog_file, all_threads=True)", update_body)
         self.assertIn("faulthandler.dump_traceback_later", update_body)
+        self.assertIn("file=cls._runtime_watchdog_file", update_body)
         self.assertIn("def _cancel_runtime_watchdog", update_body)
         self.assertIn("faulthandler.cancel_dump_traceback_later", update_body)
         update_runtime_start = update_body.index("    def update_runtime(cls):")

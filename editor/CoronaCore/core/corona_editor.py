@@ -26,6 +26,7 @@ class CoronaEditor:
     _last_runtime_warning = {}
     _shutdown_snapshot = None
     _runtime_watchdog_error_logged = False
+    _runtime_watchdog_file = None
 
     @classmethod
     def _dispatch_script_request(cls, json_str):
@@ -540,12 +541,20 @@ class CoronaEditor:
         except Exception:
             logger.debug("Unable to update native Python runtime phase", exc_info=True)
 
-    @staticmethod
-    def _cancel_runtime_watchdog():
+    @classmethod
+    def _cancel_runtime_watchdog(cls):
         import faulthandler
 
-        if faulthandler.is_enabled():
-            faulthandler.cancel_dump_traceback_later()
+        try:
+            if faulthandler.is_enabled():
+                faulthandler.cancel_dump_traceback_later()
+                faulthandler.disable()
+        finally:
+            output = cls._runtime_watchdog_file
+            cls._runtime_watchdog_file = None
+            if output is not None:
+                output.flush()
+                output.close()
 
     @classmethod
     def _arm_runtime_watchdog(cls):
@@ -554,11 +563,23 @@ class CoronaEditor:
         if cls._shutdown_requested:
             return
         try:
-            if not faulthandler.is_enabled():
-                faulthandler.enable(all_threads=True)
+            if cls._runtime_watchdog_file is None:
+                from pathlib import Path
+
+                output_path = Path(sys.executable).resolve().parent / "logs" / "python_faulthandler.log"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                cls._runtime_watchdog_file = output_path.open(
+                    "a", encoding="utf-8", buffering=1)
+                faulthandler.enable(file=cls._runtime_watchdog_file, all_threads=True)
+                logger.info("Python runtime watchdog output: %s", output_path)
             faulthandler.cancel_dump_traceback_later()
-            faulthandler.dump_traceback_later(2.0, repeat=False)
+            faulthandler.dump_traceback_later(
+                2.0, repeat=False, file=cls._runtime_watchdog_file)
         except Exception:
+            output = cls._runtime_watchdog_file
+            cls._runtime_watchdog_file = None
+            if output is not None:
+                output.close()
             if not cls._runtime_watchdog_error_logged:
                 logger.exception("Unable to arm Python runtime watchdog")
                 cls._runtime_watchdog_error_logged = True
