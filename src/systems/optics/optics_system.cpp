@@ -2776,6 +2776,7 @@ bool OpticsSystem::initialize_render_pipelines() {
         hardware_->visibilityDebugResolvePipeline.emplace(visibility_debug_resolve_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->actorPickPipeline.emplace(actor_pick_comp_glsl, ktm::uvec3(1, 1, 1));
         hardware_->opticsOverlayPipeline.emplace(optics_overlay_comp_glsl, ktm::uvec3(8, 8, 1));
+        hardware_->opticsGizmoPipeline.emplace(optics_gizmo_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->opticsCursorPipeline.emplace(optics_cursor_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->opticsUiWarpPipeline.emplace(optics_ui_warp_comp_glsl, ktm::uvec3(8, 8, 1));
         hardware_->opticsCompositePipeline.emplace(optics_composite_comp_glsl, ktm::uvec3(8, 8, 1));
@@ -4733,7 +4734,7 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     uint64_t frame_index) {
     auto& uiVisibility = *hardware_->uiVisibilityPipeline;
     auto& opticsOverlay = *hardware_->opticsOverlayPipeline;
-    // auto& opticsGizmo = *hardware_->opticsGizmoPipeline;  // Removed in Horizon API update
+    auto& opticsGizmo = *hardware_->opticsGizmoPipeline;
     auto& opticsCursor = *hardware_->opticsCursorPipeline;
     auto& opticsUiWarp = *hardware_->opticsUiWarpPipeline;
     auto& opticsComposite = *hardware_->opticsCompositePipeline;
@@ -4919,8 +4920,6 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
         return &background;
     }
 
-    // Gizmo rendering disabled - opticsGizmoPipeline removed in Horizon API update
-    /*
     if (gizmo_visible) {
         opticsGizmo.pushConsts.outputImage = overlayDescriptor;
         opticsGizmo.pushConsts.outputWidth = hardware_->gbufferSize.x;
@@ -4973,7 +4972,6 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
             hardware_->gbufferSize.x,
             hardware_->gbufferSize.y));
     }
-    */
 
     if (cursor_visible && cursor_state != nullptr) {
         const bool preserve_existing_overlay =
@@ -5063,12 +5061,9 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
         stream << uiVisibility(hardware_->gbufferSize.x, hardware_->gbufferSize.y)
                << opticsOverlay(dispatchX, dispatchY, 1);
     }
-    // Gizmo dispatch disabled - opticsGizmoPipeline removed
-    /*
     if (gizmo_visible) {
         stream << opticsGizmo(dispatchX, dispatchY, 1);
     }
-    */
     if (cursor_visible) {
         stream << opticsCursor(cursorDispatchX, cursorDispatchY, 1);
     }
