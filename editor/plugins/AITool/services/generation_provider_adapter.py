@@ -169,8 +169,35 @@ class DeferredDownloadProvider:
         return fn()
 
 
+class DeferredDownloadScheduler:
+    """Engine-owned facade exposing a generic deferred-download protocol."""
+
+    def __init__(self, scheduler: Any) -> None:
+        self._scheduler = scheduler
+
+    def submit_deferred_download(
+        self,
+        download_fn: Callable[..., Any],
+        download_kwargs: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        provider = DeferredDownloadProvider(download_fn)
+        runner = ProviderStageRunner(provider)
+        job_payload = {
+            **payload,
+            "download_kwargs": dict(download_kwargs),
+            "_runtime_context": {
+                "generation_provider": provider,
+                "stage_handlers": runner.stage_handlers(),
+                "stage_order": ("download",),
+            },
+        }
+        return self._scheduler.submit(job_payload)
+
+
 __all__ = [
     "DeferredDownloadProvider",
+    "DeferredDownloadScheduler",
     "PROVIDER_STAGE_METHODS",
     "ProviderStageRunner",
 ]

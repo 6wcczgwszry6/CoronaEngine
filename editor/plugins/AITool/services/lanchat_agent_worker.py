@@ -14362,7 +14362,9 @@ class LANChatAgentWorker:
         setter = getattr(model_tools, "set_deferred_download_scheduler", None)
         if callable(setter):
             try:
-                setter(scheduler)
+                from .generation_provider_adapter import DeferredDownloadScheduler
+
+                setter(DeferredDownloadScheduler(scheduler))
             except Exception as exc:  # noqa: BLE001
                 self._logger.debug("Failed to install deferred download scheduler: %s", type(exc).__name__)
 
@@ -14376,7 +14378,9 @@ class LANChatAgentWorker:
         if not callable(getter) or not callable(setter):
             return
         try:
-            if getter() is scheduler:
+            # Quasar receives an engine-owned facade, so identity is not the
+            # original GenerationScheduler. Clearing is scoped to this worker.
+            if getter() is not None:
                 setter(None)
         except Exception as exc:  # noqa: BLE001
             self._logger.debug("Failed to clear deferred download scheduler: %s", type(exc).__name__)
