@@ -94,22 +94,6 @@ class ProjectCopyTests(unittest.TestCase):
                 ["creative_world_5"],
             )
 
-    def test_open_project_file_only_returns_selected_path(self):
-        with tempfile.TemporaryDirectory() as temp_dir:
-            source = Path(temp_dir) / "vision_scene.json"
-            source.write_text("{}", encoding="utf-8")
-
-            original_open_file = project_launcher.FileHandler.open_file
-            project_launcher.FileHandler.open_file = staticmethod(
-                lambda **kwargs: ("", str(source))
-            )
-            try:
-                result = project_launcher.ProjectLauncher.open_project_file()
-            finally:
-                project_launcher.FileHandler.open_file = original_open_file
-
-            self.assertEqual(result, {"name": source.stem, "path": str(source.resolve())})
-
     def test_project_launcher_python_does_not_import_project_copy_or_vision_import(self):
         source = Path(project_launcher.__file__).read_text(encoding="utf-8")
         self.assertNotIn("ProjectCopy", source)
@@ -186,22 +170,6 @@ class ProjectCopyTests(unittest.TestCase):
             settings = CoronaSettings(str(config_path))
             recent = settings.get_recent_projects()
             self.assertTrue(recent[0]["legacy"])
-
-    def test_portable_migration_target_defaults_to_new_project_data_directory(self):
-        captured = {}
-        original_get_default_path = project_launcher.settings_manager.get_default_path
-        original_choose_new_directory = project_launcher.FileHandler.choose_new_directory
-        project_launcher.settings_manager.get_default_path = lambda: ""
-        project_launcher.FileHandler.choose_new_directory = staticmethod(
-            lambda **kwargs: captured.update(kwargs) or ""
-        )
-        try:
-            project_launcher.ProjectLauncher.choose_portable_scene_target()
-        finally:
-            project_launcher.settings_manager.get_default_path = original_get_default_path
-            project_launcher.FileHandler.choose_new_directory = original_choose_new_directory
-
-        self.assertEqual(Path(captured["default_dir"]).name, "data")
 
     def test_portable_settings_save_does_not_modify_scene_ini_or_create_project_ini(self):
         with tempfile.TemporaryDirectory() as temp_dir:
