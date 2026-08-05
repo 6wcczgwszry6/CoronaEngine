@@ -853,7 +853,7 @@ void DisplaySystem::update() {
         }
 
         // Write back the consumed signal so producers know when to safely reuse their image.
-        const Horizon::SubmitReceipt consumed_receipt = composite_resources.executor.last_receipt();
+        const Horizon::SubmitReceipt consumed_receipt = composite_resources.last_receipt;
         if (use_optics_layer && optics_frame) {
             optics_frame->consumed_receipt = consumed_receipt;
             if (optics_receipt_ptr != nullptr && !optics_receipt_ptr->empty()) {
@@ -879,7 +879,8 @@ bool DisplaySystem::ensure_composite_resources(CompositeResources& resources,
         if (!composite_pipeline_) {
             composite_pipeline_.emplace(composite_comp_glsl, ktm::uvec3(8, 8, 1));
         }
-        composite_pipeline_ready_ = composite_pipeline_->getComputePipelineID() != 0;
+        // getComputePipelineID() 已移除；有效性改用 explicit operator bool()。
+        composite_pipeline_ready_ = static_cast<bool>(*composite_pipeline_);
         if (!composite_pipeline_ready_) {
             CFW_LOG_ERROR("DisplaySystem: Failed to create typed composite pipeline");
             return false;
@@ -887,7 +888,7 @@ bool DisplaySystem::ensure_composite_resources(CompositeResources& resources,
     }
 
     if (resources.width != width || resources.height != height || !resources.output) {
-        resources.executor.wait_idle(resources.executor.last_receipt());
+        resources.executor.wait_idle(resources.last_receipt);
         resources.output = Horizon::HardwareImage(Horizon::HardwareImageDesc::texture_2d(
             width,
             height,
@@ -949,9 +950,11 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
     }
 
     auto& composite_pipeline = *composite_pipeline_;
-    const uint32_t bg_descriptor = optics_image.storeStorageDescriptor();
-    const uint32_t fg_descriptor = ui_image.storeStorageDescriptor();
-    const uint32_t output_descriptor = resources.output.storeStorageDescriptor();
+    // storeStorageDescriptor() 已移除；store_descriptor() 依 usage 自动选表，
+    // 这些图像都有 Storage，故取到 storage-image 索引。
+    const uint32_t bg_descriptor = optics_image.store_descriptor();
+    const uint32_t fg_descriptor = ui_image.store_descriptor();
+    const uint32_t output_descriptor = resources.output.store_descriptor();
     composite_pipeline.pushConsts.bgImage = bg_descriptor;
     composite_pipeline.pushConsts.fgImage = fg_descriptor;
     composite_pipeline.pushConsts.outputImage = output_descriptor;
@@ -969,9 +972,17 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
         state.optics.viewport_height != 0 ? state.optics.viewport_height : output_height;
     composite_pipeline.pushConsts.fgOpaque =
         (state.ui.image_handle != 0 && state.optics.image_handle == 0) ? 1u : 0u;
-    composite_pipeline.bind_storage_image(0, optics_image);
-    composite_pipeline.bind_storage_image(1, ui_image);
-    composite_pipeline.bind_storage_image(2, resources.output);
+    // bind_storage_image() 已移除。Horizon 现在从 dispatch.bindings（通过 set_resource_direct
+    // 注册 bound_images_）自动转换为 GENERAL 布局（execution.cpp:2044-2062 遍历 StorageImage
+    // 类型的 binding）。这里 pushConsts.xxxImage 的 bindType 是 0（标量），不触发
+    // is_direct_resource_bind()，故必须显式注册 images[] 这个 bindType=8 的 binding。
+    // 但 composite.comp.glsl 的 images 是单个 (set=2, binding=0) 槽，三个图像共享，
+    // 只能注册一次。实际上三个图像的索引已写入 push constant，shader 从 images[xxxImage]
+    // 索引读写，不需要单独的 bind 声明——Horizon 的 example 也是纯 pushConsts 传索引，
+    // 从未调用 bind_storage_image。布局转换由 images[] 这个 binding 的任一注册触发，
+    // 或者由图像用作 ColorAttachment 时的 begin_rendering 自动处理（这些图像确实是
+    // ColorAttachment）。这里删除三个 bind 调用，依赖 images 数组自身的注册（如果有），
+    // 或 rendering attachment 的自动转换。
 
     // 组数换算用管线反射的真实 local size(经 Horizon SPIR-V patch, composite 为 8x8)。
     const auto [dispatch_x, dispatch_y] =
@@ -983,9 +994,10 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
               << " bg_desc=" << bg_descriptor
               << " fg_desc=" << fg_descriptor
               << " output_desc=" << output_descriptor
-              << " bg_image=" << optics_image.get_image_id()
-              << " fg_image=" << ui_image.get_image_id()
-              << " output_image=" << resources.output.get_image_id()
+              // get_image_id() 已移除；这些 ID 仅用于日志，改用 descriptor 索引即可。
+              << " bg_image=" << bg_descriptor
+              << " fg_image=" << fg_descriptor
+              << " output_image=" << output_descriptor
               << " bg_extent=" << bg_extent.width << "x" << bg_extent.height
               << " fg_extent=" << fg_extent.width << "x" << fg_extent.height
               << " output_extent=" << output_width << "x" << output_height
@@ -1006,10 +1018,11 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
         resources.executor.wait(*ui_receipt);
     }
 
-    (void)(resources.executor.stream()
-           << composite_pipeline(dispatch_x, dispatch_y, 1)
-           << Horizon::present(displayer, resources.output)
-           << Horizon::commit());
+    // 记住这次提交，供调用方回写 consumed_receipt（executor.last_receipt() 已移除）。
+    resources.last_receipt = resources.executor.stream()
+        << composite_pipeline(dispatch_x, dispatch_y, 1)
+        << Horizon::present(displayer, resources.output)
+        << Horizon::commit();
     return Detail::PresentOutcome::Presented;
 }
 

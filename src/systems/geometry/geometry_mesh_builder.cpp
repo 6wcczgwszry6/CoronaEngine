@@ -73,10 +73,19 @@ bool upload_geometry_texture(Horizon::HardwareImage& texture,
         return false;
     }
     try {
+        // Horizon 移除了 HardwareImage::upload()：改为 staging buffer + copy_from()。
+        Horizon::HardwareBufferDesc staging_desc;
+        staging_desc.element_count = bytes.size_bytes();
+        staging_desc.element_size = 1;
+        staging_desc.usage = Horizon::BufferUsageFlags::TransferSrc;
+        staging_desc.cpu_access = Horizon::CpuAccessMode::Write;
+        const Horizon::HardwareBuffer staging(staging_desc, bytes);
+
         Horizon::HardwareExecutor executor;
         const auto receipt = executor.stream()
-            << texture.upload(bytes)
+            << texture.copy_from(staging)
             << Horizon::commit();
+        // staging 是局部量，必须等 GPU 用完再析构。
         executor.wait_idle(receipt);
         return true;
     } catch (const std::exception& exc) {
