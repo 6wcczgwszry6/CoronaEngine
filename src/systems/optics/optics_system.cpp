@@ -2883,8 +2883,18 @@ bool OpticsSystem::ensure_gizmo_axis_textures() {
         const auto bytes = std::span<const std::byte>(
             reinterpret_cast<const std::byte*>(pixels[i].rgba.data()),
             pixels[i].rgba.size());
-        image.write_bytes(bytes);
-        const auto receipt = executor.stream() << Horizon::commit();
+
+        // Use staging buffer + copy_from() like cursor icon (new Horizon API)
+        Horizon::HardwareBufferDesc staging_desc;
+        staging_desc.element_count = bytes.size_bytes();
+        staging_desc.element_size = 1;
+        staging_desc.usage = Horizon::BufferUsageFlags::TransferSrc;
+        staging_desc.cpu_access = Horizon::CpuAccessMode::Write;
+        const Horizon::HardwareBuffer staging(staging_desc, bytes);
+
+        const auto receipt = executor.stream()
+            << image.copy_from(staging)
+            << Horizon::commit();
         executor.wait_idle(receipt);
         hardware_->gizmoAxisImages[i] = std::move(image);
     }
@@ -4935,14 +4945,10 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
             upload_value(gizmo_layout.axes[2].direction);
         opticsGizmo.pushConsts.xImage =
             hardware_->gizmoAxisImages[0].store_descriptor();
-        // The provided assets use blue for axis_y.png and green for axis_z.png,
-        // while the world-axis convention is Y=green and Z=blue. Swap the
-        // texture slots (and their source metadata below) to keep semantics
-        // aligned with the world-axis widget.
         opticsGizmo.pushConsts.yImage =
-            hardware_->gizmoAxisImages[2].store_descriptor();
-        opticsGizmo.pushConsts.zImage =
             hardware_->gizmoAxisImages[1].store_descriptor();
+        opticsGizmo.pushConsts.zImage =
+            hardware_->gizmoAxisImages[2].store_descriptor();
         opticsGizmo.pushConsts.activeAxis =
             static_cast<std::uint32_t>(gizmo_state.active_axis);
         opticsGizmo.pushConsts.hoverAxis =
@@ -4958,12 +4964,12 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
                 sprite_metadata[0].tip.x, sprite_metadata[0].tip.y});
         opticsGizmo.pushConsts.ySourceAnchorTip =
             upload_value(ktm::fvec4{
-                sprite_metadata[2].anchor.x, sprite_metadata[2].anchor.y,
-                sprite_metadata[2].tip.x, sprite_metadata[2].tip.y});
-        opticsGizmo.pushConsts.zSourceAnchorTip =
-            upload_value(ktm::fvec4{
                 sprite_metadata[1].anchor.x, sprite_metadata[1].anchor.y,
                 sprite_metadata[1].tip.x, sprite_metadata[1].tip.y});
+        opticsGizmo.pushConsts.zSourceAnchorTip =
+            upload_value(ktm::fvec4{
+                sprite_metadata[2].anchor.x, sprite_metadata[2].anchor.y,
+                sprite_metadata[2].tip.x, sprite_metadata[2].tip.y});
         opticsGizmo.set_debug_label(make_optics_dispatch_label(
             "ui_gizmo",
             static_cast<std::uint32_t>(frame_index),
@@ -5049,6 +5055,27 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     opticsComposite.pushConsts.outputImage = target.composite_output.store_descriptor();
     opticsComposite.pushConsts.outputWidth = hardware_->gbufferSize.x;
     opticsComposite.pushConsts.outputHeight = hardware_->gbufferSize.y;
+
+    if (gizmo_visible) {
+        const auto overlayExtent = target.ui_overlay.extent();
+        const auto compositeExtent = target.composite_output.extent();
+        CFW_LOG_INFO("Optics gizmo diagnostics: origin=({}, {}) xdir=({}, {}) ydir=({}, {}) zdir=({}, {}) overlay_desc={} overlay_extent={}x{} composite_extent={}x{} composite_fg_desc={}",
+                     gizmo_layout.origin.x,
+                     gizmo_layout.origin.y,
+                     gizmo_layout.axes[0].direction.x,
+                     gizmo_layout.axes[0].direction.y,
+                     gizmo_layout.axes[1].direction.x,
+                     gizmo_layout.axes[1].direction.y,
+                     gizmo_layout.axes[2].direction.x,
+                     gizmo_layout.axes[2].direction.y,
+                     overlayDescriptor,
+                     overlayExtent.width,
+                     overlayExtent.height,
+                     compositeExtent.width,
+                     compositeExtent.height,
+                     compositeOverlayDescriptor);
+    }
+
     opticsComposite.set_debug_label(make_optics_dispatch_label(
         "ui_composite",
         static_cast<std::uint32_t>(frame_index),
