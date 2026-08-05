@@ -66,12 +66,14 @@ class CoronaSettings:
 
         self.config = configparser.ConfigParser(strict=False)
         self._active_project_path = None
+        self._automatic_hydration_attempted = False
         self.active_project_config = None
         self._ensure_file_exists()
 
     @property
     def active_project_path(self):
-        if not self._active_project_path:
+        if not self._active_project_path and not self._automatic_hydration_attempted:
+            self._automatic_hydration_attempted = True
             self._hydrate_active_project_from_last_project()
         return self._active_project_path
 

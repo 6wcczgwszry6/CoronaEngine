@@ -34,6 +34,8 @@ class BlockSpec:
     inputs: dict[str, dict[str, Any]]
     dynamic: bool = False
     project_usage: str = ""
+    capabilities: tuple[str, ...] = ()
+    ai_use: str = ""
 
 
 def _checks(value: str | None) -> tuple[str, ...]:
@@ -87,6 +89,8 @@ def load_contract_catalog(path: str | Path | None = None) -> dict[str, Any]:
             inputs=inputs,
             dynamic=str(block.get("dynamic") or "false").lower() == "true",
             project_usage=str(block.get("projectUsage") or ""),
+            capabilities=_checks(block.get("capabilities")),
+            ai_use=str(block.get("aiUse") or "").strip(),
         )
 
     node_types = {

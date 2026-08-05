@@ -121,6 +121,6 @@ export const CoronaTheme = Blockly.Theme.defineTheme('CoronaTheme', {
   fontStyle: {
     family: '"Microsoft YaHei", sans-serif',
     weight: 'normal',
-    size: 12,
+    size: 13,
   },
 });

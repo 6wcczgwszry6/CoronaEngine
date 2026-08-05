@@ -4,6 +4,7 @@ import pathlib
 import tempfile
 import unittest
 
+from editor.backend.blockly.ai_node_graph_contract import load_contract_catalog
 from editor.backend.blockly.check_ai_contract_catalog import (
     CONTRACT_PATH,
     TOOLBOX_PATH,
@@ -19,6 +20,15 @@ class AiContractCatalogTests(unittest.TestCase):
         self.assertEqual(261, result["toolboxCount"])
         self.assertEqual(result["toolboxCount"], result["catalogCount"])
         self.assertEqual(result["catalogCount"], result["declaredCount"])
+
+    def test_current_contract_exposes_machine_readable_capabilities_and_usage_hints(self):
+        catalog = load_contract_catalog(CONTRACT_PATH)
+        follow = catalog["blocks"]["camera_follow_object"]
+        near = catalog["blocks"]["detect_position_near"]
+        self.assertIn("camera-follow", follow.capabilities)
+        self.assertIn("exact real actor", follow.ai_use)
+        self.assertIn("distance-check", near.capabilities)
+        self.assertIn("live position", near.ai_use)
 
     def test_checker_reports_missing_extra_duplicate_and_bad_count(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -48,9 +58,12 @@ class AiContractCatalogTests(unittest.TestCase):
             contract.write_text(
                 "<CoronaBlocksDocument documentPurpose=\"internal-ai-node-graph-contract\">"
                 "<InternalAiContract><FixedTarget targetId=\"wrong\" actorBinding=\"actor\"/>"
-                "</InternalAiContract><Catalog blockCount=\"1\"><Blocks>"
+                "</InternalAiContract>"
+                "<CapabilityTaxonomy><Capability name=\"known\" keywords=\"known\">Known.</Capability>"
+                "</CapabilityTaxonomy><Catalog blockCount=\"1\"><Blocks>"
                 "<Block type=\"alpha\" shape=\"bad\" projectUsage=\"bad\" "
-                "recommended=\"maybe\" dynamic=\"false\" outputCheck=\"Number\">"
+                "recommended=\"maybe\" dynamic=\"false\" outputCheck=\"Number\" "
+                "capabilities=\"unknown\" aiUse=\"\">"
                 "<Field name=\"MODE\" kind=\"dropdown\" defaultJson=\"not-json\"/>"
                 "<Field name=\"MODE\" kind=\"dropdown\" defaultJson=\"0\"/>"
                 "<Input name=\"VALUE\" kind=\"bad\"/>"
@@ -68,6 +81,8 @@ class AiContractCatalogTests(unittest.TestCase):
         self.assertIn("defaultJson is not valid JSON", combined)
         self.assertIn("dropdown needs optionValues", combined)
         self.assertIn("invalid input kind", combined)
+        self.assertIn("unknown capabilities", combined)
+        self.assertIn("aiUse must not be empty", combined)
         self.assertIn("GlobalWorkspaceRootTypes references missing block", combined)
 
 

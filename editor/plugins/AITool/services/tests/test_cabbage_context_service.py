@@ -42,122 +42,857 @@ class CabbageContextServiceTests(unittest.TestCase):
             None,
         )
 
-    def visible_tutorial_keys(self, context):
-        return {
-            task.get("taskKey")
-            for task in context.get("activeTasks", [])
-            if task.get("type") == "tutorial" and task.get("status") in {"active", "pending"}
-        }
+    def tutorial_tasks(self, context):
+        return sorted(
+            [task for task in context.get("activeTasks", []) if task.get("type") == "tutorial"],
+            key=lambda task: int(task.get("globalOrder") or 0),
+        )
 
-    def test_new_world_contains_node_interaction_tutorials(self):
+    def active_tutorial(self, context):
+        active = [
+            task for task in self.tutorial_tasks(context)
+            if task.get("status") == "active"
+        ]
+        self.assertEqual(1, len(active), "Exactly one tutorial step must be active")
+        return active[0]
+
+    def record(self, event_type, details=None, success=True, timestamp=None):
+        payload = {
+            "type": event_type,
+            "category": "tutorial",
+            "success": success,
+            "details": details or {},
+            "worldId": self.world.name,
+        }
+        if timestamp is not None:
+            payload["timestamp"] = timestamp
+        return self.service.record_event(payload)
+
+    @staticmethod
+    def tutorial_event_sequence():
+        return [
+            ("tutorial.basics.viewport_focus", "viewport_focused", {}),
+            ("tutorial.basics.camera_forward_back", "camera_moved", {
+                "key": "W", "axisGroup": "forward_back", "actualDelta": 1,
+            }),
+            ("tutorial.basics.camera_left_right", "camera_moved", {
+                "key": "A", "axisGroup": "left_right", "actualDelta": 1,
+            }),
+            ("tutorial.basics.camera_up_down", "camera_moved", {
+                "key": "E", "axisGroup": "up_down", "actualDelta": 1,
+            }),
+            ("tutorial.basics.camera_rotate", "camera_rotated", {
+                "interaction": "right_mouse_drag", "actualDelta": 1,
+            }),
+            ("tutorial.basics.camera_wheel", "camera_moved", {
+                "interaction": "wheel", "actualDelta": 1,
+            }),
+            ("tutorial.basics.open_scene_manager", "panel_opened", {
+                "panelId": "SceneTools", "source": "user",
+            }),
+            ("tutorial.basics.import_model", "model_imported", {
+                "sceneName": "Scene", "actorName": "TutorialActor",
+                "actorId": "actor-1", "resourcePath": "cache/tutorial.glb",
+            }),
+            ("tutorial.basics.select_model", "actor_selected", {
+                "actorName": "TutorialActor", "actorId": "actor-1", "source": "scene_tree",
+            }),
+            ("tutorial.basics.set_position_x", "transform_position", {
+                "actorName": "TutorialActor", "actorId": "actor-1", "axis": "x", "value": 1,
+            }),
+            ("tutorial.basics.set_rotation_y", "transform_rotation", {
+                "actorName": "TutorialActor", "actorId": "actor-1", "axis": "y", "value": 45,
+            }),
+            ("tutorial.basics.set_scale_x", "transform_scale", {
+                "actorName": "TutorialActor", "actorId": "actor-1", "axis": "x", "value": 1.5,
+            }),
+            ("tutorial.basics.enable_physics", "physics_changed", {
+                "actorName": "TutorialActor", "actorId": "actor-1",
+                "operation": "SetPhysicsEnabled", "value": True,
+            }),
+            ("tutorial.basics.set_mass", "physics_changed", {
+                "actorName": "TutorialActor", "actorId": "actor-1",
+                "operation": "SetMass", "value": 10,
+            }),
+            ("tutorial.basics.set_light_x", "lighting_changed", {
+                "sceneName": "Scene", "axis": "x", "value": 0.5,
+            }),
+            ("tutorial.basics.open_nodes", "panel_opened", {
+                "panelId": "NodeGraphPanel", "source": "user",
+            }),
+            ("tutorial.basics.confirm_start_node", "node_selected", {
+                "nodeId": "start-1", "nodeType": "start", "uniqueStart": True, "source": "user",
+            }),
+            ("tutorial.basics.create_custom_node", "node_created", {
+                "nodeId": "custom-1", "nodeType": "custom",
+            }),
+            ("tutorial.basics.select_custom_node", "node_selected", {
+                "nodeId": "custom-1", "nodeType": "custom", "mode": "select", "source": "user",
+            }),
+            ("tutorial.basics.move_custom_node", "node_moved", {
+                "nodeId": "custom-1", "actualDelta": 20, "mode": "select", "source": "user",
+            }),
+            ("tutorial.basics.create_delete_practice_node", "node_created", {
+                "nodeId": "delete-practice-1", "nodeType": "custom",
+            }),
+            ("tutorial.basics.delete_practice_node", "node_deleted", {
+                "nodeId": "delete-practice-1", "nodeType": "custom", "mode": "delete", "source": "user",
+            }),
+            ("tutorial.basics.return_select_tool", "node_tool_mode_changed", {
+                "mode": "select", "source": "user",
+            }),
+            ("tutorial.basics.connect_nodes", "node_connected", {
+                "sourceNodeId": "start-1", "targetNodeId": "custom-1", "edgeId": "edge-1",
+            }),
+            ("tutorial.basics.open_custom_node", "node_selected", {
+                "nodeId": "custom-1", "source": "user",
+            }),
+            ("tutorial.basics.add_when_enter", "block_added", {
+                "nodeId": "custom-1", "blockId": "enter-1", "blockType": "node_when_enter",
+            }),
+            ("tutorial.basics.add_set_position", "block_connected", {
+                "nodeId": "custom-1", "blockId": "position-1",
+                "blockType": "object_set_position",
+                "parentBlockType": "node_when_enter", "connected": True,
+            }),
+            ("tutorial.basics.set_position_model", "block_parameter_changed", {
+                "nodeId": "custom-1", "blockId": "position-1",
+                "blockType": "object_set_position", "fieldName": "NAME",
+                "parentBlockType": "node_when_enter", "connected": True,
+                "newValue": "TutorialActor", "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.set_start_x", "block_parameter_changed", {
+                "nodeId": "custom-1", "blockId": "position-1",
+                "blockType": "object_set_position", "fieldName": "X",
+                "parentBlockType": "node_when_enter", "connected": True,
+                "newValue": -3, "modelName": "TutorialActor", "x": -3, "y": 0, "z": 0,
+            }),
+            ("tutorial.basics.add_while_active", "block_added", {
+                "nodeId": "custom-1", "blockId": "active-1",
+                "blockType": "node_while_active", "parentBlockType": "", "connected": False,
+            }),
+            ("tutorial.basics.add_move_direction", "block_connected", {
+                "nodeId": "custom-1", "blockId": "move-1",
+                "blockType": "object_move_direction",
+                "parentBlockType": "node_while_active", "connected": True,
+            }),
+            ("tutorial.basics.set_move_model", "block_parameter_changed", {
+                "nodeId": "custom-1", "blockId": "move-1",
+                "blockType": "object_move_direction", "fieldName": "NAME",
+                "parentBlockType": "node_while_active", "connected": True,
+                "newValue": "TutorialActor", "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.set_move_direction", "block_parameter_changed", {
+                "nodeId": "custom-1", "blockId": "move-1",
+                "blockType": "object_move_direction", "fieldName": "DIRECTION",
+                "parentBlockType": "node_while_active", "connected": True,
+                "newValue": "RIGHT", "direction": "RIGHT", "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.set_move_speed", "block_parameter_changed", {
+                "nodeId": "custom-1", "blockId": "move-1",
+                "blockType": "object_move_direction", "fieldName": "SPEED",
+                "parentBlockType": "node_while_active", "connected": True,
+                "newValue": 2, "modelName": "TutorialActor",
+                "direction": "RIGHT", "speed": 2,
+            }),
+            ("tutorial.basics.run_graph", "run_clicked", {"source": "user"}),
+            ("tutorial.basics.focus_ai_composer", "ai_composer_focused", {
+                "source": "user",
+            }),
+            ("tutorial.basics.ask_ai", "ai_question_answered", {
+                "prompt": "Explain why the model starts at X=-3 and moves right; do not modify anything.",
+                "mode": "ask", "responseReceived": True,
+            }),
+            ("tutorial.basics.modify_with_ai", "ai_node_graph_changed", {
+                "prompt": "Change the continuous movement speed from 2 to 4 and keep everything else.",
+                "mode": "modify", "operation": "edit", "applied": True,
+            }),
+            ("tutorial.basics.generate_with_ai", "ai_node_graph_changed", {
+                "prompt": "Add an End node and connect the Custom node to it.",
+                "mode": "generate", "operation": "extend", "applied": True,
+                "createdNodeIds": ["ai-end-1"], "createdEdgeIds": ["ai-edge-1"],
+            }),
+        ]
+
+    def complete_tutorial_steps(self, count):
+        response = self.service.load()
+        for expected_key, event_type, details in self.tutorial_event_sequence()[:count]:
+            self.assertEqual(expected_key, self.active_tutorial(response["context"])["taskKey"])
+            response = self.record(event_type, details)
+            self.assertTrue(response["success"])
+            self.assertEqual([expected_key], response["completedTaskKeys"])
+        return response
+
+    def test_new_world_uses_schema_v2_with_four_chapters_and_39_steps(self):
         response = self.service.load()
         self.assertTrue(response["success"])
-        keys = self.active_task_keys(response["context"])
-        self.assertIn("tutorial.move_node", keys)
-        self.assertIn("tutorial.connect_nodes", keys)
-        self.assertIn("tutorial.drag_block", keys)
+        context = response["context"]
+        tutorials = self.tutorial_tasks(context)
 
-    def test_new_world_shows_one_scene_task_and_one_node_task(self):
-        context = self.service.load()["context"]
+        self.assertEqual(2, context["schemaVersion"])
+        self.assertEqual(39, len(tutorials))
         self.assertEqual(
-            {"tutorial.import_model", "tutorial.create_node"},
-            self.visible_tutorial_keys(context),
+            ["chapter_viewport", "chapter_scene", "chapter_nodes", "chapter_ai"],
+            list(dict.fromkeys(task["chapterKey"] for task in tutorials)),
         )
-        visible = {
-            task.get("track")
-            for task in context.get("activeTasks", [])
-            if task.get("status") == "active" and task.get("type") == "tutorial"
+        self.assertEqual(
+            {"chapter_viewport": 6, "chapter_scene": 9, "chapter_nodes": 20, "chapter_ai": 4},
+            {
+                chapter_key: sum(task["chapterKey"] == chapter_key for task in tutorials)
+                for chapter_key in {task["chapterKey"] for task in tutorials}
+            },
+        )
+        self.assertEqual(list(range(1, 40)), [task["globalOrder"] for task in tutorials])
+        self.assertTrue(all(task["taskKey"].startswith("tutorial.basics.") for task in tutorials))
+        self.assertEqual("tutorial.basics.viewport_focus", self.active_tutorial(context)["taskKey"])
+        self.assertTrue(all(
+            task["status"] == ("active" if task["globalOrder"] == 1 else "queued")
+            for task in tutorials
+        ))
+
+    def test_tutorial_tasks_are_bilingual_and_do_not_expose_track_or_discipline(self):
+        tutorials = self.tutorial_tasks(self.service.load()["context"])
+        visible_fields = (
+            "chapterTitle", "chapterTitleEn", "chapterSummary", "chapterSummaryEn",
+            "title", "titleEn", "message", "messageEn", "suggestion", "suggestionEn",
+            "completionCriteria", "completionCriteriaEn",
+        )
+        forbidden_internal_names = (
+            "node_when_enter", "node_while_active", "object_set_position",
+            "object_move_direction", "control_wait", "logic_boolean", "run_succeeded",
+            "SetPhysicsEnabled", "SECONDS", "DIRECTION", "SPEED",
+        )
+        self.assertEqual(39, len(CabbageContextService.TUTORIAL_TASKS))
+        for task in tutorials:
+            with self.subTest(task=task["taskKey"]):
+                for field in visible_fields:
+                    value = str(task.get(field) or "").strip()
+                    self.assertTrue(value, field)
+                    self.assertNotIn("???", value)
+                    for internal_name in forbidden_internal_names:
+                        self.assertNotIn(internal_name, value)
+                self.assertNotIn("track", task)
+                self.assertNotIn("discipline", task)
+
+    def test_block_add_tasks_name_the_visible_toolbox_category(self):
+        tutorials = {
+            task["taskKey"]: task
+            for task in self.tutorial_tasks(self.service.load()["context"])
         }
-        self.assertEqual({"scene", "node"}, visible)
-
-    def test_legacy_pending_tutorials_are_migrated_to_two_visible_slots(self):
-        context = self.service._default_context(self.world)
-        for task in context["activeTasks"]:
-            if task.get("type") == "tutorial":
-                task["status"] = "pending"
-        context_path = self.service._context_path(self.world)
-        context_path.parent.mkdir(parents=True, exist_ok=True)
-        context_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
-
-        loaded = self.service.load()["context"]
-        self.assertEqual(
-            {"tutorial.import_model", "tutorial.create_node"},
-            self.visible_tutorial_keys(loaded),
-        )
-        queued = {
-            task.get("taskKey")
-            for task in loaded.get("activeTasks", [])
-            if task.get("type") == "tutorial" and task.get("status") == "queued"
+        expected_categories = {
+            "tutorial.basics.add_when_enter": ("\u4e8b\u4ef6", "Events"),
+            "tutorial.basics.add_set_position": ("\u8fd0\u52a8", "Motion"),
+            "tutorial.basics.add_while_active": ("\u4e8b\u4ef6", "Events"),
+            "tutorial.basics.add_move_direction": ("\u8fd0\u52a8", "Motion"),
         }
-        self.assertIn("tutorial.transform_model", queued)
-        self.assertIn("tutorial.move_node", queued)
+        for task_key, (category_zh, category_en) in expected_categories.items():
+            with self.subTest(task=task_key):
+                task = tutorials[task_key]
+                self.assertIn("\u67e5\u627e\u4f4d\u7f6e", task["message"])
+                self.assertIn(f"\u201c{category_zh}\u201d\u5206\u7c7b", task["message"])
+                self.assertIn("left block toolbox >", task["messageEn"])
+                self.assertIn(f"{category_en} category", task["messageEn"])
+                self.assertIn(category_zh, task["title"])
+                self.assertIn(category_en, task["titleEn"])
 
-    def test_completing_a_task_reveals_next_task_in_same_track(self):
-        imported = self.service.record_event({
-            "type": "model_imported",
-            "category": "scene",
-            "success": True,
-            "worldId": self.world.name,
-        })
-        self.assertEqual(["tutorial.import_model"], imported["completedTaskKeys"])
-        self.assertEqual(
-            {"tutorial.transform_model", "tutorial.create_node"},
-            self.visible_tutorial_keys(imported["context"]),
-        )
-
-        created = self.service.record_event({
-            "type": "node_created",
-            "category": "node",
-            "success": True,
-            "details": {"nodeId": "state_2"},
-            "worldId": self.world.name,
-        })
-        self.assertEqual(["tutorial.create_node"], created["completedTaskKeys"])
-        self.assertEqual(
-            {"tutorial.transform_model", "tutorial.move_node"},
-            self.visible_tutorial_keys(created["context"]),
-        )
-
-    def test_any_transform_parameter_completes_adjust_object_task(self):
-        for event_type in ("transform_position", "transform_rotation", "transform_scale"):
-            with self.subTest(event_type=event_type):
-                context_path = self.service._context_path(self.world)
-                if context_path.exists():
-                    context_path.unlink()
-                response = self.service.record_event({
-                    "type": event_type,
-                    "category": "scene",
-                    "success": True,
-                    "details": {"actorName": "Player"},
-                    "worldId": self.world.name,
-                })
-                self.assertEqual(["tutorial.transform_model"], response["completedTaskKeys"])
-                self.assertIsNotNone(self.history_task(response["context"], "tutorial.transform_model"))
-
-    def test_supplementary_tutorial_events_are_recognized(self):
-        cases = (
-            ("block_parameter_changed", {"blockId": "speed", "fieldName": "VALUE"}, "tutorial.edit_block_parameter"),
-            ("block_added", {"workspaceRole": "condition", "interaction": "pick"}, "tutorial.set_transition_condition"),
-            ("run_started", {"source": "node_graph"}, "tutorial.run_node_graph"),
-            ("run_succeeded", {"source": "node_graph"}, "tutorial.run_node_graph"),
-        )
-        for event_type, details, task_key in cases:
-            with self.subTest(event_type=event_type):
-                context_path = self.service._context_path(self.world)
-                if context_path.exists():
-                    context_path.unlink()
-                response = self.service.record_event({
-                    "type": event_type,
-                    "category": "node" if "block" in event_type else "runtime",
-                    "success": True,
-                    "details": details,
-                    "worldId": self.world.name,
-                })
-                self.assertIn(task_key, response["completedTaskKeys"])
-                self.assertIsNotNone(self.history_task(response["context"], task_key))
-
-    def test_retired_rotate_task_is_removed_from_existing_world(self):
+    def test_current_tutorial_copy_refreshes_active_and_completed_tasks(self):
         context = self.service._default_context(self.world)
+        active = next(
+            task for task in context["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.add_when_enter"
+        )
+        active.update({
+            "title": "stale active title",
+            "message": "stale active message",
+            "track": "programming",
+        })
+
+        completed_at = self.service._now_ms() - 5000
+        history = next(
+            dict(task) for task in context["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.add_set_position"
+        )
+        history.update({
+            "title": "stale history title",
+            "message": "stale history message",
+            "status": "completed",
+            "completedAt": completed_at,
+            "updatedAt": completed_at,
+            "track": "art",
+            "discipline": "art",
+            "historyOnlyMarker": "keep-me",
+        })
+        context["taskHistory"].append(history)
+        self.service._write_locked(self.world, context)
+
+        refreshed = self.service.load()["context"]
+        refreshed_active = next(
+            task for task in refreshed["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.add_when_enter"
+        )
+        refreshed_history = self.history_task(
+            refreshed, "tutorial.basics.add_set_position",
+        )
+
+        self.assertIn("\u201c\u4e8b\u4ef6\u201d\u5206\u7c7b", refreshed_active["message"])
+        self.assertNotEqual("stale active title", refreshed_active["title"])
+        self.assertNotIn("track", refreshed_active)
+        self.assertIsNotNone(refreshed_history)
+        self.assertIn("\u201c\u8fd0\u52a8\u201d\u5206\u7c7b", refreshed_history["message"])
+        self.assertNotEqual("stale history title", refreshed_history["title"])
+        self.assertEqual("completed", refreshed_history["status"])
+        self.assertEqual(completed_at, refreshed_history["completedAt"])
+        self.assertEqual("keep-me", refreshed_history["historyOnlyMarker"])
+        self.assertNotIn("track", refreshed_history)
+        self.assertNotIn("discipline", refreshed_history)
+
+    def test_only_current_step_can_complete_and_camera_requires_actual_change(self):
+        early = self.record("model_imported", {"actorId": "too-early"})
+        self.assertEqual([], early["completedTaskKeys"])
+        self.assertEqual("tutorial.basics.viewport_focus", self.active_tutorial(early["context"])["taskKey"])
+
+        focused = self.record("viewport_focused")
+        self.assertEqual(["tutorial.basics.viewport_focus"], focused["completedTaskKeys"])
+
+        for details in (
+            {"key": "W", "axisGroup": "forward_back", "actualDelta": 0},
+            {"key": "A", "axisGroup": "forward_back", "actualDelta": 1},
+            {"key": "W", "axisGroup": "left_right", "actualDelta": 1},
+        ):
+            rejected = self.record("camera_moved", details)
+            self.assertEqual([], rejected["completedTaskKeys"])
+            self.assertEqual(
+                "tutorial.basics.camera_forward_back",
+                self.active_tutorial(rejected["context"])["taskKey"],
+            )
+
+        moved = self.record("camera_moved", {
+            "key": "S", "axisGroup": "forward_back", "actualDelta": -0.25,
+        })
+        self.assertEqual(["tutorial.basics.camera_forward_back"], moved["completedTaskKeys"])
+
+    def test_guidance_open_does_not_complete_panel_tasks(self):
+        response = self.complete_tutorial_steps(6)
+        self.assertEqual("tutorial.basics.open_scene_manager", self.active_tutorial(response["context"])["taskKey"])
+        guided = self.record("panel_opened", {"panelId": "SceneTools", "source": "guidance"})
+        self.assertEqual([], guided["completedTaskKeys"])
+        opened = self.record("panel_opened", {"panelId": "SceneTools", "source": "user"})
+        self.assertEqual(["tutorial.basics.open_scene_manager"], opened["completedTaskKeys"])
+
+    def test_scene_steps_require_bound_actor_axis_operation_and_value(self):
+        response = self.complete_tutorial_steps(9)
+        self.assertEqual("actor-1", response["context"]["tutorialSession"]["bindings"]["modelActorId"])
+
+        rejected_cases = [
+            ("transform_position", {"actorId": "other", "axis": "x", "value": 1}),
+            ("transform_position", {"actorId": "actor-1", "axis": "y", "value": 1}),
+            ("transform_position", {"actorId": "actor-1", "axis": "x", "value": 1.02}),
+        ]
+        for event_type, details in rejected_cases:
+            rejected = self.record(event_type, details)
+            self.assertEqual([], rejected["completedTaskKeys"])
+        accepted = self.record("transform_position", {"actorId": "actor-1", "axis": "x", "value": 1.009})
+        self.assertEqual(["tutorial.basics.set_position_x"], accepted["completedTaskKeys"])
+
+        rejected = self.record("transform_rotation", {"actorId": "actor-1", "axis": "y", "value": 45.2})
+        self.assertEqual([], rejected["completedTaskKeys"])
+        accepted = self.record("transform_rotation", {"actorId": "actor-1", "axis": "y", "value": 45.09})
+        self.assertEqual(["tutorial.basics.set_rotation_y"], accepted["completedTaskKeys"])
+
+        self.assertEqual([], self.record("transform_scale", {
+            "actorId": "actor-1", "axis": "x", "value": 1.52,
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_scale_x"], self.record("transform_scale", {
+            "actorId": "actor-1", "axis": "x", "value": 1.5,
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("physics_changed", {
+            "actorId": "actor-1", "operation": "SetMass", "value": True,
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.enable_physics"], self.record("physics_changed", {
+            "actorId": "actor-1", "operation": "SetPhysicsEnabled", "value": True,
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("physics_changed", {
+            "actorId": "actor-1", "operation": "SetMass", "value": 10.02,
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_mass"], self.record("physics_changed", {
+            "actorId": "actor-1", "operation": "SetMass", "value": 10,
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("lighting_changed", {"axis": "y", "value": 0.5})["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_light_x"], self.record("lighting_changed", {
+            "sceneName": "Scene", "axis": "x", "value": 0.5,
+        })["completedTaskKeys"])
+
+    def test_node_and_block_steps_require_bound_entities_and_connections(self):
+        response = self.complete_tutorial_steps(17)
+        self.assertEqual(
+            "tutorial.basics.create_custom_node",
+            self.active_tutorial(response["context"])["taskKey"],
+        )
+
+        created = self.record("node_created", {"nodeId": "custom-1", "nodeType": "custom"})
+        self.assertEqual(["tutorial.basics.create_custom_node"], created["completedTaskKeys"])
+        bindings = created["context"]["tutorialSession"]["bindings"]
+        self.assertEqual("start-1", bindings["startNodeId"])
+        self.assertEqual("custom-1", bindings["customNodeId"])
+
+        for details in (
+            {"nodeId": "custom-1", "mode": "select", "source": "creation"},
+            {"nodeId": "custom-1", "mode": "delete", "source": "user"},
+            {"nodeId": "other", "mode": "select", "source": "user"},
+        ):
+            self.assertEqual([], self.record("node_selected", details)["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.select_custom_node"], self.record("node_selected", {
+            "nodeId": "custom-1", "nodeType": "custom", "mode": "select", "source": "user",
+        })["completedTaskKeys"])
+
+        for details in (
+            {"nodeId": "other", "actualDelta": 10, "mode": "select", "source": "user"},
+            {"nodeId": "custom-1", "actualDelta": 0, "mode": "select", "source": "user"},
+            {"nodeId": "custom-1", "actualDelta": 10, "mode": "delete", "source": "user"},
+            {"nodeId": "custom-1", "actualDelta": 10, "mode": "select", "source": "guidance"},
+        ):
+            self.assertEqual([], self.record("node_moved", details)["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.move_custom_node"], self.record("node_moved", {
+            "nodeId": "custom-1", "actualDelta": 10, "mode": "select", "source": "user",
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("node_created", {
+            "nodeId": "custom-1", "nodeType": "custom",
+        })["completedTaskKeys"])
+        created_delete_node = self.record("node_created", {
+            "nodeId": "delete-practice-1", "nodeType": "custom",
+        })
+        self.assertEqual(
+            ["tutorial.basics.create_delete_practice_node"],
+            created_delete_node["completedTaskKeys"],
+        )
+        self.assertEqual(
+            "delete-practice-1",
+            created_delete_node["context"]["tutorialSession"]["bindings"]["deletePracticeNodeId"],
+        )
+
+        for details in (
+            {"nodeId": "custom-1", "mode": "delete", "source": "user"},
+            {"nodeId": "delete-practice-1", "mode": "select", "source": "user"},
+            {"nodeId": "delete-practice-1", "mode": "delete", "source": "guidance"},
+        ):
+            self.assertEqual([], self.record("node_deleted", details)["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.delete_practice_node"], self.record("node_deleted", {
+            "nodeId": "delete-practice-1", "nodeType": "custom", "mode": "delete", "source": "user",
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("node_tool_mode_changed", {
+            "mode": "select", "source": "guidance",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.return_select_tool"], self.record(
+            "node_tool_mode_changed", {"mode": "select", "source": "user"},
+        )["completedTaskKeys"])
+
+        self.assertEqual([], self.record("node_connected", {
+            "sourceNodeId": "custom-1", "targetNodeId": "start-1", "edgeId": "wrong",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.connect_nodes"], self.record("node_connected", {
+            "sourceNodeId": "start-1", "targetNodeId": "custom-1", "edgeId": "edge-1",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.open_custom_node"], self.record("node_selected", {
+            "nodeId": "custom-1", "mode": "select", "source": "user",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.add_when_enter"], self.record("block_added", {
+            "nodeId": "custom-1", "blockId": "enter-1", "blockType": "node_when_enter",
+        })["completedTaskKeys"])
+
+        for details in (
+            {"nodeId": "custom-1", "parentBlockType": "node_when_enter", "connected": False},
+            {"nodeId": "custom-1", "parentBlockType": "other_event", "connected": True},
+            {"nodeId": "other", "parentBlockType": "node_when_enter", "connected": True},
+        ):
+            rejected = self.record("block_connected", {
+                "blockId": "position-1", "blockType": "object_set_position", **details,
+            })
+            self.assertEqual([], rejected["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.add_set_position"], self.record("block_connected", {
+            "nodeId": "custom-1", "blockId": "position-1",
+            "blockType": "object_set_position", "parentBlockType": "node_when_enter",
+            "connected": True,
+        })["completedTaskKeys"])
+
+        position_base = {
+            "nodeId": "custom-1", "blockId": "position-1",
+            "blockType": "object_set_position", "parentBlockType": "node_when_enter",
+            "connected": True,
+        }
+        self.assertEqual([], self.record("block_parameter_changed", {
+            **position_base, "fieldName": "NAME", "newValue": "OtherActor",
+            "modelName": "OtherActor",
+        })["completedTaskKeys"])
+        self.assertEqual([], self.record("block_parameter_changed", {
+            **position_base, "connected": False, "fieldName": "NAME",
+            "newValue": "TutorialActor", "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_position_model"], self.record("block_parameter_changed", {
+            **position_base, "fieldName": "NAME", "newValue": "TutorialActor",
+            "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+
+        for details in (
+            {"newValue": -2.9, "x": -2.9, "y": 0, "z": 0, "modelName": "TutorialActor"},
+            {"newValue": -3, "x": -3, "y": 0, "z": 0, "modelName": "OtherActor"},
+            {"newValue": -3, "x": -3, "y": 1, "z": 0, "modelName": "TutorialActor"},
+        ):
+            rejected = self.record("block_parameter_changed", {
+                **position_base, "fieldName": "X", **details,
+            })
+            self.assertEqual([], rejected["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_start_x"], self.record("block_parameter_changed", {
+            **position_base, "fieldName": "X", "newValue": -3, "x": -3,
+            "y": 0, "z": 0, "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("block_added", {
+            "nodeId": "custom-1", "blockId": "active-1", "blockType": "node_while_active",
+            "parentBlockType": "node_when_enter", "connected": True,
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.add_while_active"], self.record("block_added", {
+            "nodeId": "custom-1", "blockId": "active-1", "blockType": "node_while_active",
+            "parentBlockType": "", "connected": False,
+        })["completedTaskKeys"])
+
+        for details in (
+            {"parentBlockType": "node_while_active", "connected": False},
+            {"parentBlockType": "node_when_enter", "connected": True},
+        ):
+            rejected = self.record("block_connected", {
+                "nodeId": "custom-1", "blockId": "move-1",
+                "blockType": "object_move_direction", **details,
+            })
+            self.assertEqual([], rejected["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.add_move_direction"], self.record("block_connected", {
+            "nodeId": "custom-1", "blockId": "move-1",
+            "blockType": "object_move_direction", "parentBlockType": "node_while_active",
+            "connected": True,
+        })["completedTaskKeys"])
+
+        move_base = {
+            "nodeId": "custom-1", "blockId": "move-1",
+            "blockType": "object_move_direction", "parentBlockType": "node_while_active",
+            "connected": True,
+        }
+        self.assertEqual([], self.record("block_parameter_changed", {
+            **move_base, "fieldName": "NAME", "newValue": "OtherActor", "modelName": "OtherActor",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_move_model"], self.record("block_parameter_changed", {
+            **move_base, "fieldName": "NAME", "newValue": "TutorialActor", "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("block_parameter_changed", {
+            **move_base, "fieldName": "DIRECTION", "newValue": "LEFT",
+            "direction": "LEFT", "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+        self.assertEqual([], self.record("block_parameter_changed", {
+            **move_base, "fieldName": "DIRECTION", "newValue": "RIGHT",
+            "direction": "RIGHT", "modelName": "OtherActor",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_move_direction"], self.record("block_parameter_changed", {
+            **move_base, "fieldName": "DIRECTION", "newValue": "RIGHT",
+            "direction": "RIGHT", "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+
+        for details in (
+            {"newValue": 1.9, "speed": 1.9, "direction": "RIGHT", "modelName": "TutorialActor"},
+            {"newValue": 2, "speed": 2, "direction": "LEFT", "modelName": "TutorialActor"},
+            {"newValue": 2, "speed": 2, "direction": "RIGHT", "modelName": "OtherActor"},
+        ):
+            rejected = self.record("block_parameter_changed", {
+                **move_base, "fieldName": "SPEED", **details,
+            })
+            self.assertEqual([], rejected["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.set_move_speed"], self.record("block_parameter_changed", {
+            **move_base, "fieldName": "SPEED", "newValue": 2, "speed": 2,
+            "direction": "RIGHT", "modelName": "TutorialActor",
+        })["completedTaskKeys"])
+        self.assertEqual(
+            "tutorial.basics.run_graph",
+            self.active_tutorial(self.service.load()["context"])["taskKey"],
+        )
+
+    def test_node_steps_can_reconcile_existing_ui_state_in_order(self):
+        response = self.complete_tutorial_steps(16)
+        self.assertEqual(
+            "tutorial.basics.confirm_start_node",
+            self.active_tutorial(response["context"])["taskKey"],
+        )
+
+        wrong_task = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.create_custom_node",
+            "nodeId": "start-1", "nodeType": "start",
+            "startNodeCount": 1, "uniqueStart": True,
+            "source": "state_observation",
+        })
+        self.assertEqual([], wrong_task["completedTaskKeys"])
+
+        completed = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.confirm_start_node",
+            "source": "state_observation",
+            "nodeId": "start-1", "nodeType": "start", "startNodeCount": 1,
+            "uniqueStart": True, "createdByTutorial": False,
+        })
+        self.assertEqual(["tutorial.basics.confirm_start_node"], completed["completedTaskKeys"])
+        self.assertFalse(completed["context"]["tutorialSession"]["bindings"]["startNodeCreatedByTutorial"])
+
+        completed = self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.create_custom_node",
+            "source": "state_observation", "nodeId": "custom-1", "nodeType": "custom",
+        })
+        self.assertEqual(["tutorial.basics.create_custom_node"], completed["completedTaskKeys"])
+
+        self.assertEqual([], self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.select_custom_node",
+            "nodeId": "custom-1", "mode": "select", "source": "state_observation",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.select_custom_node"], self.record("node_selected", {
+            "nodeId": "custom-1", "mode": "select", "source": "user",
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("tutorial_node_state_observed", {
+            "observedTaskKey": "tutorial.basics.move_custom_node",
+            "nodeId": "custom-1", "actualDelta": 20, "mode": "select",
+            "source": "state_observation",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.move_custom_node"], self.record("node_moved", {
+            "nodeId": "custom-1", "actualDelta": 20, "mode": "select", "source": "user",
+        })["completedTaskKeys"])
+
+        self.assertEqual(["tutorial.basics.create_delete_practice_node"], self.record(
+            "node_created", {"nodeId": "delete-practice-1", "nodeType": "custom"},
+        )["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.delete_practice_node"], self.record("node_deleted", {
+            "nodeId": "delete-practice-1", "mode": "delete", "source": "user",
+        })["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.return_select_tool"], self.record(
+            "node_tool_mode_changed", {"mode": "select", "source": "user"},
+        )["completedTaskKeys"])
+
+        remaining_observations = [
+            ("tutorial.basics.connect_nodes", {
+                "edgeId": "edge-1", "sourceNodeId": "start-1", "targetNodeId": "custom-1",
+            }),
+            ("tutorial.basics.open_custom_node", {
+                "nodeId": "custom-1",
+            }),
+            ("tutorial.basics.add_when_enter", {
+                "nodeId": "custom-1", "blockId": "enter-1", "blockType": "node_when_enter",
+                "workspaceRole": "node",
+            }),
+            ("tutorial.basics.add_set_position", {
+                "nodeId": "custom-1", "blockId": "position-1", "blockType": "object_set_position",
+                "parentBlockType": "node_when_enter", "connected": True, "workspaceRole": "node",
+            }),
+            ("tutorial.basics.set_position_model", {
+                "nodeId": "custom-1", "blockId": "position-1", "blockType": "object_set_position",
+                "parentBlockType": "node_when_enter", "connected": True, "fieldName": "NAME",
+                "newValue": "TutorialActor", "value": "TutorialActor", "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.set_start_x", {
+                "nodeId": "custom-1", "blockId": "position-1", "blockType": "object_set_position",
+                "parentBlockType": "node_when_enter", "connected": True, "fieldName": "X",
+                "newValue": -3, "value": -3, "x": -3, "y": 0, "z": 0,
+                "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.add_while_active", {
+                "nodeId": "custom-1", "blockId": "active-1", "blockType": "node_while_active",
+                "parentBlockType": "", "connected": False, "workspaceRole": "node",
+            }),
+            ("tutorial.basics.add_move_direction", {
+                "nodeId": "custom-1", "blockId": "move-1", "blockType": "object_move_direction",
+                "parentBlockType": "node_while_active", "connected": True, "workspaceRole": "node",
+            }),
+            ("tutorial.basics.set_move_model", {
+                "nodeId": "custom-1", "blockId": "move-1", "blockType": "object_move_direction",
+                "parentBlockType": "node_while_active", "connected": True, "fieldName": "NAME",
+                "newValue": "TutorialActor", "value": "TutorialActor", "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.set_move_direction", {
+                "nodeId": "custom-1", "blockId": "move-1", "blockType": "object_move_direction",
+                "parentBlockType": "node_while_active", "connected": True, "fieldName": "DIRECTION",
+                "newValue": "RIGHT", "value": "RIGHT", "direction": "RIGHT",
+                "modelName": "TutorialActor",
+            }),
+            ("tutorial.basics.set_move_speed", {
+                "nodeId": "custom-1", "blockId": "move-1", "blockType": "object_move_direction",
+                "parentBlockType": "node_while_active", "connected": True, "fieldName": "SPEED",
+                "newValue": 2, "value": 2, "speed": 2, "direction": "RIGHT",
+                "modelName": "TutorialActor",
+            }),
+        ]
+        for expected_key, details in remaining_observations:
+            completed = self.record("tutorial_node_state_observed", {
+                "observedTaskKey": expected_key, "source": "state_observation", **details,
+            })
+            self.assertEqual([expected_key], completed["completedTaskKeys"])
+
+        self.assertEqual(
+            "tutorial.basics.run_graph",
+            self.active_tutorial(completed["context"])["taskKey"],
+        )
+
+    def test_tutorial_baseline_capture_merges_late_sections_without_overwriting(self):
+        first = self.record("tutorial_baseline_captured", {
+            "baselineJson": json.dumps({
+                "cameraState": {"position": [1, 2, 3]},
+                "panels": {"NodeGraphPanel": {"open": False}},
+            }),
+        })
+        self.assertEqual([], first["completedTaskKeys"])
+
+        second = self.record("tutorial_baseline_captured", {
+            "baselineJson": json.dumps({
+                "cameraState": {"position": [9, 9, 9], "forward": [0, 0, 1]},
+                "nodeGraph": {
+                    "targetKey": "project:node-graph",
+                    "nodeIds": ["existing-start"],
+                    "edgeIds": [],
+                    "selectedKind": "node",
+                    "selectedId": "existing-start",
+                },
+            }),
+        })
+        baseline = second["context"]["tutorialSession"]["baseline"]
+        self.assertEqual([1, 2, 3], baseline["cameraState"]["position"])
+        self.assertEqual([0, 0, 1], baseline["cameraState"]["forward"])
+        self.assertFalse(baseline["panels"]["NodeGraphPanel"]["open"])
+        self.assertEqual(["existing-start"], baseline["nodeGraph"]["nodeIds"])
+        self.assertEqual("existing-start", baseline["nodeGraph"]["selectedId"])
+
+    def test_run_and_ai_completion_keeps_tutorial_content_and_never_restores(self):
+        response = self.complete_tutorial_steps(34)
+        self.assertEqual("tutorial.basics.run_graph", self.active_tutorial(response["context"])["taskKey"])
+        self.assertEqual([], self.record("run_started")["completedTaskKeys"])
+        self.assertEqual([], self.record("run_succeeded")["completedTaskKeys"])
+        self.assertEqual([], self.record("run_clicked", {"source": "guidance"})["completedTaskKeys"])
+        self.assertEqual(["tutorial.basics.run_graph"], self.record(
+            "run_clicked", {"source": "user"},
+        )["completedTaskKeys"])
+
+        after_run = self.service.load()
+        self.assertEqual("active", after_run["context"]["tutorialSession"]["status"])
+        self.assertEqual(
+            "tutorial.basics.focus_ai_composer",
+            self.active_tutorial(after_run["context"])["taskKey"],
+        )
+        self.assertEqual(35, len([
+            task for task in after_run["context"]["taskHistory"]
+            if task.get("taskKey", "").startswith("tutorial.basics.")
+        ]))
+        self.assertEqual([], self.record("preview_started", {"status": "running"})["completedTaskKeys"])
+        self.assertEqual([], self.record("preview_stopped", {
+            "status": "stopped", "restored": True,
+        })["completedTaskKeys"])
+
+        self.assertEqual([], self.record("ai_composer_focused", {"source": "guidance"})["completedTaskKeys"])
+        self.assertEqual(
+            ["tutorial.basics.focus_ai_composer"],
+            self.record("ai_composer_focused", {"source": "user"})["completedTaskKeys"],
+        )
+        self.assertEqual([], self.record("ai_question_answered", {
+            "prompt": "", "mode": "ask", "responseReceived": True,
+        })["completedTaskKeys"])
+        self.assertEqual(
+            ["tutorial.basics.ask_ai"],
+            self.record("ai_question_answered", {
+                "prompt": "Explain why the model moves right. Explain only.",
+                "mode": "ask", "responseReceived": True,
+            })["completedTaskKeys"],
+        )
+        self.assertEqual([], self.record("ai_node_graph_changed", {
+            "prompt": "Change the movement speed.", "mode": "modify",
+            "operation": "extend", "applied": True,
+        })["completedTaskKeys"])
+        self.assertEqual(
+            ["tutorial.basics.modify_with_ai"],
+            self.record("ai_node_graph_changed", {
+                "prompt": "Change the continuous rightward movement speed from 2 to 4.",
+                "mode": "modify", "operation": "edit", "applied": True,
+            })["completedTaskKeys"],
+        )
+        self.assertEqual([], self.record("ai_node_graph_changed", {
+            "prompt": "Add an End node.", "mode": "generate", "operation": "create", "applied": True,
+        })["completedTaskKeys"])
+
+        completed_at = 1_900_000_000_000
+        finished = self.record("ai_node_graph_changed", {
+            "prompt": "Add an End node and keep the current graph.",
+            "mode": "generate", "operation": "extend", "applied": True,
+            "createdNodeIds": ["ai-end-1"], "createdEdgeIds": ["ai-edge-1"],
+        }, timestamp=completed_at)
+        self.assertEqual(["tutorial.basics.generate_with_ai"], finished["completedTaskKeys"])
+        session = finished["context"]["tutorialSession"]
+        self.assertEqual("completed", session["status"])
+        self.assertEqual(completed_at, session["completedAt"])
+        self.assertEqual(completed_at + 15000, session["completionNoticeExpiresAt"])
+        self.assertEqual({}, session["baseline"])
+        self.assertEqual([], session["modificationLog"])
+        self.assertEqual([], self.tutorial_tasks(finished["context"]))
+        self.assertEqual(39, len([
+            task for task in finished["context"]["taskHistory"]
+            if task.get("taskKey", "").startswith("tutorial.basics.")
+        ]))
+        bindings = session["bindings"]
+        self.assertEqual("actor-1", bindings["modelActorId"])
+        self.assertEqual("custom-1", bindings["customNodeId"])
+        self.assertEqual("delete-practice-1", bindings["deletePracticeNodeId"])
+
+        for legacy_event in (
+            "tutorial_restore_failed",
+            "tutorial_restore_retry_requested",
+            "tutorial_restore_succeeded",
+        ):
+            legacy = self.record(legacy_event, {"error": "must not restore"})
+            legacy_session = legacy["context"]["tutorialSession"]
+            self.assertEqual("completed", legacy_session["status"])
+            self.assertEqual(completed_at, legacy_session["completedAt"])
+            self.assertEqual(completed_at + 15000, legacy_session["completionNoticeExpiresAt"])
+
+        dismissed = self.record("tutorial_completion_notice_dismissed")
+        self.assertEqual(0, dismissed["context"]["tutorialSession"]["completionNoticeExpiresAt"])
+
+    def test_full_39_step_sequence_preserves_chapter_history_and_bindings(self):
+        response = self.complete_tutorial_steps(39)
+        context = response["context"]
+        history = [
+            task for task in context["taskHistory"]
+            if task.get("taskKey", "").startswith("tutorial.basics.")
+        ]
+        self.assertEqual(
+            [key for key, _event_type, _details in self.tutorial_event_sequence()],
+            [task["taskKey"] for task in history],
+        )
+        self.assertTrue(all(int(task.get("completedAt") or 0) > 0 for task in history))
+        self.assertEqual([1, 2, 3, 4], list(dict.fromkeys(task["chapterOrder"] for task in history)))
+        bindings = context["tutorialSession"]["bindings"]
+        self.assertEqual("actor-1", bindings["modelActorId"])
+        self.assertEqual("start-1", bindings["startNodeId"])
+        self.assertEqual("custom-1", bindings["customNodeId"])
+        self.assertEqual("delete-practice-1", bindings["deletePracticeNodeId"])
+        self.assertEqual("edge-1", bindings["edgeId"])
+        self.assertEqual("enter-1", bindings["whenEnterBlockId"])
+        self.assertEqual("position-1", bindings["setPositionBlockId"])
+        self.assertEqual("active-1", bindings["whileActiveBlockId"])
+        self.assertEqual("move-1", bindings["moveDirectionBlockId"])
+
+    def test_existing_v2_tutorial_receives_template_copy_and_legacy_tasks_retire(self):
+        context = self.service._default_context(self.world)
+        current = next(
+            task for task in context["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.create_custom_node"
+        )
+        for field in (
+            "chapterTitleEn", "chapterSummaryEn", "titleEn", "messageEn",
+            "suggestionEn", "completionCriteriaEn",
+        ):
+            current.pop(field, None)
         context["activeTasks"].append({
             "taskKey": "tutorial.rotate_model",
             "type": "tutorial",
@@ -166,12 +901,94 @@ class CabbageContextServiceTests(unittest.TestCase):
             "createdAt": 1,
             "updatedAt": 1,
         })
+        context["activeTasks"].append({
+            "taskKey": "tutorial.basics.start_preview",
+            "type": "tutorial",
+            "chapterKey": "chapter_preview",
+            "status": "queued",
+            "createdAt": 1,
+            "updatedAt": 1,
+        })
+        context["activeTasks"].append({
+            "taskKey": "tutorial.basics.choose_select_tool",
+            "type": "tutorial",
+            "chapterKey": "chapter_nodes",
+            "status": "queued",
+            "createdAt": 1,
+            "updatedAt": 1,
+        })
+        context["taskHistory"].append({
+            "taskKey": "tutorial.create_node",
+            "type": "tutorial",
+            "status": "completed",
+            "completedAt": 10,
+        })
         context_path = self.service._context_path(self.world)
         context_path.parent.mkdir(parents=True, exist_ok=True)
         context_path.write_text(json.dumps(context, ensure_ascii=False), encoding="utf-8")
 
         loaded = self.service.load()["context"]
         self.assertNotIn("tutorial.rotate_model", self.active_task_keys(loaded))
+        self.assertNotIn("tutorial.basics.start_preview", self.active_task_keys(loaded))
+        self.assertNotIn("tutorial.basics.choose_select_tool", self.active_task_keys(loaded))
+        self.assertIsNotNone(self.history_task(loaded, "tutorial.create_node"))
+        migrated = next(
+            task for task in loaded["activeTasks"]
+            if task.get("taskKey") == "tutorial.basics.create_custom_node"
+        )
+        template = self.service._tutorial_templates()["tutorial.basics.create_custom_node"]
+        for field in (
+            "chapterTitleEn", "chapterSummaryEn", "titleEn", "messageEn",
+            "suggestionEn", "completionCriteriaEn",
+        ):
+            self.assertEqual(template[field], migrated[field])
+
+    def test_node_issue_task_preserves_english_fields(self):
+        response = self.service.update_task({
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "bilingual.issue",
+                "type": "node-issue",
+                "title": "\u4e2d\u6587\u6807\u9898",
+                "titleEn": "English Title",
+                "message": "\u4e2d\u6587\u539f\u56e0",
+                "messageEn": "English Cause",
+                "suggestion": "\u4e2d\u6587\u5efa\u8bae",
+                "suggestionEn": "English Suggestion",
+                "completionCriteria": "\u4e2d\u6587\u6807\u51c6",
+                "completionCriteriaEn": "English Criteria",
+            },
+        })
+        task = next(item for item in response["context"]["activeTasks"] if item["taskKey"] == "bilingual.issue")
+        self.assertEqual("English Title", task["titleEn"])
+        self.assertEqual("English Cause", task["messageEn"])
+        self.assertEqual("English Suggestion", task["suggestionEn"])
+        self.assertEqual("English Criteria", task["completionCriteriaEn"])
+
+    def test_node_issue_task_without_english_copy_keeps_english_fields_blank(self):
+        response = self.service.update_task({
+            "action": "upsert",
+            "worldId": self.world.name,
+            "task": {
+                "taskKey": "legacy.chinese.issue",
+                "type": "node-issue",
+                "title": "\u4e2d\u6587\u6807\u9898",
+                "message": "\u4e2d\u6587\u539f\u56e0",
+                "messageEn": "\u4e2d\u6587\u539f\u56e0",
+                "suggestion": "\u4e2d\u6587\u5efa\u8bae",
+                "completionCriteria": "\u4e2d\u6587\u6807\u51c6",
+                "completionCriteriaEn": "\u4e2d\u6587\u6807\u51c6",
+            },
+        })
+        task = next(
+            item for item in response["context"]["activeTasks"]
+            if item["taskKey"] == "legacy.chinese.issue"
+        )
+        self.assertEqual("", task["titleEn"])
+        self.assertEqual("", task["messageEn"])
+        self.assertEqual("", task["suggestionEn"])
+        self.assertEqual("", task["completionCriteriaEn"])
 
     def test_first_score_update_clamps_and_persists_model_score(self):
         context = self.service.load()["context"]
@@ -271,60 +1088,6 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertEqual(2, memory["occurrences"])
         self.assertEqual(1, memory["resolvedCount"])
         self.assertEqual(1, memory["chatDiscussionCount"])
-
-    def test_node_move_completes_only_move_tutorial(self):
-        response = self.service.record_event({
-            "type": "node_moved",
-            "category": "node",
-            "success": True,
-            "details": {"nodeId": "start"},
-            "worldId": self.world.name,
-        })
-        self.assertEqual(["tutorial.move_node"], response["completedTaskKeys"])
-        self.assertIsNotNone(self.history_task(response["context"], "tutorial.move_node"))
-        self.assertEqual(1, response["context"]["metrics"]["nodeEdits"])
-        self.assertIn("tutorial.connect_nodes", self.active_task_keys(response["context"]))
-        self.assertIn("tutorial.drag_block", self.active_task_keys(response["context"]))
-
-    def test_connection_requires_two_different_nodes(self):
-        same_node = self.service.record_event({
-            "type": "node_connected",
-            "category": "node",
-            "success": True,
-            "details": {"sourceNodeId": "loop", "targetNodeId": "loop"},
-            "worldId": self.world.name,
-        })
-        self.assertEqual([], same_node["completedTaskKeys"])
-        self.assertIn("tutorial.connect_nodes", self.active_task_keys(same_node["context"]))
-
-        different_nodes = self.service.record_event({
-            "type": "node_connected",
-            "category": "node",
-            "success": True,
-            "details": {"sourceNodeId": "start", "targetNodeId": "play"},
-            "worldId": self.world.name,
-        })
-        self.assertEqual(["tutorial.connect_nodes"], different_nodes["completedTaskKeys"])
-
-    def test_block_tutorial_requires_drag_interaction(self):
-        picked = self.service.record_event({
-            "type": "block_added",
-            "category": "node",
-            "success": True,
-            "details": {"blockType": "logic_boolean", "interaction": "pick"},
-            "worldId": self.world.name,
-        })
-        self.assertEqual([], picked["completedTaskKeys"])
-        self.assertIn("tutorial.drag_block", self.active_task_keys(picked["context"]))
-
-        dragged = self.service.record_event({
-            "type": "block_added",
-            "category": "node",
-            "success": True,
-            "details": {"blockType": "logic_boolean", "interaction": "drag"},
-            "worldId": self.world.name,
-        })
-        self.assertEqual(["tutorial.drag_block"], dragged["completedTaskKeys"])
 
     def test_late_event_from_another_world_is_rejected(self):
         response = self.service.record_event({
@@ -441,9 +1204,13 @@ class CabbageContextServiceTests(unittest.TestCase):
                     "phase": "node-logic",
                     "effectId": effect_id,
                     "title": f"goal step {index}",
+                    "titleEn": f"Goal Step {index}",
                     "message": f"build gameplay effect {effect_id}",
+                    "messageEn": f"Build gameplay effect {effect_id}",
                     "suggestion": f"finish the {effect_id} node logic",
+                    "suggestionEn": f"Finish the {effect_id} node logic",
                     "completionCriteria": f"signal {signal} is observed for the requested effect",
+                    "completionCriteriaEn": f"Signal {signal} is observed for the requested effect",
                     "completionSignal": signal,
                     "requiredBlockTypes": block_types,
                 }
@@ -479,6 +1246,8 @@ class CabbageContextServiceTests(unittest.TestCase):
     def test_goal_plan_prompt_only_requests_personalized_guidance_tasks(self):
         description = "一间会随音乐改变颜色的抽象几何空间"
         prompt = self.service._goal_plan_prompt(description, "story")
+        self.assertIn("titleEn", prompt)
+        self.assertIn("completionCriteriaEn", prompt)
         self.assertIn("个性化搭建任务", prompt)
         self.assertIn("不能直接修改当前节点区", prompt)
         self.assertIn("不是替用户生成一套节点积木", prompt)
@@ -521,6 +1290,17 @@ class CabbageContextServiceTests(unittest.TestCase):
                 self.assertIn(request_data, prompt)
                 self.assertIn("唯一的世界语义来源", prompt)
                 self.assertIn("只代表可选能力，不是必须加入世界的内容", prompt)
+
+    def test_normalized_goal_tasks_preserve_complete_english_copy(self):
+        context = self.service._default_context(self.world)
+        tasks = self.service._normalize_goal_plan_tasks(
+            self.goal_plan_payload(), context, self.service._now_ms(),
+        )
+        self.assertEqual(6, len(tasks))
+        for task in tasks:
+            with self.subTest(task=task.get("taskKey")):
+                for field in ("titleEn", "messageEn", "suggestionEn", "completionCriteriaEn"):
+                    self.assertTrue(str(task.get(field) or "").strip())
 
     def test_goal_plan_rejects_unknown_completion_signal(self):
         context = self.service._default_context(self.world)
@@ -762,8 +1542,8 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.service._ensure_task_slots_locked(context, self.service._now_ms())
 
         self.assertEqual(
-            {"tutorial.import_model", "tutorial.create_node"},
-            self.visible_tutorial_keys(context),
+            {"tutorial.basics.viewport_focus"},
+            {self.active_tutorial(context)["taskKey"]},
         )
 
     def test_failed_goal_generation_restores_default_tutorial_tasks(self):
@@ -792,8 +1572,8 @@ class CabbageContextServiceTests(unittest.TestCase):
         self.assertEqual("error", context["worldGoal"]["status"])
         self.assertEqual("invalid generated plan", context["worldGoal"]["generationError"])
         self.assertEqual(
-            {"tutorial.import_model", "tutorial.create_node"},
-            self.visible_tutorial_keys(context),
+            {"tutorial.basics.viewport_focus"},
+            {self.active_tutorial(context)["taskKey"]},
         )
         self.assertFalse(any(task.get("type") == "goal" for task in context["activeTasks"]))
 

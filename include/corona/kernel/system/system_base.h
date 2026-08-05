@@ -1,5 +1,6 @@
 #pragma once
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <mutex>
@@ -97,6 +98,7 @@ class SystemBase : public ISystem {
     void resume() override;
 
     void stop() override;
+    [[nodiscard]] bool stop_for(std::chrono::milliseconds timeout);
 
     // ========================================
     // 性能统计接口实现
@@ -187,6 +189,9 @@ class SystemBase : public ISystem {
     std::mutex control_mutex_;          ///< 保护 start/stop 操作
     std::mutex pause_mutex_;            ///< 保护暂停状态
     std::condition_variable pause_cv_;  ///< 暂停条件变量
+    std::mutex thread_exit_mutex_;
+    std::condition_variable thread_exit_cv_;
+    bool thread_finished_ = true;
 
     ISystemContext* context_;  ///< 系统上下文
     int target_fps_;           ///< 目标帧率

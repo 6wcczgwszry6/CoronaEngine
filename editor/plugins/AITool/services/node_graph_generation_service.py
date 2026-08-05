@@ -8,8 +8,9 @@ and persistence.
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, deque
 from concurrent.futures import ThreadPoolExecutor
+import copy
 import json
 import logging
 from pathlib import Path
@@ -19,6 +20,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import xml.etree.ElementTree as ET
 import uuid
 from typing import Any
 
@@ -55,6 +57,166 @@ class NodeGraphGenerationService:
         "filepath",
         "actortarget",
         "scenetarget",
+    }
+    CORE_BLOCK_TYPES = {
+        "node_when_enter", "node_while_active", "node_when_exit",
+        "control_if", "control_else", "control_wait", "control_wait2",
+        "control_for", "control_until",
+        "logic_boolean", "logic_compare", "logic_operation", "logic_negate",
+        "math_number", "math_arithmetic", "math_single", "math_constrain",
+        "text", "object_reference",
+        "variable_define", "variable_set", "variable_get", "variable_exists",
+        "engine_X", "engine_Y", "engine_Z",
+        "engine_Xset", "engine_Yset", "engine_Zset",
+        "engine_Xadd", "engine_Yadd", "engine_Zadd",
+        "object_set_position", "object_move_direction", "object_get_x", "object_get_y", "object_get_z",
+    }
+    CAPABILITY_BLOCK_TYPES = {
+        "input-control": {
+            "event_keyboard", "event_keyboard_combo", "detect_keyboard1", "detect_keyboard0",
+            "object_third_person_move", "object_first_person_move", "object_arcade_jump",
+        },
+        "wasd-object-movement": {
+            "object_third_person_move", "object_first_person_move",
+        },
+        "space-object-jump": {"object_arcade_jump"},
+        "movement": {
+            "engine_move", "engine_moveto", "engine_movetoXYZ", "engine_movetoXYZtime",
+            "engine_Xset", "engine_Yset", "engine_Zset",
+            "engine_Xadd", "engine_Yadd", "engine_Zadd",
+            "object_set_position", "object_move_direction", "object_move_to_lane", "object_move_to_lane_smooth",
+            "object_third_person_move", "object_first_person_move",
+        },
+        "physics": {
+            "object_set_native_physics", "object_set_tag_velocity_axis",
+        },
+        "attraction": {
+            "engine_X", "engine_Y", "engine_Z",
+            "engine_Xadd", "engine_Yadd", "engine_Zadd",
+            "object_get_x", "object_get_y", "object_get_z",
+            "object_move_tag", "object_set_tag_velocity_axis",
+            "math_arithmetic", "math_single", "math_constrain",
+        },
+        "distance-check": {
+            "detect_position_near", "engine_X", "engine_Y", "engine_Z",
+            "object_get_x", "object_get_y", "object_get_z",
+            "math_arithmetic", "math_single", "logic_compare",
+        },
+        "threshold-action": {"logic_compare", "control_if", "math_number"},
+        "object-removal": {
+            "object_delete", "object_hide", "object_show",
+            "object_delete_raycast_hit", "object_delete_mouse_pick",
+        },
+        "visibility": {"object_hide", "object_show", "appearance_hide", "appearance_show"},
+        "rotation": {
+            "engine_rotateX", "engine_rotateY", "engine_rotateZ",
+            "engine_rotationX", "engine_rotationY", "engine_rotationZ",
+        },
+        "camera-follow": {
+            "camera_follow_object", "camera_third_person_orbit", "camera_first_person_follow",
+            "camera_lock_mouse", "camera_unlock_mouse",
+        },
+        "timer": {
+            "control_wait", "control_wait2", "control_cooldown_ready",
+            "control_start_cooldown", "control_reset_cooldown",
+        },
+        "state": {
+            "variable_define", "variable_set", "variable_get", "variable_exists", "variable_add",
+        },
+        "multi-object": {
+            "object_move_tag", "object_set_tag_velocity_axis", "object_set_tag",
+            "object_count_tag", "object_count_active_tag", "object_tag_numbered_range",
+            "object_reset_tag", "object_scatter_tag", "object_recycle_tag_axis",
+        },
+        "collision": {
+            "detect_touch", "detect_touch_tag", "detect_touch_started",
+            "detect_touch_tag_started", "object_set_logical_collision",
+            "object_logical_collision_enabled",
+        },
+    }
+    CAPABILITY_PATTERNS = (
+        ("input-control", r"(?:wasd|keyboard|key\s*press|mouse|input|控制|输入|按键|键盘|鼠标)"),
+        ("movement", r"(?:move|movement|motion|translate|移动|运动|位移|行走|朝.*(?:靠近|前进))"),
+        ("physics", r"(?:physics|velocity|impulse|rigidbody|物理|速度|冲量|刚体)"),
+        ("attraction", r"(?:attract|attraction|pull\s+towards?|suction|gravity\s*well|吸附|吸引|吸力|拉向|引力)"),
+        ("distance-check", r"(?:distance|radius|near|proximity|距离|半径|靠近|附近|接近)"),
+        ("threshold-action", r"(?:threshold|less\s+than|greater\s+than|within|阈值|小于|大于|以内|超过|达到|低于)"),
+        ("object-removal", r"(?:destroy|remove\s+(?:the\s+)?object|consume|swallow|销毁|删除对象|吞噬|消失|移除)"),
+        ("visibility", r"(?:hide|show|visible|invisible|隐藏|显示|可见|不可见)"),
+        ("rotation", r"(?:rotate|rotation|spin|orbit|旋转|转动|自转)"),
+        ("camera-follow", r"(?:camera.*follow|follow.*camera|相机.*跟随|跟随.*相机|镜头.*跟随)"),
+        ("timer", r"(?:timer|cooldown|delay|every\s+\d|计时|冷却|延迟|每隔)"),
+        ("state", r"(?:state|variable|counter|flag|状态|变量|计数|标记)"),
+        ("multi-object", r"(?:all\s+(?:objects?|actors?|targets?)|every\s+(?:object|actor|target)|所有对象|全部对象|每个对象|所有建筑|全部建筑|多个|批量)"),
+        ("collision", r"(?:collision|collide|touch|碰撞|接触|触碰)"),
+    )
+    CAPABILITY_VALIDATION_TYPES = {
+        "input-control": {
+            "event_keyboard", "event_keyboard_combo", "detect_keyboard1", "detect_keyboard0",
+            "object_third_person_move", "object_first_person_move", "object_arcade_jump",
+        },
+        "movement": {
+            "engine_move", "engine_moveto", "engine_movetoXYZ", "engine_movetoXYZtime",
+            "engine_Xset", "engine_Yset", "engine_Zset",
+            "engine_Xadd", "engine_Yadd", "engine_Zadd",
+            "object_set_position", "object_move_direction", "object_move_to_lane", "object_move_to_lane_smooth",
+            "object_third_person_move", "object_first_person_move",
+        },
+        "physics": {"object_set_native_physics", "object_set_tag_velocity_axis"},
+        "attraction": {
+            "engine_Xadd", "engine_Yadd", "engine_Zadd", "object_move_tag",
+            "object_set_tag_velocity_axis", "object_set_position",
+        },
+        "distance-check": {
+            "detect_position_near", "engine_X", "engine_Y", "engine_Z",
+            "object_get_x", "object_get_y", "object_get_z",
+        },
+        "threshold-action": {"logic_compare", "control_if"},
+        "object-removal": {"object_delete", "object_hide", "appearance_hide"},
+        "visibility": {"object_hide", "object_show", "appearance_hide", "appearance_show"},
+        "rotation": {"engine_rotateX", "engine_rotateY", "engine_rotateZ"},
+        "camera-follow": {
+            "camera_follow_object", "camera_third_person_orbit", "camera_first_person_follow",
+        },
+        "timer": {
+            "control_wait", "control_wait2", "control_cooldown_ready",
+            "control_start_cooldown", "control_reset_cooldown",
+        },
+        "state": {
+            "variable_define", "variable_set", "variable_get", "variable_exists", "variable_add",
+        },
+        "multi-object": {
+            "object_move_tag", "object_set_tag_velocity_axis", "object_set_tag",
+            "object_count_tag", "object_count_active_tag", "object_tag_numbered_range",
+            "object_reset_tag", "object_scatter_tag", "object_recycle_tag_axis",
+        },
+        "collision": {
+            "detect_touch", "detect_touch_tag", "detect_touch_started",
+            "detect_touch_tag_started", "object_set_logical_collision",
+            "object_logical_collision_enabled",
+        },
+    }
+    COORDINATE_GETTER_TYPES = {
+        "engine_X": ("OBJECT", "X"),
+        "engine_Y": ("OBJECT", "Y"),
+        "engine_Z": ("OBJECT", "Z"),
+        "object_get_x": ("NAME", "X"),
+        "object_get_y": ("NAME", "Y"),
+        "object_get_z": ("NAME", "Z"),
+    }
+    DYNAMIC_MOVEMENT_INPUTS = {
+        "object_set_position": {"X": "X", "Y": "Y", "Z": "Z"},
+        "engine_Xset": {"VALUE": "X"},
+        "engine_Yset": {"VALUE": "Y"},
+        "engine_Zset": {"VALUE": "Z"},
+        "engine_Xadd": {"VALUE": "X"},
+        "engine_Yadd": {"VALUE": "Y"},
+        "engine_Zadd": {"VALUE": "Z"},
+        "object_move_tag": {"DX": "X", "DY": "Y", "DZ": "Z"},
+        "object_set_tag_velocity_axis": {"VALUE": "FIELD_AXIS"},
+    }
+    CAMERA_FOLLOW_TYPES = {
+        "camera_follow_object", "camera_third_person_orbit", "camera_first_person_follow",
     }
 
     def __init__(self) -> None:
@@ -118,7 +280,7 @@ class NodeGraphGenerationService:
             "instruction": instruction[: cls.MAX_INSTRUCTION_CHARS],
             "responseLanguage": response_language,
             "workspace": json.loads(json.dumps(workspace, ensure_ascii=False)),
-            "projectContext": json.loads(json.dumps(project_context, ensure_ascii=False)),
+            "projectContext": cls._compact_project_context(project_context),
         }
 
     def _load_contract(self) -> tuple[Path, str]:
@@ -137,69 +299,622 @@ class NodeGraphGenerationService:
         return path, text
 
     @staticmethod
-    def _instruction_requirements(instruction: str) -> dict[str, Any]:
+    def _compact_project_context(project_context: dict[str, Any]) -> dict[str, Any]:
+        if not isinstance(project_context, dict):
+            return {}
+
+        compact = {
+            key: copy.deepcopy(project_context[key])
+            for key in (
+                "sceneName", "actorContextAvailable", "actorContextRevision",
+                "assistanceProfile", "optimizationHintsEnabled",
+            )
+            if key in project_context
+        }
+        actors = project_context.get("actors")
+        compact_actors: list[dict[str, Any]] = []
+        if isinstance(actors, list):
+            for actor in actors:
+                if not isinstance(actor, dict):
+                    continue
+                name = str(actor.get("name") or "").strip()
+                if not name:
+                    continue
+                item: dict[str, Any] = {
+                    "name": name,
+                    "type": str(actor.get("type") or "actor").strip() or "actor",
+                    "tags": [str(value).strip() for value in (actor.get("tags") or []) if str(value).strip()]
+                    if isinstance(actor.get("tags"), list)
+                    else [],
+                    "aliases": [str(value).strip() for value in (actor.get("aliases") or []) if str(value).strip()]
+                    if isinstance(actor.get("aliases"), list)
+                    else [],
+                }
+                for key in ("semanticRole", "transform", "size", "collision", "physicsEnabled"):
+                    if key in actor and actor[key] is not None:
+                        item[key] = copy.deepcopy(actor[key])
+                compact_actors.append(item)
+        compact["actors"] = compact_actors
+        return compact
+
+    @staticmethod
+    def _actor_match_terms(actor: dict[str, Any]) -> list[str]:
+        values: list[str] = []
+        for field in ("name", "semanticRole"):
+            value = str(actor.get(field) or "").strip()
+            if value:
+                values.append(value)
+        for field in ("aliases", "tags"):
+            raw_values = actor.get(field)
+            if isinstance(raw_values, list):
+                values.extend(str(value).strip() for value in raw_values if str(value).strip())
+
+        terms: list[str] = []
+        for value in values:
+            terms.append(value)
+            terms.extend(re.findall(r"[\u3400-\u9fff]{2,}", value))
+            terms.extend(re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", value))
+
+        role_text = " ".join(values).casefold()
+        role_aliases = (
+            (
+                r"(?:^|[\s_-])(?:attractor|controller|source|origin)(?:$|[\s_-])|"
+                r"\u5438\u5f15\u6e90|\u63a7\u5236\u6e90|\u6765\u6e90",
+                ("source object", "source actor", "\u6765\u6e90\u5bf9\u8c61", "\u5438\u5f15\u6e90", "\u63a7\u5236\u5bf9\u8c61"),
+            ),
+            (
+                r"(?:^|[\s_-])(?:building|structure)s?(?:$|[\s_-])|\u5efa\u7b51",
+                ("building", "buildings", "\u5efa\u7b51"),
+            ),
+            (
+                r"(?:^|[\s_-])targets?(?:$|[\s_-])|\u76ee\u6807",
+                ("target object", "target actor", "targets", "\u76ee\u6807\u5bf9\u8c61"),
+            ),
+        )
+        for pattern, aliases in role_aliases:
+            if re.search(pattern, role_text, re.IGNORECASE):
+                terms.extend(aliases)
+        return list(dict.fromkeys(term for term in terms if term))
+
+    @staticmethod
+    def _actor_term_position(lowered_instruction: str, term: str) -> int:
+        lowered_term = str(term or "").casefold().strip()
+        if not lowered_term:
+            return -1
+        if re.fullmatch(r"[a-z0-9_-]+", lowered_term):
+            match = re.search(
+                rf"(?<![a-z0-9_-]){re.escape(lowered_term)}(?![a-z0-9_-])",
+                lowered_instruction,
+            )
+            return match.start() if match else -1
+        return lowered_instruction.find(lowered_term)
+
+    @staticmethod
+    def _actor_has_source_role(actor: dict[str, Any]) -> bool:
+        values = [str(actor.get("semanticRole") or "")]
+        if isinstance(actor.get("tags"), list):
+            values.extend(str(value) for value in actor["tags"])
+        role_text = " ".join(values).casefold()
+        return bool(re.search(
+            r"(?:attractor|controller|source|origin|\u5438\u5f15\u6e90|\u63a7\u5236\u6e90|\u6765\u6e90)",
+            role_text,
+        ))
+
+    @staticmethod
+    def _actor_is_camera(actor: dict[str, Any]) -> bool:
+        values = [
+            str(actor.get("name") or ""),
+            str(actor.get("type") or ""),
+            str(actor.get("semanticRole") or ""),
+        ]
+        if isinstance(actor.get("tags"), list):
+            values.extend(str(value) for value in actor["tags"])
+        return bool(re.search(r"(?:camera|\u6444\u50cf\u673a|\u76f8\u673a|\u955c\u5934)", " ".join(values), re.IGNORECASE))
+
+    @classmethod
+    def _explicit_follow_relation(
+        cls,
+        text: str,
+        actor_matches: list[tuple[int, int, str]],
+        actors_by_name: dict[str, dict[str, Any]],
+    ) -> dict[str, Any] | None:
+        follow_pattern = r"(?:\bfollow(?:s|ing)?\b|\btrack(?:s|ing)?\b|\bchase(?:s|ing)?\b|\u8ddf\u968f|\u8ffd\u968f|\u8ffd\u8e2a)"
+        camera_pattern = r"(?:camera|\u6444\u50cf\u673a|\u76f8\u673a|\u955c\u5934)"
+        follow = None
+        for candidate in re.finditer(follow_pattern, text, re.IGNORECASE):
+            prefix = text[max(0, candidate.start() - 80):candidate.start()]
+            suffix = text[candidate.end():min(len(text), candidate.end() + 40)]
+            if re.search(camera_pattern, prefix, re.IGNORECASE) or re.search(camera_pattern, suffix, re.IGNORECASE):
+                continue
+            follow = candidate
+            break
+        if follow is None:
+            return None
+        before = [name for position, _index, name in actor_matches if position < follow.start()]
+        after = [name for position, _index, name in actor_matches if position > follow.end()]
+        before = list(dict.fromkeys(before))
+        after = list(dict.fromkeys(after))
+        if not before or not after:
+            return None
+        leader = after[0]
+        followers = [name for name in before if name != leader]
+        if not followers:
+            return None
+        if all(cls._actor_is_camera(actors_by_name.get(name, {})) for name in followers):
+            return None
+        return {"source": leader, "targets": followers}
+
+    @classmethod
+    def _explicit_camera_target(
+        cls,
+        text: str,
+        actor_matches: list[tuple[int, int, str]],
+        actors_by_name: dict[str, dict[str, Any]],
+    ) -> str | None:
+        camera_pattern = r"(?:camera|\u6444\u50cf\u673a|\u76f8\u673a|\u955c\u5934)"
+        follow_pattern = r"(?:\bfollow(?:s|ing)?\b|\btrack(?:s|ing)?\b|\bchase(?:s|ing)?\b|\u8ddf\u968f|\u8ffd\u968f|\u8ffd\u8e2a)"
+        relation = None
+        for match in re.finditer(follow_pattern, text, re.IGNORECASE):
+            prefix = text[max(0, match.start() - 80):match.start()]
+            suffix = text[match.end():min(len(text), match.end() + 40)]
+            if re.search(camera_pattern, prefix, re.IGNORECASE) or re.search(camera_pattern, suffix, re.IGNORECASE):
+                relation = match
+        if relation is None:
+            return None
+
+        after = [
+            name
+            for position, _index, name in actor_matches
+            if position > relation.end() and not cls._actor_is_camera(actors_by_name.get(name, {}))
+        ]
+        if after:
+            return list(dict.fromkeys(after))[0]
+
+        before = [
+            name
+            for position, _index, name in actor_matches
+            if position < relation.start() and not cls._actor_is_camera(actors_by_name.get(name, {}))
+        ]
+        return list(dict.fromkeys(before))[-1] if before else None
+
+    @staticmethod
+    def _dynamic_axes(instruction: str) -> list[str]:
+        if re.search(r"(?:xz|x-z|\u6c34\u5e73|\u5730\u9762|\u5e73\u9762|\u4fef\u89c6|top[- ]?down)", instruction, re.IGNORECASE):
+            return ["X", "Z"]
+        return ["X", "Y", "Z"]
+
+    @classmethod
+    def _instruction_requirements(
+        cls,
+        instruction: str,
+        operation: str | None = None,
+        project_context: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
         text = str(instruction or "")
         lowered = text.casefold()
         requires_wasd = "wasd" in lowered or bool(
-            re.search(r"(?:\u524d\u540e\u5de6\u53f3|\u56db\u65b9\u5411|\u65b9\u5411\u952e)", text)
+            re.search(r"(?:前后左右|四方向|方向键)", text)
         )
         requires_space_jump = bool(
-            ("space" in lowered or "\u7a7a\u683c" in text)
-            and ("jump" in lowered or "\u8df3" in text)
+            ("space" in lowered or "空格" in text)
+            and ("jump" in lowered or "跳" in text)
         )
         first_person_requested = bool(
             "first person" in lowered
             or "first-person" in lowered
-            or "\u7b2c\u4e00\u4eba\u79f0" in text
+            or "第一人称" in text
         )
         broad_demo_terms = re.compile(
-            r"(?:\u5b8c\u6574\u6e38\u620f|\u6574\u4e2a\u6e38\u620f|\u6e38\u620f\u6f14\u793a|demo|deno|"
-            r"\u8ba1\u5206|\u751f\u547d|\u80dc\u5229|\u5931\u8d25|\u654c\u4eba|\u6218\u6597|\u5173\u5361|"
+            r"(?:完整游戏|整个游戏|游戏演示|demo|deno|"
+            r"计分|生命|胜利|失败|敌人|战斗|关卡|"
             r"score|lives?|victory|defeat|enemy|combat|level)",
             re.IGNORECASE,
         )
         narrow_object_control = bool(
             (requires_wasd or requires_space_jump) and not broad_demo_terms.search(text)
         )
-        capabilities = []
+
+        capabilities: list[str] = []
         if requires_wasd:
-            capabilities.append("wasd-object-movement")
+            capabilities.extend(("input-control", "wasd-object-movement"))
         if requires_space_jump:
             capabilities.append("space-object-jump")
+        for capability, pattern in cls.CAPABILITY_PATTERNS:
+            if re.search(pattern, text, re.IGNORECASE):
+                capabilities.append(capability)
+        capabilities = list(dict.fromkeys(capabilities))
+
         replacement_match = re.search(
-            r"(?:(?:\u5c06|\u628a)\s*)?(.{1,80}?)\s*"
-            r"(?:\u4fee\u6539(?:\u6210|\u4e3a)|\u6539(?:\u6210|\u4e3a)|"
-            r"\u66ff\u6362(?:\u6210|\u4e3a)|\u6362(?:\u6210|\u4e3a)|"
-            r"\u8c03\u6574(?:\u6210|\u4e3a)|\u8bbe\u7f6e(?:\u6210|\u4e3a)|"
-            r"\u8bbe(?:\u6210|\u4e3a)|\u53d8(?:\u6210|\u4e3a))\s*"
-            r"([^\u3002\uff01\uff1f!?\n]{1,80})",
+            r"(?:(?:将|把)\s*)?(.{1,80}?)\s*"
+            r"(?:修改(?:成|为)|改(?:成|为)|"
+            r"替换(?:成|为)|换(?:成|为)|"
+            r"调整(?:成|为)|设置(?:成|为)|"
+            r"设(?:成|为)|变(?:成|为))\s*"
+            r"([^。！？!?\n]{1,80})",
             text,
             re.IGNORECASE,
         )
         replacement_directive = None
         if replacement_match:
-            source = replacement_match.group(1).strip(" \t\uFF0C,\uFF1A:")
+            source = replacement_match.group(1).strip(" \t，,：:")
             source = re.sub(
-                r"^(?:\u8bf7(?:\u4f60)?|\u9ebb\u70e6|\u5e2e\u6211|\u5e2e\u5fd9|\u7ed9\u6211|\u66ff\u6211|\u4e3a\u6211)\s*",
+                r"^(?:请(?:你)?|麻烦|帮我|帮忙|给我|替我|为我)\s*",
                 "",
                 source,
             )
-            source = re.sub(r"^(?:\u5c06|\u628a)\s*", "", source)
+            source = re.sub(r"^(?:将|把)\s*", "", source)
             replacement_directive = {
                 "source": source,
-                "target": replacement_match.group(2).strip(" \t\uFF0C,\uFF1A:"),
+                "target": replacement_match.group(2).strip(" \t，,：:"),
             }
+
+        known_actors: list[dict[str, Any]] = []
+        actors = (project_context or {}).get("actors") if isinstance(project_context, dict) else []
+        if isinstance(actors, list):
+            known_actors = [actor for actor in actors if isinstance(actor, dict)]
+        actors_by_name = {
+            str(actor.get("name") or "").strip(): actor
+            for actor in known_actors
+            if str(actor.get("name") or "").strip()
+        }
+
+        actor_matches: list[tuple[int, int, str]] = []
+        for actor_index, actor in enumerate(known_actors):
+            name = str(actor.get("name") or "").strip()
+            if not name:
+                continue
+            positions = [
+                position
+                for term in cls._actor_match_terms(actor)
+                if (position := cls._actor_term_position(lowered, term)) >= 0
+            ]
+            if positions:
+                actor_matches.append((min(positions), actor_index, name))
+        actor_matches.sort(key=lambda item: (item[0], item[1]))
+        mentioned = list(dict.fromkeys(name for _position, _index, name in actor_matches))
+        follow_relation = cls._explicit_follow_relation(text, actor_matches, actors_by_name)
+        camera_target = cls._explicit_camera_target(text, actor_matches, actors_by_name)
+        if follow_relation and "camera-follow" not in capabilities and "movement" not in capabilities:
+            capabilities.append("movement")
+
+        source_capability = any(
+            item in capabilities for item in ("attraction", "rotation")
+        )
+        role_sources = [
+            str(actor.get("name") or "").strip()
+            for actor in known_actors
+            if str(actor.get("name") or "").strip() and cls._actor_has_source_role(actor)
+        ]
+        mentioned_role_sources = [name for name in mentioned if name in role_sources]
+        generic_source_requested = bool(re.search(
+            r"(?:source\s+(?:object|actor)|controller|attractor|"
+            r"\u6765\u6e90\u5bf9\u8c61|\u5438\u5f15\u6e90|\u63a7\u5236\u6e90)",
+            text,
+            re.IGNORECASE,
+        ))
+        source: list[str] = []
+        if follow_relation:
+            source = [str(follow_relation["source"])]
+        elif source_capability:
+            if mentioned_role_sources:
+                source = mentioned_role_sources[:1]
+            elif generic_source_requested and len(role_sources) == 1:
+                source = role_sources[:1]
+            elif mentioned:
+                source = mentioned[:1]
+        elif "camera-follow" in capabilities:
+            if camera_target:
+                source = [camera_target]
+            elif mentioned_role_sources:
+                source = mentioned_role_sources[:1]
+            elif generic_source_requested and len(role_sources) == 1:
+                source = role_sources[:1]
+            elif mentioned:
+                source = mentioned[:1]
+        explicit_actor_list = len(mentioned) >= 2 and bool(re.search(
+            r"(?:,|\uFF0C|\u3001|\band\b|\u548c|\u4e0e|\u53ca)",
+            text,
+            re.IGNORECASE,
+        ))
+        target_candidates = [name for name in mentioned if name not in source]
+        multi_target = (
+            "multi-object" in capabilities
+            or len(target_candidates) >= 2
+            or (explicit_actor_list and not source_capability)
+        )
+        all_objects_requested = bool(re.search(
+            r"(?:all\s+(?:objects?|actors?|targets?)|every\s+(?:object|actor|target)|\u6240\u6709\u5bf9\u8c61|\u5168\u90e8\u5bf9\u8c61|\u6bcf\u4e2a\u5bf9\u8c61)",
+            text,
+            re.IGNORECASE,
+        ))
+        targets = target_candidates
+        if follow_relation:
+            targets = [str(name) for name in follow_relation.get("targets") or [] if str(name)]
+            multi_target = len(targets) >= 2
+        if multi_target and all_objects_requested:
+            for actor in known_actors:
+                name = str(actor.get("name") or "").strip()
+                if name and name not in source and name not in targets:
+                    targets.append(name)
+        actor_requirements = {
+            "mentioned": mentioned,
+            "control": mentioned[:1] if any(
+                item in capabilities for item in ("input-control", "wasd-object-movement", "movement")
+            ) else [],
+            "source": source,
+            "targets": targets,
+            "multiTarget": multi_target,
+        }
+
+        parameter_patterns = {
+            "speed": r"(?:速度|speed)\s*(?:为|=|:)?\s*(-?\d+(?:\.\d+)?)",
+            "radius": r"(?:半径|radius)\s*(?:为|=|:)?\s*(-?\d+(?:\.\d+)?)",
+            "force": r"(?:力度|力量|吸力|force|strength)\s*(?:为|=|:)?\s*(-?\d+(?:\.\d+)?)",
+            "distance": r"(?:距离|distance)\s*(?:小于|大于|为|=|:)?\s*(-?\d+(?:\.\d+)?)",
+            "duration": r"(?:时间|时长|秒|duration|seconds?)\s*(?:为|=|:)?\s*(-?\d+(?:\.\d+)?)",
+        }
+        parameters: dict[str, Any] = {}
+        for name, pattern in parameter_patterns.items():
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                value = float(match.group(1))
+                parameters[name] = int(value) if value.is_integer() else value
+        numeric_mentions = []
+        for match in re.finditer(r"-?\d+(?:\.\d+)?", text):
+            value = float(match.group(0))
+            numeric_mentions.append({
+                "value": int(value) if value.is_integer() else value,
+                "context": text[max(0, match.start() - 12): min(len(text), match.end() + 12)],
+            })
+        if numeric_mentions:
+            parameters["numericMentions"] = numeric_mentions[:12]
+        defaults_required = []
+        if "movement" in capabilities and "speed" not in parameters:
+            defaults_required.append("speed")
+        if "attraction" in capabilities and "force" not in parameters:
+            defaults_required.append("force")
+        if "distance-check" in capabilities and not ({"distance", "radius"} & parameters.keys()):
+            defaults_required.append("distanceThreshold")
+        parameters["defaultsRequired"] = defaults_required
+
+        lifecycle = []
+        if re.search(r"(?:开始时|进入时|初始化|on\s+start|initialize)", text, re.IGNORECASE):
+            lifecycle.append("on-enter")
+        if re.search(r"(?:持续|每帧|实时|不断|一直|while|continuously|constantly)", text, re.IGNORECASE) or any(
+            item in capabilities for item in ("movement", "attraction", "rotation", "camera-follow")
+        ):
+            lifecycle.append("while-active")
+        if "input-control" in capabilities:
+            lifecycle.append("input-triggered")
+        if not lifecycle:
+            lifecycle.append("on-enter")
+
+        capability_alternatives: list[list[str]] = []
+        hide_or_destroy = bool(
+            re.search(
+                r"(?:\u9690\u85cf|hide)\s*(?:\u6216|\u6216\u8005|/|or)\s*(?:\u9500\u6bc1|\u5220\u9664|destroy|remove)"
+                r"|(?:\u9500\u6bc1|\u5220\u9664|destroy|remove)\s*(?:\u6216|\u6216\u8005|/|or)\s*(?:\u9690\u85cf|hide)",
+                text,
+                re.IGNORECASE,
+            )
+        )
+        if hide_or_destroy:
+            capability_alternatives.append(["visibility", "object-removal"])
+
+        dynamic_relations: list[dict[str, Any]] = []
+        relation_axes = cls._dynamic_axes(text)
+        if follow_relation:
+            dynamic_relations.append({
+                "kind": "follow",
+                "source": str(follow_relation["source"]),
+                "targets": [str(name) for name in follow_relation.get("targets") or [] if str(name)],
+                "axes": relation_axes,
+            })
+        elif "attraction" in capabilities and source and targets:
+            dynamic_relations.append({
+                "kind": "attraction",
+                "source": source[0],
+                "targets": targets,
+                "axes": relation_axes,
+            })
+
+        distance_relations: list[dict[str, Any]] = []
+        if "distance-check" in capabilities:
+            if source and targets:
+                distance_relations.append({
+                    "source": source[0],
+                    "targets": targets,
+                    "axes": relation_axes,
+                })
+            elif len(mentioned) >= 2:
+                distance_relations.append({
+                    "source": mentioned[0],
+                    "targets": mentioned[1:],
+                    "axes": relation_axes,
+                })
+
         return {
+            "operation": operation or "create",
+            "actors": actor_requirements,
+            "capabilities": capabilities,
             "requiredCapabilities": capabilities,
+            "capabilityAlternatives": capability_alternatives,
+            "parameters": parameters,
+            "lifecycle": list(dict.fromkeys(lifecycle)),
+            "constraints": [
+                "use-only-existing-scene-actors",
+                "use-only-contracted-blocks",
+                "return-complete-workspace",
+                "preserve-unrelated-logic",
+            ],
             "narrowObjectControl": narrow_object_control,
             "firstPersonRequested": first_person_requested,
             "replacementDirective": replacement_directive,
+            "dynamicActorRelations": dynamic_relations,
+            "distanceActorRelations": distance_relations,
+            "cameraTargets": ([camera_target] if camera_target else source[:1]) if "camera-follow" in capabilities else [],
         }
 
     @staticmethod
-    def _build_prompt(request: dict[str, Any], contract_text: str) -> str:
-        requirements = NodeGraphGenerationService._instruction_requirements(request["instruction"])
-        request_payload = {
+    def _contract_block_text(block: ET.Element) -> str:
+        values = [str(value or "") for value in block.attrib.values()]
+        for child in block:
+            values.extend(str(value or "") for value in child.attrib.values())
+        return " ".join(values).casefold()
+
+    @staticmethod
+    def _contract_signature_index(contract_text: str) -> dict[str, Any]:
+        root = ET.fromstring(contract_text)
+        signatures: dict[str, Any] = {}
+        for block in root.findall("./Catalog/Blocks/Block"):
+            block_type = str(block.get("type") or "").strip()
+            if not block_type:
+                continue
+            signatures[block_type] = {
+                "shape": str(block.get("shape") or ""),
+                "output": str(block.get("outputCheck") or ""),
+                "capabilities": str(block.get("capabilities") or "").split(),
+                "aiUse": str(block.get("aiUse") or "").strip(),
+                "fields": [
+                    str(field.get("name") or "").strip()
+                    for field in block.findall("./Field")
+                    if str(field.get("name") or "").strip()
+                ],
+                "inputs": {
+                    str(input_node.get("name") or "").strip(): {
+                        "kind": str(input_node.get("kind") or ""),
+                        "check": str(input_node.get("check") or ""),
+                    }
+                    for input_node in block.findall("./Input")
+                    if str(input_node.get("name") or "").strip()
+                },
+            }
+        return signatures
+
+    @classmethod
+    def _select_contract(
+        cls,
+        request: dict[str, Any],
+        contract_path: Path,
+        contract_text: str,
+        requirements: dict[str, Any],
+        *,
+        expanded: bool = False,
+    ) -> dict[str, Any]:
+        catalog = load_contract_catalog(contract_path)
+        specs = catalog.get("blocks") if isinstance(catalog, dict) else {}
+        root = ET.fromstring(contract_text)
+        block_elements = root.findall("./Catalog/Blocks/Block")
+        block_by_type = {
+            str(block.get("type") or "").strip(): block
+            for block in block_elements
+            if str(block.get("type") or "").strip()
+        }
+        project_safe = {
+            block_type
+            for block_type, spec in specs.items()
+            if getattr(spec, "project_usage", "") == "project-safe"
+        }
+        selected = set(cls.CORE_BLOCK_TYPES) & project_safe
+        capabilities = set(requirements.get("capabilities") or [])
+        for capability in capabilities:
+            selected.update(cls.CAPABILITY_BLOCK_TYPES.get(capability, set()) & project_safe)
+            selected.update(
+                block_type
+                for block_type, spec in specs.items()
+                if block_type in project_safe
+                and capability in set(getattr(spec, "capabilities", ()) or ())
+            )
+
+        existing_types = set(cls._graph_block_types(request.get("workspace") or {}))
+        selected.update(existing_types & project_safe)
+
+        tokens = {
+            token
+            for token in re.findall(r"[a-zA-Z][a-zA-Z0-9_-]{2,}", request.get("instruction") or "")
+            if token.casefold() not in {
+                "the", "and", "for", "with", "this", "that", "from", "into", "make", "create",
+            }
+        }
+        direct_matches: list[tuple[int, str]] = []
+        lowered_instruction = str(request.get("instruction") or "").casefold()
+        for block_type, block in block_by_type.items():
+            if block_type not in project_safe:
+                continue
+            metadata = cls._contract_block_text(block)
+            score = sum(1 for token in tokens if token.casefold() in metadata)
+            if block_type.casefold() in lowered_instruction:
+                score += 4
+            if score:
+                direct_matches.append((score, block_type))
+        direct_matches.sort(key=lambda item: (-item[0], item[1]))
+        selected.update(block_type for _score, block_type in direct_matches[:16])
+
+        # Existing blocks must be preserved when the task is understood, but they do
+        # not prove that the selector understood an otherwise unknown instruction.
+        recognized = bool(capabilities or direct_matches)
+        if not recognized:
+            return {
+                "text": contract_text,
+                "mode": "full",
+                "selectedTypes": sorted(block_by_type),
+            }
+
+        if expanded:
+            selected_categories = {
+                str(block_by_type[block_type].get("category") or "")
+                for block_type in selected
+                if block_type in block_by_type
+            }
+            for block_type, block in block_by_type.items():
+                if block_type not in project_safe:
+                    continue
+                if (
+                    str(block.get("category") or "") in selected_categories
+                    or str(block.get("recommended") or "").casefold() == "true"
+                ):
+                    selected.add(block_type)
+
+        selected &= set(block_by_type)
+        if len(selected) < 8:
+            return {
+                "text": contract_text,
+                "mode": "full",
+                "selectedTypes": sorted(block_by_type),
+            }
+
+        filtered_root = copy.deepcopy(root)
+        blocks_parent = filtered_root.find("./Catalog/Blocks")
+        if blocks_parent is None:
+            raise ValueError("节点 AI 合同缺少 Catalog/Blocks")
+        for block in list(blocks_parent):
+            if str(block.get("type") or "").strip() not in selected:
+                blocks_parent.remove(block)
+        filtered_root.set("selectionMode", "expanded" if expanded else "filtered")
+        filtered_root.set("selectedBlockCount", str(len(selected)))
+        try:
+            ET.indent(filtered_root, space="  ")
+        except AttributeError:
+            pass
+        return {
+            "text": ET.tostring(filtered_root, encoding="unicode"),
+            "mode": "expanded" if expanded else "filtered",
+            "selectedTypes": sorted(selected),
+        }
+
+    @staticmethod
+    def _build_prompt(
+        request: dict[str, Any],
+        contract_text: str,
+        requirements: dict[str, Any] | None = None,
+        *,
+        contract_mode: str = "full",
+        selected_types: list[str] | None = None,
+    ) -> str:
+        requirements = requirements or NodeGraphGenerationService._instruction_requirements(
+            request["instruction"], request.get("operation"), request.get("projectContext")
+        )
+        request_envelope = {
             "schemaVersion": request["schemaVersion"],
             "requestId": request["requestId"],
             "targetId": request["targetId"],
@@ -208,9 +923,6 @@ class NodeGraphGenerationService:
             "operation": request["operation"],
             "instruction": request["instruction"],
             "responseLanguage": request["responseLanguage"],
-            "derivedRequirements": requirements,
-            "workspace": request["workspace"],
-            "projectContext": request["projectContext"],
         }
         scoped_rules = []
         if requirements["narrowObjectControl"]:
@@ -228,6 +940,32 @@ class NodeGraphGenerationService:
             scoped_rules.append(
                 "The same reachable node_while_active DO chain must also contain object_arcade_jump. "
                 "Its NAME must exactly equal the movement block NAME."
+            )
+        for relation in requirements.get("dynamicActorRelations") or []:
+            if not isinstance(relation, dict):
+                continue
+            scoped_rules.append(
+                "Dynamic actor relation: each movement target "
+                + ", ".join(str(value) for value in relation.get("targets") or [])
+                + " must read the live "
+                + ", ".join(str(value) for value in relation.get("axes") or [])
+                + " coordinates of "
+                + str(relation.get("source") or "")
+                + ". Fixed world coordinates are not a valid substitute."
+            )
+        for relation in requirements.get("distanceActorRelations") or []:
+            if not isinstance(relation, dict):
+                continue
+            scoped_rules.append(
+                "Every requested distance/proximity condition must contain both the source actor "
+                + str(relation.get("source") or "")
+                + " and each target actor in the same Boolean condition, using live actor coordinates."
+            )
+        if requirements.get("cameraTargets"):
+            scoped_rules.append(
+                "Every requested camera-follow block must bind exactly to "
+                + str((requirements.get("cameraTargets") or [""])[0])
+                + "."
             )
         scoped_text = "\n".join(f"- {item}" for item in scoped_rules) or "- Follow only the explicit user request."
         operation_rules = {
@@ -252,49 +990,62 @@ class NodeGraphGenerationService:
                 "logic and repair only connections made invalid by that deletion."
             ),
         }
-        operation_rule = operation_rules[request["operation"]]
         language = request["responseLanguage"]
+        contract_label = "FULL_CORONA_BLOCKS_CONTRACT_XML" if contract_mode == "full" else "SELECTED_CORONA_BLOCKS_CONTRACT_XML"
+        selection_summary = {
+            "mode": contract_mode,
+            "selectedBlockCount": len(selected_types or []),
+            "selectedBlockTypes": selected_types or [],
+        }
+        signature_index = NodeGraphGenerationService._contract_signature_index(contract_text)
         return (
-            "You are editing CoronaEngine's visible project node graph. Follow the complete trusted XML contract below.\n"
+            "You are editing CoronaEngine's visible project node graph. Follow the trusted XML contract supplied below.\n"
             "Return exactly one JSON object containing the complete final workspace. Never return a patch, Python, XML, "
             "Markdown, file path, or prose outside the JSON. Use only catalog blocks. Preserve unrelated existing logic "
-            "for extend/edit/delete. Never invent an actor: object names must exactly match projectContext.actors.\n"
+            "for extend/edit/delete. Never invent an actor: object names must exactly match PROJECT_CONTEXT_JSON.actors.\n"
             "The project node graph is already scoped to the current Native Editor scene. An empty graph-level actor "
             "binding is expected and must never trigger a scene-binding workflow. Never ask the user to bind a scene or actor. "
             "For movement, jump, rotation, collision, physics, and other object operations, choose the intended concrete target "
-            "from projectContext.actors and serialize its exact name into the supported object field or object input defined by "
-            "the XML contract.\n\n"
-            "OPERATION MODE:\n"
-            + f"- {operation_rule}\n\n"
-            + "TASK SCOPING RULES:\n"
-            "- Implement only capabilities explicitly requested by the user. Do not expand a small feature into a full game.\n"
-            "- XML examples are structural illustrations only and must never be copied as gameplay templates.\n"
-            "- Prefer the smallest valid graph change and reuse an existing reachable gameplay node when practical.\n"
+            "from PROJECT_CONTEXT_JSON.actors and serialize its exact name into the supported object field or object input.\n\n"
+            "OUTPUT_AND_OPERATION_RULES:\n"
+            + f"- {operation_rules[request['operation']]}\n"
+            + "- Implement only capabilities explicitly requested by the user. Do not expand a small feature into a full game.\n"
+            + "- XML examples are structural illustrations only and must never be copied as gameplay templates.\n"
+            + "- Prefer the smallest valid graph change and reuse an existing reachable gameplay node when practical.\n"
             + scoped_text
-            + "\n\nBLOCKLY SERIALIZATION GUARDRAILS:\n"
+            + "\n\nBLOCKLY_SERIALIZATION_GUARDRAILS:\n"
             "- fields contains only real Catalog <Field> names. inputs contains only real Catalog <Input> names. "
             "Never serialize an input socket as a field.\n"
-            "- control_if has no BOOL field. Put a Boolean output block under inputs.CONDITION.block. "
-            "Example: {\"type\":\"control_if\",\"id\":\"if_1\",\"inputs\":{"
-            "\"CONDITION\":{\"block\":{\"type\":\"logic_boolean\",\"id\":\"bool_1\","
-            "\"fields\":{\"BOOL\":\"TRUE\"}}},\"DO\":{\"block\":{\"type\":\"engine_rotateZ\","
-            "\"id\":\"rotate_1\",\"fields\":{\"ANGLE\":15},\"inputs\":{\"OBJECT\":{\"block\":{"
-            "\"type\":\"object_reference\",\"id\":\"object_1\",\"fields\":{\"OBJECT\":\"RealActorName\","
-            "\"MANUAL\":\"\"}}}}}}}}.\n"
+            "- control_if has no BOOL field. Put a Boolean output block under inputs.CONDITION.block.\n"
             "- engine_rotateX/engine_rotateY/engine_rotateZ have only the ANGLE field. Bind the target through "
-            "inputs.OBJECT.block using object_reference, and choose an exact actor name from PROJECT_CONTEXT. "
-            "Never invent an actor name or leave an object placeholder.\n"
+            "inputs.OBJECT.block using object_reference, and choose an exact actor name from PROJECT_CONTEXT_JSON.\n"
             "- inputs.DO is a statement connection. Put the first action in inputs.DO.block and continue that branch "
             "with next.block. Never put branch actions beside DO or inside fields.\n"
+            "- When editing an existing block, preserve its id and type. Change only documented field values or "
+            "documented input connections. Never add an input name that is absent from CONTRACT_BLOCK_SIGNATURES_JSON.\n"
+            "- workspace.edges entries use this exact macro schema: {id,name,source:{nodeId,side,index},"
+            "target:{nodeId,side,index},conditionWorkspace}. source and target are objects, side is left/right/bottom, "
+            "and index is a non-negative integer. Use edges:[] when no macro transition is needed.\n"
+            "- conditionWorkspace is either {} or a Blockly workspace with exactly one top-level Boolean output block. "
+            "Do not place gameplay statement blocks in an edge condition.\n"
             "- Before returning JSON, check every block against its Catalog entry: every field name, input name, "
-            "connection kind, output type, and dropdown value must match exactly.\n"
-            + "\n\nLANGUAGE RULES:\n"
+            "connection kind, output type, and dropdown value must match exactly.\n\n"
+            "CONTRACT_BLOCK_SIGNATURES_JSON:\n"
+            + json.dumps(signature_index, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nLANGUAGE_RULES:\n"
             + f"- responseLanguage is {language}. The summary and every newly added or renamed custom node/edge label must use that language.\n"
-            "- Do not mix Chinese and English UI labels. Technical block types, field names, IDs, WASD, API names, "
-            "and real actor names are identifiers and must not be translated.\n\n"
-            "HOST_REQUEST_JSON:\n"
-            + json.dumps(request_payload, ensure_ascii=False, separators=(",", ":"))
-            + "\n\nFULL_CORONA_BLOCKS_CONTRACT_XML:\n"
+            + "- Do not mix Chinese and English UI labels. Technical identifiers and real actor names must not be translated.\n\n"
+            "REQUEST_ENVELOPE_JSON:\n"
+            + json.dumps(request_envelope, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nDERIVED_REQUIREMENTS_JSON:\n"
+            + json.dumps(requirements, ensure_ascii=False, separators=(",", ":"))
+            + "\n\nCURRENT_WORKSPACE_JSON:\n"
+            + json.dumps(request["workspace"], ensure_ascii=False, separators=(",", ":"))
+            + "\n\nPROJECT_CONTEXT_JSON:\n"
+            + json.dumps(request["projectContext"], ensure_ascii=False, separators=(",", ":"))
+            + "\n\nCONTRACT_SELECTION_JSON:\n"
+            + json.dumps(selection_summary, ensure_ascii=False, separators=(",", ":"))
+            + f"\n\n{contract_label}:\n"
             + contract_text
         )
 
@@ -304,16 +1055,18 @@ class NodeGraphGenerationService:
         endpoint = base if base.endswith("/chat/completions") else base + "/chat/completions"
         body = {
             "model": settings.model,
-            "temperature": 0.05,
-            "max_tokens": 12000,
+            "temperature": float(getattr(settings, "temperature", 0.05)),
+            "max_tokens": int(getattr(settings, "max_tokens", 12000)),
             "response_format": {"type": "json_object"},
-            "thinking": {"type": "disabled"},
+            "thinking": {
+                "type": "enabled" if getattr(settings, "thinking_enabled", False) else "disabled"
+            },
             "messages": [
                 {
                     "role": "system",
                     "content": (
                         "你是 CoronaEngine 内嵌节点图编辑器。你只输出一个 JSON 对象。"
-                        "必须根据完整 XML 合同对 node_graph:project:global 做增删改查，返回完整最终节点图。"
+                        "必须根据本次提供的 XML 合同对 node_graph:project:global 做增删改查，返回完整最终节点图。"
                         "禁止输出 Python、XML、文件路径、JSON Patch、Markdown 或合同外积木。"
                     ),
                 },
@@ -421,7 +1174,7 @@ class NodeGraphGenerationService:
         catalog = load_contract_catalog(contract_path)
         block_specs = catalog.get("blocks", {})
         used_ids: set[str] = set()
-        for graph_workspace in cls._all_graph_workspaces(workspace):
+        for graph_workspace in cls._reachable_node_workspaces(workspace):
             for block in cls._workspace_blocks(graph_workspace):
                 block_id = str(block.get("id") or "").strip()
                 if block_id:
@@ -551,6 +1304,159 @@ class NodeGraphGenerationService:
                 block_types[block_type] += 1
         return block_types
 
+    @classmethod
+    def _reachable_node_workspaces(cls, workspace: dict[str, Any]) -> list[dict[str, Any]]:
+        nodes = [item for item in (workspace.get("nodes") or []) if isinstance(item, dict)]
+        edges = [item for item in (workspace.get("edges") or []) if isinstance(item, dict)]
+        node_by_id = {
+            str(node.get("id") or "").strip(): node
+            for node in nodes
+            if str(node.get("id") or "").strip()
+        }
+        starts = [
+            node_id
+            for node_id, node in node_by_id.items()
+            if str(node.get("nodeType") or "").strip() == "start"
+        ]
+        adjacency: dict[str, set[str]] = {}
+        for edge in edges:
+            source = edge.get("source") if isinstance(edge.get("source"), dict) else {}
+            target = edge.get("target") if isinstance(edge.get("target"), dict) else {}
+            source_id = str(source.get("nodeId") or "").strip()
+            target_id = str(target.get("nodeId") or "").strip()
+            if source_id and target_id:
+                adjacency.setdefault(source_id, set()).add(target_id)
+        reachable: set[str] = set()
+        queue = deque(starts)
+        while queue:
+            node_id = queue.popleft()
+            if node_id in reachable:
+                continue
+            reachable.add(node_id)
+            queue.extend(sorted(adjacency.get(node_id, set()) - reachable))
+        return [
+            node_by_id[node_id].get("workspace")
+            for node_id in sorted(reachable)
+            if isinstance(node_by_id.get(node_id, {}).get("workspace"), dict)
+        ]
+
+    @classmethod
+    def _reachable_condition_workspaces(cls, workspace: dict[str, Any]) -> list[dict[str, Any]]:
+        nodes = [item for item in (workspace.get("nodes") or []) if isinstance(item, dict)]
+        edges = [item for item in (workspace.get("edges") or []) if isinstance(item, dict)]
+        node_ids = {str(node.get("id") or "").strip() for node in nodes}
+        starts = {
+            str(node.get("id") or "").strip()
+            for node in nodes
+            if str(node.get("nodeType") or "").strip() == "start"
+        }
+        outgoing: dict[str, list[dict[str, Any]]] = {}
+        for edge in edges:
+            source = edge.get("source") if isinstance(edge.get("source"), dict) else {}
+            source_id = str(source.get("nodeId") or "").strip()
+            if source_id:
+                outgoing.setdefault(source_id, []).append(edge)
+        reachable = set(starts)
+        queue = deque(starts)
+        condition_workspaces: list[dict[str, Any]] = []
+        while queue:
+            source_id = queue.popleft()
+            for edge in outgoing.get(source_id, []):
+                condition = edge.get("conditionWorkspace")
+                if isinstance(condition, dict):
+                    condition_workspaces.append(condition)
+                target = edge.get("target") if isinstance(edge.get("target"), dict) else {}
+                target_id = str(target.get("nodeId") or "").strip()
+                if target_id in node_ids and target_id not in reachable:
+                    reachable.add(target_id)
+                    queue.append(target_id)
+        return condition_workspaces
+
+    @classmethod
+    def _reachable_block_types(cls, workspace: dict[str, Any]) -> Counter:
+        block_types: Counter = Counter()
+        graph_workspaces = (
+            cls._reachable_node_workspaces(workspace)
+            + cls._reachable_condition_workspaces(workspace)
+        )
+        for graph_workspace in graph_workspaces:
+            for block in cls._workspace_blocks(graph_workspace):
+                block_type = str(block.get("type") or "").strip()
+                if block_type:
+                    block_types[block_type] += 1
+        return block_types
+
+    @classmethod
+    def _referenced_actor_names(cls, workspace: dict[str, Any]) -> set[str]:
+        names: set[str] = set()
+        for graph_workspace in cls._reachable_node_workspaces(workspace):
+            for block in cls._workspace_blocks(graph_workspace):
+                block_type = str(block.get("type") or "").strip()
+                for input_name in NodeGraphReviewService.ACTOR_REFERENCE_FIELDS.get(block_type, ()):
+                    state, actor_name = NodeGraphReviewService._actor_reference(block, input_name)
+                    if state == "resolved" and actor_name:
+                        names.add(actor_name)
+        return names
+
+    @staticmethod
+    def _literal_text_input(block: dict[str, Any], input_name: str) -> str:
+        inputs = block.get("inputs") if isinstance(block.get("inputs"), dict) else {}
+        connection = inputs.get(input_name) if isinstance(inputs, dict) else None
+        if not isinstance(connection, dict):
+            return ""
+        for key in ("block", "shadow"):
+            value_block = connection.get(key)
+            if not isinstance(value_block, dict):
+                continue
+            fields = value_block.get("fields") if isinstance(value_block.get("fields"), dict) else {}
+            for field_name in ("TEXT", "VALUE", "TAG", "TAG_TEXT"):
+                value = fields.get(field_name)
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+        return ""
+
+    @classmethod
+    def _referenced_tags(cls, workspace: dict[str, Any]) -> set[str]:
+        batch_tag_blocks = {
+            "object_move_tag",
+            "object_set_tag_velocity_axis",
+            "object_count_tag",
+            "object_count_active_tag",
+            "object_reset_tag",
+            "object_scatter_tag",
+            "object_recycle_tag_axis",
+        }
+        tags: set[str] = set()
+        for graph_workspace in cls._reachable_node_workspaces(workspace):
+            for block in cls._workspace_blocks(graph_workspace):
+                if str(block.get("type") or "").strip() not in batch_tag_blocks:
+                    continue
+                fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
+                for field_name in ("TAG_TEXT", "TAG"):
+                    value = fields.get(field_name)
+                    if isinstance(value, str) and value.strip():
+                        tags.add(value.strip())
+                input_value = cls._literal_text_input(block, "TAG")
+                if input_value:
+                    tags.add(input_value)
+        return tags
+
+    @staticmethod
+    def _actor_tags(project_context: dict[str, Any]) -> dict[str, set[str]]:
+        actors = project_context.get("actors") if isinstance(project_context, dict) else []
+        if not isinstance(actors, list):
+            return {}
+        result: dict[str, set[str]] = {}
+        for actor in actors:
+            if not isinstance(actor, dict):
+                continue
+            name = str(actor.get("name") or "").strip()
+            if not name:
+                continue
+            raw_tags = actor.get("tags") if isinstance(actor.get("tags"), list) else []
+            result[name] = {str(tag).strip() for tag in raw_tags if str(tag).strip()}
+        return result
+
     @staticmethod
     def _actor_names(project_context: dict[str, Any]) -> set[str]:
         actors = project_context.get("actors") if isinstance(project_context, dict) else []
@@ -563,6 +1469,136 @@ class NodeGraphGenerationService:
         }
 
     @staticmethod
+    def _input_child_blocks(block: dict[str, Any], input_name: str) -> list[dict[str, Any]]:
+        inputs = block.get("inputs") if isinstance(block.get("inputs"), dict) else {}
+        connection = inputs.get(input_name) if isinstance(inputs, dict) else None
+        if not isinstance(connection, dict):
+            return []
+        return [
+            child
+            for key in ("block", "shadow")
+            if isinstance((child := connection.get(key)), dict)
+        ]
+
+    @classmethod
+    def _walk_input_subtree(cls, block: dict[str, Any]):
+        if not isinstance(block, dict):
+            return
+        yield block
+        inputs = block.get("inputs") if isinstance(block.get("inputs"), dict) else {}
+        for connection in inputs.values():
+            if not isinstance(connection, dict):
+                continue
+            for key in ("block", "shadow"):
+                child = connection.get(key)
+                if isinstance(child, dict):
+                    yield from cls._walk_input_subtree(child)
+
+    @classmethod
+    def _coordinate_reads(cls, blocks: list[dict[str, Any]]) -> dict[str, set[str]]:
+        reads: dict[str, set[str]] = {}
+        for root in blocks:
+            for block in cls._walk_input_subtree(root):
+                getter = cls.COORDINATE_GETTER_TYPES.get(str(block.get("type") or "").strip())
+                if not getter:
+                    continue
+                field_name, axis = getter
+                state, actor_name = NodeGraphReviewService._actor_reference(block, field_name)
+                if state == "resolved" and actor_name:
+                    reads.setdefault(actor_name, set()).add(axis)
+        return reads
+
+    @classmethod
+    def _subtree_actor_references(cls, root: dict[str, Any]) -> set[str]:
+        names: set[str] = set()
+        for block in cls._walk_input_subtree(root):
+            block_type = str(block.get("type") or "").strip()
+            for field_name in NodeGraphReviewService.ACTOR_REFERENCE_FIELDS.get(block_type, ()):
+                state, actor_name = NodeGraphReviewService._actor_reference(block, field_name)
+                if state == "resolved" and actor_name:
+                    names.add(actor_name)
+        return names
+
+    @classmethod
+    def _movement_targets(
+        cls, block: dict[str, Any], actor_tags: dict[str, set[str]]
+    ) -> set[str]:
+        block_type = str(block.get("type") or "").strip()
+        targets: set[str] = set()
+        for field_name in NodeGraphReviewService.ACTOR_REFERENCE_FIELDS.get(block_type, ()):
+            state, actor_name = NodeGraphReviewService._actor_reference(block, field_name)
+            if state == "resolved" and actor_name:
+                targets.add(actor_name)
+        if block_type in {"object_move_tag", "object_set_tag_velocity_axis"}:
+            fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
+            tag = str(fields.get("TAG_TEXT") or fields.get("TAG") or cls._literal_text_input(block, "TAG")).strip()
+            if tag:
+                targets.update(name for name, tags in actor_tags.items() if tag in tags)
+        return targets
+
+    @classmethod
+    def _dynamic_relation_coverage(
+        cls,
+        workspace: dict[str, Any],
+        source: str,
+        targets: list[str],
+        actor_tags: dict[str, set[str]],
+    ) -> dict[str, set[str]]:
+        coverage = {target: set() for target in targets}
+        for graph_workspace in cls._reachable_node_workspaces(workspace):
+            for block in cls._workspace_blocks(graph_workspace):
+                block_type = str(block.get("type") or "").strip()
+                input_axes = cls.DYNAMIC_MOVEMENT_INPUTS.get(block_type)
+                if not input_axes:
+                    continue
+                matching_targets = cls._movement_targets(block, actor_tags).intersection(coverage)
+                if not matching_targets:
+                    continue
+                fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
+                for input_name, configured_axis in input_axes.items():
+                    axis = str(fields.get("AXIS") or "").upper() if configured_axis == "FIELD_AXIS" else configured_axis
+                    if axis not in {"X", "Y", "Z"}:
+                        continue
+                    reads = cls._coordinate_reads(cls._input_child_blocks(block, input_name))
+                    if axis not in reads.get(source, set()):
+                        continue
+                    for target in matching_targets:
+                        coverage[target].add(axis)
+        return coverage
+
+    @classmethod
+    def _condition_relation_satisfied(
+        cls,
+        workspace: dict[str, Any],
+        source: str,
+        target: str,
+        axes: set[str],
+    ) -> bool:
+        condition_roots: list[dict[str, Any]] = []
+        for graph_workspace in cls._reachable_node_workspaces(workspace):
+            for block in cls._workspace_blocks(graph_workspace):
+                if str(block.get("type") or "") not in {"control_if", "control_else"}:
+                    continue
+                condition_roots.extend(cls._input_child_blocks(block, "CONDITION"))
+        for graph_workspace in cls._reachable_condition_workspaces(workspace):
+            condition_roots.extend(cls._workspace_roots(graph_workspace))
+
+        for root in condition_roots:
+            references = cls._subtree_actor_references(root)
+            if source not in references or target not in references:
+                continue
+            reads = cls._coordinate_reads([root])
+            source_axes = reads.get(source, set())
+            target_axes = reads.get(target, set())
+            contains_position_near = any(
+                str(block.get("type") or "") == "detect_position_near"
+                for block in cls._walk_input_subtree(root)
+            )
+            if axes.issubset(source_axes) and (contains_position_near or axes.issubset(target_axes)):
+                return True
+        return False
+
+    @staticmethod
     def _contains_chinese(value: Any) -> bool:
         return bool(re.search(r"[\u3400-\u9fff]", str(value or "")))
 
@@ -573,7 +1609,10 @@ class NodeGraphGenerationService:
         workspace = result.get("workspace") if isinstance(result.get("workspace"), dict) else {}
         project_context = request.get("projectContext")
         actors = project_context.get("actors") if isinstance(project_context, dict) else None
-        actor_context_available = isinstance(actors, list)
+        if isinstance(project_context, dict) and "actorContextAvailable" in project_context:
+            actor_context_available = project_context.get("actorContextAvailable") is True
+        else:
+            actor_context_available = isinstance(actors, list)
         known_actors = cls._actor_names(project_context if isinstance(project_context, dict) else {})
         errors: list[str] = []
 
@@ -656,56 +1695,162 @@ class NodeGraphGenerationService:
     def _validate_requested_semantics(
         cls, result: dict[str, Any], request: dict[str, Any]
     ) -> None:
-        requirements = cls._instruction_requirements(request["instruction"])
+        requirements = cls._instruction_requirements(
+            request["instruction"], request.get("operation"), request.get("projectContext")
+        )
         required = set(requirements["requiredCapabilities"])
         if not required:
             return
 
         workspace = result["workspace"]
         actor_names = cls._actor_names(request.get("projectContext") or {})
-        matching_chain = None
-        movement_types = {"object_third_person_move"}
-        if requirements["firstPersonRequested"]:
-            movement_types.add("object_first_person_move")
-        for node in workspace.get("nodes", []):
-            if not isinstance(node, dict):
-                continue
-            for root in cls._workspace_roots(node.get("workspace")):
-                if root.get("type") != "node_while_active":
-                    continue
-                do_input = root.get("inputs", {}).get("DO", {}) if isinstance(root.get("inputs"), dict) else {}
-                first = do_input.get("block") if isinstance(do_input, dict) else None
-                chain = list(cls._walk_block(first)) if isinstance(first, dict) else []
-                movements = [block for block in chain if block.get("type") in movement_types]
-                jumps = [block for block in chain if block.get("type") == "object_arcade_jump"]
-                has_movement = bool(movements)
-                has_jump = bool(jumps)
-                if (("wasd-object-movement" not in required or has_movement)
-                    and ("space-object-jump" not in required or has_jump)):
-                    matching_chain = (movements, jumps)
+        control_required = required & {"wasd-object-movement", "space-object-jump"}
+        if control_required:
+            matching_chain = None
+            movement_types = {"object_third_person_move"}
+            if requirements["firstPersonRequested"]:
+                movement_types.add("object_first_person_move")
+            for graph_workspace in cls._reachable_node_workspaces(workspace):
+                for root in cls._workspace_roots(graph_workspace):
+                    if root.get("type") != "node_while_active":
+                        continue
+                    do_input = root.get("inputs", {}).get("DO", {}) if isinstance(root.get("inputs"), dict) else {}
+                    first = do_input.get("block") if isinstance(do_input, dict) else None
+                    chain = list(cls._walk_block(first)) if isinstance(first, dict) else []
+                    movements = [block for block in chain if block.get("type") in movement_types]
+                    jumps = [block for block in chain if block.get("type") == "object_arcade_jump"]
+                    if (
+                        ("wasd-object-movement" not in control_required or movements)
+                        and ("space-object-jump" not in control_required or jumps)
+                    ):
+                        matching_chain = (movements, jumps)
+                        break
+                if matching_chain:
                     break
-            if matching_chain:
-                break
 
-        if not matching_chain:
-            missing = []
-            if "wasd-object-movement" in required:
-                missing.append("node_while_active 中的 object_third_person_move")
-            if "space-object-jump" in required:
-                missing.append("同一执行链中的 object_arcade_jump")
-            raise ValueError("生成结果没有实现用户要求：缺少" + "和".join(missing))
+            if not matching_chain:
+                missing = []
+                if "wasd-object-movement" in control_required:
+                    missing.append("node_while_active 中的 object_third_person_move")
+                if "space-object-jump" in control_required:
+                    missing.append("同一持续循环中的 object_arcade_jump")
+                raise ValueError("请求的控制能力没有完整实现：" + "；".join(missing))
 
-        movements, jumps = matching_chain
-        targets = []
-        for block in movements + jumps:
-            fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
-            targets.append(str(fields.get("NAME") or "").strip())
-        if not targets or any(not target for target in targets):
-            raise ValueError("WASD 移动和跳跃积木必须指定一个真实对象")
-        if len(set(targets)) != 1:
-            raise ValueError("WASD 移动和空格跳跃必须绑定同一个对象")
-        if targets[0] not in actor_names:
-            raise ValueError(f"控制对象 {targets[0]} 不存在于当前场景")
+            movements, jumps = matching_chain
+            targets = []
+            for block in movements + jumps:
+                fields = block.get("fields") if isinstance(block.get("fields"), dict) else {}
+                targets.append(str(fields.get("NAME") or "").strip())
+            if not targets or any(not target for target in targets):
+                raise ValueError("WASD 移动和空格跳跃必须绑定明确的同一对象")
+            if len(set(targets)) != 1:
+                raise ValueError("WASD 移动和空格跳跃必须绑定同一个对象")
+            if actor_names and targets[0] not in actor_names:
+                raise ValueError(f"对象 {targets[0]} 不存在于当前场景")
+
+        reachable_types = set(cls._reachable_block_types(workspace))
+        alternative_groups = [
+            [str(capability) for capability in group if str(capability)]
+            for group in (requirements.get("capabilityAlternatives") or [])
+            if isinstance(group, list)
+        ]
+        alternative_members = {capability for group in alternative_groups for capability in group}
+        missing_capabilities = []
+        for capability in sorted(required - control_required - alternative_members):
+            accepted = cls.CAPABILITY_VALIDATION_TYPES.get(capability)
+            if accepted and not reachable_types.intersection(accepted):
+                missing_capabilities.append(capability)
+        for group in alternative_groups:
+            if not any(
+                reachable_types.intersection(cls.CAPABILITY_VALIDATION_TYPES.get(capability, set()))
+                for capability in group
+            ):
+                missing_capabilities.append("(" + " or ".join(group) + ")")
+        if missing_capabilities:
+            raise ValueError(
+                "生成节点图缺少请求的关键能力：" + ", ".join(missing_capabilities)
+            )
+
+        if "attraction" in required and "node_while_active" not in reachable_types:
+            raise ValueError("持续吸附逻辑必须从 node_while_active 生命周期入口可达")
+
+        actor_requirement = requirements.get("actors") if isinstance(requirements.get("actors"), dict) else {}
+        targets = [str(value) for value in (actor_requirement.get("targets") or []) if str(value)]
+        if actor_requirement.get("multiTarget") is True and len(targets) >= 2:
+            referenced = cls._referenced_actor_names(workspace)
+            referenced_tags = cls._referenced_tags(workspace)
+            actor_tags = cls._actor_tags(request.get("projectContext") or {})
+            missing_actors = [
+                name
+                for name in targets
+                if name not in referenced and not actor_tags.get(name, set()).intersection(referenced_tags)
+            ]
+            if missing_actors:
+                raise ValueError(
+                    "多目标请求没有覆盖以下明确目标：" + ", ".join(missing_actors[:6])
+                )
+
+        actor_tags = cls._actor_tags(request.get("projectContext") or {})
+        for relation in requirements.get("dynamicActorRelations") or []:
+            if not isinstance(relation, dict):
+                continue
+            source = str(relation.get("source") or "").strip()
+            targets = [str(value).strip() for value in (relation.get("targets") or []) if str(value).strip()]
+            axes = {str(value).upper() for value in (relation.get("axes") or []) if str(value).upper() in {"X", "Y", "Z"}}
+            if not source or not targets or not axes:
+                continue
+            coverage = cls._dynamic_relation_coverage(workspace, source, targets, actor_tags)
+            incomplete = [
+                f"{target} missing {','.join(sorted(axes - coverage.get(target, set())))}"
+                for target in targets
+                if not axes.issubset(coverage.get(target, set()))
+            ]
+            if incomplete:
+                raise ValueError(
+                    "Dynamic actor dependency is incomplete: movement for each target must read "
+                    f"the live {','.join(sorted(axes))} coordinates of {source}; "
+                    + "; ".join(incomplete[:6])
+                )
+
+        for relation in requirements.get("distanceActorRelations") or []:
+            if not isinstance(relation, dict):
+                continue
+            source = str(relation.get("source") or "").strip()
+            targets = [str(value).strip() for value in (relation.get("targets") or []) if str(value).strip()]
+            axes = {str(value).upper() for value in (relation.get("axes") or []) if str(value).upper() in {"X", "Y", "Z"}}
+            if not source or not targets or not axes:
+                continue
+            missing = [
+                target
+                for target in targets
+                if not cls._condition_relation_satisfied(workspace, source, target, axes)
+            ]
+            if missing:
+                raise ValueError(
+                    "Distance condition must contain both requested actors and use live coordinates: "
+                    f"source={source}, missingTargets={','.join(missing[:6])}"
+                )
+
+        camera_targets = [str(value).strip() for value in (requirements.get("cameraTargets") or []) if str(value).strip()]
+        if camera_targets:
+            expected = camera_targets[0]
+            matched = False
+            for graph_workspace in cls._reachable_node_workspaces(workspace):
+                for block in cls._workspace_blocks(graph_workspace):
+                    block_type = str(block.get("type") or "").strip()
+                    if block_type not in cls.CAMERA_FOLLOW_TYPES:
+                        continue
+                    for field_name in NodeGraphReviewService.ACTOR_REFERENCE_FIELDS.get(block_type, ()):
+                        state, actor_name = NodeGraphReviewService._actor_reference(block, field_name)
+                        if state == "resolved" and actor_name == expected:
+                            matched = True
+                            break
+                    if matched:
+                        break
+                if matched:
+                    break
+            if not matched:
+                raise ValueError(f"Camera follow block must target the requested actor {expected}")
 
         if requirements["narrowObjectControl"]:
             before = cls._graph_block_types(request["workspace"])
@@ -781,7 +1926,7 @@ class NodeGraphGenerationService:
         if validated.get("success") is not True:
             errors = validated.get("errors") or []
             detail = "；".join(str(item) for item in errors[:6])
-            raise ValueError("生成的节点图未通过积木合同校验" + (f"：{detail}" if detail else ""))
+            raise ValueError("\u751f\u6210\u7684\u8282\u70b9\u56fe\u672a\u901a\u8fc7\u79ef\u6728\u5408\u540c\u6821\u9a8c" + (f"\uff1a{detail}" if detail else ""))
         cls._validate_response_language(normalized_result, request)
         cls._validate_actor_references(normalized_result, request)
         cls._validate_operation_scope(normalized_result, request)
@@ -798,26 +1943,80 @@ class NodeGraphGenerationService:
             "warnings": normalization_warnings + list(validated.get("warnings") or []),
         }
 
+    @staticmethod
+    def _redact_secret(value: Any, secret: str | None) -> str:
+        text = str(value or "")
+        secret_text = str(secret or "")
+        return text.replace(secret_text, "[redacted]") if secret_text else text
+
+    @staticmethod
+    def _needs_contract_expansion(error: Exception | str | None) -> bool:
+        text = str(error or "").casefold()
+        markers = (
+            "unknown block type",
+            "缺少请求的关键能力",
+            "控制能力没有完整实现",
+        )
+        return any(marker.casefold() in text for marker in markers)
+
     def generate(self, payload: Any, cancel_event: threading.Event | None = None) -> dict[str, Any]:
         try:
             request = self._normalize_payload(payload)
             if cancel_event and cancel_event.is_set():
                 return self._error("GENERATION_CANCELLED", "已停止本次节点生成。")
-            settings = NodeGraphReviewService._resolve_settings()
+            settings = NodeGraphReviewService._resolve_settings("node_graph")
             if not settings.api_key:
                 return self._error("AI_NOT_CONFIGURED", "DeepSeek 未配置，无法生成节点逻辑。")
             contract_path, contract_text = self._load_contract()
-            prompt = self._build_prompt(request, contract_text)
+            requirements = self._instruction_requirements(
+                request["instruction"], request["operation"], request.get("projectContext")
+            )
+            primary_selection = self._select_contract(
+                request, contract_path, contract_text, requirements
+            )
             normalized = None
             validation_error = None
             for attempt in range(2):
-                current_prompt = prompt
+                selection = primary_selection
+                if (
+                    attempt == 1
+                    and primary_selection["mode"] != "full"
+                    and self._needs_contract_expansion(validation_error)
+                ):
+                    selection = self._select_contract(
+                        request, contract_path, contract_text, requirements, expanded=True
+                    )
+                    error_text = str(validation_error or "").casefold()
+                    if (
+                        selection["selectedTypes"] == primary_selection["selectedTypes"]
+                        or "unknown block type" in error_text
+                    ):
+                        selection = {
+                            "text": contract_text,
+                            "mode": "full",
+                            "selectedTypes": sorted(
+                                (load_contract_catalog(contract_path).get("blocks") or {}).keys()
+                            ),
+                        }
+                current_prompt = self._build_prompt(
+                    request,
+                    selection["text"],
+                    requirements,
+                    contract_mode=selection["mode"],
+                    selected_types=selection["selectedTypes"],
+                )
                 if validation_error is not None:
                     current_prompt += (
                         "\n\nPREVIOUS_RESULT_REJECTED:\n"
                         + str(validation_error)
                         + "\nReturn a corrected complete JSON result. Do not repeat the rejected structure."
                     )
+                logger.info(
+                    "Generating node graph [attempt=%d, contract=%s, blocks=%d]",
+                    attempt + 1,
+                    selection["mode"],
+                    len(selection["selectedTypes"]),
+                )
                 raw = self._call_deepseek(settings, current_prompt)
                 if cancel_event and cancel_event.is_set():
                     return self._error("GENERATION_CANCELLED", "已停止本次节点生成。")
@@ -844,8 +2043,11 @@ class NodeGraphGenerationService:
             )
             return {"success": True, "status": "ok", **normalized}
         except ValueError as exc:
-            logger.warning("Node graph generation rejected: %s", exc)
-            return self._error("INVALID_GENERATION_DATA", str(exc))
+            safe_message = self._redact_secret(
+                exc, getattr(locals().get("settings"), "api_key", "")
+            )
+            logger.warning("Node graph generation rejected: %s", safe_message)
+            return self._error("INVALID_GENERATION_DATA", safe_message)
         except urllib.error.HTTPError as exc:
             status = int(getattr(exc, "code", 0) or 0)
             logger.warning("Node graph generation provider HTTP error [status=%s]", status)

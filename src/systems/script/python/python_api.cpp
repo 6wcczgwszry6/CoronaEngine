@@ -4,12 +4,14 @@
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/kernel/event/i_event_bus.h>
 #include <corona/systems/script/python_api.h>
+#include <corona/systems/script/engine_scripts.h>
 #include <corona/systems/script/python/python_error_handler.h>
 #include <corona/systems/script/python/python_path_config.h>
 #include <nanobind/stl/string.h>
 #include <windows.h>
 
 #include <iostream>
+#include <sstream>
 #include <ranges>
 #include <regex>
 #include <set>
@@ -23,42 +25,124 @@ namespace Corona::Script::Python {
 const std::string codePath = PathCfg::engine_root();
 
 PythonAPI::PythonAPI() {
+    lifecycle_snapshot_.state = PythonLifecycleState::Created;
+    install_active_python_runtime_coordinator(&runtime_coordinator_);
 }
 
 PythonAPI::~PythonAPI() {
-    if (!shutting_down_.load()) {
-        if (Py_IsInitialized()) {
-            shutdown();
-        } else {
-            (void)pStartFunc.release();
-            (void)messageFunc.release();
-            (void)pModule.release();
-            (void)pFunc.release();
-        }
+    if (active_python_runtime_coordinator() == &runtime_coordinator_) {
+        install_active_python_runtime_coordinator(nullptr);
     }
+    if (runtime_coordinator_.state() != PythonRuntimeState::Stopped) {
+        shutdown();
+    }
+    detach_python_objects_without_decref();
 }
 
 void PythonAPI::begin_shutdown() {
+    if (shutting_down_.load()) {
+        return;
+    }
+    if (backend_initialized_.load() && lifecycle_.state() == PythonLifecycleState::Running) {
+        PythonRuntimeRequest request;
+        request.kind = PythonRuntimeRequestKind::LifecycleControl;
+        request.source = "ScriptSystem::stop";
+        request.function = "shutdown";
+        const auto response = runtime_coordinator_.submit_and_wait(
+            std::move(request), std::chrono::milliseconds(2500));
+        if (response.status != PythonRuntimeResponseStatus::Success) {
+            CFW_LOG_ERROR("PythonAPI: cooperative shutdown request failed: {}", response.error);
+        }
+    }
     shutting_down_.store(true);
+    runtime_coordinator_.begin_quiescing();
+    lifecycle_.request_stop();
+    std::lock_guard lock(lifecycle_mtx_);
+    lifecycle_snapshot_.state = lifecycle_.state();
+    lifecycle_snapshot_.shutting_down = true;
+    lifecycle_snapshot_.phase = "shutdown_requested";
+    CFW_LOG_NOTICE("PythonAPI: lifecycle transition -> StopRequested");
+}
+
+PythonLifecycleSnapshot PythonAPI::lifecycle_snapshot() const {
+    std::lock_guard lock(lifecycle_mtx_);
+    auto snapshot = lifecycle_snapshot_;
+    snapshot.state = lifecycle_.state();
+    snapshot.shutting_down = shutting_down_.load();
+    return snapshot;
+}
+
+std::string PythonAPI::shutdown_diagnostics() const {
+    const auto runtime = runtime_coordinator_.snapshot();
+    std::lock_guard lock(lifecycle_mtx_);
+    std::ostringstream out;
+    out << "python.lifecycle.shutdown_timeout"
+        << " lifecycle_state=" << static_cast<int>(lifecycle_.state())
+        << " lifecycle_phase=" << lifecycle_snapshot_.phase
+        << " coordinator_state=" << static_cast<int>(runtime.state)
+        << " queued=" << runtime.queued_count
+        << " pending=" << runtime.pending_count
+        << " consumer_thread=" << runtime.consumer_thread_token
+        << " execution_phase=" << runtime.execution_phase;
+    if (runtime.current_request) {
+        out << " request_id=" << runtime.current_request->request_id
+            << " request_kind=" << static_cast<int>(runtime.current_request->kind)
+            << " request_source=" << runtime.current_request->source
+            << " request_module=" << runtime.current_request->module
+            << " request_function=" << runtime.current_request->function;
+    } else {
+        out << " request_id=none";
+    }
+    if (!last_python_shutdown_snapshot_json_.empty()) {
+        out << " python_snapshot=" << last_python_shutdown_snapshot_json_;
+    } else {
+        out << " python_snapshot=unavailable";
+    }
+    return out.str();
 }
 
 void PythonAPI::shutdown() {
     begin_shutdown();
 
-    if (!Py_IsInitialized()) {
-        return;
+    CFW_LOG_INFO("PythonAPI: Shutting down Python runtime ownership...");
+    lifecycle_.transition(PythonLifecycleState::Stopping);
+    runtime_coordinator_.begin_python_stopping();
+
+    const auto detached_count = detach_python_objects_without_decref();
+    if (detached_count != 0) {
+        CFW_LOG_ERROR(
+            "PythonAPI: {} Python references survived cooperative shutdown; detached without DECREF "
+            "because the ScriptSystem Python thread is no longer available",
+            detached_count);
     }
-
-    CFW_LOG_INFO("PythonAPI: Shutting down Python interpreter...");
-
-    (void)pStartFunc.release();
-    (void)messageFunc.release();
-    (void)pModule.release();
-    (void)pFunc.release();
 
     PyConfig_Clear(&config);
 
+    lifecycle_.transition(PythonLifecycleState::Stopped);
+    runtime_coordinator_.stop();
+    {
+        std::lock_guard lock(lifecycle_mtx_);
+        lifecycle_snapshot_.state = lifecycle_.state();
+        lifecycle_snapshot_.phase = "shutdown_complete";
+        lifecycle_snapshot_.shutting_down = true;
+    }
+
     CFW_LOG_INFO("PythonAPI: Python shutdown complete");
+}
+
+std::size_t PythonAPI::detach_python_objects_without_decref() {
+    std::size_t detached_count = 0;
+    auto detach = [&detached_count](nanobind::object& object) {
+        if (!object.is_valid()) return;
+        const auto released = object.release();
+        if (released.is_valid()) ++detached_count;
+    };
+    detach(pStartFunc);
+    detach(messageFunc);
+    detach(pEditor);
+    detach(pModule);
+    detach(pFunc);
+    return detached_count;
 }
 
 int64_t PythonAPI::nowMsec() {
@@ -77,10 +161,17 @@ std::string PythonAPI::wstr2str(const std::wstring& wstr) {
 }
 
 bool PythonAPI::initializeInterpreterLocked() {
-    if (Py_IsInitialized()) {
+    if (interpreter_initialized_.load(std::memory_order_acquire)) {
+        if (lifecycle_.state() == PythonLifecycleState::Created) {
+            lifecycle_.transition(PythonLifecycleState::InterpreterInitializing);
+            lifecycle_.transition(PythonLifecycleState::InterpreterReady);
+        }
         return true;
     }
 
+    if (!lifecycle_.transition(PythonLifecycleState::InterpreterInitializing)) {
+        return lifecycle_.state() == PythonLifecycleState::InterpreterReady;
+    }
     CFW_LOG_INFO("PythonAPI: Initializing Python interpreter...");
 
     PyImport_AppendInittab("CoronaEngine", &PyInit_CoronaEngine);
@@ -89,6 +180,13 @@ bool PythonAPI::initializeInterpreterLocked() {
     auto check_status = [&](PyStatus status, const char* step) {
         if (!PyStatus_Exception(status)) {
             return true;
+        }
+        lifecycle_.transition(PythonLifecycleState::Failed);
+        {
+            std::lock_guard lock(lifecycle_mtx_);
+            lifecycle_snapshot_.state = lifecycle_.state();
+            lifecycle_snapshot_.phase = step;
+            lifecycle_snapshot_.error = status.err_msg ? status.err_msg : "unknown Python error";
         }
         CFW_LOG_CRITICAL("PythonAPI: {} failed: {}", step, status.err_msg ? status.err_msg : "unknown Python error");
         PyConfig_Clear(&config);
@@ -129,27 +227,15 @@ bool PythonAPI::initializeInterpreterLocked() {
     if (!check_status(Py_InitializeFromConfig(&config), "initialize Python interpreter")) {
         return false;
     }
-    PyEval_SaveThread();
-    CFW_LOG_INFO("PythonAPI: Python interpreter initialized successfully");
-
-    if (!Py_IsInitialized()) {
-        CFW_LOG_CRITICAL("Python failed to initialize. Diagnostics:");
-        try {
-            auto print_wlist = [&](const char* title, const PyWideStringList& list) {
-                CFW_LOG_ERROR("  {} ({})", title, list.length);
-                for (Py_ssize_t i = 0; i < list.length; ++i) {
-                    std::wstring ws = list.items[i] ? std::wstring(list.items[i]) : L"";
-                    CFW_LOG_ERROR("    - {}", wstr2str(ws));
-                }
-            };
-            CFW_LOG_ERROR("  home: {}", wstr2str(config.home));
-            CFW_LOG_ERROR("  pythonpath_env: {}", wstr2str(config.pythonpath_env));
-            print_wlist("module_search_paths", config.module_search_paths);
-        } catch (...) {
-            CFW_LOG_ERROR("Failed to print Python configuration diagnostics");
-        }
-        return false;
+    main_thread_state_ = PyEval_SaveThread();
+    interpreter_initialized_.store(true, std::memory_order_release);
+    lifecycle_.transition(PythonLifecycleState::InterpreterReady);
+    {
+        std::lock_guard lock(lifecycle_mtx_);
+        lifecycle_snapshot_.state = lifecycle_.state();
+        lifecycle_snapshot_.phase = "interpreter_ready";
     }
+    CFW_LOG_INFO("PythonAPI: Python interpreter initialized successfully");
 
     return true;
 }
@@ -169,7 +255,12 @@ bool PythonAPI::ensureInitialized() {
         return true;
     }
     if (!initializeInterpreterLocked()) {
+        lifecycle_.transition(PythonLifecycleState::Failed);
         return false;
+    }
+
+    if (!lifecycle_.transition(PythonLifecycleState::BackendInitializing)) {
+        return lifecycle_.state() == PythonLifecycleState::Running;
     }
 
     {
@@ -196,15 +287,31 @@ bool PythonAPI::ensureInitialized() {
             nanobind::object editor = nanobind::getattr(entrance, "editor");
             nanobind::object start_attr = nanobind::getattr(entrance, "run");
             nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
+            if (nanobind::hasattr(editor, "initialize_runtime")) {
+                nanobind::object init_runtime = nanobind::getattr(editor, "initialize_runtime");
+                init_runtime();
+            }
             pStartFunc = std::move(start_attr);
             messageFunc = std::move(log_attr);
+            pEditor = editor;
             pStartFunc();
+            if (nanobind::hasattr(editor, "start_runtime")) {
+                nanobind::object start_runtime = nanobind::getattr(editor, "start_runtime");
+                start_runtime();
+            }
             if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
                 event_bus->publish<Events::ScriptFinishStartEvent>({});
             }
             backend_initialized_.store(true);
+            lifecycle_.transition(PythonLifecycleState::Running);
+            {
+                std::lock_guard lock(lifecycle_mtx_);
+                lifecycle_snapshot_.state = lifecycle_.state();
+                lifecycle_snapshot_.phase = "running";
+            }
             CFW_LOG_INFO("PythonAPI: Python backend initialized successfully");
         } catch (const nanobind::python_error& e) {
+            lifecycle_.transition(PythonLifecycleState::Failed);
             log_python_error(e);
             // pModule.reset();
             // pFunc.reset();
@@ -217,59 +324,7 @@ bool PythonAPI::ensureInitialized() {
     return true;
 }
 
-bool PythonAPI::performHotReload() {
-    int64_t currentTime = PythonHotfix::GetCurrentTimeMsec();  // ms
-    constexpr int64_t kHotReloadIntervalMs = 100;              // 100ms
-    if (currentTime - lastHotReloadTime <= kHotReloadIntervalMs || hotfixManger.packageSet.empty()) {
-        return false;
-    }
-
-    CFW_LOG_DEBUG("PythonAPI: performHotReload triggered. packageSet.size={}", hotfixManger.packageSet.size());
-
-    bool reloadedDeps = hotfixManger.ReloadPythonFile();
-    if (!reloadedDeps) {
-        CFW_LOG_DEBUG("PythonAPI: hotfixManger.ReloadPythonFile returned false");
-        return false;
-    }
-
-    nanobind::gil_scoped_acquire gil;
-    CFW_LOG_DEBUG("PythonAPI: reloading 'main' module (via importlib.reload)");
-
-    try {
-        nanobind::module_ importlib = nanobind::module_::import_("importlib");
-        nanobind::object reload_func = nanobind::getattr(importlib, "reload");
-
-        nanobind::module_ mod = nanobind::module_::import_("main");
-        (void)reload_func(mod);
-
-        nanobind::object editor = nanobind::getattr(mod, "editor");
-        nanobind::object start_attr = nanobind::getattr(mod, "run");
-        nanobind::object log_attr = nanobind::getattr(editor, "show_log_on_js");
-        pStartFunc = std::move(start_attr);
-        messageFunc = std::move(log_attr);
-        /*  nanobind::object newFunc = nanobind::getattr(mod, "run");
-          if (!nanobind::callable::check_(newFunc)) {
-              CFW_LOG_WARNING("PythonAPI: new run attribute is not callable");
-              return false;
-          }
-          nanobind::object newMsg = nanobind::getattr(mod, "put_queue");
-
-          pModule = std::move(mod);
-          pFunc = std::move(newFunc);
-          messageFunc = std::move(newMsg);*/
-    } catch (const nanobind::python_error& e) {
-        CFW_LOG_ERROR("PythonAPI: reload(main) failed");
-        log_python_error(e);
-        return false;
-    }
-
-    lastHotReloadTime = currentTime;
-    hasHotReload = true;
-    CFW_LOG_DEBUG("PythonAPI: performHotReload finished successfully");
-    return true;
-}
-
-void PythonAPI::invokeEntry(bool isReload) const {
+void PythonAPI::invokeEntry(bool isReload) {
     // 如果正在关闭，不执行
     if (shutting_down_.load()) {
         return;
@@ -278,12 +333,16 @@ void PythonAPI::invokeEntry(bool isReload) const {
     if (!messageFunc.is_valid()) {
         return;
     }
+    runtime_coordinator_.set_execution_phase("gil_wait:editor_update");
     nanobind::gil_scoped_acquire gil;
+    runtime_coordinator_.set_execution_phase("editor_update");
 
     try {
         //(void)pFunc(isReload ? 1 : 0);
         messageFunc();
+        runtime_coordinator_.set_execution_phase("idle");
     } catch (const nanobind::python_error& e) {
+        runtime_coordinator_.set_execution_phase("editor_update_error");
         log_python_error(e);
     }
 }
@@ -302,8 +361,15 @@ void PythonAPI::sendMessage(const std::string& message) const {
 }
 
 void PythonAPI::runPythonScript() {
+    const auto frame_start = std::chrono::steady_clock::now();
+    if (!runtime_coordinator_.bind_consumer_thread()) {
+        CFW_LOG_CRITICAL("PythonAPI: runPythonScript called from a non-owner thread");
+        return;
+    }
     // 如果正在关闭，不执行任何 Python 代码
-    if (shutting_down_.load()) {
+    if (shutting_down_.load() || lifecycle_.state() == PythonLifecycleState::StopRequested ||
+        lifecycle_.state() == PythonLifecycleState::Stopping ||
+        lifecycle_.state() == PythonLifecycleState::Stopped) {
         return;
     }
 
@@ -312,13 +378,9 @@ void PythonAPI::runPythonScript() {
         return;
     }
 
-    bool reloaded = false;
-    {
-        std::unique_lock lk(queMtx);
-        reloaded = performHotReload();
-        if (!reloaded && !hotfixManger.packageSet.empty()) {
-            hasHotReload = false;
-        }
+    process_runtime_requests();
+    if (shutting_down_.load()) {
+        return;
     }
 
     // 再次检查是否正在关闭
@@ -326,80 +388,87 @@ void PythonAPI::runPythonScript() {
         return;
     }
 
-    invokeEntry(reloaded);
+    invokeEntry(false);
+
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - frame_start).count();
+    const auto now = nowMsec();
+    auto last = last_overrun_log_ms_.load(std::memory_order_relaxed);
+    if (elapsed >= 50 && now - last >= 5000 &&
+        last_overrun_log_ms_.compare_exchange_strong(last, now)) {
+        CFW_LOG_WARNING("PythonAPI: python.lifecycle.overrun phase=update elapsed_ms={} state={}",
+                        elapsed, static_cast<int>(lifecycle_.state()));
+    }
 }
 
-void PythonAPI::checkPythonScriptChange() {
-    const std::string& sourcePath = PathCfg::editor_backend_abs();
-    const std::string runtimePath = PathCfg::runtime_backend_abs();
-    int64_t checkTime = PythonHotfix::GetCurrentTimeMsec();
-    CFW_LOG_DEBUG("PythonAPI: checkPythonScriptChange: src={}, dst={}, t={}", sourcePath, runtimePath, checkTime);
-    copyModifiedFiles(sourcePath, runtimePath, checkTime);
+void PythonAPI::process_runtime_requests() {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(4);
+    for (std::size_t processed = 0; processed < 32; ++processed) {
+        auto request = runtime_coordinator_.wait_pop(std::chrono::milliseconds(0));
+        if (!request) {
+            return;
+        }
+        runtime_coordinator_.set_execution_phase("coordinator_request:" + request->source + ":" + request->function);
+        auto response = execute_runtime_request(*request);
+        runtime_coordinator_.complete(request->request_id, std::move(response));
+        runtime_coordinator_.set_execution_phase("idle");
+        if (std::chrono::steady_clock::now() >= deadline) {
+            return;
+        }
+    }
 }
 
-void PythonAPI::checkReleaseScriptChange() {
-    static int64_t lastCheckTime = 0;
-    static std::unordered_map<std::string, int64_t> lastProcessedMtime;  // mod -> last mtime processed
-
-    int64_t currentTime = PythonHotfix::GetCurrentTimeMsec();
-    if (currentTime - lastCheckTime < 100) {
-        return;
-    }
-    lastCheckTime = currentTime;
-
-    std::queue<std::unordered_set<std::string>> messageQue;
-    const std::string runtimePathStr = Corona::Script::Python::PathCfg::runtime_backend_abs();
-    const std::filesystem::path runtimePath(runtimePathStr);
-    PythonHotfix::TraverseDirectory(runtimePathStr, messageQue, currentTime);
-
-    if (messageQue.empty()) {
-        return;
-    }
-
-    std::unique_lock lk(queMtx);
-    const auto& mods = messageQue.front();
-
-    // Build module list string for logging
-    std::string moduleListStr;
-    bool first = true;
-    for (const auto& m : mods) {
-        if (!first) moduleListStr += ", ";
-        moduleListStr += m;
-        first = false;
-    }
-    CFW_LOG_DEBUG("PythonAPI: detected modified modules ({}): {}", mods.size(), moduleListStr);
-
-    auto modToPath = [&](const std::string& mod) {
-        std::string rel = mod;  // replace '.' with '/'
-        std::ranges::replace(rel, '.', '/');
-        return runtimePath / (rel + ".py");
-    };
-
-    for (const auto& mod : mods) {
-        int64_t fileMtimeMs = 0;
-        std::error_code ec;
-        const auto filePath = modToPath(mod);
-        auto ftime = std::filesystem::last_write_time(filePath, ec);
-        if (!ec) {
-            auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
-            fileMtimeMs = std::chrono::duration_cast<std::chrono::milliseconds>(sysTime.time_since_epoch()).count();
+PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequest& request) {
+    runtime_coordinator_.set_execution_phase("gil_wait:coordinator_request");
+    nanobind::gil_scoped_acquire gil;
+    runtime_coordinator_.set_execution_phase("coordinator_request");
+    try {
+        if (request.kind == PythonRuntimeRequestKind::LifecycleControl &&
+            request.function == "shutdown") {
+            std::string shutdown_snapshot_json = "{}";
+            if (pEditor.is_valid()) {
+                if (nanobind::hasattr(pEditor, "request_shutdown")) {
+                    nanobind::getattr(pEditor, "request_shutdown")();
+                }
+                if (nanobind::hasattr(pEditor, "shutdown_runtime")) {
+                    auto result = nanobind::getattr(pEditor, "shutdown_runtime")();
+                    auto json = nanobind::module_::import_("json");
+                    shutdown_snapshot_json = nanobind::cast<std::string>(
+                        nanobind::getattr(json, "dumps")(result));
+                }
+            }
+            EngineScripts::clear_python_callback_registry();
+            pStartFunc.reset();
+            messageFunc.reset();
+            pEditor.reset();
+            pModule.reset();
+            pFunc.reset();
+            backend_initialized_.store(false);
+            shutting_down_.store(true);
+            {
+                std::lock_guard lock(lifecycle_mtx_);
+                last_python_shutdown_snapshot_json_ = shutdown_snapshot_json;
+            }
+            return PythonRuntimeResponse::success(std::move(shutdown_snapshot_json));
         }
 
-        auto it = lastProcessedMtime.find(mod);
-        if (it != lastProcessedMtime.end() && fileMtimeMs > 0 && fileMtimeMs <= it->second) {
-            CFW_LOG_DEBUG("PythonAPI: skip duplicate module in window: '{}' mtime={} lastProcessed={}", mod, fileMtimeMs, it->second);
-            continue;
+        if (request.kind == PythonRuntimeRequestKind::ServiceCall) {
+            if (!pEditor.is_valid()) {
+                return PythonRuntimeResponse::failure("python editor is unavailable");
+            }
+            auto dispatcher = nanobind::getattr(pEditor, "dispatch_script_request_from_cpp");
+            auto result = dispatcher(request.payload_json.c_str());
+            return PythonRuntimeResponse::success(nanobind::cast<std::string>(result));
         }
-
-        if (!hotfixManger.packageSet.contains(mod)) {
-            hotfixManger.packageSet.emplace(mod, currentTime);
-            CFW_LOG_DEBUG("PythonAPI: packageSet.emplace: '{}' @{}", mod, currentTime);
-        } else {
-            CFW_LOG_DEBUG("PythonAPI: packageSet already contains: '{}' (skip)", mod);
+        if (request.kind == PythonRuntimeRequestKind::Callback && request.handler) {
+            return request.handler(request);
         }
-        if (fileMtimeMs > 0) {
-            lastProcessedMtime[mod] = fileMtimeMs;
-        }
+        return PythonRuntimeResponse::failure("unsupported python runtime request");
+    } catch (const nanobind::python_error& error) {
+        log_python_error(error);
+        return PythonRuntimeResponse::failure(error.what());
+    } catch (const std::exception& error) {
+        return PythonRuntimeResponse::failure(error.what());
     }
 }
 
@@ -416,55 +485,4 @@ std::wstring PythonAPI::str2wstr(const std::string& str) {
     return w;
 }
 
-void PythonAPI::copyModifiedFiles(const std::filesystem::path& sourceDir,
-                                  const std::filesystem::path& destDir,
-                                  int64_t checkTimeMs) {
-    static const std::set<std::string> skip = {
-        "__pycache__", "__init__.py", ".pyc", "StaticComponents.py"};
-    static std::unordered_map<std::string, int64_t> lastCopiedMtime;
-
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(sourceDir)) {
-        if (!entry.is_regular_file()) {
-            continue;
-        }
-        const auto& filePath = entry.path();
-        std::string fileName = filePath.filename().string();
-        if (!PythonHotfix::EndsWith(fileName, ".py")) {
-            continue;
-        }
-        bool skipFile = std::ranges::any_of(skip, [&](const std::string& s) {
-            return PythonHotfix::EndsWith(fileName, s);
-        });
-        if (skipFile) {
-            continue;
-        }
-
-        try {
-            auto ftime = std::filesystem::last_write_time(filePath);
-            auto sysTime = std::chrono::clock_cast<std::chrono::system_clock>(ftime);
-            int64_t modifyMs = std::chrono::duration_cast<std::chrono::milliseconds>(sysTime.time_since_epoch()).count();
-
-            auto srcKey = filePath.string();
-            auto it = lastCopiedMtime.find(srcKey);
-            bool newerThanLastCopy = (it == lastCopiedMtime.end()) || (modifyMs > it->second);
-            if (checkTimeMs - modifyMs <= PythonHotfix::kFileRecentWindowMs && newerThanLastCopy) {
-                auto relativePath = std::filesystem::relative(filePath, sourceDir);
-                auto destFilePath = destDir / relativePath;
-                std::filesystem::create_directories(destFilePath.parent_path());
-                std::filesystem::copy_file(filePath, destFilePath,
-                                           std::filesystem::copy_options::overwrite_existing);
-                std::filesystem::last_write_time(destFilePath, ftime);
-
-                lastCopiedMtime[srcKey] = modifyMs;
-
-                std::string modName = destFilePath.string();
-                PythonHotfix::NormalizeModuleName(modName);
-                CFW_LOG_DEBUG("PythonAPI: copied recent file: {} -> {}, module='{}' src_mtime={}",
-                              filePath.string(), destFilePath.string(), modName, modifyMs);
-            }
-        } catch (const std::exception& e) {
-            CFW_LOG_ERROR("PythonAPI: File copy error: {}", e.what());
-        }
-    }
-}
 }  // namespace Corona::Script::Python

@@ -11,6 +11,7 @@
 #endif
 
 #include "browser_manager.h"
+#include "actor_selection_routing.h"
 #include "cef_client.h"
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
@@ -869,7 +870,10 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
             "geometry.position", "geometry.rotation", "geometry.scale",
             "material.texture", "mechanics.collision_enabled", "mechanics.collision_type",
             "mechanics.physics_enabled", "optics.diffuse", "optics.emission", "optics.metallic",
-            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible"};
+            "optics.roughness", "optics.shininess", "optics.specular", "optics.visible",
+            "runtime.entity_id", "runtime.asset_id", "runtime.model_ref", "runtime.entity_type",
+            "runtime.semantic_role", "runtime.source_plan_id", "runtime.source_batch_id",
+            "runtime.source_scene_version", "runtime.actor_version"};
         if (persisted_fields.is_object()) {
             for (const auto& field : persisted_fields.items()) {
                 const auto dot = field.key().find('.');
@@ -7361,11 +7365,8 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             const auto scene_name = arg_string(request.args, 0);
             const auto actor_type = arg_string(request.args, 1, "actor");
             const auto actor_name = arg_string(request.args, 2);
-            nlohmann::json payload = {
-                {"actor_type", actor_type},
-                {"scene", scene_name},
-                {"actor", actor_name},
-            };
+            const auto payload = make_actor_selection_event_payload(
+                scene_name, actor_type, actor_name, arg_object(request.args, 3));
             emit_editor_api_event("SceneTools.actorSelectionChanged", payload);
             return native_success({
                 {"status", "success"},

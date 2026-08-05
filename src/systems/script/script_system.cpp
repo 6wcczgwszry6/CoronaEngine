@@ -7,6 +7,10 @@
 #include <corona/systems/script/python_api.h>
 #include <corona/systems/script/script_system.h>
 #include <nanobind/nanobind.h>
+#include <windows.h>
+
+#include <chrono>
+#include <iostream>
 
 namespace Corona::Systems {
 
@@ -39,7 +43,21 @@ void ScriptSystem::stop() {
     if (python_api_) {
         python_api_->begin_shutdown();
     }
-    Kernel::SystemBase::stop();
+    constexpr auto kShutdownTimeout = std::chrono::seconds(3);
+    if (stop_for(kShutdownTimeout)) {
+        return;
+    }
+
+    CFW_LOG_ERROR(
+        "ScriptSystem: Python worker did not stop within {} seconds; terminating process",
+        kShutdownTimeout.count());
+    const auto diagnostics = python_api_->shutdown_diagnostics();
+    std::cerr << diagnostics << std::endl;
+    ::OutputDebugStringA((diagnostics + "\n").c_str());
+    CFW_LOG_CRITICAL("{}", diagnostics);
+    CFW_LOG_FLUSH();
+    std::cerr.flush();
+    ::TerminateProcess(::GetCurrentProcess(), 1);
 }
 
 void ScriptSystem::update() {

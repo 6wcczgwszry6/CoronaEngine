@@ -405,6 +405,7 @@ const editorApiStatic = {
     onActorSelectionChanged: (callback) => register_manifest_editor_api_callback('events.onActorSelectionChanged', callback),
     onActorTransformUpdated: (callback) => register_manifest_editor_api_callback('events.onActorTransformUpdated', callback),
     onActorPickResult: (callback) => register_manifest_editor_api_callback('events.onActorPickResult', callback),
+    onViewportGizmoPointerResult: (callback) => register_manifest_editor_api_callback('events.onViewportGizmoPointerResult', callback),
     onFocusPoseResult: (callback) => register_manifest_editor_api_callback('events.onFocusPoseResult', callback),
     onNetworkActorDeleteSyncBroadcastRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkActorDeleteSyncBroadcastRequested', callback),
     onNetworkActorOwnershipClaimed: (callback) => register_manifest_editor_api_callback('events.onNetworkActorOwnershipClaimed', callback),
@@ -588,8 +589,11 @@ const editorApiStatic = {
       call_manifest_editor_api('sceneTools.renameActor', [sceneName, actorName, name]),
     openActor: (sceneName, actorName) =>
       call_manifest_editor_api('sceneTools.openActor', [sceneName, actorName]),
-    selectActor: (sceneName, actorType, actorName) =>
-      call_manifest_editor_api('sceneTools.selectActor', [sceneName, actorType, actorName]),
+    selectActor: (sceneName, actorType, actorName, context = null) =>
+      call_manifest_editor_api(
+        'sceneTools.selectActor',
+        context ? [sceneName, actorType, actorName, context] : [sceneName, actorType, actorName],
+      ),
     focusActor: (sceneName, actorName, cameraName) =>
       call_manifest_editor_api('sceneTools.focusActor', [sceneName, actorName, cameraName]),
     setRenderBackend: (mode, sceneName = null, cameraId = null) =>

@@ -5,6 +5,7 @@
 #include <corona/systems/script/camera_follow_controller.h>
 #include <corona/systems/script/corona_engine_api.h>
 #include <corona/systems/script/engine_scripts.h>
+#include <corona/systems/script/python_runtime_coordinator.h>
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/array.h>
 #include <nanobind/stl/string.h>
@@ -18,6 +19,9 @@
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <unordered_map>
+
+#include <nlohmann/json.hpp>
 
 #include <SDL3/SDL.h>
 
@@ -64,49 +68,131 @@ using namespace Corona::API;
 namespace EngineScripts {
 
 namespace {
-std::mutex g_python_callback_mutex;
-std::deque<std::function<void()>> g_python_callbacks;
-bool g_python_callback_scheduled = false;
+std::atomic<std::uint64_t> g_next_python_callback_token{1};
+std::unordered_map<std::uint64_t, PyObject*> g_python_callback_registry;
 
-int run_pending_python_callbacks(void*) {
-    for (;;) {
-        std::function<void()> callback;
-        {
-            std::lock_guard lock(g_python_callback_mutex);
-            if (g_python_callbacks.empty()) {
-                g_python_callback_scheduled = false;
-                return 0;
+PyObject* json_to_python(const nlohmann::json& value) {
+    if (value.is_null()) return Py_NewRef(Py_None);
+    if (value.is_boolean()) return PyBool_FromLong(value.get<bool>() ? 1 : 0);
+    if (value.is_number_integer()) return PyLong_FromLongLong(value.get<long long>());
+    if (value.is_number_unsigned()) return PyLong_FromUnsignedLongLong(value.get<unsigned long long>());
+    if (value.is_number_float()) return PyFloat_FromDouble(value.get<double>());
+    if (value.is_string()) return PyUnicode_FromString(value.get_ref<const std::string&>().c_str());
+    if (value.is_array()) {
+        PyObject* tuple = PyTuple_New(static_cast<Py_ssize_t>(value.size()));
+        if (!tuple) return nullptr;
+        for (std::size_t index = 0; index < value.size(); ++index) {
+            PyObject* item = json_to_python(value[index]);
+            if (!item) {
+                Py_DECREF(tuple);
+                return nullptr;
             }
-            callback = std::move(g_python_callbacks.front());
-            g_python_callbacks.pop_front();
+            PyTuple_SET_ITEM(tuple, static_cast<Py_ssize_t>(index), item);
         }
-        try {
-            callback();
-        } catch (const std::exception& error) {
-            CFW_LOG_ERROR("[Bindings::pending_callback] {}", error.what());
-        } catch (...) {
-            CFW_LOG_ERROR("[Bindings::pending_callback] Unknown exception");
-        }
+        return tuple;
     }
+    if (value.is_object()) {
+        PyObject* dict = PyDict_New();
+        if (!dict) return nullptr;
+        for (auto it = value.begin(); it != value.end(); ++it) {
+            PyObject* item = json_to_python(it.value());
+            if (!item || PyDict_SetItemString(dict, it.key().c_str(), item) != 0) {
+                Py_XDECREF(item);
+                Py_DECREF(dict);
+                return nullptr;
+            }
+            Py_DECREF(item);
+        }
+        return dict;
+    }
+    PyErr_SetString(PyExc_TypeError, "unsupported callback JSON value");
+    return nullptr;
 }
 
-void enqueue_python_callback(std::function<void()> callback) {
-    bool schedule = false;
-    {
-        std::lock_guard lock(g_python_callback_mutex);
-        g_python_callbacks.push_back(std::move(callback));
-        if (!g_python_callback_scheduled) {
-            g_python_callback_scheduled = true;
-            schedule = true;
+Corona::Script::Python::PythonRuntimeResponse execute_python_callback(
+    const Corona::Script::Python::PythonRuntimeRequest& request) {
+    using Corona::Script::Python::PythonRuntimeResponse;
+    if (!PyGILState_Check()) {
+        return PythonRuntimeResponse::failure("python callback executed without the GIL");
+    }
+    const auto it = g_python_callback_registry.find(request.callback_token);
+    if (request.function == "release") {
+        if (it != g_python_callback_registry.end()) {
+            Py_DECREF(it->second);
+            g_python_callback_registry.erase(it);
+        }
+        return PythonRuntimeResponse::success();
+    }
+    if (it == g_python_callback_registry.end()) {
+        return PythonRuntimeResponse::failure("python callback token is no longer registered");
+    }
+    const auto args_json = nlohmann::json::parse(request.payload_json.empty() ? "[]" : request.payload_json,
+                                                 nullptr, false);
+    if (args_json.is_discarded() || !args_json.is_array()) {
+        return PythonRuntimeResponse::failure("python callback arguments are invalid");
+    }
+    PyObject* args = json_to_python(args_json);
+    if (!args) {
+        PyErr_Print();
+        return PythonRuntimeResponse::failure("failed to convert python callback arguments");
+    }
+    PyObject* result = PyObject_CallObject(it->second, args);
+    Py_DECREF(args);
+    if (!result) {
+        PyErr_Print();
+        return PythonRuntimeResponse::failure("python callback raised an exception");
+    }
+    Py_DECREF(result);
+    return PythonRuntimeResponse::success();
+}
+
+bool enqueue_python_callback(std::uint64_t callback_token,
+                             nlohmann::json args,
+                             std::string function = "invoke") {
+    auto* coordinator = Corona::Script::Python::active_python_runtime_coordinator();
+    if (!coordinator) return false;
+    Corona::Script::Python::PythonRuntimeRequest request;
+    request.kind = Corona::Script::Python::PythonRuntimeRequestKind::Callback;
+    request.source = "Mechanics";
+    request.function = std::move(function);
+    request.callback_token = callback_token;
+    request.payload_json = std::move(args).dump();
+    request.handler = &execute_python_callback;
+    return coordinator->submit(std::move(request)).accepted;
+}
+
+std::uint64_t register_python_callback(PyObject* callback) {
+    if (!PyGILState_Check() || !callback || !PyCallable_Check(callback)) return 0;
+    const auto callback_token = g_next_python_callback_token.fetch_add(1);
+    Py_INCREF(callback);
+    g_python_callback_registry.emplace(callback_token, callback);
+    return callback_token;
+}
+
+struct PythonCallbackLease {
+    explicit PythonCallbackLease(std::uint64_t value) : callback_token(value) {}
+    ~PythonCallbackLease() {
+        if (callback_token != 0) {
+            enqueue_python_callback(callback_token, nlohmann::json::array(), "release");
         }
     }
-    if (schedule && Py_AddPendingCall(&run_pending_python_callbacks, nullptr) != 0) {
-        std::lock_guard lock(g_python_callback_mutex);
-        g_python_callback_scheduled = false;
-        CFW_LOG_WARNING("Python pending-call queue is full; callbacks retained for retry");
-    }
+    std::uint64_t callback_token = 0;
+};
+
+std::shared_ptr<PythonCallbackLease> make_python_callback_lease(PyObject* callback) {
+    const auto callback_token = register_python_callback(callback);
+    return callback_token == 0 ? nullptr : std::make_shared<PythonCallbackLease>(callback_token);
 }
 }  // namespace
+
+void clear_python_callback_registry() {
+    if (!PyGILState_Check()) {
+        CFW_LOG_ERROR("[Bindings::callback_registry] clear requested without the GIL");
+        return;
+    }
+    for (auto& [_, callback] : g_python_callback_registry) Py_DECREF(callback);
+    g_python_callback_registry.clear();
+}
 
 namespace {
 
@@ -219,19 +305,12 @@ void BindAll(nanobind::module_& m) {
                      return;
                  }
 
-                auto func_ptr = std::shared_ptr<nb::object>(new nb::object(callback), [](nb::object* p) {
-                    try {
-                        nb::gil_scoped_acquire gil;
-                        delete p;
-                    } catch (...) {
-                        delete p;
-                    }
-                });
+                auto callback_lease = make_python_callback_lease(callback.ptr());
+                if (!callback_lease) return;
 
-                CallbackType cb = [func_ptr](std::uintptr_t other, bool began, const std::array<float, 3>& normal, const std::array<float, 3>& point) mutable {
-                    enqueue_python_callback([func_ptr, other, began, normal, point] {
-                        (*func_ptr).attr("__call__")(other, began, normal, point);
-                    });
+                CallbackType cb = [callback_lease](std::uintptr_t other, bool began, const std::array<float, 3>& normal, const std::array<float, 3>& point) {
+                    enqueue_python_callback(callback_lease->callback_token,
+                                            nlohmann::json::array({other, began, normal, point}));
                 };
 
                  self.set_collision_callback(cb); },
@@ -245,19 +324,12 @@ void BindAll(nanobind::module_& m) {
                     return;
                 }
 
-                auto func_ptr = std::shared_ptr<nb::object>(new nb::object(callback), [](nb::object* p) {
-                    try {
-                        nb::gil_scoped_acquire gil;
-                        delete p;
-                    } catch (...) {
-                        delete p;
-                    }
-                });
+                auto callback_lease = make_python_callback_lease(callback.ptr());
+                if (!callback_lease) return;
 
-                CallbackType cb = [func_ptr]() mutable {
-                    enqueue_python_callback([func_ptr] {
-                        (*func_ptr).attr("__call__")();
-                    });
+                CallbackType cb = [callback_lease]() {
+                    enqueue_python_callback(callback_lease->callback_token,
+                                            nlohmann::json::array());
                 };
 
                 self.set_on_move_callback(cb); }, nb::arg("callback"), "Set move callback for geometry.")
@@ -384,7 +456,8 @@ void BindAll(nanobind::module_& m) {
         .def("save_screenshot", &Camera::save_screenshot, nb::arg("path"),
              "Save a screenshot from this camera's perspective to file (async)")
         .def("save_screenshot_sync", &Camera::save_screenshot_sync, nb::arg("path"),
-             "Save a screenshot and block until it completes. Returns True on success.")
+             "Save a screenshot and block until it completes. Returns True on success.",
+             nb::call_guard<nb::gil_scoped_release>())
         .def("set_output_mode", &Camera::set_output_mode, nb::arg("mode"),
              "Set camera output mode. mode: 'final_color', 'base_color', 'normal', 'position', 'object_id', 'visibility_buffer', 'ssao_raw', 'ssao', 'shadow_mask_raw', 'shadow_mask'")
         .def("get_output_mode", &Camera::get_output_mode,
@@ -1067,6 +1140,12 @@ void BindAll(nanobind::module_& m) {
     m.def("drain_input_events", []() -> std::vector<Corona::Systems::UI::InputEvent> {
         return Corona::Systems::UI::drain_input_events();
     }, "Drain all pending input events from the CEF InputInject queue");
+
+    m.def("python_runtime_phase", [](const std::string& phase) {
+        if (auto* coordinator = Corona::Script::Python::active_python_runtime_coordinator()) {
+            coordinator->set_execution_phase(phase);
+        }
+    }, nb::arg("phase"), "Update the native Python runtime diagnostic phase");
 
 }
 

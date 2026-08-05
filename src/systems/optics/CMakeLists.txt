@@ -5,6 +5,9 @@
 corona_add_system(optics
     SOURCES
         optics_system.cpp
+        actor_pick_readback_worker.cpp
+        ${PROJECT_SOURCE_DIR}/include/corona/systems/optics/actor_pick_readback_worker.h
+        actor_pick_result.h
         hardware.h
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_material_adapter.cpp>
         $<$<BOOL:${CORONA_BUILD_VISION}>:vision/vision_material_adapter.h>
@@ -43,6 +46,18 @@ endif()
 set(OPTICS_CURSOR_SHADER "${PROJECT_SOURCE_DIR}/assets/shaders/optics_cursor.comp.glsl")
 set_source_files_properties("${OPTICS_CURSOR_SHADER}" PROPERTIES HEADER_FILE_ONLY TRUE)
 target_sources(corona_optics_system PRIVATE "${OPTICS_CURSOR_SHADER}")
+set(OPTICS_GIZMO_SHADER "${PROJECT_SOURCE_DIR}/assets/shaders/optics_gizmo.comp.glsl")
+set_source_files_properties("${OPTICS_GIZMO_SHADER}" PROPERTIES HEADER_FILE_ONLY TRUE)
+target_sources(corona_optics_system PRIVATE "${OPTICS_GIZMO_SHADER}")
+# The shader is included through Helicon's GLSL(...) macro in hardware.h.  Keep
+# an explicit object dependency as well, so changing the GLSL source always
+# recompiles the optics translation unit even when the compiler's generated
+# header dependency scanner misses the macro-expanded include.
+set_source_files_properties(
+    optics_system.cpp
+    hardware.h
+    PROPERTIES OBJECT_DEPENDS "${OPTICS_GIZMO_SHADER}"
+)
 
 if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
     add_executable(corona_vision_model_normalization_tests
@@ -179,6 +194,18 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
 endif()
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_optics_actor_pick_readback_worker_tests
+        tests/test_actor_pick_readback_worker.cpp
+        actor_pick_readback_worker.cpp
+    )
+    target_include_directories(corona_optics_actor_pick_readback_worker_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    add_test(NAME OpticsActorPickReadbackWorkerTests
+             COMMAND corona_optics_actor_pick_readback_worker_tests)
+
     add_executable(corona_optics_native_frame_throttle_tests
         tests/test_native_frame_throttle.cpp
     )
@@ -234,6 +261,18 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     target_link_libraries(corona_shadow_culling_tests PRIVATE Horizon)
     add_test(NAME ShadowCullingTests
              COMMAND corona_shadow_culling_tests)
+
+    add_executable(corona_viewport_gizmo_math_tests
+        tests/test_viewport_gizmo_math.cpp
+    )
+    target_include_directories(corona_viewport_gizmo_math_tests
+        PRIVATE
+            ${PROJECT_SOURCE_DIR}/include
+            ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_viewport_gizmo_math_tests PRIVATE Horizon)
+    add_test(NAME ViewportGizmoMathTests
+             COMMAND corona_viewport_gizmo_math_tests)
 endif()
 
 # ------------------------------------------------------------------------------

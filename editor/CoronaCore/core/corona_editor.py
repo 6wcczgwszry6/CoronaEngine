@@ -19,6 +19,14 @@ class CoronaEditor:
 
     _selected_scene = None
     _selected_actor = None
+    _runtime_state = "created"
+    _shutdown_requested = False
+    _runtime_initialized = False
+    _runtime_started = False
+    _last_runtime_warning = {}
+    _shutdown_snapshot = None
+    _runtime_watchdog_error_logged = False
+    _runtime_watchdog_file = None
 
     @classmethod
     def _dispatch_script_request(cls, json_str):
@@ -63,6 +71,106 @@ class CoronaEditor:
         unregister = getattr(cls.CoronaEngine, "unregister_python_script_service_dispatcher", None)
         if callable(unregister):
             unregister()
+
+    @classmethod
+    def initialize_runtime(cls):
+        if cls._shutdown_requested:
+            return False
+        if cls._runtime_initialized:
+            return True
+        cls._runtime_state = "initializing"
+        cls._runtime_initialized = True
+        cls._runtime_state = "initialized"
+        return True
+
+    @classmethod
+    def start_runtime(cls):
+        if cls._shutdown_requested:
+            return False
+        if not cls._runtime_initialized:
+            cls.initialize_runtime()
+        cls._runtime_started = True
+        cls._runtime_state = "running"
+        return True
+
+    @classmethod
+    def is_shutting_down(cls):
+        return cls._shutdown_requested
+
+    @classmethod
+    def request_shutdown(cls):
+        cls._shutdown_requested = True
+        if cls._runtime_state not in ("stopped", "stopping"):
+            cls._runtime_state = "stop_requested"
+
+    @classmethod
+    def checkpoint(cls):
+        if cls._shutdown_requested:
+            raise RuntimeError("Python runtime shutdown requested")
+        return True
+
+    @classmethod
+    def _warn_runtime_phase(cls, phase, elapsed_ms, threshold):
+        if elapsed_ms < threshold:
+            return
+        import time as _time
+        now = _time.monotonic()
+        last = cls._last_runtime_warning.get(phase, 0.0)
+        if now - last < 5.0:
+            return
+        logger.warning(
+            "python.lifecycle.overrun phase=%s elapsed_ms=%.2f state=%s",
+            phase, elapsed_ms, cls._runtime_state)
+        cls._last_runtime_warning[phase] = now
+
+    @classmethod
+    def shutdown_runtime(cls):
+        cls._cancel_runtime_watchdog()
+        if cls._runtime_state == "stopped":
+            return cls._shutdown_snapshot or {
+                "runtime_state": "stopped",
+                "services": [],
+                "python_threads": [],
+            }
+        cls.request_shutdown()
+        cls._runtime_state = "stopping"
+        snapshots = []
+        try:
+            from backend import registry as _service_registry
+            snapshots = _service_registry.shutdown_python_script_services(2.0)
+            alive = [item for item in snapshots if item.get("thread_alive")]
+            if alive:
+                logger.error("Python services still alive during shutdown: %s", alive)
+        except Exception:
+            logger.exception("Python service registry shutdown failed")
+        if cls.scripts_mgr is not None:
+            try:
+                cls.scripts_mgr.shutdown()
+            except Exception:
+                logger.exception("ScriptsManager shutdown failed")
+            cls.scripts_mgr = None
+        cls._scripts_initialized = False
+        try:
+            cls.unregister_script_dispatcher()
+        except Exception:
+            logger.exception("Python dispatcher unregister failed")
+        cls.module_list.clear()
+        cls._runtime_started = False
+        cls._runtime_state = "stopped"
+        cls._shutdown_snapshot = {
+            "runtime_state": cls._runtime_state,
+            "services": snapshots,
+            "python_threads": [
+                {
+                    "name": thread.name,
+                    "ident": thread.ident,
+                    "daemon": thread.daemon,
+                    "alive": thread.is_alive(),
+                }
+                for thread in threading.enumerate()
+            ],
+        }
+        return cls._shutdown_snapshot
 
     @classmethod
     def emit_editor_event(cls, event_name, args=None):
@@ -425,8 +533,67 @@ class CoronaEditor:
         ]
 
     @classmethod
-    def show_log_on_js(cls):
+    def _set_native_runtime_phase(cls, phase):
+        try:
+            setter = getattr(cls.CoronaEngine, "python_runtime_phase", None)
+            if callable(setter):
+                setter(str(phase))
+        except Exception:
+            logger.debug("Unable to update native Python runtime phase", exc_info=True)
+
+    @classmethod
+    def _cancel_runtime_watchdog(cls):
+        import faulthandler
+
+        try:
+            if faulthandler.is_enabled():
+                faulthandler.cancel_dump_traceback_later()
+                faulthandler.disable()
+        finally:
+            output = cls._runtime_watchdog_file
+            cls._runtime_watchdog_file = None
+            if output is not None:
+                output.flush()
+                output.close()
+
+    @classmethod
+    def _arm_runtime_watchdog(cls):
+        import faulthandler
+
+        if cls._shutdown_requested:
+            return
+        try:
+            if cls._runtime_watchdog_file is None:
+                from pathlib import Path
+
+                output_path = Path(sys.executable).resolve().parent / "logs" / "python_faulthandler.log"
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                cls._runtime_watchdog_file = output_path.open(
+                    "a", encoding="utf-8", buffering=1)
+                faulthandler.enable(file=cls._runtime_watchdog_file, all_threads=True)
+                logger.info("Python runtime watchdog output: %s", output_path)
+            faulthandler.cancel_dump_traceback_later()
+            faulthandler.dump_traceback_later(
+                2.0, repeat=False, file=cls._runtime_watchdog_file)
+        except Exception:
+            output = cls._runtime_watchdog_file
+            cls._runtime_watchdog_file = None
+            if output is not None:
+                output.close()
+            if not cls._runtime_watchdog_error_logged:
+                logger.exception("Unable to arm Python runtime watchdog")
+                cls._runtime_watchdog_error_logged = True
+
+    @classmethod
+    def _update_runtime_impl(cls):
+        import time as _time
+        runtime_start = _time.perf_counter()
+        if cls._shutdown_requested or not cls._runtime_started:
+            return False
+        cls.checkpoint()
         if not cls._scripts_initialized and cls.CoronaEngine is not None:
+            cls._set_native_runtime_phase("script_initialize")
+            init_start = _time.perf_counter()
             try:
                 project_path = getattr(cls.CoronaEngine, 'active_project_path', None)
                 if not project_path:
@@ -448,20 +615,31 @@ class CoronaEditor:
                             logger.debug("ScriptsManager: 懒初始化完成，场景=%s", scene.name)
                         cls._scripts_initialized = True
             except Exception:
-                pass
+                logger.exception("ScriptsManager initialization failed")
+            cls._warn_runtime_phase(
+                "script_initialize", (_time.perf_counter() - init_start) * 1000.0, 500.0)
 
+        cls.checkpoint()
         if cls.scripts_mgr is not None:
+            cls._set_native_runtime_phase("script_update")
+            update_start = _time.perf_counter()
             try:
                 import time as _time
                 now = _time.perf_counter()
                 delta = now - getattr(cls, '_last_script_update', now)
                 cls._last_script_update = now
                 cls.scripts_mgr.update(min(delta, 0.1))
+            except RuntimeError:
+                return False
             except Exception:
-                pass
+                logger.exception("Script runtime update failed")
+            cls._warn_runtime_phase(
+                "script_update", (_time.perf_counter() - update_start) * 1000.0, 50.0)
 
         # ── Input 事件队列消费：CEF InputInject → 队列 → Python─ ─
         # 每帧批量消费积攒的键盘/鼠标注入事件，消除逐事件 cefQuery 开销
+        cls._set_native_runtime_phase("input_dispatch")
+        input_start = _time.perf_counter()
         try:
             import CoronaEngine
             events = CoronaEngine.drain_input_events()
@@ -474,7 +652,36 @@ class CoronaEditor:
                         corona_engine_scratch.handle_key_release(e.arg0, e.arg1 or e.arg0)
                     elif e.type == 2:    # mouseEvent
                         corona_engine_scratch.handle_mouse_event(e.arg0, e.arg1, e.arg3, e.arg4)
+        except RuntimeError:
+            return False
         except Exception:
-            pass
+            logger.exception("Input event dispatch failed")
+        cls._warn_runtime_phase(
+            "input_dispatch", (_time.perf_counter() - input_start) * 1000.0, 50.0)
 
+        elapsed_ms = (_time.perf_counter() - runtime_start) * 1000.0
+        cls._warn_runtime_phase("update", elapsed_ms, 50.0)
         return True
+
+    @classmethod
+    def update_runtime(cls):
+        cls._set_native_runtime_phase("update_entry")
+        cls._arm_runtime_watchdog()
+        try:
+            return cls._update_runtime_impl()
+        finally:
+            cls._set_native_runtime_phase("idle")
+            # Keep the watchdog armed between frames. If another Python thread
+            # takes the GIL and blocks in native code, the next C++ update cannot
+            # enter Python to arm a new timer; this outstanding timer still dumps
+            # every Python thread without requiring the GIL.
+            cls._arm_runtime_watchdog()
+
+    @classmethod
+    def show_log_on_js(cls):
+        """Backward-compatible C++ entry point for one runtime update."""
+        if not cls._runtime_initialized:
+            cls.initialize_runtime()
+        if not cls._runtime_started:
+            cls.start_runtime()
+        return cls.update_runtime()

@@ -111,6 +111,36 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         NodeGraphReviewService._validate_model_result(result, request)
         self.assertEqual(["good"], [item["code"] for item in result["issues"]])
 
+    def test_review_result_preserves_bilingual_issue_fields(self):
+        workspace = graph(nodes=[{
+            "id": "start",
+            "nodeType": "start",
+            "workspace": {"blocks": {"blocks": [block("node_when_enter", "enter_1")]}},
+        }])
+        result = {
+            "hasProblems": True,
+            "summary": "\u4e2d\u6587\u603b\u7ed3",
+            "summaryEn": "English Summary",
+            "issues": [{
+                "nodeId": "start",
+                "blockId": "enter_1",
+                "code": "custom_logic_issue",
+                "confidence": 0.95,
+                "title": "\u4e2d\u6587\u6807\u9898",
+                "titleEn": "English Title",
+                "message": "\u4e2d\u6587\u539f\u56e0",
+                "messageEn": "English Cause",
+                "suggestion": "\u4e2d\u6587\u5efa\u8bae",
+                "suggestionEn": "English Suggestion",
+            }],
+        }
+        NodeGraphReviewService._validate_model_result(result, {"workspace": workspace})
+        issue = result["issues"][0]
+        self.assertEqual("English Summary", result["summaryEn"])
+        self.assertEqual("English Title", issue["titleEn"])
+        self.assertEqual("English Cause", issue["messageEn"])
+        self.assertEqual("English Suggestion", issue["suggestionEn"])
+
     def test_deepseek_request_uses_json_mode_and_current_model(self):
         settings = DeepSeekSettings(
             api_key="test-secret",
@@ -414,6 +444,9 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
         prompt = NodeGraphReviewService._build_prompt(
             {"workspace": graph(), "projectContext": {}}, [], []
         )
+        self.assertIn("summaryEn", prompt)
+        self.assertIn("titleEn", prompt)
+        self.assertIn("suggestionEn", prompt)
         self.assertIn("不要评价玩法是否丰富", prompt)
         self.assertIn("不要因为 Demo 简单就建议增加功能", prompt)
         self.assertIn("没有真实问题时 hasProblems=false", prompt)
@@ -910,6 +943,62 @@ class NodeGraphReviewServiceTests(unittest.TestCase):
             {"actorContextAvailable": True, "actors": [{"name": "Ball"}]},
         )
         self.assertIn("missing_actor_target", {item["code"] for item in facts})
+
+
+    def test_node_graph_settings_use_ai_setting_only(self):
+        provider = types.SimpleNamespace(
+            api_key="editor-secret",
+            base_url="https://configured.example",
+            model="provider-model",
+        )
+        collector = types.SimpleNamespace(
+            AI_SETTINGS={
+                "node_graph": {
+                    "provider": "deepseek",
+                    "model": "configured-node-model",
+                    "temperature": 0.07,
+                    "max_tokens": 7777,
+                    "thinking": True,
+                },
+                "providers": [{
+                    "name": "deepseek",
+                    "api_key": "editor-secret",
+                    "base_url": "https://configured.example",
+                }],
+            },
+            AIConfig=types.SimpleNamespace(providers={"deepseek": provider}),
+        )
+        entrance = types.ModuleType("Quasar.ai_service.entrance")
+        entrance.get_ai_entrance = lambda: types.SimpleNamespace(collector=collector)
+        quasar = types.ModuleType("Quasar")
+        quasar.__path__ = []
+        ai_service = types.ModuleType("Quasar.ai_service")
+        ai_service.__path__ = []
+        modules = {
+            "Quasar": quasar,
+            "Quasar.ai_service": ai_service,
+            "Quasar.ai_service.entrance": entrance,
+        }
+
+        with mock.patch.dict(sys.modules, modules):
+            node_settings = NodeGraphReviewService._resolve_settings("node_graph")
+            review_settings = NodeGraphReviewService._resolve_settings()
+
+        self.assertEqual("editor-secret", node_settings.api_key)
+        self.assertEqual("https://configured.example", node_settings.base_url)
+        self.assertEqual("configured-node-model", node_settings.model)
+        self.assertEqual(0.07, node_settings.temperature)
+        self.assertEqual(7777, node_settings.max_tokens)
+        self.assertTrue(node_settings.thinking_enabled)
+        self.assertEqual("editor-ai-setting", node_settings.source)
+
+        self.assertEqual("editor-secret", review_settings.api_key)
+        self.assertEqual("https://configured.example", review_settings.base_url)
+        self.assertEqual("provider-model", review_settings.model)
+        self.assertEqual(0.1, review_settings.temperature)
+        self.assertEqual(1200, review_settings.max_tokens)
+        self.assertFalse(review_settings.thinking_enabled)
+        self.assertEqual("editor-ai-setting", review_settings.source)
 
 
 if __name__ == "__main__":

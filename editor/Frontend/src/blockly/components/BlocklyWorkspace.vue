@@ -177,6 +177,7 @@ import { useI18n } from 'vue-i18n';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { scriptingService } from '@/utils/bridge.js';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const { t, locale } = useI18n();
@@ -408,9 +409,9 @@ async function handleToggleRun() {
       || Number(preview.runningCount ?? preview.running_count ?? 0) > 0
       || Boolean(preview.hasSnapshot ?? preview.has_snapshot);
     if (previewActive) {
-      alert(preview.scope === 'scene'
+      alert(translateUiText(preview.scope === 'scene'
         ? '当前积木脚本正在由全局运行执行'
-        : '当前积木脚本正在由项目预览执行');
+        : '当前积木脚本正在由项目预览执行'));
       return;
     }
   } catch (error) {
@@ -502,6 +503,8 @@ function startPollTimer() {
 const loadBlocklyModules = async () => {
   try {
     BlocklyLib = await import('blockly/core');
+    const { installCustomBlockLocalization } = await import('@/blockly/i18n/customBlockLocalization.js');
+    installCustomBlockLocalization(BlocklyLib);
     blocklyCN = await import('blockly/msg/zh-hans');
     blocklyEN = await import('blockly/msg/en');
     return true;

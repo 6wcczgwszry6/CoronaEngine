@@ -8,6 +8,7 @@
 #include <thread>
 
 #include "cef_client.h"
+#include "cef_bridge_helpers.h"
 #include "corona/kernel/core/i_logger.h"
 #include "corona/systems/ui/camera_viewport_manager.h"
 
@@ -253,6 +254,10 @@ void BrowserManager::update() {
             CFW_LOG_ERROR("Browser main-thread task failed with an unknown exception");
         }
     }
+
+    // GPU actor-pick completions are produced by OpticsSystem on another thread;
+    // broadcast them only from this CEF/UI-thread tick.
+    drain_actor_pick_completion_events();
 
     // Texture uploads are driven by UiFrameRunner after this frame's SDL/CEF input has
     // already been routed. Keeping uploads out of this queue drain prevents a GPU receipt

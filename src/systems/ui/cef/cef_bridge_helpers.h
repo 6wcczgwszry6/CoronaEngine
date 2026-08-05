@@ -24,6 +24,9 @@ void enqueue_input_event(InputEvent event);
 
 std::vector<InputEvent> drain_input_events();
 
+// Called on the CEF/UI thread once per frame to complete and dispatch pending GPU picks.
+void drain_actor_pick_completion_events();
+
 bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
                                      CefRefPtr<CefFrame> frame,
                                      const CefRefPtr<CefProcessMessage>& message);

@@ -293,6 +293,7 @@
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
             : 'border-green-500/50 text-green-200 bg-green-700/20 hover:bg-green-600/30'"
           :disabled="previewRunning || previewBusy"
+          data-guidance="preview-start"
           title="开始项目预览"
           @click="handleStartGamePreview"
         >
@@ -304,6 +305,7 @@
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
             : 'border-red-500/50 text-red-200 bg-red-700/20 hover:bg-red-600/30'"
           :disabled="!previewRunning || previewBusy"
+          data-guidance="preview-stop"
           title="结束项目预览"
           @click="handleStopGamePreview"
         >
@@ -322,11 +324,14 @@
       :class="{ 'viewport-cursor-hidden': nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' }"
       :style="nativeViewportCursorEnabled && viewportUiMode === 'stereo3d' ? { cursor: 'none' } : null"
       data-viewport-pick-surface
+      data-guidance="main-viewport"
+      @focus="handleViewportFocus"
       @pointermove="handleViewportPointer"
       @pointerdown="handleViewportPointerDown"
       @pointerup="handleViewportPointer"
+      @pointercancel="handleViewportPointerCancel"
       @pointerleave="handleViewportPointerLeave"
-      @click="handleViewportScratchClick"
+      @click="handleViewportClick"
       @wheel.prevent="handleWheel"
     ></div>
 
@@ -365,7 +370,8 @@
               type="number"
               step="0.1"
               :disabled="!sceneLightSettings.enabled || sceneLightBusy"
-              @change="updateSceneLight"
+              :data-guidance="axis === 'x' ? 'scene-light-x' : undefined"
+              @change="updateSceneLight(axis)"
             />
           </label>
         </div>
@@ -515,8 +521,9 @@
           pending: dockShortcutPending.has(shortcut.id),
         }"
         :aria-busy="dockShortcutPending.has(shortcut.id)"
+        :data-guidance="shortcut.id === 'SceneTools' ? 'scene-shortcut' : 'node-shortcut'"
         :title="`${isShortcutOpen(shortcut.id) ? '关闭' : '打开'}${shortcut.label}`"
-        @click.stop="toggleDockShortcut(shortcut.id)"
+        @click.stop="toggleDockShortcut(shortcut.id, { source: 'user' })"
       >
         <span class="dock-shortcut-icon">{{ shortcut.icon }}</span>
         <span>{{ shortcut.label }}</span>
@@ -572,11 +579,17 @@ import {
 } from '@/utils/panelWindows.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
+  createViewportGizmoController,
+  isViewportGizmoSelectionOwner,
+  resolveViewportGizmoTarget,
+} from '@/utils/viewportGizmo.js';
+import {
   createViewportUiModeStore,
   createViewportUiCalibrationStore,
   createViewportUiPointerController,
   isNativeViewportCursorEnabled,
 } from '@/utils/viewportUiMode.js';
+import { createServiceInitializationRetry } from '@/utils/serviceInitialization.js';
 import CabbageReviewAssistant from '@/components/ui/CabbageReviewAssistant.vue';
 import CabbageChatPanel from '@/views/sidebar/CabbageChatPanel.vue';
 import CabbageGuidanceOverlay from '@/components/ui/CabbageGuidanceOverlay.vue';
@@ -594,6 +607,7 @@ import {
 import { flushProjectNodeGraphBeforeRun } from '@/services/nodeGraphRuntimeService.js';
 import { cancelActiveNodeGraphGeneration } from '@/services/nodeGraphGenerationService.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
+import { closeTutorialSessionChannel } from '@/services/cabbageTutorialSessionService.js';
 
 const { error: logError, warn: logWarn } = useErrorHandler('MainPage');
 
@@ -643,11 +657,20 @@ const detachResidentCabbageChat = async () => {
   }
 };
 
-const toggleDockShortcut = async (id) => {
+const recordPanelOpened = (id, source = 'user') => cabbageContextService.recordEvent({
+  type: 'panel_opened',
+  category: 'panel',
+  success: true,
+  details: { panelId: id, source },
+});
+
+const toggleDockShortcut = async (id, { source = 'user' } = {}) => {
+  const wasOpen = Boolean(dockStore.panels[id]?.open);
   if (id === 'NodeGraphPanel') {
     dockShortcutPending.add(id);
     try {
       await toggleFloatingPanel(dockStore, id);
+      if (!wasOpen && dockStore.panels[id]?.open) void recordPanelOpened(id, source);
     } finally {
       dockShortcutPending.delete(id);
     }
@@ -666,6 +689,7 @@ const toggleDockShortcut = async (id) => {
     return;
   }
   openDockedPanel(id);
+  if (!wasOpen && dockStore.panels[id]?.open) void recordPanelOpened(id, source);
 };
 const handleNodeGraphPanelOpenRequest = async () => {
   // AI generation must use the same centered in-editor floating surface as the
@@ -703,11 +727,16 @@ const cameraBindingState = ref({
 let actorPickIndex = new Map();
 let actorPickResultCallbackToken = null;
 let actorSelectionCallbackToken = null;
+let gizmoPointerResultCallbackToken = null;
 let actorTransformCallbackToken = null;
 let sceneAddedCallbackToken = null;
 const actorTransformBaselines = new Map();
 const ACTOR_TRANSFORM_EPSILON = 1e-5;
 let sceneRenamedCallbackToken = null;
+let gizmoDownRequestId = '';
+let gizmoDownPointerId = null;
+let gizmoDownConsumed = false;
+let gizmoClickTimer = 0;
 const viewportPickSurfaceRef = ref(null);
 const viewportLayoutVersion = ref(0);
 const viewportUiMode = ref('flat2d');
@@ -753,6 +782,17 @@ const mouseRotate = reactive({
   active: false,
   lastX: 0,
   lastY: 0,
+  startForward: null,
+  moved: false,
+});
+const cameraMovementGestures = new Map();
+const movementAxisGroups = Object.freeze({
+  w: 'forward_back',
+  s: 'forward_back',
+  a: 'left_right',
+  d: 'left_right',
+  q: 'up_down',
+  e: 'up_down',
 });
 
 const MAX_CAMERA_VIEWPORT_RENDER_PIXELS = 1920 * 1080;
@@ -862,7 +902,10 @@ const handleActorTransformForCabbage = (payload = {}) => {
 };
 
 const emitActorChangeFast = (type, sceneId, actorName) => {
-  editorApi.sceneTools.selectActor(sceneId, type, actorName).catch((error) => {
+  editorApi.sceneTools.selectActor(sceneId, type, actorName, {
+    sourceViewport: 'main',
+    sourceCameraHandle: Number(cameraBindingState.value.cameraHandle || 0),
+  }).catch((error) => {
     logError('Failed to publish actor selection', error);
   });
 };
@@ -871,18 +914,35 @@ const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = ''
   const actorType = String(payload?.actor_type || payload?.type || '').trim().toLowerCase();
   const sceneId = String(payload?.scene || payload?.scene_id || maybeSceneId || '').trim();
   const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
-  if (!actorName || actorType === 'scene') return;
+  if (!actorName || actorType === 'scene') {
+    viewportGizmoController.clearTarget();
+    return;
+  }
 
   const resolvedSceneId = sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
   setActorContext(resolvedSceneId, actorName);
   void seedActorTransformBaseline(resolvedSceneId, actorName);
+  const ownsGizmo = isViewportGizmoSelectionOwner({
+    viewportScope: 'main',
+    cameraHandle: cameraBindingState.value.cameraHandle,
+    selection: payload,
+  });
+  if (ownsGizmo) {
+    await syncMainViewportGizmoSelection({
+      ...payload,
+      scene: resolvedSceneId,
+      actor: actorName,
+      actor_type: actorType,
+    });
+  } else {
+    viewportGizmoController.clearTarget();
+  }
   if (!dockStore.panels.SceneDatas?.open) {
     openDockedPanel('SceneDatas');
   }
 };
 
 const viewportPickController = createViewportPickController({
-  retryDelayMs: 60,
   getBridge: () => window.coronaBridge,
   getCameraBinding: () => cameraBindingState.value,
   getHitRect: getViewportHitRect,
@@ -890,6 +950,49 @@ const viewportPickController = createViewportPickController({
   getActorIndex: () => actorPickIndex,
   emitActorChange: (type, sceneId, actorName) => emitActorChangeFast(type, sceneId, actorName),
 });
+
+const viewportGizmoController = createViewportGizmoController({
+  getBridge: () => window.coronaBridge,
+  getCameraBinding: () => cameraBindingState.value,
+  getHitRect: getViewportHitRect,
+  getRenderRect: getViewportRenderRect,
+  onDragEnd: (payload) => {
+    const sceneId =
+      String(payload?.sceneId || cameraBindingState.value.sceneId || '').trim();
+    const actorName = String(payload?.actor || '').trim();
+    if (sceneId && actorName) {
+      sceneService.saveActor(sceneId, actorName).catch((error) => {
+        logError('Failed to save gizmo actor transform', error);
+      });
+    }
+  },
+});
+
+const syncMainViewportGizmoSelection = async (selection = {}, pickResult = null) => {
+  const sceneId =
+    String(cameraBindingState.value.sceneId || tabs.value[activeTab.value]?.id || '').trim();
+  let target = resolveViewportGizmoTarget({
+    sceneId,
+    selection,
+    pickResult,
+    actorIndex: actorPickIndex,
+  });
+  if (!target && selection?.actor && String(selection.actor_type || selection.type) !== 'scene') {
+    await refreshActorPickIndex(sceneId).catch(() => false);
+    target = resolveViewportGizmoTarget({
+      sceneId,
+      selection,
+      pickResult,
+      actorIndex: actorPickIndex,
+    });
+  }
+  if (target) {
+    viewportGizmoController.setTarget(target);
+  } else {
+    viewportGizmoController.clearTarget();
+  }
+  return target;
+};
 
 const viewportUiPointerController = createViewportUiPointerController({
   getBridge: () => window.coronaBridge,
@@ -1020,6 +1123,7 @@ const previewRunning = ref(false);
 const previewBusy = ref(false);
 const previewStatusText = ref('');
 const previewDetails = ref({});
+let tutorialPreviewObservedRunning = false;
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
@@ -1078,6 +1182,7 @@ let unsubscribeCabbageContext = null;
 let unsubscribeCabbagePreWarnings = null;
 let cabbageCandidateTimer = null;
 let cabbageWorldLoadGeneration = 0;
+const cabbageWorldInitializationRetry = createServiceInitializationRetry();
 const ACTIVE_PROJECT_PATH_KEY = 'corona.activeProjectPath';
 
 function normalizeActiveProjectPath(value) {
@@ -1112,7 +1217,7 @@ async function persistCabbageTaskActions(actions = []) {
   }
 }
 
-async function loadCabbageWorldContext({ reset = true, retryCount = 6 } = {}) {
+async function loadCabbageWorldContext({ reset = true } = {}) {
   const generation = ++cabbageWorldLoadGeneration;
   const expectedProjectPath = normalizeActiveProjectPath(readActiveProjectPath());
   const scopeId = currentProjectReviewScopeId();
@@ -1121,49 +1226,48 @@ async function loadCabbageWorldContext({ reset = true, retryCount = 6 } = {}) {
   // the task board disappear whenever loading was slow or temporarily failed.
   const cachedSnapshot = readCabbageAssistantContext(scopeId);
   if (reset) {
+    cabbageWorldInitializationRetry.cancel();
     cabbageAssistant.clearForProjectChange(scopeId);
     if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
+    publishCabbageAssistantContext(cabbageAssistant);
   }
-
-  let lastError = null;
-  for (let attempt = 0; attempt < Math.max(1, retryCount); attempt += 1) {
+  try {
+    const snapshot = await cabbageContextService.loadCurrentWorld();
     if (generation !== cabbageWorldLoadGeneration
       || normalizeActiveProjectPath(readActiveProjectPath()) !== expectedProjectPath) {
       return null;
     }
-    try {
-      const snapshot = await cabbageContextService.loadCurrentWorld();
-      if (generation !== cabbageWorldLoadGeneration
-        || normalizeActiveProjectPath(readActiveProjectPath()) !== expectedProjectPath) {
-        return null;
-      }
-      cabbageAssistant.hydrateContext(snapshot);
-      void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
-      const goal = snapshot?.worldGoal || {};
-      if (goal.source === 'ai' && goal.status === 'generating' && String(goal.prompt || '').trim()) {
-        // A backend restart can interrupt an in-memory DeepSeek job while leaving the
-        // world context in `generating`. Restart that same plan when the world opens.
-        // The context service deduplicates polling when the original job is still alive.
-        void initializeWorldTasks({
-          prompt: String(goal.prompt || '').trim(),
-          mode: String(goal.mode || 'story'),
-          waitForCompletion: false,
-        }).catch((error) => {
-          console.warn('[CabbageContext] failed to resume world task generation', error?.message || error);
+    cabbageWorldInitializationRetry.cancel();
+    cabbageAssistant.hydrateContext(snapshot);
+    void cabbageContextService.requestProfileScoreUpdate().catch(() => {});
+    const goal = snapshot?.worldGoal || {};
+    if (goal.source === 'ai'
+      && goal.status === 'generating'
+      && String(goal.prompt || '').trim()) {
+      void initializeWorldTasks({
+        prompt: String(goal.prompt || '').trim(),
+        mode: String(goal.mode || 'story'),
+        waitForCompletion: false,
+      }).catch((error) => {
+        console.warn(
+          '[CabbageContext] failed to resume world task generation',
+          error?.message || error,
+        );
+      });
+    }
+    return snapshot;
+  } catch (error) {
+    if (generation === cabbageWorldLoadGeneration) {
+      if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
+      if (error?.retryable) {
+        cabbageWorldInitializationRetry.schedule(() => {
+          if (generation !== cabbageWorldLoadGeneration) return;
+          void loadCabbageWorldContext({ reset: false });
         });
-      }
-      return snapshot;
-    } catch (error) {
-      lastError = error;
-      if (attempt + 1 < retryCount) {
-        await new Promise((resolve) => window.setTimeout(resolve, 250 + attempt * 150));
+      } else {
+        console.warn('[CabbageContext] failed to load world context', error?.message || error);
       }
     }
-  }
-
-  if (generation === cabbageWorldLoadGeneration) {
-    if (cachedSnapshot) cabbageAssistant.hydrateContext(cachedSnapshot);
-    console.warn('[CabbageContext] failed to load current world context after retries', lastError?.message || lastError);
   }
   return null;
 }
@@ -1454,7 +1558,7 @@ const syncSceneCameraBinding = async (sceneId, { preservePose = false } = {}) =>
   }
 };
 
-const updateSceneLight = async () => {
+const updateSceneLight = async (axis = '') => {
   if (sceneLightBusy.value) return false;
   const sceneId = cameraBindingState.value.sceneId
     || tabs.value[activeTab.value]?.id
@@ -1471,7 +1575,12 @@ const updateSceneLight = async () => {
       type: 'lighting_changed',
       category: 'lighting',
       success: true,
-      details: { sceneName: sceneId },
+      details: {
+        sceneName: sceneId,
+        axis: String(axis || '').toLowerCase(),
+        value: axis ? Number(direction[axis]) || 0 : undefined,
+        source: 'property_panel',
+      },
     });
     return true;
   } catch (error) {
@@ -1535,6 +1644,10 @@ const sendScratchPointerEvent = (type, event, pickedActor = '') => {
     pickedActor || ''
   ).catch(() => {});
 };
+const vectorDistance = (left = [], right = []) => Math.sqrt(
+  left.reduce((sum, value, index) => sum + ((Number(value) || 0) - (Number(right[index]) || 0)) ** 2, 0)
+);
+
 const handleWheel = (event) => {
   sendScratchPointerEvent('wheel', event);
   if (isGamePreviewInputLocked()) return;
@@ -1546,8 +1659,27 @@ const handleWheel = (event) => {
     event.preventDefault();
     return;
   }
+  const before = [...cameraState.value.position];
   const direction = event.deltaY > 0 ? 'backward' : 'forward';
   handleCameraMove(direction);
+  const actualDelta = vectorDistance(before, cameraState.value.position);
+  if (actualDelta > 1e-6) {
+    void cabbageContextService.recordEvent({
+      type: 'camera_moved',
+      category: 'camera',
+      success: true,
+      details: { interaction: 'wheel', actualDelta },
+    });
+  }
+};
+
+const handleViewportFocus = () => {
+  void cabbageContextService.recordEvent({
+    type: 'viewport_focused',
+    category: 'viewport',
+    success: true,
+    details: { source: 'user' },
+  });
 };
 
 const focusViewportInput = () => {
@@ -1562,6 +1694,14 @@ const handleKeyDown = (event) => {
   }
   const tag = event.target?.tagName;
   if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+  if (
+    (event.key === 'Escape' || event.code === 'Escape')
+    && viewportGizmoController.isDragging()
+  ) {
+    event.preventDefault();
+    viewportGizmoController.cancel('escape');
+    return;
+  }
   const modifiers = [
     event.ctrlKey ? 'Ctrl' : '',
     event.altKey ? 'Alt' : '',
@@ -1586,6 +1726,9 @@ const handleKeyDown = (event) => {
   if (movementKeys[key] !== undefined) {
     event.preventDefault();
     if (!movementKeys[key]) {
+      if (movementAxisGroups[key]) {
+        cameraMovementGestures.set(key, [...cameraState.value.position]);
+      }
       // A project/scene reload recreates native cameras and invalidates their old
       // handles. Refresh once when a new movement gesture starts instead of
       // continuing to publish WASD/QE updates to a released camera.
@@ -1614,6 +1757,20 @@ const handleKeyUp = (event) => {
   const key = event.key.toLowerCase();
   if (movementKeys[key] !== undefined) {
     movementKeys[key] = false;
+    const gestureStart = cameraMovementGestures.get(key);
+    cameraMovementGestures.delete(key);
+    const axisGroup = movementAxisGroups[key];
+    if (gestureStart && axisGroup) {
+      const actualDelta = vectorDistance(gestureStart, cameraState.value.position);
+      if (actualDelta > 1e-6) {
+        void cabbageContextService.recordEvent({
+          type: 'camera_moved',
+          category: 'camera',
+          success: true,
+          details: { key: key.toUpperCase(), axisGroup, actualDelta },
+        });
+      }
+    }
     if (!hasActiveMovementKeys()) {
       stopMoveLoop();
       scheduleCameraUpdate();
@@ -1663,7 +1820,10 @@ const resetRealtimeCameraInput = () => {
     movementKeys[key] = false;
   });
   stopMoveLoop();
+  cameraMovementGestures.clear();
   mouseRotate.active = false;
+  mouseRotate.startForward = null;
+  mouseRotate.moved = false;
 };
 
 const setEditorCameraInputLock = (reason, locked) => {
@@ -1938,6 +2098,14 @@ const handleMouseRotate = (dx, dy) => {
 const viewportCursorShape = () => (mouseRotate.active ? 'grabbing' : 'arrow');
 
 const handleViewportPointer = (event) => {
+  viewportGizmoController.pointer(event, event.type);
+  if (event.type === 'pointerup') {
+    try {
+      viewportPickSurfaceRef.value?.releasePointerCapture?.(event.pointerId);
+    } catch (_) {
+      // Pointer capture may already have been released.
+    }
+  }
   sendScratchPointerEvent(event.type === 'pointerup' ? 'mouseup' : 'move', event);
   viewportUiPointerController.send(event, event.type, viewportCursorShape());
 };
@@ -1947,6 +2115,9 @@ const handleViewportPointerDown = (event) => {
   // Detached docks and project initialization may reload the native scene after
   // MainPage's first snapshot. Rebind before the user starts interacting.
   void refreshSceneCameraBinding({ preservePose: true });
+  gizmoDownConsumed = false;
+  gizmoDownPointerId = event.pointerId;
+  gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
   sendScratchPointerEvent('mousedown', event);
   viewportUiPointerController.send(
     event,
@@ -1955,9 +2126,36 @@ const handleViewportPointerDown = (event) => {
   );
 };
 
+const handleViewportPointerCancel = (event) => {
+  try {
+    viewportPickSurfaceRef.value?.releasePointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture may already have been released.
+  }
+  viewportGizmoController.cancel('pointercancel');
+};
+
 const handleViewportPointerLeave = () => {
   viewportUiPointerController.hide();
 };
+
+const handleViewportGizmoPointerResult = (payload = {}) => {
+  const result = viewportGizmoController.handleResult(payload);
+  if (payload.requestId === gizmoDownRequestId && payload.consumed) {
+    gizmoDownConsumed = true;
+    try {
+      viewportPickSurfaceRef.value?.setPointerCapture?.(gizmoDownPointerId);
+    } catch (_) {
+      // Pointer capture is best effort on embedded browser surfaces.
+    }
+  }
+  if (result.status === 'ended' || result.status === 'cancelled') {
+    gizmoDownRequestId = '';
+    gizmoDownPointerId = null;
+  }
+};
+
+const handleMainViewportBlur = () => viewportGizmoController.cancel('blur');
 
 let pendingScratchClick = null;
 
@@ -1965,16 +2163,10 @@ const finishPendingScratchClick = (pickedActor = '') => {
   const pending = pendingScratchClick;
   if (!pending) return;
   pendingScratchClick = null;
-  if (pending.timer != null) window.clearTimeout(pending.timer);
   sendScratchPointerEvent('click', pending.event, pickedActor);
 };
 
 const handleViewportScratchClick = (event) => {
-  // Preserve rapid click gameplay even though the native picker tracks one
-  // outstanding request at a time. The previous click falls back to an empty
-  // pick, which is exactly what whole-viewport click blocks need.
-  if (pendingScratchClick) finishPendingScratchClick('');
-
   const eventSnapshot = {
     clientX: Number(event?.clientX || 0),
     clientY: Number(event?.clientY || 0),
@@ -1986,16 +2178,35 @@ const handleViewportScratchClick = (event) => {
     return;
   }
 
+  // A newer click supersedes an unfinished request. The engine may still
+  // complete the old request, but viewportPickController filters it by the
+  // latest requestId and finishScratchClickFromPick ignores its old pending
+  // entry. This keeps a later blank click from being swallowed by a slow pick.
   pendingScratchClick = {
     requestId,
     event: eventSnapshot,
-    timer: window.setTimeout(() => finishPendingScratchClick(''), 220),
   };
+};
+
+const handleViewportClick = (event) => {
+  // A single click owns selection/clearing. Ignore the synthetic second
+  // click from a rapid double-click so it cannot reset an active Gizmo drag.
+  if (Number(event?.detail || 0) > 1) return;
+  if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
+  const eventSnapshot = {
+    clientX: Number(event?.clientX || 0),
+    clientY: Number(event?.clientY || 0),
+    button: Number(event?.button || 0),
+  };
+  gizmoClickTimer = window.setTimeout(() => {
+    gizmoClickTimer = 0;
+    if (!gizmoDownConsumed) handleViewportScratchClick(eventSnapshot);
+  }, 45);
 };
 
 const finishScratchClickFromPick = (payload, result) => {
   if (!pendingScratchClick || payload?.requestId !== pendingScratchClick.requestId) return;
-  if (result?.status === 'pending' || result?.status === 'stale') return;
+  if (result?.status === 'stale') return;
   const pickedActor =
     result?.actor?.name ||
     payload?.actorName ||
@@ -2012,6 +2223,8 @@ const onMouseDown = (event) => {
     mouseRotate.active = true;
     mouseRotate.lastX = event.clientX;
     mouseRotate.lastY = event.clientY;
+    mouseRotate.startForward = [...cameraState.value.forward];
+    mouseRotate.moved = false;
     event.preventDefault();
     return;
   }
@@ -2032,6 +2245,7 @@ const onMouseMove = (event) => {
 
   if (dx === 0 && dy === 0) return;
   handleMouseRotate(dx, dy);
+  mouseRotate.moved = true;
   scheduleCameraUpdate();
 };
 
@@ -2042,6 +2256,19 @@ const onMouseUp = (event) => {
   }
   if (event.button === 2 && mouseRotate.active) {
     mouseRotate.active = false;
+    const actualDelta = mouseRotate.startForward
+      ? vectorDistance(mouseRotate.startForward, cameraState.value.forward)
+      : 0;
+    if (mouseRotate.moved && actualDelta > 1e-6) {
+      void cabbageContextService.recordEvent({
+        type: 'camera_rotated',
+        category: 'camera',
+        success: true,
+        details: { interaction: 'right_mouse_drag', actualDelta },
+      });
+    }
+    mouseRotate.startForward = null;
+    mouseRotate.moved = false;
     if (!sendCameraUpdateFast()) {
       const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
       syncSceneCameraBinding(sceneId);
@@ -2090,22 +2317,18 @@ const applyActorPickResult = (result, payload = result?.payload) => {
 
 const handleActorPickResult = (payload) => {
   const result = viewportPickController.handlePickResult(payload);
-  if (result.status !== 'unknown' || !payload?.sceneId) {
-    applyActorPickResult(result, payload);
-    finishScratchClickFromPick(payload, result);
-    return;
+  applyActorPickResult(result, payload);
+  // Gizmo synchronization is owned exclusively by actorSelectionChanged.
+  // A miss still publishes the empty scene selection so that the same
+  // selection path clears the property panel and Gizmo exactly once.
+  if (result.status === 'miss') {
+    emitActorChangeFast(
+      'scene',
+      payload?.sceneId || cameraBindingState.value.sceneId || DEFAULT_SCENE_NAME,
+      '',
+    );
   }
-
-  refreshActorPickIndex(payload.sceneId)
-    .then(() => {
-      const refreshedResult = viewportPickController.handlePickResult(payload);
-      applyActorPickResult(refreshedResult, payload);
-      finishScratchClickFromPick(payload, refreshedResult);
-    })
-    .catch((error) => {
-      logError('Actor pick index refresh failed', error);
-      finishScratchClickFromPick(payload, result);
-    });
+  finishScratchClickFromPick(payload, result);
 };
 
 const sendCameraUpdateFast = () => {
@@ -2345,7 +2568,10 @@ const normalizePreviewDetails = (payload = {}) => ({
   hasSnapshot: Boolean(payload.hasSnapshot ?? payload.has_snapshot),
   restoreStatus: payload.restoreStatus ?? payload.restore_status ?? 'idle',
   restoreError: payload.restoreError ?? payload.restore_error ?? '',
-  restored: Boolean(payload.restored),
+  restored: Boolean(
+    payload.restored
+    ?? ['restored', 'completed', 'success'].includes(String(payload.restoreStatus ?? payload.restore_status ?? '').toLowerCase())
+  ),
   stopPending: Boolean(payload.stopPending ?? payload.stop_pending),
   workerActive: Boolean(payload.workerActive ?? payload.worker_active),
   errors: Array.isArray(payload.errors) ? payload.errors : [],
@@ -2375,6 +2601,28 @@ const applyPreviewStatus = (payload = {}) => {
   else if (state === 'error') previewStatusText.value = details.restoreError ? `场景恢复失败：${details.restoreError}` : (details.errors[0] || details.message || '预览出错');
   else previewStatusText.value = details.startedCount === 0 && details.warnings.length ? '没有可运行脚本' : '';
   publishGamePreviewStatus(details);
+  if (state === 'running' && !tutorialPreviewObservedRunning) {
+    tutorialPreviewObservedRunning = true;
+    void cabbageContextService.recordEvent({
+      type: 'preview_started',
+      category: 'preview',
+      success: true,
+      details: { status: 'running' },
+    });
+  } else if (
+    state === 'stopped'
+    && tutorialPreviewObservedRunning
+    && details.restored
+    && !details.restoreError
+  ) {
+    tutorialPreviewObservedRunning = false;
+    void cabbageContextService.recordEvent({
+      type: 'preview_stopped',
+      category: 'preview',
+      success: true,
+      details: { status: 'stopped', restored: true, restoreError: '' },
+    });
+  }
   return details;
 };
 
@@ -2925,6 +3173,7 @@ onMounted(async () => {
   document.addEventListener('mouseup', onMouseUp);
   document.addEventListener('contextmenu', onContextMenu);
   window.addEventListener('resize', handleViewportLayoutChange);
+  window.addEventListener('blur', handleMainViewportBlur);
   registerEditorControls();
 
   // 跨窗口事件监听：panel / loading / viewport 等 UI 本地通道
@@ -2941,13 +3190,14 @@ onMounted(async () => {
   actorSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleActorSelectionForObjectDock);
   actorTransformCallbackToken = await editorApi.events.onActorTransformUpdated(handleActorTransformForCabbage);
   actorPickResultCallbackToken = await editorApi.events.onActorPickResult(handleActorPickResult);
+  gizmoPointerResultCallbackToken =
+    await editorApi.events.onViewportGizmoPointerResult(handleViewportGizmoPointerResult);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   // Primary work docks start hidden. If this main CEF page is reused, close any native
   // floating tab left by the previous project before resetting the shortcut state.
   for (const panelId of [
     ...dockShortcuts.map((item) => item.id),
-    'AITalkBar',
     'SceneDatas',
     'CabbageChatPanel',
   ]) {
@@ -2979,6 +3229,7 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  cabbageWorldInitializationRetry.cancel();
   stopProjectResourceLoadPolling();
   clearPreviewPoll();
   clearKnownEditorCameraInputLocks();
@@ -2995,6 +3246,7 @@ onUnmounted(() => {
   void cabbageContextService.flush();
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
+  closeTutorialSessionChannel();
   coronaEventBus.off('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   for (const timer of pendingPanelRedocks.values()) window.clearTimeout(timer);
@@ -3005,6 +3257,10 @@ onUnmounted(() => {
   coronaEventBus.off('camera-pose-request', applyCameraPose);
   coronaEventBus.off('viewport-controls-request', handleViewportControlsRequest);
   coronaEventBus.off('node-graph-panel-open-request', handleNodeGraphPanelOpenRequest);
+  if (gizmoClickTimer) window.clearTimeout(gizmoClickTimer);
+  gizmoClickTimer = 0;
+  viewportGizmoController.cancel('cancel');
+  viewportGizmoController.clearTarget();
   if (actorPickResultCallbackToken) {
     editorApi.off(actorPickResultCallbackToken).catch((error) => {
       logError('Failed to unregister actor pick result callback', error);
@@ -3016,6 +3272,12 @@ onUnmounted(() => {
       logError('Failed to unregister actor selection callback', error);
     });
     actorSelectionCallbackToken = null;
+  }
+  if (gizmoPointerResultCallbackToken) {
+    editorApi.off(gizmoPointerResultCallbackToken).catch((error) => {
+      logError('Failed to unregister viewport gizmo callback', error);
+    });
+    gizmoPointerResultCallbackToken = null;
   }
   if (actorTransformCallbackToken) {
     editorApi.off(actorTransformCallbackToken).catch((error) => {
@@ -3037,6 +3299,7 @@ onUnmounted(() => {
     sceneRenamedCallbackToken = null;
   }
   window.removeEventListener('resize', handleViewportLayoutChange);
+  window.removeEventListener('blur', handleMainViewportBlur);
   sceneCameraBindingRequestRevision += 1;
   sceneCameraBindingRefreshPromise = null;
   stopMoveLoop();

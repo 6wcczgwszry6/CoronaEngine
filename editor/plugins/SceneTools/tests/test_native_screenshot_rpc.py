@@ -1463,16 +1463,6 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             / "sidebar"
             / "Network.vue"
         ).read_text(encoding="utf-8")
-        room_panel_source = (
-            self._repo_root()
-            / "editor"
-            / "Frontend"
-            / "src"
-            / "views"
-            / "sidebar"
-            / "lanchat"
-            / "RoomPanel.vue"
-        ).read_text(encoding="utf-8")
         event_bus_source = (
             self._repo_root()
             / "editor"
@@ -1497,11 +1487,9 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             "editorApi.events.onNetworkActorSyncBroadcastRequested(onNetworkActorSyncBroadcastRequested)",
             network_source,
         )
-        self.assertIn("onNetworkActorSyncBroadcastRequested(handleActorSyncBroadcast)", room_panel_source)
         self.assertIn("editorApi.off(networkActorSyncBroadcastCallbackToken)", network_source)
-        self.assertIn("editorApi.off(actorSyncBroadcastCallbackToken)", room_panel_source)
-        self.assertNotIn("coronaEventBus.on('actor-sync-broadcast'", network_source + room_panel_source)
-        self.assertNotIn("coronaEventBus.off('actor-sync-broadcast'", network_source + room_panel_source)
+        self.assertNotIn("coronaEventBus.on('actor-sync-broadcast'", network_source)
+        self.assertNotIn("coronaEventBus.off('actor-sync-broadcast'", network_source)
         self.assertNotIn("event === 'actor-sync-broadcast'", event_bus_source)
 
     def test_network_actor_mutation_broadcasts_are_cpp_defined_events(self):
@@ -1741,20 +1729,20 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertNotIn("__coronaEmit('lanchat-event')", bridge_source)
 
     def test_lanchat_frontend_consumer_uses_cpp_defined_event_wrapper(self):
-        ai_talk_source = (
+        app_source = (
             self._repo_root()
             / "editor"
             / "Frontend"
             / "src"
-            / "views"
-            / "sidebar"
-            / "AITalkBar.vue"
+            / "App.vue"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("editorApi.events.onLanChatEvent(onLanchatEvent)", ai_talk_source)
-        self.assertIn("editorApi.off(lanChatEventCallbackToken)", ai_talk_source)
-        self.assertNotIn("coronaEventBus.on('lanchat-event'", ai_talk_source)
-        self.assertNotIn("coronaEventBus.off('lanchat-event'", ai_talk_source)
+        self.assertIn("editorApi.events.onLanChatEvent(onLanChatEvent)", app_source)
+        self.assertIn("lanchat.handleEvent(payload)", app_source)
+        self.assertIn("if (!isStandalonePanel.value)", app_source)
+        self.assertIn("editorApi.off(callbackToken)", app_source)
+        self.assertNotIn("coronaEventBus.on('lanchat-event'", app_source)
+        self.assertNotIn("coronaEventBus.off('lanchat-event'", app_source)
 
     def test_realtime_focus_and_pick_events_are_defined_and_emitted_by_cpp_callback_registry(self):
         source = self._editor_api_source()
@@ -3000,14 +2988,20 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
 
         for snippet in (
             "PyCallable_Check(callback)",
-            "Py_XINCREF(callback)",
-            "PyObject_CallObject",
-            "PyErr_Print",
-            "Py_XDECREF(callback)",
+            "PythonRuntimeRequestKind::Callback",
+            "callback_token",
+            "coordinator->submit",
             "clear_python_script_callbacks()",
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, source)
+
+        callback_section = source[
+            source.index("execute_editor_python_callback"):
+            source.index("NativeResult invoke_python_script_service")
+        ]
+        self.assertNotIn("PyGILState_Ensure", callback_section)
+        self.assertNotIn("PyGILState_Release", callback_section)
 
         for snippet in (
             'm.def("register_python_script_callback"',
@@ -3028,6 +3022,19 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         ):
             with self.subTest(snippet=snippet):
                 self.assertIn(snippet, python_api_source)
+
+    def test_python_api_shutdown_does_not_release_objects_or_take_gil_off_thread(self):
+        source = (
+            self._repo_root() / "src" / "systems" / "script" / "python" / "python_api.cpp"
+        ).read_text(encoding="utf-8")
+        shutdown_start = source.index("void PythonAPI::shutdown()")
+        shutdown_end = source.index("int64_t PythonAPI::nowMsec()", shutdown_start)
+        shutdown_body = source[shutdown_start:shutdown_end]
+
+        self.assertNotIn("(void)pStartFunc.release()", source)
+        self.assertNotIn("(void)messageFunc.release()", source)
+        self.assertNotIn("nanobind::gil_scoped_acquire", shutdown_body)
+        self.assertIn("detach_python_objects_without_decref", shutdown_body)
 
     def test_scene_tools_registers_native_camera_handlers(self):
         source = self._handler_source()
@@ -3437,6 +3444,29 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             transform_body.group(0),
         )
 
+    def test_native_actor_serializer_does_not_reappend_owned_runtime_fields(self):
+        source = self._handler_source()
+        normalized_fields = re.search(
+            r"static const std::set<std::string> normalized_fields\{(.*?)\};",
+            source,
+            re.S,
+        )
+        self.assertIsNotNone(normalized_fields)
+
+        for field in (
+            "runtime.entity_id",
+            "runtime.asset_id",
+            "runtime.model_ref",
+            "runtime.entity_type",
+            "runtime.semantic_role",
+            "runtime.source_plan_id",
+            "runtime.source_batch_id",
+            "runtime.source_scene_version",
+            "runtime.actor_version",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', normalized_fields.group(1))
+
     def test_actor_file_transfer_uses_runtime_asset_identity_without_wire_changes(self):
         source = self._network_system_source()
 
@@ -3841,13 +3871,27 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
             repo_root / "editor" / "CoronaCore" / "core" / "entities" / "actor.py"
         ).read_text(encoding="utf-8")
 
-        self.assertIn("Py_AddPendingCall", bindings_source)
-        self.assertIn("g_python_callbacks", bindings_source)
+        self.assertNotIn("Py_AddPendingCall", bindings_source)
+        self.assertNotIn("shared_ptr<nb::object>", bindings_source)
+        self.assertIn("PythonRuntimeRequestKind::Callback", bindings_source)
+        self.assertIn("callback_token", bindings_source)
         self.assertIn("resolve_fixed_dt", lifecycle_source)
         self.assertIn("kMaxCatchUpSteps", lifecycle_source)
         on_move_start = actor_source.index("    def on_move(self):")
         on_move_end = actor_source.index("\n    def enable_collision_callback", on_move_start)
         self.assertNotIn("self.save_data()", actor_source[on_move_start:on_move_end])
+
+    def test_synchronous_screenshot_wait_releases_the_python_gil(self):
+        repo_root = self._repo_root()
+        bindings_source = (
+            repo_root / "src" / "systems" / "script" / "python" / "engine_bindings.cpp"
+        ).read_text(encoding="utf-8")
+
+        binding_start = bindings_source.index('.def("save_screenshot_sync"')
+        binding_end = bindings_source.index("\n        .def(", binding_start + 1)
+        screenshot_binding = bindings_source[binding_start:binding_end]
+
+        self.assertIn("nb::call_guard<nb::gil_scoped_release>()", screenshot_binding)
 
     def test_portable_scene_folder_is_wired_through_project_and_frontend_apis(self):
         repo_root = self._repo_root()

@@ -15,8 +15,37 @@ layout(push_constant) uniform PushConsts
 
 void main()
 {
-    uvec4 visibilityData = imageLoad(
-        imagesRGBA32UI[nonuniformEXT(pushConsts.visibilityImageIndex)],
-        ivec2(pushConsts.pixel));
-    ssbos[nonuniformEXT(pushConsts.outputBufferIndex)].data[0] = visibilityData.r;
+    // Pick is intentionally tolerant to a small amount of pointer/viewport
+    // rounding error. Keep the exact center pixel as the first choice, then
+    // search the nearest non-zero visibility id in a 5x5 neighborhood.
+    const int kRadius = 2;
+    const uint visibilityIndex = pushConsts.visibilityImageIndex;
+    const ivec2 center = ivec2(pushConsts.pixel);
+    const ivec2 extent = imageSize(imagesRGBA32UI[nonuniformEXT(visibilityIndex)]);
+
+    uint bestInstance = 0u;
+    int bestDistance = 1 << 30;
+    for (int offsetY = -kRadius; offsetY <= kRadius; ++offsetY) {
+        for (int offsetX = -kRadius; offsetX <= kRadius; ++offsetX) {
+            const ivec2 samplePixel = center + ivec2(offsetX, offsetY);
+            if (samplePixel.x < 0 || samplePixel.y < 0 ||
+                samplePixel.x >= extent.x || samplePixel.y >= extent.y) {
+                continue;
+            }
+
+            const uint instance = imageLoad(
+                imagesRGBA32UI[nonuniformEXT(visibilityIndex)], samplePixel).r;
+            if (instance == 0u) {
+                continue;
+            }
+
+            const int distance = offsetX * offsetX + offsetY * offsetY;
+            if (bestInstance == 0u || distance < bestDistance) {
+                bestInstance = instance;
+                bestDistance = distance;
+            }
+        }
+    }
+
+    ssbos[nonuniformEXT(pushConsts.outputBufferIndex)].data[0] = bestInstance;
 }

@@ -76,6 +76,8 @@ class ScratchRuntimeContext:
     external_target: bool = False
 
     stop_requested: bool = False
+    isolated: bool = False
+    isolation_reason: str = ""
     key_state: dict = field(default_factory=dict)
     key_press_until: dict = field(default_factory=dict)
     mouse_pressed: bool = False
@@ -167,6 +169,30 @@ def bind_context(ctx: ScratchRuntimeContext):
     with _context_lock:
         _contexts[ctx.context_id] = ctx
     return ctx
+
+
+def isolate_context(context_id: str | None, reason: str = "") -> list[dict]:
+    """Quarantine live contexts without destroying state still used by their threads."""
+    if not context_id:
+        return []
+    prefix = f"{context_id}:clone:"
+    with _context_lock:
+        matches = [
+            ctx for key, ctx in _contexts.items()
+            if key == context_id or key.startswith(prefix)
+        ]
+        for ctx in matches:
+            ctx.stop_requested = True
+            ctx.isolated = True
+            ctx.isolation_reason = str(reason or "runtime isolated")
+    return [runtime_state_snapshot(ctx) for ctx in matches]
+
+
+def assert_engine_operation_allowed():
+    ctx = _current_context()
+    if ctx.isolated or ctx.stop_requested:
+        raise SystemExit(0)
+    return True
 
 
 def release_context(ctx: ScratchRuntimeContext | None = None):
@@ -372,6 +398,7 @@ def set_project_global():
 
 
 def _actor_only(api_name: str) -> bool:
+    assert_engine_operation_allowed()
     ctx = _current_context()
     if ctx.target_type == "project":
         _logger.warning("[ScratchWrapper] %s ignored in project-global script", api_name)
@@ -470,6 +497,7 @@ def _native_scene_matches(data, requested):
 
 
 def _native_scene_snapshot(scene_name):
+    assert_engine_operation_allowed()
     errors = []
     try:
         from CoronaCore.core.corona_editor import CoronaEditor
@@ -986,6 +1014,7 @@ def _snapshot_actor_key(data):
 
 
 def _native_restore_operation(scene_route, actor_name, operation, values):
+    assert_engine_operation_allowed()
     from CoronaCore.core.editor_api import CoronaEditorApi
     action = f"Restore actor {actor_name} operation {operation}"
     return _native_payload_or_raise(
@@ -998,6 +1027,7 @@ def _native_restore_operation(scene_route, actor_name, operation, values):
 
 def _set_native_runtime_camera(scene_route, position, forward, world_up, fov, camera_name=""):
     """Update the main editor viewport camera in memory without writing the scene file."""
+    assert_engine_operation_allowed()
     try:
         from CoronaCore.core.corona_editor import CoronaEditor
         engine = CoronaEditor.CoronaEngine
@@ -2436,6 +2466,7 @@ def _object_name(actor) -> str:
 
 
 def _runtime_scene():
+    assert_engine_operation_allowed()
     _init_engine()
     ctx = _current_context()
     if ctx.scene is not None:
@@ -2571,6 +2602,7 @@ def _mark_deleted(actor=None, name=None):
 
 
 def _resolve_actor(name):
+    assert_engine_operation_allowed()
     target = str(name or "").strip()
     if not target:
         return None
@@ -3125,6 +3157,7 @@ def _unique_object_name(base):
 
 
 def _try_native_spawn(scene, template, name, pos, template_actor=None):
+    assert_engine_operation_allowed()
     if scene is None:
         return None
     template_actor = template_actor or _resolve_actor(template)
@@ -3437,6 +3470,8 @@ def runtime_state_snapshot(ctx=None):
         'lists': lists,
         'mouse_locked': bool(ctx.mouse_locked),
         'binding_error': ctx.binding_error,
+        'isolated': bool(ctx.isolated),
+        'isolation_reason': ctx.isolation_reason,
         'current_node_id': ctx.current_node_id,
         'current_node_name': ctx.current_node_name,
         'waiting_edge_id': ctx.waiting_edge_id,
@@ -3674,7 +3709,7 @@ def _tick_runtime_physics_auto():
 
 
 def check_stop():
-    if _current_context().stop_requested:
+    if _current_context().stop_requested or _current_context().isolated:
         raise SystemExit(0)
     _tick_runtime_physics_auto()
 
@@ -3743,7 +3778,9 @@ def restart_level():
 def _run_bound_handler(ctx, handler, label):
     try:
         with using_context(ctx):
+            check_stop()
             handler()
+            check_stop()
     except SystemExit:
         pass
     except Exception:
@@ -3813,6 +3850,7 @@ def _run_clone_context(child, handler, parent_context_id):
 
 
 def clone(name):
+    check_stop()
     parent = _current_context()
     template = str(name or "").strip() or str(parent.actor_name or "").strip()
     if not template:
@@ -3989,6 +4027,7 @@ def RB(message):
 
 
 def _broadcast(message, wait_for_handlers):
+    check_stop()
     key = str(message or '')
     calls = []
     for ctx in _live_contexts():
@@ -4005,7 +4044,10 @@ def _broadcast(message, wait_for_handlers):
             thread.start()
     if wait_for_handlers:
         for thread in calls:
-            thread.join()
+            while thread.is_alive():
+                check_stop()
+                thread.join(timeout=0.05)
+        check_stop()
     return len(calls)
 
 
@@ -5331,8 +5373,9 @@ def request_stop(context_id: str | None = None):
 
 def request_stop_all():
     with _context_lock:
-        for ctx in _contexts.values():
-            ctx.stop_requested = True
+        for context_id, ctx in _contexts.items():
+            if context_id != "default":
+                ctx.stop_requested = True
 
 
 def reset_stop():

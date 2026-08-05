@@ -3,6 +3,7 @@
 
 #include <corona/kernel/core/i_logger.h>
 #include <corona/resource/resource_manager.h>
+#include <corona/resource/types/image.h>
 #include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/script/corona_engine_api.h>
@@ -16,13 +17,16 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <filesystem>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
 #include "browser_manager.h"
 #include "cef_client.h"
+#include "request_response_broker.h"
 
 namespace Corona::Systems::UI {
 
@@ -51,6 +55,97 @@ struct CameraWindowModeState {
 };
 
 static std::unordered_map<int, CameraWindowModeState> s_camera_window_modes;
+
+struct ViewportGizmoDragRuntime {
+    std::uintptr_t actor_handle{};
+    Corona::ViewportGizmoAxis axis{Corona::ViewportGizmoAxis::None};
+    ktm::fvec3 initial_position{};
+    ktm::fvec3 last_position{};
+    ktm::fvec2 initial_pointer{};
+    ktm::fvec2 fallback_screen_direction{};
+    std::optional<float> initial_axis_parameter;
+    bool fallback_logged{false};
+    bool write_failure_logged{false};
+    std::string scene_id;
+    std::string actor_name;
+};
+
+static std::mutex s_viewport_gizmo_mutex;
+static std::unordered_map<std::uintptr_t, ViewportGizmoDragRuntime>
+    s_viewport_gizmo_drags;
+
+struct ViewportGizmoCpuMasks {
+    std::array<std::vector<std::uint8_t>, 3> alpha;
+    std::array<Corona::Systems::OpticsDetail::ViewportGizmoSpriteMask, 3> views;
+    bool valid{false};
+};
+
+const ViewportGizmoCpuMasks& viewport_gizmo_cpu_masks() {
+    static ViewportGizmoCpuMasks masks;
+    static std::once_flag load_once;
+    std::call_once(load_once, [] {
+        constexpr std::array<const char*, 3> paths{{
+            "assets/icon/axis_x.png",
+            "assets/icon/axis_y.png",
+            "assets/icon/axis_z.png",
+        }};
+        std::error_code ec;
+        auto root = std::filesystem::current_path(ec);
+        for (std::size_t i = 0; i < paths.size(); ++i) {
+            auto path = std::filesystem::path(paths[i]);
+            if (!ec) {
+                for (auto dir = root; !dir.empty(); dir = dir.parent_path()) {
+                    const auto candidate = dir / paths[i];
+                    if (std::filesystem::exists(candidate, ec) && !ec) {
+                        path = candidate;
+                        break;
+                    }
+                    ec.clear();
+                    if (dir == dir.parent_path()) break;
+                }
+            }
+            const auto image_id =
+                Corona::Resource::ResourceManager::get_instance().import_sync(path);
+            if (image_id == Corona::Resource::IResource::INVALID_UID) {
+                CFW_LOG_WARNING("Viewport gizmo alpha mask load failed: {}", path.string());
+                return;
+            }
+            auto image =
+                Corona::Resource::ResourceManager::get_instance()
+                    .acquire_read<Corona::Resource::Image>(image_id);
+            if (!image || image->get_width() <= 0 || image->get_height() <= 0 ||
+                image->get_data() == nullptr) {
+                CFW_LOG_WARNING("Viewport gizmo alpha mask is invalid: {}", path.string());
+                return;
+            }
+            const auto width = static_cast<std::uint32_t>(image->get_width());
+            const auto height = static_cast<std::uint32_t>(image->get_height());
+            const int channels = image->get_channels();
+            if (channels != 4) {
+                CFW_LOG_WARNING("Viewport gizmo image has no alpha channel: {}", path.string());
+                return;
+            }
+            const auto pixel_count =
+                static_cast<std::size_t>(width) * static_cast<std::size_t>(height);
+            masks.alpha[i].resize(pixel_count);
+            const auto* pixels = image->get_data();
+            for (std::size_t pixel = 0; pixel < pixel_count; ++pixel) {
+                masks.alpha[i][pixel] = pixels[pixel * 4 + 3];
+            }
+            const auto& metadata =
+                Corona::Systems::OpticsDetail::kViewportGizmoSpriteMetadata[i];
+            masks.views[i] = {
+                .alpha = masks.alpha[i],
+                .width = width,
+                .height = height,
+                .anchor = metadata.anchor,
+                .tip = metadata.tip,
+            };
+        }
+        masks.valid = true;
+    });
+    return masks;
+}
 
 bool set_browser_tab_system_cursor_state(CefRefPtr<CefBrowser> browser, bool hidden, bool custom) {
     if (!browser) {
@@ -309,47 +404,12 @@ bool handle_camera_viewport_fast(const CefRefPtr<CefProcessMessage>& message) {
     return true;
 }
 
-void append_geometry_handle(std::vector<std::uintptr_t>& handles, std::uintptr_t geometry_handle) {
-    if (geometry_handle == 0) {
-        return;
-    }
-    if (std::find(handles.begin(), handles.end(), geometry_handle) == handles.end()) {
-        handles.push_back(geometry_handle);
-    }
-}
-
 std::vector<std::uintptr_t> resolve_profile_handles(std::uintptr_t actor_handle) {
     std::vector<std::uintptr_t> profile_handles;
     if (auto actor = Corona::SharedDataHub::instance().actor_storage().try_acquire_read(actor_handle)) {
         profile_handles = actor->profile_handles;
     }
     return profile_handles;
-}
-
-std::vector<std::uintptr_t> resolve_actor_geometry_handles(std::uintptr_t actor_handle) {
-    std::vector<std::uintptr_t> profile_handles;
-    if (auto actor = Corona::SharedDataHub::instance().actor_storage().try_acquire_read(actor_handle)) {
-        profile_handles = actor->profile_handles;
-    }
-
-    std::vector<std::uintptr_t> geometry_handles;
-    auto& hub = Corona::SharedDataHub::instance();
-    for (const auto profile_handle : profile_handles) {
-        if (auto profile = hub.profile_storage().try_acquire_read(profile_handle)) {
-            append_geometry_handle(geometry_handles, profile->geometry_handle);
-            if (auto mechanics = hub.mechanics_storage().try_acquire_read(profile->mechanics_handle)) {
-                append_geometry_handle(geometry_handles, mechanics->geometry_handle);
-            }
-            if (auto optics = hub.optics_storage().try_acquire_read(profile->optics_handle)) {
-                append_geometry_handle(geometry_handles, optics->geometry_handle);
-            }
-            if (auto acoustics = hub.acoustics_storage().try_acquire_read(profile->acoustics_handle)) {
-                append_geometry_handle(geometry_handles, acoustics->geometry_handle);
-            }
-        }
-    }
-
-    return geometry_handles;
 }
 
 struct FocusBounds {
@@ -642,7 +702,8 @@ bool handle_actor_transform_fast(const CefRefPtr<CefProcessMessage>& message) {
 
     const auto operation = args->GetInt(1);
     auto& hub = Corona::SharedDataHub::instance();
-    for (const auto geometry_handle : resolve_actor_geometry_handles(actor_handle)) {
+    for (const auto geometry_handle :
+         hub.resolve_actor_geometry_handles(actor_handle)) {
         auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
         if (!geometry || geometry->transform_handle == 0) {
             continue;
@@ -669,11 +730,35 @@ bool handle_actor_transform_fast(const CefRefPtr<CefProcessMessage>& message) {
 
 void send_viewport_pick_result(const CefRefPtr<CefFrame>& frame,
                                const nlohmann::json& payload) {
-    (void)frame;
-    auto event_payload = payload.is_object()
-                             ? payload
-                             : nlohmann::json::object({{"payload", payload}});
-    emit_editor_api_event("SceneTools.actorPickResult", event_payload);
+    emit_editor_api_event_to_frame("SceneTools.actorPickResult", payload, frame);
+}
+
+void drain_actor_pick_completion_events_impl() {
+    for (const auto& completion : Corona::SharedDataHub::instance().drain_actor_pick_completions()) {
+        CFW_LOG_DEBUG("ViewportPick completion: camera={} scene='{}' request={} status={} actor=0x{:x} cam_px=({}, {})",
+                      completion.camera_handle,
+                      completion.scene_id,
+                      completion.request_id,
+                      completion.status,
+                      completion.actor_handle,
+                      completion.x,
+                      completion.y);
+        nlohmann::json payload = {
+            {"status", completion.status},
+            {"sceneId", completion.scene_id},
+            {"cameraHandle", static_cast<std::uint64_t>(completion.camera_handle)},
+            {"requestId", completion.request_id},
+            {"actorHandle", static_cast<std::uint64_t>(completion.actor_handle)},
+            {"x", completion.x},
+            {"y", completion.y},
+        };
+        cef_request_response_broker().complete(
+            completion.request_id, completion.camera_handle, completion.scene_id,
+            CefResponse{completion.status, std::move(payload)});
+    }
+    auto& broker = cef_request_response_broker();
+    broker.expire();
+    broker.dispatch();
 }
 
 bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
@@ -701,22 +786,18 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
     const double vp_w = read_double(5);
     const double vp_h = read_double(6);
 
-    auto emit = [&](const std::string& status,
-                    std::uintptr_t actor_handle,
-                    std::uint32_t result_x,
-                    std::uint32_t result_y,
-                    const char* message_text = nullptr) {
-        nlohmann::json payload;
-        payload["status"] = status;
-        payload["sceneId"] = scene_id;
-        payload["cameraHandle"] = static_cast<std::uint64_t>(camera_handle);
-        payload["requestId"] = request_id;
-        payload["actorHandle"] = static_cast<std::uint64_t>(actor_handle);
-        payload["x"] = result_x;
-        payload["y"] = result_y;
-        if (message_text) {
-            payload["message"] = message_text;
-        }
+    auto emit_error = [&](const char* message_text, std::uint32_t result_x = 0,
+                          std::uint32_t result_y = 0) {
+        nlohmann::json payload = {
+            {"status", "error"},
+            {"sceneId", scene_id},
+            {"cameraHandle", static_cast<std::uint64_t>(camera_handle)},
+            {"requestId", request_id},
+            {"actorHandle", 0},
+            {"x", result_x},
+            {"y", result_y},
+        };
+        if (message_text) payload["message"] = message_text;
         send_viewport_pick_result(frame, payload);
     };
 
@@ -724,7 +805,7 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
         vp_w <= 0.0 || vp_h <= 0.0 || !std::isfinite(x) || !std::isfinite(y)) {
         CFW_LOG_WARNING("ViewportPick: invalid params (camera={}, scene='{}', request='{}', vp={}x{})",
                         camera_handle, scene_id, request_id, vp_w, vp_h);
-        emit("error", 0, 0, 0, "invalid params");
+        emit_error("invalid params");
         return true;
     }
 
@@ -739,7 +820,35 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
         actor_pick_handle = cam->actor_pick_handle;
     } else {
         CFW_LOG_WARNING("ViewportPick: camera {} is unavailable", camera_handle);
-        emit("error", 0, 0, 0, "camera unavailable");
+        emit_error("camera unavailable");
+        return true;
+    }
+
+    const auto browser = frame ? frame->GetBrowser() : nullptr;
+    const int browser_id = browser ? browser->GetIdentifier() : 0;
+    const std::string frame_id = frame ? frame->GetIdentifier().ToString() : std::string{};
+    if (!browser || browser_id <= 0 || frame_id.empty()) {
+        emit_error("invalid CEF frame");
+        return true;
+    }
+
+    const bool registered = cef_request_response_broker().register_request(
+        CefRequestContext{request_id, browser_id, frame_id, camera_handle, scene_id},
+        [frame](const CefRequestContext& context, const CefResponse& response) {
+            auto payload = response.payload.is_object()
+                               ? response.payload
+                               : nlohmann::json::object();
+            payload["status"] = response.status;
+            payload["sceneId"] = context.scene_id;
+            payload["cameraHandle"] = static_cast<std::uint64_t>(context.camera_handle);
+            payload["requestId"] = context.request_id;
+            if (!payload.contains("actorHandle")) payload["actorHandle"] = 0;
+            if (!payload.contains("x")) payload["x"] = 0;
+            if (!payload.contains("y")) payload["y"] = 0;
+            send_viewport_pick_result(frame, payload);
+        });
+    if (!registered) {
+        emit_error("duplicate requestId");
         return true;
     }
 
@@ -749,7 +858,7 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
         scaled_x >= cam_w || scaled_y >= cam_h) {
         CFW_LOG_DEBUG("ViewportPick miss: camera={} request={} pos=({},{}) -> scaled=({},{})",
                       camera_handle, request_id, x, y, scaled_x, scaled_y);
-        emit("miss", 0, 0, 0);
+        hub.enqueue_actor_pick_completion({camera_handle, scene_id, request_id, "miss", 0, 0, 0});
         return true;
     }
 
@@ -757,42 +866,23 @@ bool handle_viewport_pick(const CefRefPtr<CefFrame>& frame,
     const auto pick_y = static_cast<std::uint32_t>(scaled_y);
 
     if (actor_pick_handle == 0) {
+        cef_request_response_broker().cancel(request_id);
         CFW_LOG_WARNING("ViewportPick: camera {} has no actor pick storage", camera_handle);
-        emit("error", 0, pick_x, pick_y, "actor pick unavailable");
+        emit_error("actor pick unavailable", pick_x, pick_y);
         return true;
     }
 
     auto pick = hub.actor_pick_storage().try_acquire_write(actor_pick_handle);
     if (!pick) {
+        cef_request_response_broker().cancel(request_id);
         CFW_LOG_WARNING("ViewportPick: pick storage {} is unavailable", actor_pick_handle);
-        emit("error", 0, pick_x, pick_y, "actor pick storage unavailable");
+        emit_error("actor pick storage unavailable", pick_x, pick_y);
         return true;
     }
 
-    if (pick->result_ready && pick->result_request_id == request_id &&
-        pick->result_x == pick_x && pick->result_y == pick_y) {
-        const auto picked_actor = pick->actor_handle;
-        emit(picked_actor != 0 ? "success" : "miss", picked_actor, pick_x, pick_y);
-        CFW_LOG_DEBUG("ViewportPick result: camera={} request={} cam_px=({},{}) -> handle=0x{:x}",
-                      camera_handle, request_id, pick_x, pick_y, picked_actor);
-        return true;
-    }
-
-    if (pick->request_id == request_id &&
-        pick->x == pick_x &&
-        pick->y == pick_y &&
-        !pick->result_ready) {
-        emit("pending", 0, pick_x, pick_y);
-        return true;
-    }
-
-    pick->request_id = request_id;
-    pick->x = pick_x;
-    pick->y = pick_y;
-    pick->pending = true;
-    pick->result_ready = false;
-    emit("pending", 0, pick_x, pick_y);
-    CFW_LOG_DEBUG("ViewportPick pending: camera={} scene='{}' request={} pos=({},{}) vp={}x{} cam={}x{} -> cam_px=({},{})",
+    (void)pick;
+    hub.enqueue_actor_pick_request({camera_handle, scene_id, request_id, pick_x, pick_y});
+    CFW_LOG_DEBUG("ViewportPick enqueue: camera={} scene='{}' request={} pos=({},{}) vp={}x{} cam={}x{} -> cam_px=({},{})",
                   camera_handle, scene_id, request_id, x, y, vp_w, vp_h, cam_w, cam_h, pick_x, pick_y);
 
     return true;
@@ -811,6 +901,373 @@ Corona::ViewportUiCursorShape parse_viewport_ui_cursor_shape(const std::string& 
     if (shape == "grabbing") return Corona::ViewportUiCursorShape::Grabbing;
     if (shape == "hidden" || shape == "none") return Corona::ViewportUiCursorShape::Hidden;
     return Corona::ViewportUiCursorShape::Arrow;
+}
+
+const char* viewport_gizmo_axis_name(Corona::ViewportGizmoAxis axis) {
+    switch (axis) {
+        case Corona::ViewportGizmoAxis::X: return "x";
+        case Corona::ViewportGizmoAxis::Y: return "y";
+        case Corona::ViewportGizmoAxis::Z: return "z";
+        default: return "none";
+    }
+}
+
+ktm::fvec3 viewport_gizmo_axis_vector(Corona::ViewportGizmoAxis axis) {
+    switch (axis) {
+        case Corona::ViewportGizmoAxis::X: return make_fvec3(1.0f, 0.0f, 0.0f);
+        case Corona::ViewportGizmoAxis::Y: return make_fvec3(0.0f, 1.0f, 0.0f);
+        case Corona::ViewportGizmoAxis::Z: return make_fvec3(0.0f, 0.0f, 1.0f);
+        default: return make_fvec3(0.0f, 0.0f, 0.0f);
+    }
+}
+
+std::optional<ktm::fvec3> actor_gizmo_position(std::uintptr_t actor_handle) {
+    auto& hub = Corona::SharedDataHub::instance();
+    for (const auto geometry_handle :
+         hub.resolve_actor_geometry_handles(actor_handle)) {
+        auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
+        if (!geometry || geometry->transform_handle == 0) {
+            continue;
+        }
+        if (auto transform =
+                hub.model_transform_storage().try_acquire_read(geometry->transform_handle)) {
+            return transform->position;
+        }
+    }
+    return std::nullopt;
+}
+
+bool write_actor_gizmo_position(std::uintptr_t actor_handle,
+                                const ktm::fvec3& position) {
+    bool wrote = false;
+    auto& hub = Corona::SharedDataHub::instance();
+    for (const auto geometry_handle :
+         hub.resolve_actor_geometry_handles(actor_handle)) {
+        auto geometry = hub.geometry_storage().try_acquire_read(geometry_handle);
+        if (!geometry || geometry->transform_handle == 0) {
+            continue;
+        }
+        if (auto transform =
+                hub.model_transform_storage().try_acquire_write(geometry->transform_handle)) {
+            transform->position = position;
+            wrote = true;
+        }
+    }
+    return wrote;
+}
+
+ktm::fvec3 viewport_gizmo_pointer_ray(const Corona::CameraDevice& camera,
+                                      ktm::fvec2 pixel,
+                                      float width,
+                                      float height) {
+    const auto forward = ktm::normalize(camera.forward);
+    auto right = ktm::cross(camera.world_up, forward);
+    right = ktm::length(right) > 1.0e-5f
+                ? ktm::normalize(right)
+                : make_fvec3(1.0f, 0.0f, 0.0f);
+    const auto up = ktm::normalize(ktm::cross(forward, right));
+    const float ndc_x = 2.0f * pixel.x / std::max(width, 1.0f) - 1.0f;
+    const float ndc_y = 2.0f * pixel.y / std::max(height, 1.0f) - 1.0f;
+    const float tan_half_fov = std::tan(ktm::radians(camera.fov) * 0.5f);
+    return ktm::normalize(
+        forward +
+        right * (ndc_x * tan_half_fov * camera.aspect) -
+        up * (ndc_y * tan_half_fov));
+}
+
+void emit_viewport_gizmo_result(const Corona::ViewportGizmoPointerResult& result,
+                                const Corona::ViewportGizmoTarget& target) {
+    nlohmann::json payload{
+        {"cameraHandle", static_cast<std::uint64_t>(result.camera_handle)},
+        {"requestId", result.request_id},
+        {"axis", viewport_gizmo_axis_name(result.axis)},
+        {"consumed", result.consumed},
+        {"dragging", result.dragging},
+        {"ended", result.ended},
+        {"cancelled", result.cancelled},
+        {"sceneId", target.scene_id},
+        {"actor", target.actor_name},
+        {"actorHandle", static_cast<std::uint64_t>(target.actor_handle)},
+        {"position", {result.position.x, result.position.y, result.position.z}},
+    };
+    emit_editor_api_event("SceneTools.viewportGizmoPointerResult", payload);
+}
+
+void emit_viewport_gizmo_transform(const Corona::ViewportGizmoTarget& target,
+                                   const ktm::fvec3& position) {
+    emit_editor_api_event(
+        "SceneTools.actorTransformUpdated",
+        nlohmann::json{
+            {"scene", target.scene_id},
+            {"actor", target.actor_name},
+            {"position", {position.x, position.y, position.z}},
+        });
+}
+
+bool handle_viewport_gizmo_target(const CefRefPtr<CefProcessMessage>& message) {
+    auto args = message->GetArgumentList();
+    double camera_value = 0.0;
+    double actor_value = 0.0;
+    if (!args || args->GetSize() < 4 ||
+        !get_numeric_arg(args, 0, camera_value) ||
+        args->GetType(1) != VTYPE_STRING ||
+        args->GetType(2) != VTYPE_STRING ||
+        !get_numeric_arg(args, 3, actor_value)) {
+        CFW_LOG_WARNING(
+            "ViewportGizmoTarget dropped: expected (cameraHandle, sceneId, actorName, actorHandle)");
+        return true;
+    }
+    const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
+    const auto actor_handle = static_cast<std::uintptr_t>(actor_value);
+    auto& hub = Corona::SharedDataHub::instance();
+    if (actor_handle == 0) {
+        hub.clear_viewport_gizmo_target(camera_handle);
+        std::lock_guard lock(s_viewport_gizmo_mutex);
+        s_viewport_gizmo_drags.erase(camera_handle);
+        CFW_LOG_INFO("Viewport gizmo target cleared: camera={}", camera_handle);
+        return true;
+    }
+    hub.set_viewport_gizmo_target({
+        .camera_handle = camera_handle,
+        .scene_id = args->GetString(1).ToString(),
+        .actor_name = args->GetString(2).ToString(),
+        .actor_handle = actor_handle,
+    });
+    CFW_LOG_INFO("Viewport gizmo target set: camera={} scene='{}' actor='{}' handle=0x{:x}",
+                 camera_handle,
+                 args->GetString(1).ToString(),
+                 args->GetString(2).ToString(),
+                 actor_handle);
+    return true;
+}
+
+bool handle_viewport_gizmo_pointer(const CefRefPtr<CefProcessMessage>& message) {
+    auto args = message->GetArgumentList();
+    double camera_value = 0.0;
+    double x_value = 0.0;
+    double y_value = 0.0;
+    double width_value = 0.0;
+    double height_value = 0.0;
+    double button_value = 0.0;
+    if (!args || args->GetSize() < 10 ||
+        !get_numeric_arg(args, 0, camera_value) ||
+        args->GetType(1) != VTYPE_STRING ||
+        args->GetType(2) != VTYPE_STRING ||
+        !get_numeric_arg(args, 3, x_value) ||
+        !get_numeric_arg(args, 4, y_value) ||
+        !get_numeric_arg(args, 5, width_value) ||
+        !get_numeric_arg(args, 6, height_value) ||
+        !get_numeric_arg(args, 7, button_value)) {
+        CFW_LOG_WARNING("ViewportGizmoPointer dropped: invalid arguments");
+        return true;
+    }
+
+    const auto camera_handle = static_cast<std::uintptr_t>(camera_value);
+    const std::string request_id = args->GetString(1).ToString();
+    std::string event_type = args->GetString(2).ToString();
+    std::transform(event_type.begin(), event_type.end(), event_type.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+
+    auto& hub = Corona::SharedDataHub::instance();
+    const auto state = hub.viewport_gizmo_state(camera_handle);
+    Corona::ViewportGizmoPointerResult result;
+    result.camera_handle = camera_handle;
+    result.request_id = request_id;
+    if (state.target.actor_handle == 0 || width_value <= 0.0 || height_value <= 0.0) {
+        emit_viewport_gizmo_result(result, state.target);
+        return true;
+    }
+
+    auto camera = hub.camera_storage().try_acquire_read(camera_handle);
+    const auto current_position = actor_gizmo_position(state.target.actor_handle);
+    if (!camera || !current_position) {
+        hub.clear_viewport_gizmo_target(camera_handle);
+        emit_viewport_gizmo_result(result, state.target);
+        return true;
+    }
+
+    const float camera_width = static_cast<float>(std::max(camera->width, 1u));
+    const float camera_height = static_cast<float>(std::max(camera->height, 1u));
+    ktm::fvec2 pointer{
+        static_cast<float>(x_value / width_value) * camera_width,
+        static_cast<float>(y_value / height_value) * camera_height,
+    };
+    const auto ui_state = hub.viewport_ui_state(camera_handle);
+    if (ui_state.mode == Corona::ViewportUiMode::Stereo3D) {
+        pointer = Corona::Systems::OpticsDetail::viewport_ui_prewarp_point(
+            pointer,
+            {
+                .lenticular_pitch = ui_state.calibration.lenticular_pitch,
+                .slant_angle_radians = ui_state.calibration.slant_angle_radians,
+                .phase_offset = ui_state.calibration.phase_offset,
+                .green_subpixel_offset = ui_state.calibration.rgb_subpixel_offsets[1],
+                .parallax_scale = ui_state.calibration.parallax_scale,
+            });
+    }
+
+    const auto layout = Corona::Systems::OpticsDetail::make_viewport_gizmo_layout(
+        camera->compute_view_proj_matrix(), *current_position,
+        camera->width, camera->height, 128.0f);
+    const auto& cpu_masks = viewport_gizmo_cpu_masks();
+    const auto hover_axis =
+        cpu_masks.valid
+            ? Corona::Systems::OpticsDetail::hit_test_viewport_gizmo_alpha(
+                  layout, pointer, cpu_masks.views, 8.0f, 128.0f)
+            : Corona::ViewportGizmoAxis::None;
+
+    std::lock_guard lock(s_viewport_gizmo_mutex);
+    auto drag_it = s_viewport_gizmo_drags.find(camera_handle);
+    const bool cancel_event =
+        event_type == "cancel" || event_type == "pointercancel" ||
+        event_type == "blur" || event_type == "escape";
+    const bool up_event = event_type == "up" || event_type == "pointerup";
+    const bool down_event = event_type == "down" || event_type == "pointerdown";
+
+    if (cancel_event && drag_it != s_viewport_gizmo_drags.end()) {
+        const bool restored = write_actor_gizmo_position(
+            drag_it->second.actor_handle, drag_it->second.initial_position);
+        CFW_LOG_WARNING("Viewport gizmo drag cancelled: camera={} actor='{}' axis={} event='{}' restored={}",
+                        camera_handle,
+                        drag_it->second.actor_name,
+                        static_cast<int>(drag_it->second.axis),
+                        event_type,
+                        restored);
+        result.axis = drag_it->second.axis;
+        result.consumed = true;
+        result.cancelled = true;
+        result.position = drag_it->second.initial_position;
+        emit_viewport_gizmo_transform(state.target, result.position);
+        s_viewport_gizmo_drags.erase(drag_it);
+        hub.update_viewport_gizmo_interaction(
+            camera_handle, Corona::ViewportGizmoAxis::None, false);
+        emit_viewport_gizmo_result(result, state.target);
+        return true;
+    }
+
+    if (down_event && static_cast<int>(button_value) == 0 &&
+        drag_it == s_viewport_gizmo_drags.end() &&
+        hover_axis != Corona::ViewportGizmoAxis::None) {
+        const auto axis_vector = viewport_gizmo_axis_vector(hover_axis);
+        const auto ray =
+            viewport_gizmo_pointer_ray(*camera, pointer, camera_width, camera_height);
+        ViewportGizmoDragRuntime drag;
+        drag.actor_handle = state.target.actor_handle;
+        drag.axis = hover_axis;
+        drag.initial_position = *current_position;
+        drag.last_position = *current_position;
+        drag.initial_pointer = pointer;
+        const std::size_t axis_index =
+            hover_axis == Corona::ViewportGizmoAxis::X ? 0u :
+            (hover_axis == Corona::ViewportGizmoAxis::Y ? 1u : 2u);
+        drag.fallback_screen_direction = layout.axes[axis_index].direction;
+        drag.initial_axis_parameter =
+            Corona::Systems::OpticsDetail::closest_axis_parameter(
+                camera->position, ray, *current_position, axis_vector);
+        drag.scene_id = state.target.scene_id;
+        drag.actor_name = state.target.actor_name;
+        s_viewport_gizmo_drags[camera_handle] = drag;
+        CFW_LOG_INFO("Viewport gizmo drag start: camera={} actor='{}' axis={} initial_parameter={}",
+                     camera_handle,
+                     state.target.actor_name,
+                     static_cast<int>(hover_axis),
+                     drag.initial_axis_parameter
+                         ? std::to_string(*drag.initial_axis_parameter)
+                         : std::string("degenerate"));
+        hub.update_viewport_gizmo_interaction(camera_handle, hover_axis, true);
+        result.axis = hover_axis;
+        result.consumed = true;
+        result.dragging = true;
+        result.position = *current_position;
+        emit_viewport_gizmo_result(result, state.target);
+        return true;
+    }
+
+    drag_it = s_viewport_gizmo_drags.find(camera_handle);
+    if (drag_it != s_viewport_gizmo_drags.end()) {
+        auto& drag = drag_it->second;
+        const auto axis_vector = viewport_gizmo_axis_vector(drag.axis);
+        const auto ray =
+            viewport_gizmo_pointer_ray(*camera, pointer, camera_width, camera_height);
+        const auto parameter =
+            Corona::Systems::OpticsDetail::closest_axis_parameter(
+                camera->position, ray, drag.initial_position, axis_vector);
+        const float depth = std::max(
+            ktm::dot(drag.initial_position - camera->position,
+                     ktm::normalize(camera->forward)),
+            camera->near_plane);
+        const float world_per_pixel =
+            2.0f * depth * std::tan(ktm::radians(camera->fov) * 0.5f) /
+            camera_height;
+        float delta = 0.0f;
+        if (parameter && drag.initial_axis_parameter) {
+            delta = *parameter - *drag.initial_axis_parameter;
+        } else {
+            if (!drag.fallback_logged) {
+                CFW_LOG_WARNING("Viewport gizmo drag fallback: camera={} actor='{}' axis={} parameter_valid={} initial_parameter_valid={} screen_direction=({}, {}) world_per_pixel={}",
+                                camera_handle,
+                                drag.actor_name,
+                                static_cast<int>(drag.axis),
+                                parameter.has_value(),
+                                drag.initial_axis_parameter.has_value(),
+                                drag.fallback_screen_direction.x,
+                                drag.fallback_screen_direction.y,
+                                world_per_pixel);
+                drag.fallback_logged = true;
+            }
+            delta = ktm::dot(pointer - drag.initial_pointer,
+                             drag.fallback_screen_direction) * world_per_pixel;
+        }
+        delta = std::clamp(delta, -10000.0f, 10000.0f);
+        const float previous_delta =
+            ktm::dot(drag.last_position - drag.initial_position, axis_vector);
+        const float max_frame_delta = std::max(world_per_pixel * 256.0f, 0.25f);
+        delta = std::clamp(
+            delta,
+            previous_delta - max_frame_delta,
+            previous_delta + max_frame_delta);
+        const auto next_position = drag.initial_position + axis_vector * delta;
+        const bool wrote = write_actor_gizmo_position(drag.actor_handle, next_position);
+        if (wrote) {
+            drag.last_position = next_position;
+            emit_viewport_gizmo_transform(state.target, next_position);
+        } else if (!drag.write_failure_logged) {
+            CFW_LOG_WARNING("Viewport gizmo transform write failed: camera={} actor='{}' axis={} handle={}",
+                            camera_handle,
+                            drag.actor_name,
+                            static_cast<int>(drag.axis),
+                            drag.actor_handle);
+            drag.write_failure_logged = true;
+        }
+        result.axis = drag.axis;
+        result.consumed = true;
+        result.position = next_position;
+        if (up_event) {
+            CFW_LOG_INFO("Viewport gizmo drag ended: camera={} actor='{}' axis={} position=({}, {}, {})",
+                         camera_handle,
+                         drag.actor_name,
+                         static_cast<int>(drag.axis),
+                         next_position.x,
+                         next_position.y,
+                         next_position.z);
+            result.ended = true;
+            result.dragging = false;
+            s_viewport_gizmo_drags.erase(drag_it);
+            hub.update_viewport_gizmo_interaction(
+                camera_handle, Corona::ViewportGizmoAxis::None, false);
+        } else {
+            result.dragging = true;
+            hub.update_viewport_gizmo_interaction(camera_handle, drag.axis, true);
+        }
+        emit_viewport_gizmo_result(result, state.target);
+        return true;
+    }
+
+    hub.update_viewport_gizmo_interaction(
+        camera_handle, Corona::ViewportGizmoAxis::None, false, hover_axis);
+    result.axis = hover_axis;
+    result.position = *current_position;
+    emit_viewport_gizmo_result(result, state.target);
+    return true;
 }
 
 // 把 Vision 光场语义参数 (pe/angle/offset, 子像素单位) 转成 warp 消费的
@@ -1930,6 +2387,10 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
 
 }  // namespace
 
+void drain_actor_pick_completion_events() {
+    drain_actor_pick_completion_events_impl();
+}
+
 bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
                                      CefRefPtr<CefFrame> frame,
                                      const CefRefPtr<CefProcessMessage>& message) {
@@ -1963,6 +2424,14 @@ bool handle_realtime_process_message(CefRefPtr<CefBrowser> browser,
 
     if (message->GetName() == "ViewportPick") {
         return handle_viewport_pick(frame, message);
+    }
+
+    if (message->GetName() == "ViewportGizmoTarget") {
+        return handle_viewport_gizmo_target(message);
+    }
+
+    if (message->GetName() == "ViewportGizmoPointer") {
+        return handle_viewport_gizmo_pointer(message);
     }
 
     if (message->GetName() == "ViewportUiMode") {

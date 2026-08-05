@@ -1,4 +1,5 @@
 import { aiService } from '@/utils/bridge.js';
+import { createServiceResponseError } from '@/utils/serviceInitialization.js';
 
 const CHANNEL_NAME = 'corona-cabbage-assistant-context-v2';
 const TRANSIENT_CHANNEL_NAME = 'corona-cabbage-assistant-transient-v1';
@@ -72,7 +73,7 @@ function normalizeSnapshot(value) {
   const taskHistory = (Array.isArray(context.taskHistory) ? context.taskHistory : []).map(normalizeTask).filter(Boolean);
   const selectedTaskKey = String(value.selectedTaskKey || context.selectedTaskKey || '');
   return {
-    schemaVersion: 1,
+    schemaVersion: Number(context.schemaVersion) || 2,
     worldId: String(context.worldId || ''),
     projectScopeId: String(value.projectScopeId || context.projectScopeId || currentScopeId()),
     graphRevision: String(value.graphRevision || context.graphRevision || ''),
@@ -85,6 +86,7 @@ function normalizeSnapshot(value) {
     worldGoal: clone(context.worldGoal || {}, {}),
     goalTaskPlan: clone(context.goalTaskPlan || {}, {}),
     goalSignalCounts: clone(context.goalSignalCounts || {}, {}),
+    tutorialSession: clone(context.tutorialSession || {}, {}),
     activeTasks,
     taskHistory,
     chatMessages: clone(context.chatMessages || [], []),
@@ -231,7 +233,7 @@ export async function loadCurrentWorld() {
   const expectedWorldId = currentWorldId();
   const response = await aiService.loadCabbageContext({ worldId: expectedWorldId });
   if (response?.success !== true || !response?.context) {
-    throw new Error(response?.message || '加载当前世界的包菜上下文失败');
+    throw createServiceResponseError(response, '加载当前世界的包菜上下文失败');
   }
   const loadedWorldId = String(response.context.worldId || '');
   if (expectedWorldId && loadedWorldId !== expectedWorldId) {

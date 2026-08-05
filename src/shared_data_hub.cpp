@@ -48,6 +48,59 @@ const SharedDataHub::ProfileStorage& SharedDataHub::profile_storage() const { re
 SharedDataHub::ActorStorage& SharedDataHub::actor_storage() { return actor_storage_; }
 const SharedDataHub::ActorStorage& SharedDataHub::actor_storage() const { return actor_storage_; }
 
+std::vector<std::uintptr_t> SharedDataHub::resolve_actor_geometry_handles(
+    std::uintptr_t actor_handle) {
+    std::vector<std::uintptr_t> geometry_handles;
+    const auto append_geometry = [&geometry_handles](std::uintptr_t geometry_handle) {
+        if (geometry_handle != 0 &&
+            std::find(geometry_handles.begin(), geometry_handles.end(),
+                      geometry_handle) == geometry_handles.end()) {
+            geometry_handles.push_back(geometry_handle);
+        }
+    };
+
+    const auto actor = actor_storage_.try_acquire_read(actor_handle);
+    if (!actor) {
+        return geometry_handles;
+    }
+    for (const auto profile_handle : actor->profile_handles) {
+        const auto profile = profile_storage_.try_acquire_read(profile_handle);
+        if (!profile) {
+            continue;
+        }
+        append_geometry(profile->geometry_handle);
+        if (const auto mechanics =
+                mechanics_storage_.try_acquire_read(profile->mechanics_handle)) {
+            append_geometry(mechanics->geometry_handle);
+        }
+        if (const auto optics =
+                optics_storage_.try_acquire_read(profile->optics_handle)) {
+            append_geometry(optics->geometry_handle);
+        }
+        if (const auto acoustics =
+                acoustics_storage_.try_acquire_read(profile->acoustics_handle)) {
+            append_geometry(acoustics->geometry_handle);
+        }
+    }
+    return geometry_handles;
+}
+
+std::optional<std::uintptr_t>
+SharedDataHub::resolve_actor_primary_transform_handle(
+    std::uintptr_t actor_handle) {
+    for (const auto geometry_handle :
+         resolve_actor_geometry_handles(actor_handle)) {
+        const auto geometry = geometry_storage_.try_acquire_read(geometry_handle);
+        if (geometry && geometry->transform_handle != 0) {
+            if (model_transform_storage_.try_acquire_read(
+                    geometry->transform_handle)) {
+                return geometry->transform_handle;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 void SharedDataHub::set_actor_guid(std::uintptr_t actor_handle, std::string actor_guid) {
     if (actor_handle == 0) {
         return;
@@ -106,6 +159,45 @@ const SharedDataHub::CameraStorage& SharedDataHub::camera_storage() const { retu
 
 SharedDataHub::ActorPickStorage& SharedDataHub::actor_pick_storage() { return actor_pick_storage_; }
 const SharedDataHub::ActorPickStorage& SharedDataHub::actor_pick_storage() const { return actor_pick_storage_; }
+
+void SharedDataHub::enqueue_actor_pick_request(ActorPickRequestCommand command) {
+    if (command.camera_handle == 0 || command.request_id.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    pending_actor_pick_requests_.push_back(std::move(command));
+}
+
+std::optional<ActorPickRequestCommand> SharedDataHub::take_actor_pick_request(
+    std::uintptr_t camera_handle) {
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    const auto it = std::find_if(pending_actor_pick_requests_.begin(),
+                                 pending_actor_pick_requests_.end(),
+                                 [camera_handle](const auto& request) {
+                                     return request.camera_handle == camera_handle;
+                                 });
+    if (it == pending_actor_pick_requests_.end()) {
+        return std::nullopt;
+    }
+    auto request = std::move(*it);
+    pending_actor_pick_requests_.erase(it);
+    return request;
+}
+
+void SharedDataHub::enqueue_actor_pick_completion(ActorPickCompletion completion) {
+    if (completion.camera_handle == 0 || completion.request_id.empty()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    actor_pick_completions_.push_back(std::move(completion));
+}
+
+std::vector<ActorPickCompletion> SharedDataHub::drain_actor_pick_completions() {
+    std::lock_guard<std::mutex> lock(actor_pick_queue_mutex_);
+    std::vector<ActorPickCompletion> completions;
+    completions.swap(actor_pick_completions_);
+    return completions;
+}
 
 SharedDataHub::EnvironmentStorage& SharedDataHub::environment_storage() { return environment_storage_; }
 const SharedDataHub::EnvironmentStorage& SharedDataHub::environment_storage() const { return environment_storage_; }
@@ -302,5 +394,61 @@ std::vector<ViewportUiPointerCommand> SharedDataHub::drain_viewport_ui_pointer_c
         commands.swap(pending_viewport_ui_pointer_commands_);
     }
     return commands;
+}
+
+void SharedDataHub::set_viewport_gizmo_target(ViewportGizmoTarget target) {
+    if (target.camera_handle == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(viewport_gizmo_mutex_);
+    auto& state = viewport_gizmo_states_[target.camera_handle];
+    const bool changed = state.target.actor_handle != target.actor_handle ||
+                         state.target.scene_id != target.scene_id ||
+                         state.target.actor_name != target.actor_name;
+    state.target = std::move(target);
+    state.sequence = ++viewport_gizmo_sequence_;
+    if (changed) {
+        state.hover_axis = ViewportGizmoAxis::None;
+        state.active_axis = ViewportGizmoAxis::None;
+        state.dragging = false;
+    }
+}
+
+void SharedDataHub::clear_viewport_gizmo_target(std::uintptr_t camera_handle) {
+    if (camera_handle == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(viewport_gizmo_mutex_);
+    viewport_gizmo_states_.erase(camera_handle);
+    ++viewport_gizmo_sequence_;
+}
+
+ViewportGizmoState SharedDataHub::viewport_gizmo_state(
+    std::uintptr_t camera_handle) const {
+    std::lock_guard<std::mutex> lock(viewport_gizmo_mutex_);
+    const auto it = viewport_gizmo_states_.find(camera_handle);
+    if (it != viewport_gizmo_states_.end()) {
+        return it->second;
+    }
+    ViewportGizmoState state;
+    state.target.camera_handle = camera_handle;
+    return state;
+}
+
+void SharedDataHub::update_viewport_gizmo_interaction(
+    std::uintptr_t camera_handle,
+    ViewportGizmoAxis axis,
+    bool dragging,
+    ViewportGizmoAxis hover_axis) {
+    if (camera_handle == 0) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(viewport_gizmo_mutex_);
+    auto& state = viewport_gizmo_states_[camera_handle];
+    state.target.camera_handle = camera_handle;
+    state.active_axis = dragging ? axis : ViewportGizmoAxis::None;
+    state.hover_axis = dragging ? axis : hover_axis;
+    state.dragging = dragging;
+    state.sequence = ++viewport_gizmo_sequence_;
 }
 }  // namespace Corona

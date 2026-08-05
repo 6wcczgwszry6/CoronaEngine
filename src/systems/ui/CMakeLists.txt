@@ -14,6 +14,7 @@ set(UI_SYSTEM_SOURCES
     vulk/browser_manager_vulkan.cpp
 
     cef/browser_manager.cpp
+    cef/actor_selection_routing.h
     cef/browser_ui.cpp
     cef/cef_app.cpp
     cef/cef_client.cpp
@@ -25,6 +26,7 @@ set(UI_SYSTEM_SOURCES
     cef/vision_actor_transform_bridge.cpp
     cef/cef_query_bridge.cpp
     cef/cef_realtime_bridge.cpp
+    cef/request_response_broker.cpp
     cef/cef_renderer_bridge.cpp
     cef/cef_runtime.cpp
     cef/cef_py_bind.cpp
@@ -38,6 +40,7 @@ set(UI_SYSTEM_SOURCES
     cef/browser_ui.h
     cef/cef_app.h
     cef/cef_bridge_helpers.h
+    cef/request_response_broker.h
     cef/cef_client.h
     cef/cef_editor_native_api_registry.h
     cef/scene_folder.h
@@ -80,6 +83,7 @@ corona_add_system(ui
         corona::resource::manager
         assimp::assimp
         nlohmann_json::nlohmann_json
+        corona::python::runtime
     INCLUDE_DIRS
         ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/cef
@@ -94,6 +98,18 @@ helicon_compile_shaders(corona_ui_system
 )
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_actor_selection_routing_tests
+        tests/test_actor_selection_routing.cpp
+    )
+    target_include_directories(corona_actor_selection_routing_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_link_libraries(corona_actor_selection_routing_tests
+        PRIVATE nlohmann_json::nlohmann_json
+    )
+    add_test(NAME ActorSelectionRoutingTests
+             COMMAND corona_actor_selection_routing_tests)
+
     add_executable(corona_scene_folder_tests
         tests/test_scene_folder.cpp
         cef/scene_folder.cpp
@@ -171,7 +187,7 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     add_executable(corona_vision_actor_transform_bridge_tests
         tests/test_vision_actor_transform_bridge.cpp
         cef/vision_actor_transform_bridge.cpp
-    )
+      )
     target_include_directories(corona_vision_actor_transform_bridge_tests
         PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}
     )
@@ -180,6 +196,30 @@ if(BUILD_CORONA_TESTING OR BUILD_TESTING)
     )
     add_test(NAME VisionActorTransformBridgeTests
              COMMAND corona_vision_actor_transform_bridge_tests)
+
+    add_executable(corona_request_response_broker_tests
+        tests/test_request_response_broker.cpp
+        cef/request_response_broker.cpp
+    )
+    target_include_directories(corona_request_response_broker_tests
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/cef
+    )
+    target_link_libraries(corona_request_response_broker_tests
+        PRIVATE Horizon nlohmann_json::nlohmann_json
+    )
+    add_test(NAME RequestResponseBrokerTests
+             COMMAND corona_request_response_broker_tests)
+
+    add_executable(corona_viewport_gizmo_state_tests
+        tests/test_viewport_gizmo_state.cpp
+        ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
+    )
+    target_include_directories(corona_viewport_gizmo_state_tests
+        PRIVATE ${PROJECT_SOURCE_DIR}/include
+    )
+    target_link_libraries(corona_viewport_gizmo_state_tests PRIVATE Horizon)
+    add_test(NAME ViewportGizmoStateTests
+             COMMAND corona_viewport_gizmo_state_tests)
 
     add_executable(corona_ui_multisurface_smoke
         tests/ui_multisurface_smoke.cpp

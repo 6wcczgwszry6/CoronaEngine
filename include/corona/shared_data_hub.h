@@ -1,6 +1,7 @@
 #pragma once
 #include <corona/kernel/utils/storage.h>
 #include <corona/memory/gpu_mem_ledger.h>
+#include <corona/systems/optics/viewport_gizmo_math.h>
 #include <ktm/ktm.h>
 
 #include <array>
@@ -314,6 +315,27 @@ struct ActorPickDevice {
     bool result_ready{false};
 };
 
+// Runtime-only actor pick request/completion messages. These are deliberately
+// kept outside ActorPickDevice so multiple clicks can be in flight without a
+// newer request overwriting an older one.
+struct ActorPickRequestCommand {
+    std::uintptr_t camera_handle{};
+    std::string scene_id;
+    std::string request_id;
+    std::uint32_t x{0};
+    std::uint32_t y{0};
+};
+
+struct ActorPickCompletion {
+    std::uintptr_t camera_handle{};
+    std::string scene_id;
+    std::string request_id;
+    std::string status; // success, miss, error
+    std::uintptr_t actor_handle{};
+    std::uint32_t x{0};
+    std::uint32_t y{0};
+};
+
 struct CameraMoveCommand {
     std::uintptr_t camera_handle{};
     ktm::fvec3 position{};
@@ -427,6 +449,46 @@ struct ViewportUiPointerCommand {
     std::uint64_t sequence{};
 };
 
+struct ViewportGizmoTarget {
+    std::uintptr_t camera_handle{};
+    std::string scene_id;
+    std::string actor_name;
+    std::uintptr_t actor_handle{};
+};
+
+struct ViewportGizmoPointerCommand {
+    std::uintptr_t camera_handle{};
+    std::string request_id;
+    std::string event_type;
+    float x{0.0f};
+    float y{0.0f};
+    float viewport_width{0.0f};
+    float viewport_height{0.0f};
+    std::uint32_t button{0};
+    std::uint32_t buttons{0};
+    std::uint32_t modifiers{0};
+    std::uint64_t sequence{};
+};
+
+struct ViewportGizmoPointerResult {
+    std::uintptr_t camera_handle{};
+    std::string request_id;
+    ViewportGizmoAxis axis{ViewportGizmoAxis::None};
+    bool consumed{false};
+    bool dragging{false};
+    bool ended{false};
+    bool cancelled{false};
+    ktm::fvec3 position{};
+};
+
+struct ViewportGizmoState {
+    ViewportGizmoTarget target{};
+    ViewportGizmoAxis hover_axis{ViewportGizmoAxis::None};
+    ViewportGizmoAxis active_axis{ViewportGizmoAxis::None};
+    bool dragging{false};
+    std::uint64_t sequence{};
+};
+
 struct EnvironmentDevice {
     ktm::fvec3 sun_position;
     std::uint32_t floor_grid_enabled{1};
@@ -519,6 +581,10 @@ class SharedDataHub {
 
     ActorStorage& actor_storage();
     const ActorStorage& actor_storage() const;
+    [[nodiscard]] std::vector<std::uintptr_t> resolve_actor_geometry_handles(
+        std::uintptr_t actor_handle);
+    [[nodiscard]] std::optional<std::uintptr_t>
+    resolve_actor_primary_transform_handle(std::uintptr_t actor_handle);
 
     // Runtime-only editor metadata keyed by native actor handle. Persisted state
     // remains in .scene; this cache only bridges Python proxy actors to native
@@ -537,6 +603,10 @@ class SharedDataHub {
 
     ActorPickStorage& actor_pick_storage();
     const ActorPickStorage& actor_pick_storage() const;
+    void enqueue_actor_pick_request(ActorPickRequestCommand command);
+    std::optional<ActorPickRequestCommand> take_actor_pick_request(std::uintptr_t camera_handle);
+    void enqueue_actor_pick_completion(ActorPickCompletion completion);
+    std::vector<ActorPickCompletion> drain_actor_pick_completions();
 
     EnvironmentStorage& environment_storage();
     const EnvironmentStorage& environment_storage() const;
@@ -561,6 +631,15 @@ class SharedDataHub {
     [[nodiscard]] ViewportUiState viewport_ui_state(std::uintptr_t camera_handle) const;
     void enqueue_viewport_ui_pointer(ViewportUiPointerCommand command);
     std::vector<ViewportUiPointerCommand> drain_viewport_ui_pointer_commands();
+    void set_viewport_gizmo_target(ViewportGizmoTarget target);
+    void clear_viewport_gizmo_target(std::uintptr_t camera_handle);
+    [[nodiscard]] ViewportGizmoState viewport_gizmo_state(
+        std::uintptr_t camera_handle) const;
+    void update_viewport_gizmo_interaction(std::uintptr_t camera_handle,
+                                           ViewportGizmoAxis axis,
+                                           bool dragging,
+                                           ViewportGizmoAxis hover_axis =
+                                               ViewportGizmoAxis::None);
 
    private:
     ModelResourceStorage model_resource_storage_;
@@ -577,6 +656,9 @@ class SharedDataHub {
     EnvironmentStorage environment_storage_;
     CameraStorage camera_storage_;
     ActorPickStorage actor_pick_storage_;
+    mutable std::mutex actor_pick_queue_mutex_;
+    std::vector<ActorPickRequestCommand> pending_actor_pick_requests_;
+    std::vector<ActorPickCompletion> actor_pick_completions_;
     SceneStorage scene_storage_;
     ImageStorage image_storage_;
     std::mutex camera_move_mutex_;
@@ -596,6 +678,9 @@ class SharedDataHub {
     std::unordered_map<std::uintptr_t, ViewportUiState> viewport_ui_states_;
     std::vector<ViewportUiPointerCommand> pending_viewport_ui_pointer_commands_;
     std::uint64_t viewport_ui_pointer_sequence_{0};
+    mutable std::mutex viewport_gizmo_mutex_;
+    std::unordered_map<std::uintptr_t, ViewportGizmoState> viewport_gizmo_states_;
+    std::uint64_t viewport_gizmo_sequence_{0};
 };
 
 }  // namespace Corona

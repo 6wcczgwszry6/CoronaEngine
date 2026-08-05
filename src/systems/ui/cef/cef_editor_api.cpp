@@ -1,9 +1,11 @@
 ﻿#include "cef_editor_api.h"
 
 #include <corona/kernel/core/i_logger.h>
+#include <corona/systems/script/python_runtime_coordinator.h>
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <string_view>
@@ -244,10 +246,11 @@ constexpr std::array<EditorApiParamSpec, 3> kSceneToolsFocusActorParams = {{
     param("camera_name", EditorApiValueType::String, true),
 }};
 
-constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSelectActorParams = {{
+constexpr std::array<EditorApiParamSpec, 4> kSceneToolsSelectActorParams = {{
     param("scene_name", EditorApiValueType::String),
     param("actor_type", EditorApiValueType::String),
     param("actor_name", EditorApiValueType::String),
+    param("context", EditorApiValueType::Object, true),
 }};
 
 constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSetRenderBackendParams = {{
@@ -555,7 +558,7 @@ constexpr std::array<EditorApiMethodSpec, 142> kEditorApiMethods = {{
 #undef EDITOR_API_METHOD0
 #undef EDITOR_API_METHOD0_WRAPPED
 
-constexpr std::array<EditorApiEventSpec, 20> kEditorApiEvents = {{
+constexpr std::array<EditorApiEventSpec, 21> kEditorApiEvents = {{
     {"AI.chunk", EditorApiValueType::String, all_callers(), "events.onAiChunk", "events.on_ai_chunk"},
     {"Editor.logBatch", EditorApiValueType::Array, all_callers(), "events.onLogBatch", "events.on_log_batch"},
     {"LANChat.event", EditorApiValueType::Object, all_callers(), "events.onLanChatEvent", "events.on_lan_chat_event"},
@@ -571,6 +574,7 @@ constexpr std::array<EditorApiEventSpec, 20> kEditorApiEvents = {{
     {"SceneTools.actorChanged", EditorApiValueType::Object, all_callers(), "events.onActorChanged", "events.on_actor_changed"},
     {"SceneTools.actorSelectionChanged", EditorApiValueType::Object, all_callers(), "events.onActorSelectionChanged", "events.on_actor_selection_changed"},
     {"SceneTools.actorTransformUpdated", EditorApiValueType::Object, all_callers(), "events.onActorTransformUpdated", "events.on_actor_transform_updated"},
+    {"SceneTools.viewportGizmoPointerResult", EditorApiValueType::Object, all_callers(), "events.onViewportGizmoPointerResult", "events.on_viewport_gizmo_pointer_result"},
     {"SceneTools.focusPoseResult", EditorApiValueType::Object, all_callers(), "events.onFocusPoseResult", "events.on_focus_pose_result"},
     {"SceneTools.sceneAdded", EditorApiValueType::Object, all_callers(), "events.onSceneAdded", "events.on_scene_added"},
     {"SceneTools.sceneRenamed", EditorApiValueType::Object, all_callers(), "events.onSceneRenamed", "events.on_scene_renamed"},
@@ -580,8 +584,7 @@ constexpr std::array<EditorApiEventSpec, 20> kEditorApiEvents = {{
 
 std::atomic<std::uint64_t> g_next_callback_token{1};
 std::mutex g_callback_mutex;
-std::mutex g_python_script_service_dispatcher_mutex;
-PyObject* g_python_script_service_dispatcher = nullptr;
+std::atomic<bool> g_python_script_service_dispatcher_registered{false};
 
 struct CallbackRecord {
     std::uint64_t token = 0;
@@ -737,58 +740,92 @@ std::optional<int> browser_identifier(const NativeContext& context) {
     return context.browser->GetIdentifier();
 }
 
-void release_python_callback(PyObject* callback) {
-    if (!callback) {
-        return;
+Script::Python::PythonRuntimeResponse execute_editor_python_callback(
+    const Script::Python::PythonRuntimeRequest& request) {
+    using Script::Python::PythonRuntimeResponse;
+    if (!PyGILState_Check()) {
+        return PythonRuntimeResponse::failure("editor callback executed without the GIL");
     }
-    if (!Py_IsInitialized()) {
-        return;
+
+    PyObject* callback = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        const auto it = g_callbacks.find(request.callback_token);
+        if (it == g_callbacks.end() || !it->second.python_script || !it->second.python_callable) {
+            return request.function == "release"
+                       ? PythonRuntimeResponse::success()
+                       : PythonRuntimeResponse::failure("editor callback token is no longer registered");
+        }
+        callback = it->second.python_callable;
+        if (request.function == "release") {
+            g_callbacks.erase(it);
+        } else {
+            Py_INCREF(callback);
+        }
     }
-    PyGILState_STATE state = PyGILState_Ensure();
-    Py_XDECREF(callback);
-    PyGILState_Release(state);
+
+    if (request.function == "release") {
+        Py_DECREF(callback);
+        return PythonRuntimeResponse::success();
+    }
+
+    const auto envelope = nlohmann::json::parse(request.payload_json, nullptr, false);
+    if (envelope.is_discarded() || !envelope.is_object()) {
+        Py_DECREF(callback);
+        return PythonRuntimeResponse::failure("editor callback payload is invalid");
+    }
+    const auto payload_text = envelope.value("payload", nlohmann::json::object()).dump();
+    const auto event_text = envelope.value("event", std::string{});
+    PyObject* py_payload = PyUnicode_FromString(payload_text.c_str());
+    PyObject* py_event = PyUnicode_FromString(event_text.c_str());
+    PyObject* py_args = (py_payload && py_event) ? PyTuple_Pack(2, py_payload, py_event) : nullptr;
+    Py_XDECREF(py_payload);
+    Py_XDECREF(py_event);
+    PyObject* result = py_args ? PyObject_CallObject(callback, py_args) : nullptr;
+    Py_XDECREF(py_args);
+    Py_DECREF(callback);
+    if (!result) {
+        PyErr_Print();
+        return PythonRuntimeResponse::failure("editor callback raised an exception");
+    }
+    Py_DECREF(result);
+    return PythonRuntimeResponse::success();
+}
+
+bool enqueue_editor_python_callback(std::uint64_t callback_token,
+                                    std::string_view event_name,
+                                    const nlohmann::json& payload,
+                                    std::string function = "invoke") {
+    auto* coordinator = Script::Python::active_python_runtime_coordinator();
+    if (!coordinator) return false;
+    Script::Python::PythonRuntimeRequest request;
+    request.kind = Script::Python::PythonRuntimeRequestKind::Callback;
+    request.source = "EditorApi";
+    request.function = std::move(function);
+    request.callback_token = callback_token;
+    request.payload_json = nlohmann::json{{"event", event_name}, {"payload", payload}}.dump();
+    request.handler = &execute_editor_python_callback;
+    return coordinator->submit(std::move(request)).accepted;
 }
 
 std::size_t emit_callbacks(std::string_view event_name,
                            const nlohmann::json& payload,
                            bool python_script) {
     if (python_script) {
-        if (!Py_IsInitialized()) {
-            return 0;
-        }
-        PyGILState_STATE state = PyGILState_Ensure();
-        std::vector<std::pair<std::uint64_t, PyObject*>> callbacks;
+        std::vector<std::uint64_t> callback_tokens;
         {
             std::lock_guard<std::mutex> lock(g_callback_mutex);
             for (const auto& [_, record] : g_callbacks) {
                 if (record.python_script && record.event_name == event_name && record.python_callable) {
-                    Py_XINCREF(record.python_callable);
-                    callbacks.emplace_back(record.token, record.python_callable);
+                    callback_tokens.push_back(record.token);
                 }
             }
         }
 
         std::size_t emitted = 0;
-        const auto payload_text = payload.dump();
-        const auto event_text = std::string(event_name);
-        for (const auto& [_, callback] : callbacks) {
-            PyObject* py_payload = PyUnicode_FromString(payload_text.c_str());
-            PyObject* py_event = PyUnicode_FromString(event_text.c_str());
-            PyObject* py_args = (py_payload && py_event) ? PyTuple_Pack(2, py_payload, py_event) : nullptr;
-            Py_XDECREF(py_payload);
-            Py_XDECREF(py_event);
-
-            PyObject* result = py_args ? PyObject_CallObject(callback, py_args) : nullptr;
-            Py_XDECREF(py_args);
-            Py_XDECREF(callback);
-            if (!result) {
-                PyErr_Print();
-                continue;
-            }
-            Py_DECREF(result);
-            ++emitted;
+        for (const auto callback_token : callback_tokens) {
+            if (enqueue_editor_python_callback(callback_token, event_name, payload)) ++emitted;
         }
-        PyGILState_Release(state);
         return emitted;
     }
 
@@ -972,11 +1009,11 @@ std::uint64_t EditorApiCallbackRegistry::register_python_script_callback_callabl
     if (!event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::PythonScript)) {
         return 0;
     }
-    if (!Py_IsInitialized() || !PyCallable_Check(callback)) {
+    if (!PyGILState_Check() || !PyCallable_Check(callback)) {
         return 0;
     }
 
-    Py_XINCREF(callback);
+    Py_INCREF(callback);
     const auto token = g_next_callback_token.fetch_add(1);
     CallbackRecord record;
     record.token = token;
@@ -990,20 +1027,21 @@ std::uint64_t EditorApiCallbackRegistry::register_python_script_callback_callabl
 }
 
 bool EditorApiCallbackRegistry::unregister(std::uint64_t callback_token) {
-    PyObject* python_callable = nullptr;
-    bool removed = false;
     {
         std::lock_guard<std::mutex> lock(g_callback_mutex);
         const auto it = g_callbacks.find(callback_token);
         if (it == g_callbacks.end()) {
             return false;
         }
-        python_callable = it->second.python_callable;
+        if (it->second.python_script && it->second.python_callable) {
+            return enqueue_editor_python_callback(callback_token,
+                                                  it->second.event_name,
+                                                  nlohmann::json::object(),
+                                                  "release");
+        }
         g_callbacks.erase(it);
-        removed = true;
     }
-    release_python_callback(python_callable);
-    return removed;
+    return true;
 }
 
 void EditorApiCallbackRegistry::clear_cef_callbacks_for_browser(int browser_id) {
@@ -1019,20 +1057,26 @@ void EditorApiCallbackRegistry::clear_cef_callbacks_for_browser(int browser_id) 
 }
 
 void EditorApiCallbackRegistry::clear_python_script_callbacks() {
-    std::vector<PyObject*> callbacks;
+    std::vector<std::pair<std::uint64_t, std::string>> callbacks;
     {
         std::lock_guard<std::mutex> lock(g_callback_mutex);
-        for (auto it = g_callbacks.begin(); it != g_callbacks.end();) {
-            if (it->second.python_script) {
-                callbacks.push_back(it->second.python_callable);
-                it = g_callbacks.erase(it);
-            } else {
-                ++it;
+        for (const auto& [token, record] : g_callbacks) {
+            if (record.python_script && record.python_callable) {
+                callbacks.emplace_back(token, record.event_name);
             }
         }
     }
-    for (auto* callback : callbacks) {
-        release_python_callback(callback);
+    if (PyGILState_Check()) {
+        for (const auto& [token, _] : callbacks) {
+            Script::Python::PythonRuntimeRequest request;
+            request.function = "release";
+            request.callback_token = token;
+            (void)execute_editor_python_callback(request);
+        }
+        return;
+    }
+    for (const auto& [token, event_name] : callbacks) {
+        enqueue_editor_python_callback(token, event_name, nlohmann::json::object(), "release");
     }
 }
 
@@ -1069,51 +1113,66 @@ std::size_t emit_editor_api_event(std::string_view event_name, const nlohmann::j
     return EditorApiCallbackRegistry::instance().emit_editor_api_event(event_name, payload);
 }
 
+std::size_t emit_editor_api_event_to_frame(std::string_view event_name,
+                                            const nlohmann::json& payload,
+                                            const CefRefPtr<CefFrame>& frame) {
+    const auto event_spec = find_editor_api_event(event_name);
+    if (!frame || !event_spec || !event_caller_allowed(*event_spec, EditorApiCaller::Cef) ||
+        !validate_editor_api_event_payload(*event_spec, payload)) {
+        return 0;
+    }
+
+    std::vector<CallbackRecord> records;
+    const auto browser = frame->GetBrowser();
+    const int browser_id = browser ? browser->GetIdentifier() : 0;
+    {
+        std::lock_guard<std::mutex> lock(g_callback_mutex);
+        for (const auto& [_, record] : g_callbacks) {
+            if (record.python_script || record.event_name != event_name || !record.context.frame) {
+                continue;
+            }
+            if (record.context.frame->GetIdentifier() != frame->GetIdentifier() ||
+                !record.context.browser || browser_id !=
+                    record.context.browser->GetIdentifier()) {
+                continue;
+            }
+            records.push_back(record);
+        }
+    }
+
+    std::size_t emitted = 0;
+    for (const auto& record : records) {
+        nlohmann::json event_payload = {
+            {"event", record.event_name},
+            {"payload", payload},
+            {"token", record.token},
+        };
+        frame->ExecuteJavaScript(
+            "window.__coronaEditorApiDispatch && window.__coronaEditorApiDispatch(" +
+                event_payload.dump() + ");",
+            frame->GetURL(), 0);
+        ++emitted;
+    }
+    return emitted;
+}
+
 std::size_t emit_python_script_event(std::string_view event_name, const nlohmann::json& payload) {
     return EditorApiCallbackRegistry::instance().emit_python_script_event(event_name, payload);
 }
 
 void register_python_script_service_dispatcher(PyObject* dispatcher) {
-    if (!Py_IsInitialized()) {
-        return;
-    }
-
-    PyGILState_STATE state = PyGILState_Ensure();
-    PyObject* old_dispatcher = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
-        if (dispatcher && PyCallable_Check(dispatcher)) {
-            Py_INCREF(dispatcher);
-            old_dispatcher = g_python_script_service_dispatcher;
-            g_python_script_service_dispatcher = dispatcher;
-        }
-    }
-    Py_XDECREF(old_dispatcher);
-    PyGILState_Release(state);
+    g_python_script_service_dispatcher_registered.store(
+        PyGILState_Check() && dispatcher && PyCallable_Check(dispatcher),
+        std::memory_order_release);
 }
 
 void unregister_python_script_service_dispatcher() {
     clear_python_script_callbacks();
-    if (!Py_IsInitialized()) {
-        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
-        g_python_script_service_dispatcher = nullptr;
-        return;
-    }
-
-    PyGILState_STATE state = PyGILState_Ensure();
-    PyObject* old_dispatcher = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
-        old_dispatcher = g_python_script_service_dispatcher;
-        g_python_script_service_dispatcher = nullptr;
-    }
-    Py_XDECREF(old_dispatcher);
-    PyGILState_Release(state);
+    g_python_script_service_dispatcher_registered.store(false, std::memory_order_release);
 }
 
 bool python_script_service_dispatcher_registered() {
-    std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
-    return g_python_script_service_dispatcher != nullptr;
+    return g_python_script_service_dispatcher_registered.load(std::memory_order_acquire);
 }
 
 std::uint64_t register_python_script_callback_callable(const std::string& event_name,
@@ -1128,50 +1187,36 @@ void clear_python_script_callbacks() {
 
 NativeResult invoke_python_script_service(const NativeRequest& request, const char* route) {
     const std::string route_name = route && *route ? route : "python-script";
-    if (!Py_IsInitialized()) {
+    auto* coordinator = Script::Python::active_python_runtime_coordinator();
+    if (!coordinator) {
         return native_failure("Python script runtime is not initialized",
                               503,
                               route_name);
     }
 
-    PyGILState_STATE state = PyGILState_Ensure();
-    PyObject* dispatcher = nullptr;
-    {
-        std::lock_guard<std::mutex> lock(g_python_script_service_dispatcher_mutex);
-        dispatcher = g_python_script_service_dispatcher;
-        Py_XINCREF(dispatcher);
-    }
-    if (!dispatcher) {
-        PyGILState_Release(state);
-        return native_failure("Python script service dispatcher is not registered",
-                              503,
+    Script::Python::PythonRuntimeRequest runtime_request;
+    runtime_request.kind = Script::Python::PythonRuntimeRequestKind::ServiceCall;
+    runtime_request.source = route_name;
+    runtime_request.module = request.module;
+    runtime_request.function = request.function;
+    runtime_request.payload_json = python_script_request_json(request);
+    const auto response = coordinator->submit_and_wait(std::move(runtime_request),
+                                                       std::chrono::seconds(2));
+    if (response.status != Script::Python::PythonRuntimeResponseStatus::Success) {
+        int error_code = 500;
+        if (response.status == Script::Python::PythonRuntimeResponseStatus::Timeout) {
+            error_code = 504;
+        } else if (response.status == Script::Python::PythonRuntimeResponseStatus::QueueFull) {
+            error_code = 429;
+        } else if (response.status == Script::Python::PythonRuntimeResponseStatus::RuntimeStopping) {
+            error_code = 503;
+        }
+        return native_failure(response.error.empty() ? "Python script function call failed" : response.error,
+                              error_code,
                               route_name);
     }
 
-    PyObject* py_request = PyUnicode_FromString(python_script_request_json(request).c_str());
-    PyObject* py_args = py_request ? PyTuple_Pack(1, py_request) : nullptr;
-    Py_XDECREF(py_request);
-
-    PyObject* object = py_args ? PyObject_CallObject(dispatcher, py_args) : nullptr;
-    Py_DECREF(dispatcher);
-    Py_XDECREF(py_args);
-
-    if (!object) {
-        PyErr_Print();
-        PyGILState_Release(state);
-        return native_failure("Python script function call failed",
-                              500,
-                              route_name);
-    }
-
-    PyObject* string_object = PyUnicode_Check(object) ? object : PyObject_Str(object);
-    const char* result_chars = string_object ? PyUnicode_AsUTF8(string_object) : nullptr;
-    const std::string result_text = result_chars ? result_chars : "";
-    if (string_object != object) {
-        Py_XDECREF(string_object);
-    }
-    Py_DECREF(object);
-    PyGILState_Release(state);
+    const auto& result_text = response.payload_json;
 
     const auto parsed = nlohmann::json::parse(result_text, nullptr, false);
     if (parsed.is_discarded()) {
