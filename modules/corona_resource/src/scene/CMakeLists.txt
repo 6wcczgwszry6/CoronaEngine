@@ -57,7 +57,7 @@ target_link_libraries(CoronaResourceScene
     PUBLIC
     stb_headers
     assimp::assimp
-    corona::kernel
+    Horizon
     nlohmann_json::nlohmann_json
     ktm::ktm
 )
