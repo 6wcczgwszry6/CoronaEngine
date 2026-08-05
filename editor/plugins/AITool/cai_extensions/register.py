@@ -100,8 +100,11 @@ class CabbageEngineToolsPlugin:
 
     def register(self, runtime) -> dict:
         from .engine_tools import register_engine_loaders
+        from Quasar.ai_modules.integrated.stream_handler import set_global_assets_summarizer
+        from .asset_summary import summarize_global_assets
 
         tool_registry = runtime.get_registry("tool")
+        set_global_assets_summarizer(summarize_global_assets)
         runtime.register_tool_loader_registrar(register_engine_loaders)
         register_engine_loaders(tool_registry)
         setattr(tool_registry, "_discovered", False)

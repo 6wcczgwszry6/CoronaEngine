@@ -44,6 +44,12 @@ class QuasarEngineBoundaryTests(unittest.TestCase):
         self.assertIn("storage_root", text)
         self.assertNotIn("Backend.local_storage", text)
 
+    def test_integrated_stream_uses_injected_asset_summarizer(self):
+        path = QUASAR_ROOT / "ai_modules" / "integrated" / "stream_handler.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("set_global_assets_summarizer", text)
+        self.assertNotIn('assets.get("scene_composition", {})', text)
+
 
 if __name__ == "__main__":
     unittest.main()
