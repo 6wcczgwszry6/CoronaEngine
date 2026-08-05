@@ -19,6 +19,16 @@ logger = logging.getLogger(__name__)
 
 def register_engine_loaders(registry: ToolRegistry) -> None:
     """在 CAI 内部 ``_register_builtin_loaders`` 末尾被调用。"""
+    from .scene_plan_tools import load_scene_plan_tools
+
+    registry.register_loader(
+        loader=load_scene_plan_tools,
+        category=ToolCategory.SCENE,
+        dependencies=[],
+        requires_config=True,
+        source="cai_extensions.scene_plan",
+    )
+
     # MCP - 场景操作
     try:
         from .mcp.tools.scene_tools import load_scene_tools

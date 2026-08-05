@@ -56,6 +56,20 @@ class QuasarEngineBoundaryTests(unittest.TestCase):
         self.assertIn("register_workflow_execution_scope_factory", text)
         self.assertIn("clear_workflow_execution_scope_factory", text)
 
+    def test_quasar_does_not_register_missing_scene_breakdown_module(self):
+        path = QUASAR_ROOT / "ai_tools" / "load_tools.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertNotIn("scene_breakdown_tools", text)
+
+    def test_scene_plan_tool_is_engine_owned(self):
+        quasar_text = (
+            QUASAR_ROOT / "ai_modules" / "text_generate" / "tools" / "text_tools.py"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn("generate_scene_plan", quasar_text)
+        self.assertTrue(
+            (Path(__file__).resolve().parents[1] / "cai_extensions" / "scene_plan_tools.py").exists()
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
