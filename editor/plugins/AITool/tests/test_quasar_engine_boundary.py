@@ -50,6 +50,12 @@ class QuasarEngineBoundaryTests(unittest.TestCase):
         self.assertIn("set_global_assets_summarizer", text)
         self.assertNotIn('assets.get("scene_composition", {})', text)
 
+    def test_workflow_executor_exposes_scope_registration_contract(self):
+        path = QUASAR_ROOT / "ai_workflow" / "executor.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("register_workflow_execution_scope_factory", text)
+        self.assertIn("clear_workflow_execution_scope_factory", text)
+
 
 if __name__ == "__main__":
     unittest.main()

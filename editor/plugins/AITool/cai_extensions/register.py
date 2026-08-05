@@ -248,6 +248,14 @@ class CabbageWorkflowSyncPlugin:
         logger.debug("[cai_extensions] workflow sync scope installed")
         return {"name": self.name}
 
+    def shutdown(self, runtime) -> None:
+        try:
+            from Quasar.ai_workflow import clear_workflow_execution_scope_factory
+
+            clear_workflow_execution_scope_factory()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[cai_extensions] workflow sync scope cleanup skipped: %s", exc)
+
 
 class CabbageEngineModulesPlugin:
     name = "cabbage.engine_modules"
