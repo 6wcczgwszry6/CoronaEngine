@@ -1,8 +1,9 @@
 # Dora-SSR 模型资产与策划—美术—程序协同分析
 
-> 分析对象：`F:\GitHub\Dora-SSR`  
-> Git 基线：`main @ e363dc89c8240c3c6a6e220ce649145feeac18b9`  
-> 分析日期：2026-07-14  
+> 分析对象：`F:\GitHub\Dora-SSR`
+> Git 基线：`main @ 9756e311494a41aa28339afbc719b8e927e4a7c8`
+> 分析日期：2026-07-14
+> 对照快照：首次报告为 `e363dc89c8240c3c6a6e220ce649145feeac18b9`。两快照从 `c2b4f9389c830f8ab07c7d572eeec5826a766f8e` 分叉，旧提交不是新 HEAD 的祖先，因此本报告按快照净差异重审，不作错误的线性升级叙事。
 > 范围说明：本报告分析该仓库中的引擎、Web IDE、工具、文档和示例所能证明的能力，不把外部游戏项目、未安装插件或团队口头流程推定为仓库能力。
 
 ## 一、结论先行
@@ -14,14 +15,30 @@ Dora-SSR 的准确定位是：**代码驱动、面向 2D 的游戏引擎与 Web 
 1. 仓库中的 `Model` 是 **2D 层级动画模型**，主链为“散图/图集描述与 `.model` XML → Action Editor → `.png + .clip + .model` → Content 路径解析 → Model/Clip/Texture Cache → Node/Sprite/Animation 实例”。Spine、DragonBones 则直接消费外部工具导出的骨骼运行时格式。
 2. 资产管理采用 **原始格式随包分发 + 字符串路径引用 + 搜索路径解析 + 分类型内存缓存**。未发现 GUID/meta、AssetDB、依赖图、统一导入器、派生数据缓存或自动资源 cooking/裁剪。
 3. 三类岗位的共同接口不是中央资产数据库，而是同一项目目录中的 **Excel、Yarn、TMX、XML/JSON、图片/音频、脚本及约定字符串**。协作可以成立，但重命名、字段漂移、缺失资源和事件名不一致主要靠人工发现。
-4. 能力强弱大致是：**程序生产链最完整；策划有剧情、地图载入、Excel/ECS、Platformer 战斗等可靠基础；美术有 2D 动画、图集、碰撞体、粒子、骨骼预览等专项链路，但缺统一场景、材质、灯光和风格 QA 管线。**
-5. Coding Agent 的真实边界是“查 API、读写文件、生成/修改脚本、构建检查、子代理协作”；自然语言生成目前明确落到 Blockly/Lua。它不是把策划文档自动编译成关卡、任务、灯光和完整玩法蓝图的领域编译器。
+4. 能力强弱大致是：**程序生产链最完整，并新增正式 Dora CLI、动态 DoraX、增强输入和 Web IDE Git 工作流；策划有剧情、地图载入、Excel/ECS、Platformer 战斗等可靠基础；美术有 2D 动画、图集、碰撞体、粒子、骨骼预览等专项链路，但缺统一场景、材质、灯光和风格 QA 管线。**
+5. Coding Agent 的工具面已扩展到受控 HTTP(S) 下载与 Dora Lua/Git 命令，但默认关闭、需逐任务显式启用；自然语言生成仍明确落到 Blockly/Lua。它不是把策划文档自动编译成关卡、任务、灯光和完整玩法蓝图的领域编译器。
 
 下文状态含义：
 
 - **原生闭环**：仓库内有明确编辑/生成、运行时和调用链。
 - **可组合实现**：底层组件具备，但项目需自行定义 schema、规则或脚本。
 - **未提供专用管线**：第一方源码和文档中未发现对应领域资产、编辑器或验证器。
+
+### 1.1 本轮更新真正改变了什么
+
+净差异有 2,727 个文件，其中 2,433 个是新增，绝大部分来自 vendored SDL2/Wa 源码，不能等同为制作能力增长。对资产与三职能协同真正有影响的变化如下：
+
+| 变化 | 新快照事实 | 对原结论的影响 |
+|---|---|---|
+| Dora CLI | 删除外置 Python sidecar，改由桌面 Dora 可执行文件启动最小 Lua CLI；提供 `build/run/buildrun/stop/status/doctor/log/doc search/read`，支持 `--asset`、多语言和 Yarn 检查 | 制作/验证入口显著增强；不等于新增资产 cook |
+| 剧情门禁 | `.yarn` 被纳入统一 CLI build，并调用 `/yarn/check-file` | 剧情从编辑器检查进一步进入命令行构建门禁 |
+| Coding Agent | 新增可开关的 `fetch_url` 与 `execute_command(lua\|git)` | Agent 可下载资源、做受控运行时/Git 操作；仍无关卡/任务/材质领域工具 |
+| DoraX | 新增 `createRoot + signal`、diff、key、unmount 和 hooks | UI/场景脚本从一次性 TSX 构造升级为代码式响应渲染 |
+| 输入与版本协作 | InputManager 订阅/context API 增强；Web IDE Git 面板支持 diff、stage、commit、分支和远端 | 触发器工程化和跨岗位文本资产协作明显改善 |
+| Spine | 两快照都已是 4.3；本轮只增强 Skeleton 同步加载判空与 parser 错误诊断 | 诊断改善，版本和资产架构不变 |
+| 旧核心风险 | 缓存 key、搜索路径、clip 序列化、Spine 卸载、DragonBones 扩展名、音频伪流式仍在 | 原 P0/P1 改造优先级不变 |
+
+证据见 [Dora CLI 教程](<F:/GitHub/Dora-SSR/Docs/docs/tutorial/115.command-line-interface.mdx:1>)、[AgentToolRegistry.ts](<F:/GitHub/Dora-SSR/Assets/Script/Lib/Agent/AgentToolRegistry.ts:227>)、[DoraX.ts](<F:/GitHub/Dora-SSR/Assets/Script/Lib/DoraX.ts:2421>) 和 [InputManager.tsx](<F:/GitHub/Dora-SSR/Assets/Script/Lib/InputManager.tsx:1475>)。
 
 ## 二、模型与资产是怎么走的
 
@@ -47,10 +64,11 @@ flowchart LR
     C1["TS / TSX / Teal / Yue / Lua"]
     C2["CodeWire .vs"]
     C3["Blockly .bl"]
-    C4["Coding Agent 文件变更"]
+    C4["Coding Agent 文件/受控命令"]
+    C5["Dora CLI 构建与检查"]
   end
 
-  P --> W["项目目录与 Web IDE"]
+  P --> W["项目目录、Web IDE、CLI 与 Git"]
   A --> W
   C --> W
 
@@ -84,7 +102,7 @@ flowchart LR
 
 | 资产 | 生产/输入 | 运行时消费 | 判断 |
 |---|---|---|---|
-| Spine | 外部 DCC 导出 `.skel/.json + .atlas + texture` | SkeletonCache、Spine 节点 | 有运行时与预览，无内建绑定/权重创作 |
+| Spine | 外部 DCC 导出 `.skel/.json + .atlas + texture` | SkeletonCache、Spine 节点 | 有运行时与预览，无内建绑定/权重创作；新版改善加载失败诊断 |
 | DragonBones | 外部导出 `_ske.json + _tex.json + texture` | DragonBoneCache、Armature | 有运行时，无完整内建骨骼创作 |
 | TMX 地图 | 外部 Tiled 制作 | TMXCache → TileNode → TextureCache | 有地图导入与运行时，无内建地图制作器 |
 | 碰撞体 | Body Editor 编辑 Lua/JSON 形式 | BodyEx → BodyDef/Body | 有专项编辑与物理预览 |
@@ -97,6 +115,8 @@ flowchart LR
 ### 2.4 构建、打包和热更新边界
 
 - 开发期直接通过 `--asset ../../Assets` 指向原始资产目录；发行工作流把 Web IDE、Doc/Font/Image/Script 等原始资源与程序一起归档。
+- 新版把平台 build/run wrapper 和 CI 明显统一，并新增 Dora CLI；CLI 可选择 `--asset`、构建/运行项目、诊断服务、查文档并检查 Yarn。它提升的是**引擎与脚本工作流的可重复性**，不是按引用图烘焙资源。
+- WebServer 的读、编译和运行接口现在能显式携带 project root，并把项目根与 `project/Script` 接入解析路径；多项目工作区更可靠，但底层引用仍是字符串路径。
 - 游戏打包教程仍要求手工组织 Assets、删除开发目录、设置搜索路径。WebServer 的 ZIP 功能是文件归档，不是依赖扫描/cook。见 [游戏打包教程](<F:/GitHub/Dora-SSR/Docs/docs/tutorial/130.game-app-pack.mdx:24>)。
 - Web IDE 的脚本构建生成 Lua、同名产物或 `.build`；这与“资源烘焙”是两件事。
 - `Cache::update` 只覆盖部分文本资源及显式 Texture；Web `/write` 落盘并不会自动使所有缓存与现存实例刷新。因而“编辑器保存后运行场景原位更新”不是全局保证。
@@ -135,7 +155,7 @@ Platformer 教程从 `Data/items.xlsx` 读取行数据，表中可以直接保�
 
 Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner 把每个节点编译为 Lua，通过 `advance(choice)` 返回文本/选项，并调用程序注册的 command/state 回调。
 
-所以剧情可独立迭代文本和分支，但动画、音频、任务进度、镜头或战斗触发仍需要程序把 command 接入相应系统。Yarn 的编辑、语法检查和 Tester 是仓库中策划链路最接近完整闭环的一项。
+所以剧情可独立迭代文本和分支，但动画、音频、任务进度、镜头或战斗触发仍需要程序把 command 接入相应系统。新版又把单文件/项目级 `.yarn` 检查接入 `Dora cli build --lang yarn`；Yarn 的编辑、Tester、服务端检查和 CLI 门禁使它成为仓库中策划链路最接近完整闭环的一项。CLI 新增的是检查入口，服务端 `/yarn/check-file` 并非新剧情模型。
 
 #### C. TMX 地图 → TileNode → 项目脚本解释
 
@@ -147,9 +167,10 @@ Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner �
 
 - CodeWire：`.vs` 节点图 → 同名 `.tl` → 编译检查，并把错误定位回节点。
 - Blockly：`.bl` 工作区 JSON → 同名 `.lua`；`BlocklyCoder` 还能执行“自然语言 → TypeScript 积木 DSL → Blockly → Lua”，编译失败时回送模型修正。
-- Coding Agent：通过通用文件工具与 API 搜索生成/修改代码，最终执行 build；它没有专用的关卡、任务、材质或风格资产生成工具。
+- Coding Agent：除通用文件、API 搜索和 build 外，新版可在用户显式开启时执行 HTTP(S) 下载及受控 Dora Lua/Git 命令；Web IDE 另有完整 Git 面板。它仍没有专用的关卡、任务、材质或风格资产生成工具。
+- Dora CLI：把多语言脚本、Yarn、运行、doctor、日志与文档检索放到统一命令入口，可作为 Agent/CI/人工制作的共同验证表面。
 
-证据见 [App.tsx](<F:/GitHub/Dora-SSR/Tools/dora-dora/src/App.tsx:2445>)、[BlocklyCoder.ts](<F:/GitHub/Dora-SSR/Assets/Script/Tools/BlocklyCoder.ts:340>)、[AgentToolRegistry.ts](<F:/GitHub/Dora-SSR/Assets/Script/Lib/Agent/AgentToolRegistry.ts:117>)。
+证据见 [App.tsx](<F:/GitHub/Dora-SSR/Tools/dora-dora/src/App.tsx:2536>)、[BlocklyCoder.ts](<F:/GitHub/Dora-SSR/Assets/Script/Tools/BlocklyCoder.ts:349>)、[AgentToolRegistry.ts](<F:/GitHub/Dora-SSR/Assets/Script/Lib/Agent/AgentToolRegistry.ts:227>)。
 
 ## 四、用户所列能力逐项判定
 
@@ -158,8 +179,8 @@ Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner �
 | 子项 | 状态 | 仓库中的实际落点 | 关键缺口 |
 |---|---|---|---|
 | 关卡 | **原生地图载入 + 可组合规则** | Tiled/TMX、TMXCache、TileNode、Node/ECS、碰撞与事件 | 无统一关卡编辑器、敌群/波次/目标/通关 schema；TMX 对象语义由脚本解释 |
-| 剧情 | **原生闭环** | Yarn Editor/Convert/Check/Tester、YarnRunner、Lua 编译、command/state 回调 | 动画、音频、任务等跨域表现仍需程序绑定 |
-| 系统 | **可组合实现** | ECS、Node、Event、InputManager、SQLite、脚本和协程 | 组件/事件/参数是开放字符串，无策划域 schema、版本与校验 |
+| 剧情 | **原生闭环，构建门禁增强** | Yarn Editor/Convert/Check/Tester、YarnRunner、Lua 编译、CLI 项目/单文件检查、command/state 回调 | 动画、音频、任务等跨域表现仍需程序绑定；无剧情/任务语义 schema |
+| 系统 | **可组合实现，输入协作增强** | ECS、Node、Event、增强 InputManager、SQLite、脚本和协程 | 组件/事件/action/context 仍是开放字符串，无策划域 schema、版本与校验 |
 | 战斗 | **原生的 Platformer 专项框架** | Data、Unit、UnitAction、Bullet、AI/Decision/Behavior、PlayRho | 不是通用战斗编辑器；数值引用完整性和可视调试需项目补充 |
 | 数值 | **原生数据入口 + 项目自建模型** | Excel → Lua table/Struct/Entity，SQLite，Data.store | 无字段类型、范围、外键、资源存在性、版本迁移和自动平衡校验 |
 | 任务与胜负条件 | **可脚本实现；未提供专用管线** | Yarn state/command、ECS、Event、DB、示例中的显式 `isGameOver`/碰撞判定 | 无 Quest/Mission/Objective、目标树、奖励、任务日志、胜负条件资产或编辑器 |
@@ -182,10 +203,10 @@ Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner �
 |---|---|---|---|
 | 蓝图生成 | **有 CodeWire 可视脚本；不是 Unreal Blueprint** | `.vs` 节点/连线 JSON → `.tl` → 编译检查 | 主要是通用控制流；无 Actor/Component 反射、统一场景序列化、资产依赖图或 Blueprint VM |
 | 积木代码生成 | **原生闭环** | Blockly `.bl` → Lua；BlocklyCoder 支持自然语言生成与失败修正 | 生成的是程序积木，不是关卡、灯光、任务图或完整玩法资产 |
-| 触发器 | **原生闭环** | InputManager Trigger、Node `slot/emit` 与 `gslot`、ECS Observer | 分散在三套机制中，缺统一领域事件 schema |
+| 触发器 | **原生闭环，接口增强** | InputManager Trigger、`on/once/off/onCompleted`、context stack、Node `slot/emit` 与 `gslot`、ECS Observer | 分散在三套机制中，action/context 仍为字符串，缺统一领域事件 schema |
 | 交互逻辑 | **可组合实现** | 输入、触摸、碰撞、事件、ECS、协程和逐帧调度 | 无单一“交互图资产”；由脚本组合 |
 | 行为脚本 | **原生，尤其 Platformer** | UnitAction、Decision Tree、Behavior Tree、AI 节点、脚本扩展 | 领域重点是 2D Platformer，不是全类型游戏行为编辑器 |
-| UI / 任务 / 战斗脚本 | **UI 与战斗基础明确；任务需自建** | DoraX/TSX、AlignNode/Yoga、ImGui；Platformer 战斗；Yarn/ECS/Event 可搭任务 | UI 偏代码式、无通用 WYSIWYG；任务目标/奖励/胜负模型缺失 |
+| UI / 任务 / 战斗脚本 | **UI 与战斗基础明确；任务需自建** | DoraX `toNode` 与 `createRoot/signal/hooks`、AlignNode/Yoga、ImGui；Platformer 战斗；Yarn/ECS/Event 可搭任务 | UI 已支持代码式响应 diff，但无通用 WYSIWYG；任务目标/奖励/胜负模型缺失 |
 
 ## 五、当前协作模型的优势与主要风险
 
@@ -194,7 +215,8 @@ Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner �
 - 内容格式透明，多数是 XML/JSON/TMX/Yarn/Excel/脚本，适合 Git、批量生成和 Agent 修改。
 - Web IDE 把代码、Yarn、Action、Body、Particle、Blockly、CodeWire 等入口聚在一起，专项工具和运行时贴得很近。
 - Yarn、Blockly/CodeWire、Platformer、ECS 都有明确的“可编辑源 → 可执行产物/运行时”链路。
-- Agent 有 API 搜索和 build gate，生成代码不会只停在文本建议层。
+- CLI 把脚本/Yarn 构建、运行、doctor、日志和文档查询统一起来；Web IDE Git 面板使文本内容与代码变更更可见。
+- Agent 有 API 搜索、build gate 及显式授权的下载/受控命令，生成代码不会只停在文本建议层。
 - 轻量路径与分类型缓存对于小型 2D 项目成本低、启动直接。
 
 ### 主要风险
@@ -204,7 +226,8 @@ Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner �
 3. **保存不等于刷新**：编辑器写盘、路径缓存、资源缓存和已有运行实例之间没有统一失效协议。
 4. **打包不可推导**：没有依赖 manifest 与确定性 staging/cook，平台 shader 变体、大小写、符号链接和漏资源需要人工兜底。
 5. **职能成熟度不均衡**：程序可视化与生成链较强，但任务/胜负、场景/Prefab、灯光/材质、自动风格 QA 没有对应产品层。
-6. **仓库中的关键实现风险**：包括异步 XML 缓存 key 不一致与异常路径未初始化指针、搜索路径移除后的迭代器失效、追加搜索路径不清 full-path cache、Spine 卸载短路、DragonBones atlas 扩展名判断疑似笔误，以及音频“stream”仍先整文件入内存。
+6. **仓库中的关键实现风险**：包括异步 XML 缓存 key 不一致与异常路径未初始化指针、搜索路径移除后的迭代器失效、追加搜索路径不清 full-path cache、Spine 卸载短路、DragonBones atlas 扩展名判断疑似笔误，以及音频“stream”仍先整文件入内存。本轮逐项复核后全部仍成立。
+7. **潜在序列化与 CLI 根路径边角**：`ClipDef::toXml` 格式仍可疑，但第一方当前无调用点，应列为潜在 C++ serializer 风险而非“编辑器必然写坏”；CLI 的一部分根路径仍从脚本目录推导，尚未完全统一到注入的 asset root。
 
 高风险代码位置： [XmlItemCache.h](<F:/GitHub/Dora-SSR/Source/Cache/XmlItemCache.h:67>)、[Content.cpp](<F:/GitHub/Dora-SSR/Source/Basic/Content.cpp:1021>)、[Cache.cpp](<F:/GitHub/Dora-SSR/Source/Cache/Cache.cpp:275>)、[DragonBoneCache.cpp](<F:/GitHub/Dora-SSR/Source/Cache/DragonBoneCache.cpp:205>)、[AudioCache.cpp](<F:/GitHub/Dora-SSR/Source/Cache/AudioCache.cpp:33>)。
 
@@ -250,5 +273,6 @@ Yarn 负责节点、分支、变量、跳转、选项和 command；YarnRunner �
 
 Dora-SSR 已经能支持一条有效的 2D 小中型项目生产线：策划用 TMX/Yarn/Excel 表达内容，程序用 ECS/Event/Platformer/脚本把规则接起来，美术通过 Action/Body/Particle 等专项编辑器和外部骨骼工具交付资源，最终由 Content 与各类 Cache 在运行时装配。
 
-它当前的短板不在“完全没有工具”，而在于**三类工具之间缺少强契约层**：没有稳定资产身份、统一 schema、依赖验证、保存失效协议和确定性打包。因此，若目标是把它升级为多人、多岗位、可持续扩展的生产平台，优先级应当是“资产 key/缓存正确性 → 保存刷新闭环 → manifest/schema/验证 → staging/cook”，随后才是任务编辑器、场景/材质/灯光与风格自动审查。
+本轮更新把“怎么开发、怎么检查、怎么协作”提升了一个台阶：内建 CLI、动态 DoraX、增强输入、Git 工作流和受控 Agent 工具都是真实增量；但“资产本身如何被稳定标识、校验、失效和打包”基本没有变化。
 
+它当前的短板不在“完全没有工具”，而在于**三类工具之间缺少强契约层**：没有稳定资产身份、统一 schema、依赖验证、保存失效协议和确定性打包。因此，若目标是把它升级为多人、多岗位、可持续扩展的生产平台，优先级应当仍是“资产 key/缓存正确性 → 保存刷新闭环 → manifest/schema/验证 → staging/cook”，随后才是任务编辑器、场景/材质/灯光与风格自动审查。新版 CLI 正好可以作为这些验证器和构建门禁的统一承载入口。

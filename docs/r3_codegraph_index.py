@@ -9,7 +9,7 @@ from typing import Final
 
 
 R3_STABILITY_GATE_PLAN_DOCUMENT: Final = (
-    "docs/R3稳定门禁与三职能Agent双轨推进计划.md"
+    "docs/plan/R3稳定门禁与三职能Agent双轨推进计划.md"
 )
 R3_AGENT_CONSTRAINT_LOOP_DOCUMENT: Final = (
     "docs/Agent任务约束循环_R3三职能协同版.md"

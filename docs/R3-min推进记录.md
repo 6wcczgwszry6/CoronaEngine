@@ -21,8 +21,8 @@ Skeleton：r3-skeleton-week1-v6 / sha256:6144cabd279c57c8e843c585156e775f213d257
 ## 0. 当前执行锚点
 
 ```text
-完整 R3 权威计划：docs/R3稳定门禁与三职能Agent双轨推进计划.md
-当前一周执行子计划：docs/R3黑盒期单人垂直切片推进计划.md
+完整 R3 权威计划：docs/plan/R3稳定门禁与三职能Agent双轨推进计划.md
+历史子计划：已被权威计划取代并清理
 执行约束：docs/Agent任务约束循环_R3三职能协同版.md
 
 当前分支：agent-native
@@ -848,7 +848,7 @@ execution reply/evidence 既有字段回归通过
 
 为避免超长历史计划和旧约束文档继续产生执行口径歧义，本轮完成文档治理：
 
-- 新增 `R3稳定门禁与三职能Agent双轨推进计划.md`，作为当前唯一推进优先级来源。
+- 新增 `docs/plan/R3稳定门禁与三职能Agent双轨推进计划.md`，作为当前唯一推进优先级来源。
 - 新增 `Agent任务约束循环_R3三职能协同版.md`，作为当前 Agent / Codex 执行规约。
 - 旧计划和旧约束循环保留历史正文，并增加新文档迁移提示。
 - 后续阶段进度继续写入本文件；微小修改只保留在提交记录中。
@@ -2377,7 +2377,7 @@ Single-player Demo Gate before / after：unavailable -> unavailable
 
 完成断点：
 
-- 新增 `R3黑盒期单人垂直切片推进计划.md`，建立 B0-B7 一周执行链。
+- 当时新增黑盒期单人垂直切片子计划，建立 B0-B7 一周执行链；该子计划后被权威计划取代并清理。
 - 计划采用端到端 Walking Skeleton 优先策略，不按模块逐个纵深开发。
 - 更新 Agent 约束循环，支持 B 编号、黑盒 Preflight、双 Gate、integration status 和单人能力解锁。
 - 明确继续使用本文件作为唯一推进记录，不创建第二份并行进度事实源。
@@ -3042,7 +3042,7 @@ changed_interfaces：GameplayLogicPlan、GameplayEntitySlot、GameplayPrimitiveS
 new_contract_version/hash：r3-skeleton-week1-v2 / sha256:754042409f4adda073e696fea0b65eb6d7466885e36bb8de155ddff9434fc7ef
 affected_nodes：program_agent、artifact_bundle、project_gate_preflight、demo_scenario_runner
 required_revalidation：B0.4 skeleton、ProgramAgent、ArtifactRegistry、TaskGraph、five-Artifact workflow
-evidence_refs：docs/R3黑盒期单人垂直切片推进计划.md:4.2-4.3；editor/plugins/AITool/services/agent_collaboration/contracts.py；editor/plugins/AITool/services/agent_collaboration/walking_skeleton.py
+evidence_refs：docs/R3-min推进记录.md:B6.4；editor/plugins/AITool/services/agent_collaboration/contracts.py；editor/plugins/AITool/services/agent_collaboration/walking_skeleton.py
 ```
 
 验证证据：
