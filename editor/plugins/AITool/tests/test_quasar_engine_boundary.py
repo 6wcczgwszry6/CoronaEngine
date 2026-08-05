@@ -23,6 +23,27 @@ class QuasarEngineBoundaryTests(unittest.TestCase):
         text = path.read_text(encoding="utf-8")
         self.assertNotIn("generation_provider_adapter", text)
 
+    def test_default_paths_do_not_invent_engine_layout(self):
+        import importlib.util
+        import sys
+
+        path = QUASAR_ROOT / "ai_config" / "paths_config.py"
+        spec = importlib.util.spec_from_file_location("quasar_paths_boundary", path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        paths = module.get_default_paths()
+        self.assertIsNone(paths.backend_root)
+        self.assertIsNone(paths.frontend_dist)
+        self.assertIsNone(paths.script_dir)
+
+    def test_local_storage_accepts_explicit_storage_root(self):
+        path = QUASAR_ROOT / "ai_media_resource" / "adapter_local.py"
+        text = path.read_text(encoding="utf-8")
+        self.assertIn("storage_root", text)
+        self.assertNotIn("Backend.local_storage", text)
+
 
 if __name__ == "__main__":
     unittest.main()
