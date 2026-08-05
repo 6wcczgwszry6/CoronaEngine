@@ -73,6 +73,18 @@ class CoronaEditor:
             unregister()
 
     @classmethod
+    def update_project_context(cls, project_path):
+        """Apply the native launcher's authoritative project on the Python thread."""
+        from utils.settings import settings_manager
+
+        normalized_path = os.path.abspath(os.path.expanduser(str(project_path or "").strip()))
+        if not normalized_path or not settings_manager.set_active_project(normalized_path):
+            return False
+        if cls.CoronaEngine is not None:
+            cls.CoronaEngine.active_project_path = normalized_path
+        return True
+
+    @classmethod
     def initialize_runtime(cls):
         if cls._shutdown_requested:
             return False

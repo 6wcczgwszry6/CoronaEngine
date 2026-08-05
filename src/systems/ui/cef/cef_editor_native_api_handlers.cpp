@@ -6457,6 +6457,11 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             }
             CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}' status='{}'",
                          state.project_path, prepared.status);
+            if (!enqueue_python_project_context_changed(state.project_path)) {
+                CFW_LOG_WARNING(
+                    "[ProjectLauncher] Python project context update was not queued for '{}'",
+                    state.project_path);
+            }
             emit_editor_api_event("ProjectLauncher.projectOpened", {
                 {"path", state.project_path}, {"status", prepared.status},
             });

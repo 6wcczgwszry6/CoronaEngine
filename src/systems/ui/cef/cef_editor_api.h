@@ -146,5 +146,6 @@ std::uint64_t register_python_script_callback_callable(const std::string& event_
 void clear_python_script_callbacks();
 NativeResult invoke_python_script_service(const NativeRequest& request,
                                           const char* route = "python-script");
+bool enqueue_python_project_context_changed(std::string_view project_path);
 
 }  // namespace Corona::Systems::UI
