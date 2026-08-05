@@ -12,6 +12,7 @@ from .environment import Environment
 
 from ..corona_editor import CoronaEditor
 from ...utils.proejct_utils import auto_save
+from ...archive.parser import parse_archive
 
 CoronaEngine = CoronaEditor.CoronaEngine
 logger = logging.getLogger(__name__)
@@ -253,6 +254,7 @@ class Scene:
         self.route = route
         self.name = Path(route).stem
         self.file_data = configparser.ConfigParser()
+        self.archive_snapshot: Dict[str, Any] = {}
 
         if CoronaEngine is None:
             raise RuntimeError("CoronaEngine 未初始化")
@@ -299,6 +301,12 @@ class Scene:
         self.name = Path(route).stem
         # save_data 会由装饰器自动调用
         return True
+
+    def _is_portable_scene_folder(self) -> bool:
+        return (
+            self.file_data.get('format', 'type', fallback='') == 'corona_scene_folder'
+            and self.file_data.getint('format', 'version', fallback=0) == 1
+        )
 
     def read_data(self):
         previous_enabled = self._begin_bulk_scene_load()
@@ -351,7 +359,12 @@ class Scene:
             data_path = os.path.join(_active_project_path() or '', self.route)
 
         if os.path.exists(data_path):
+            self.archive_snapshot = parse_archive(data_path)
             self.file_data.read(data_path, encoding='utf-8')
+            if self._is_portable_scene_folder():
+                self.name = self.file_data.get('scene', 'name', fallback=self.name)
+            else:
+                self.name = self.file_data.get('base', 'name', fallback=self.name)
 
             # 读取太阳设置
             if 'sun' in self.file_data:
@@ -504,6 +517,42 @@ class Scene:
                 self.file_data.set('actors', key, value)
 
     def save_data(self):
+        if self._is_portable_scene_folder():
+            # Portable scene saves are owned by the native scene store.  Python
+            # only supplies the fields that are not already native scene state.
+            from ..editor_api import CoronaEditorApi
+            vision_document = getattr(self, 'vision_document', None)
+            snapshot = {
+                'name': self.name,
+                'script_path': getattr(self, 'script_path', ''),
+                'terrain': {
+                    'path': getattr(self, 'terrain_path', ''),
+                    'type': getattr(self, 'terrain_type', ''),
+                },
+                'vision': {
+                    'storage': getattr(self, 'vision_storage', ''),
+                    'source_id': getattr(self, 'vision_source_id', ''),
+                    'import_mode': getattr(self, 'vision_import_mode', ''),
+                },
+                'vision_document': {
+                    'version': VISION_DOCUMENT_VERSION,
+                    'encoding': VISION_DOCUMENT_ENCODING,
+                    'asset_root': getattr(self, 'vision_document_asset_root', ''),
+                    'data': _encode_vision_document(vision_document) if vision_document is not None else '',
+                },
+            }
+            scene_route = 'scene.ini' if os.path.isabs(self.route) else self.route
+            result = CoronaEditorApi.main.scene_save(scene_route, snapshot)
+            if isinstance(result, dict) and not result.get('ok', False):
+                diagnostics = result.get('diagnostics', [])
+                raise RuntimeError(
+                    f"Portable scene save failed: {result.get('message', 'validation failed')}; "
+                    f"diagnostics={diagnostics}")
+            return result
+
+        raise RuntimeError(
+            'Legacy projects are read-only; use Save as Portable Scene before editing')
+
         # 保存文件数据
         if os.path.isabs(self.route):
             data_path = self.route
@@ -512,12 +561,16 @@ class Scene:
 
         # 确保必要的 section 存在。actors 由 C++ native scene 持久化，
         # Python save_data 只保留磁盘上的当前 actors section，不重新生成。
-        for section in ('base', 'sun', 'grid', 'scripts', 'terrain'):
+        metadata_section = 'scene' if self._is_portable_scene_folder() else 'base'
+        for section in (metadata_section, 'sun', 'grid', 'scripts', 'terrain'):
             if section not in self.file_data:
                 self.file_data[section] = {}
 
+        if metadata_section == 'scene' and 'base' in self.file_data:
+            self.file_data.remove_section('base')
+
         # 基础信息
-        self.file_data['base']['name'] = self.name
+        self.file_data[metadata_section]['name'] = self.name
 
         # 太阳设置
         env = self.get_environment()

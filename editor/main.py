@@ -27,28 +27,19 @@ except Exception:
         force=True,
     )
 
+editor = CoronaEditor
+editor.module_list["CoronaEditor"] = CoronaEditor
+from backend.registry import register_core_python_script_services
+register_core_python_script_services()
+editor.register_script_dispatcher()
+atexit.register(editor.unregister_script_dispatcher)
+
 try:
     from CoronaPlugin.utils.load_utils import reimport
     reimport()
 except:
     pass
 
-editor = CoronaEditor
-editor.module_list["CoronaEditor"] = CoronaEditor
-editor.register_script_dispatcher()
-atexit.register(editor.unregister_script_dispatcher)
-
 
 def run():
-    try:
-        aitool_root = REPO_ROOT / "editor" / "plugins" / "AITool"
-        if str(aitool_root) not in sys.path:
-            sys.path.insert(0, str(aitool_root))
-        from Quasar.ai_tools.warmup import warmup_all
-        from plugins.AITool.utils.load_local_ai_setting import load_ai_setting
-        load_ai_setting()
-        warmup_all()
-    except:
-        pass
-
     logging.info("Python script runtime initialized; C++ UI owns the Vue/CEF frontend tab.")

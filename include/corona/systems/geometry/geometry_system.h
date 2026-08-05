@@ -38,8 +38,12 @@ struct SceneVisibilityConfig {
     bool collect_stats             = true;
 
     bool enable_distance_culling  = true;   // 是否启用距离剔除
-    float unload_distance         = 10.0f;  // 超过此距离且不可见时触发淘汰
-    float preload_distance        = 25.0f;  // 进入此距离时触发预加载
+    float unload_distance         = 80.0f;  // 超过此距离且不可见时触发淘汰
+    float preload_distance        = 50.0f;  // 进入此距离时触发预加载
+
+    // 八叉树距离驱动 LOD 级空间淘汰
+    bool  enable_lod_spatial_eviction = false;  // 默认关闭（需足够大的 preload→unload gap）
+    float lod_evict_distance = 0.0f;             // 0 = 自动: (preload+effective_unload)/2
 };
 
 /**
@@ -301,6 +305,11 @@ class GeometrySystem : public Kernel::SystemBase {
     static float compute_angular_epsilon(float pixel_budget,
                                          float fov_deg,
                                          float height_px);
+
+    /// 根据 VRAM 占比动态缩放像素预算：压力越大 → 预算越宽松 → 倾向粗 LOD → 显存自然回落。
+    /// @param vram_ratio  used_bytes / budget_bytes，范围 [0,1]；budget=0 时返回默认值。
+    /// @return 缩放后的像素预算（≥ 默认值 1.5px）。
+    static float compute_pixel_budget_from_pressure(float vram_ratio);
 
     /// 屏幕空间误差选级：给定到 mesh 最近点距离 d、各级世界误差（world_errors[i] =
     /// geometric_error[i]·actor_scale，下标与 levels 对齐，level 0 误差为 0），以及相机角
@@ -598,6 +607,10 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 失败则丢弃（结果 RAII 自动释放 GPU）。仅几何线程访问在途表，无需加锁。
     void process_pending_lod_builds();
 
+    /// 空间距离驱动的 LOD 级淘汰：释放指定 actor 所有 geometry 的 LOD1..N GPU 缓冲，
+    /// 仅保留 LOD0，并设 lod_spatially_evicted 标记。仅几何线程 update() 中调用。
+    void evict_lods_for_actor(std::uintptr_t actor);
+
     /// 维护 mesh/texture 的 CPU 资源账本（P0）：登记新出现 model_id 的 Scene
     /// (mesh CPU) 与其 Image 纹理 (texture CPU)，按 rid 去重；并对 ResourceManager
     /// 的存活集合做对账，删除已被驱逐的 rid。低频调用（~1Hz）即可，CPU 用量变化缓慢。
@@ -608,6 +621,29 @@ class GeometrySystem : public Kernel::SystemBase {
     /// {lod_levels[0], lod_levels[demand_median-1], lod_levels[N-1]}，清空窗口外级的
     /// vertices/indices/bone_weights。每 kCpuWindowEvalInterval 帧调用一次。
     void reconcile_cpu_residency();
+
+    // ========================================
+    // LOD 级 LRU — 延迟 Cap 机制
+    // ========================================
+    // 当 VRAM 超过 soft 水位（75% 预算）时，按距离排序对远处 geometry 施加 LOD 下限，
+    // 迫使其选更粗 LOD 以释放显存。远者优先降级——保留近处精细度，牺牲远处细节。
+
+    /// 单条 LOD 预算候选项：reconcile 每 (geom,mesh) 收集一条，供 enforce_lod_budget
+    /// 在帧末尾统一按距离排序、按需施加 LOD 下限（cap）。
+    struct LodBudgetEntry {
+        std::uint64_t lod_key;        // make_lod_key(geometry_handle, mesh_index)
+        ktm::fvec3    world_center;   // mesh 世界 AABB 中心，用于距相机距离排序
+        int           current_demand; // 本帧自然需求（滞回后、cap 前），非 cap 后值
+        int           level_count;    // 该 mesh 的 LOD 总级数（= lod_cache 条目中 levels.size()）
+    };
+
+    /// 在 reconcile_lod_residency 末尾调用：扫描所有 entry，按 VRAM 压力对远处 mesh
+    /// 施加 demand 下限（lod_budget_caps），下一帧 reconcile 生效。
+    /// @param camera_positions 所有相机世界坐标（用于距离排序）
+    /// @param entries          本帧收集的所有 LodBudgetEntry
+    void enforce_lod_budget(
+        const std::vector<ktm::fvec3>& camera_positions,
+        const std::vector<LodBudgetEntry>& entries);
 
     /// 计算 mesh/texture 的 VRAM/RAM 用量 + 预算视图（线程安全，内部加锁）。
     [[nodiscard]] MemoryReport compute_memory_report() const;

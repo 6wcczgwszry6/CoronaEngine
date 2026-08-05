@@ -221,6 +221,7 @@ export const BLOCK_CATEGORY_MAP = {
   object_hide: "\u5bf9\u8c61",
   object_lane_index: "\u73a9\u6cd5\u6a21\u677f",
   object_logical_collision_enabled: "\u7269\u7406",
+  object_move_direction: "\u8fd0\u52a8",
   object_move_tag: "\u8fd0\u52a8",
   object_move_to_lane: "\u73a9\u6cd5\u6a21\u677f",
   object_move_to_lane_smooth: "\u73a9\u6cd5\u6a21\u677f",

@@ -23,8 +23,18 @@ class ScriptBase(ABC):
 
     def shutdown(self):
         """关闭脚本"""
+        self.on_shutdown()
         self.is_initialized = False
         self.logger.info(f"Script {self.name} shutdown")
+
+    def on_start(self) -> None:
+        pass
+
+    def on_update(self, delta_time: float) -> None:
+        pass
+
+    def on_shutdown(self) -> None:
+        pass
 
     def on_event(self, event_name: str, data: Any = None) -> None:
         """处理事件"""

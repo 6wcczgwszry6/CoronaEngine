@@ -55,6 +55,10 @@ void SystemBase::start() {
 
     should_run_.store(true, std::memory_order_release);
     is_paused_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> exit_lock(thread_exit_mutex_);
+        thread_finished_ = false;
+    }
     state_.store(SystemState::running, std::memory_order_release);
 
     // 创建工作线程
@@ -110,6 +114,36 @@ void SystemBase::stop() {
     }
 
     state_.store(SystemState::stopped, std::memory_order_release);
+}
+
+bool SystemBase::stop_for(std::chrono::milliseconds timeout) {
+    std::lock_guard<std::mutex> lock(control_mutex_);
+
+    if (state_ == SystemState::stopped || state_ == SystemState::idle) {
+        return true;
+    }
+
+    state_.store(SystemState::stopping, std::memory_order_release);
+    should_run_.store(false, std::memory_order_release);
+    {
+        std::lock_guard<std::mutex> pause_lock(pause_mutex_);
+        is_paused_.store(false, std::memory_order_release);
+    }
+    pause_cv_.notify_one();
+
+    if (!thread_.joinable()) {
+        state_.store(SystemState::stopped, std::memory_order_release);
+        return true;
+    }
+
+    std::unique_lock<std::mutex> exit_lock(thread_exit_mutex_);
+    if (!thread_exit_cv_.wait_for(exit_lock, timeout, [this] { return thread_finished_; })) {
+        return false;
+    }
+    exit_lock.unlock();
+    thread_.join();
+    state_.store(SystemState::stopped, std::memory_order_release);
+    return true;
 }
 
 // ========================================
@@ -248,6 +282,11 @@ void SystemBase::thread_loop() {
     }
 
     this->on_thread_stopped();
+    {
+        std::lock_guard<std::mutex> lock(thread_exit_mutex_);
+        thread_finished_ = true;
+    }
+    thread_exit_cv_.notify_all();
 }
 
 void SystemBase::on_thread_started() {

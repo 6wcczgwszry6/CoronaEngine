@@ -2001,7 +2001,9 @@ class LANChatRuntimeGuardTests(unittest.TestCase):
             source = path.read_text(encoding="utf-8")
             self.assertNotIn("plugins.AITool.Quasar", source, path)
         editor_source = production_paths[0].read_text(encoding="utf-8")
-        self.assertIn("from Quasar.ai_tools.warmup import warmup_all", editor_source)
+        aitool_source = production_paths[1].read_text(encoding="utf-8")
+        self.assertNotIn("warmup_all", editor_source)
+        self.assertIn("from Quasar.ai_tools.warmup import warmup_all", aitool_source)
 
     def test_runtime_direct_engine_tool_overrides_stale_import_model(self) -> None:
         class FakeTool:

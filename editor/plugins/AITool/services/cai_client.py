@@ -32,9 +32,14 @@ class CAIClient:
         self._cai_app = cai_app
         self._executor = executor
         self._queue_maxsize = queue_maxsize
+        self._lock = threading.Lock()
+        self._streams = set()
+        self._futures = set()
 
     def start_stream(self, payload: dict):
         stream = CAIStream(self._queue_maxsize)
+        with self._lock:
+            self._streams.add(stream)
 
         def stream_worker():
             try:
@@ -47,6 +52,24 @@ class CAIClient:
             finally:
                 if not stream.stopped:
                     stream.put(("done", None))
+                with self._lock:
+                    self._streams.discard(stream)
 
-        self._executor.submit(stream_worker)
+        future = self._executor.submit(stream_worker)
+        with self._lock:
+            self._futures.add(future)
+        future.add_done_callback(self._forget_future)
         return stream
+
+    def _forget_future(self, future):
+        with self._lock:
+            self._futures.discard(future)
+
+    def shutdown(self):
+        with self._lock:
+            streams = list(self._streams)
+            futures = list(self._futures)
+        for stream in streams:
+            stream.stop()
+        for future in futures:
+            future.cancel()

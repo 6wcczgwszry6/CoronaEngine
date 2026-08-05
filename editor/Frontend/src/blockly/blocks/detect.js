@@ -1,4 +1,5 @@
 import * as Blockly from 'blockly/core';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 export const defineDetectBlocks = () => {
   Blockly.Blocks['detect_touch'] = {
@@ -81,7 +82,7 @@ export const defineDetectBlocks = () => {
       this.appendValueInput('QUESTION')
         .setCheck('String')
         .appendField('\u8be2\u95ee')
-        .appendField(new Blockly.FieldTextInput('\u4f60\u53eb\u4ec0\u4e48\uff1f'), 'QUESTION_TEXT')
+        .appendField(new Blockly.FieldTextInput(translateUiText('\u4f60\u53eb\u4ec0\u4e48\uff1f')), 'QUESTION_TEXT')
         .appendField('\u7684\u56de\u7b54');
       this.setOutput(true, 'String');
       this.setInputsInline(true);

@@ -6,7 +6,7 @@
     <DockTitleBar
       v-if="!embedded && !isDocked"
       :title="editingTarget ? `${t('blockly.title')} - ${editingTarget}` : t('blockly.title')"
-      extraClass="bg-[#84A65B]"
+      extraClass="bg-[#D8B86C]"
       routePath="/ScratchTool"
       @close="handleClose"
     />
@@ -61,9 +61,9 @@
         <div
           id="drag-overlay"
           class="absolute inset-0 z-20 flex items-center justify-center pointer-events-none"
-          style="background: rgba(132,166,91,0.15); border: 3px dashed #84a65b; display: none;"
+          style="background: rgba(216,184,108,0.15); border: 3px dashed #d8b86c; display: none;"
         >
-          <div class="text-center text-[#84a65b]">
+          <div class="text-center text-[#d8b86c]">
             <div class="text-4xl mb-2">📂</div>
             <div class="text-lg font-bold">{{ t('blockly.dragImport') }}</div>
           </div>
@@ -177,6 +177,7 @@ import { useI18n } from 'vue-i18n';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockPanel } from '@/composables/useDockPanel.js';
 import { scriptingService } from '@/utils/bridge.js';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const { closePanel: closeDockPanel, isDocked } = useDockPanel();
 const { t, locale } = useI18n();
@@ -408,9 +409,9 @@ async function handleToggleRun() {
       || Number(preview.runningCount ?? preview.running_count ?? 0) > 0
       || Boolean(preview.hasSnapshot ?? preview.has_snapshot);
     if (previewActive) {
-      alert(preview.scope === 'scene'
+      alert(translateUiText(preview.scope === 'scene'
         ? '当前积木脚本正在由全局运行执行'
-        : '当前积木脚本正在由项目预览执行');
+        : '当前积木脚本正在由项目预览执行'));
       return;
     }
   } catch (error) {
@@ -502,6 +503,8 @@ function startPollTimer() {
 const loadBlocklyModules = async () => {
   try {
     BlocklyLib = await import('blockly/core');
+    const { installCustomBlockLocalization } = await import('@/blockly/i18n/customBlockLocalization.js');
+    installCustomBlockLocalization(BlocklyLib);
     blocklyCN = await import('blockly/msg/zh-hans');
     blocklyEN = await import('blockly/msg/en');
     return true;

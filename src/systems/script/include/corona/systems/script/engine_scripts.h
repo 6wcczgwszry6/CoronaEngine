@@ -10,4 +10,7 @@ void BindAll(nanobind::module_& m);
 
 void BindCef(nanobind::module_& m);
 
+// Called by PythonAPI on the ScriptSystem Python thread while holding the GIL.
+void clear_python_callback_registry();
+
 }  // namespace EngineScripts

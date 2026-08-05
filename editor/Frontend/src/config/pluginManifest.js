@@ -8,7 +8,6 @@ import Pet from '@/views/tools/Pet.vue';
 import LogView from '@/views/sidebar/LogView.vue';
 import FileManager from '@/views/sidebar/FileManager.vue';
 import ProjectSettings from '@/views/sidebar/ProjectSettings.vue';
-import AITalkBar from '@/views/sidebar/AITalkBar.vue';
 import NodeGraphPanel from '@/views/sidebar/NodeGraphPanel.vue';
 import CabbageChatPanel from '@/views/sidebar/CabbageChatPanel.vue';
 import EditorSettings from '@/views/sidebar/EditorSettings.vue';
@@ -24,10 +23,10 @@ export const PLUGIN_MANIFEST = [
     displayName: '场景管理',
     pageType: 'view',
     defaultDock: 'right',
-    defaultWidth: 460,
-    defaultHeight: 560,
+    defaultWidth: 360,
+    defaultHeight: 540,
     autoInit: false,
-    defaultOpenMode: 'external',
+    defaultOpenMode: 'docked',
     defaultFloatPosition: 'right_top',
     minFloatWidth: 340,
     minFloatHeight: 360,
@@ -53,10 +52,10 @@ export const PLUGIN_MANIFEST = [
     displayName: '对象',
     pageType: 'view',
     defaultDock: 'right',
-    defaultWidth: 420,
-    defaultHeight: 460,
+    defaultWidth: 360,
+    defaultHeight: 540,
     autoInit: false,
-    defaultOpenMode: 'external',
+    defaultOpenMode: 'docked',
     defaultFloatPosition: 'right_bottom',
     minFloatWidth: 320,
     minFloatHeight: 320,
@@ -112,22 +111,6 @@ export const PLUGIN_MANIFEST = [
     component: ProjectSettings,
   },
   {
-    id: 'AITalkBar',
-    routePath: '/AITalkBar',
-    displayNameKey: 'plugins.AITalkBar',
-    displayName: 'AI 对话',
-    pageType: 'plugin',
-    defaultDock: 'right',
-    defaultWidth: 420,
-    defaultHeight: 560,
-    autoInit: false,
-    defaultOpenMode: 'external',
-    defaultFloatPosition: 'left_bottom',
-    minFloatWidth: 320,
-    minFloatHeight: 360,
-    component: AITalkBar,
-  },
-  {
     id: 'NodeGraphPanel',
     routePath: '/NodeGraph',
     displayNameKey: 'plugins.NodeGraphPanel',
@@ -137,10 +120,14 @@ export const PLUGIN_MANIFEST = [
     // Open wide enough for the toolbox, node canvas and inspector to use the
     // normal three-column layout immediately. Narrower user-resized windows still
     // fall back to NodeGraphWorkspace's compact responsive layout.
-    defaultWidth: 1440,
-    defaultHeight: 720,
+    defaultWidth: 1100,
+    defaultHeight: 320,
+    // Keep the docked height compact, but open the shortcut-created floating panel
+    // at the large centered size used by the node editing workflow.
+    defaultFloatWidth: 1480,
+    defaultFloatHeight: 790,
     autoInit: false,
-    defaultOpenMode: 'external',
+    defaultOpenMode: 'docked',
     defaultFloatPosition: 'center',
     minFloatWidth: 760,
     minFloatHeight: 440,
@@ -151,14 +138,14 @@ export const PLUGIN_MANIFEST = [
     id: 'CabbageChatPanel',
     routePath: '/CabbageChat',
     displayNameKey: 'plugins.CabbageChatPanel',
-    displayName: '包菜答疑',
+    displayName: 'AI 创作助手',
     pageType: 'plugin',
     defaultDock: 'right',
     defaultWidth: 420,
     defaultHeight: 600,
     autoInit: false,
-    defaultOpenMode: 'external',
-    defaultFloatPosition: 'right_top',
+    defaultOpenMode: 'docked',
+    defaultFloatPosition: 'right_bottom',
     minFloatWidth: 340,
     minFloatHeight: 400,
     floatingPriority: 110,

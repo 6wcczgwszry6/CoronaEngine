@@ -405,6 +405,7 @@ const editorApiStatic = {
     onActorSelectionChanged: (callback) => register_manifest_editor_api_callback('events.onActorSelectionChanged', callback),
     onActorTransformUpdated: (callback) => register_manifest_editor_api_callback('events.onActorTransformUpdated', callback),
     onActorPickResult: (callback) => register_manifest_editor_api_callback('events.onActorPickResult', callback),
+    onViewportGizmoPointerResult: (callback) => register_manifest_editor_api_callback('events.onViewportGizmoPointerResult', callback),
     onFocusPoseResult: (callback) => register_manifest_editor_api_callback('events.onFocusPoseResult', callback),
     onNetworkActorDeleteSyncBroadcastRequested: (callback) => register_manifest_editor_api_callback('events.onNetworkActorDeleteSyncBroadcastRequested', callback),
     onNetworkActorOwnershipClaimed: (callback) => register_manifest_editor_api_callback('events.onNetworkActorOwnershipClaimed', callback),
@@ -520,10 +521,22 @@ const editorApiStatic = {
       call_manifest_editor_api('project.createProject', [projectData || {}]),
     createWorldProject: (worldData) =>
       call_manifest_editor_api('project.createWorldProject', [worldData || {}]),
+    choosePortableSceneTarget: () =>
+      call_manifest_editor_api('project.choosePortableSceneTarget', []),
+    validatePortableScene: (payload) =>
+      call_manifest_editor_api('project.validatePortableScene', [payload || {}]),
+    importPortableAsset: (payload) =>
+      call_manifest_editor_api('project.importPortableAsset', [payload || {}]),
+    cleanupPortableSceneAssets: (payload) =>
+      call_manifest_editor_api('project.cleanupPortableSceneAssets', [payload || {}]),
     getAppVersion: () => call_manifest_editor_api('project.getAppVersion', []),
     getDefaultProjectPath: () => call_manifest_editor_api('project.getDefaultProjectPath', []),
+    getProjectLoadStatus: () => call_manifest_editor_api('project.getProjectLoadStatus', []),
     getRecentProjects: () => call_manifest_editor_api('project.getRecentProjects', []),
-    openProject: (projectPath) => call_manifest_editor_api('project.openProject', [projectPath]),
+    migrateLegacyScene: (payload) =>
+      call_manifest_editor_api('project.migrateLegacyScene', [payload || {}]),
+    openProject: (projectPath, options = {}) =>
+      call_manifest_editor_api('project.openProject', [projectPath, options]),
     openProjectFile: () => call_manifest_editor_api('project.openProjectFile', []),
     setProjectMode: (mode, settings) =>
       call_manifest_editor_api('project.setProjectMode', [{ mode, settings }]),
@@ -564,6 +577,8 @@ const editorApiStatic = {
     listSceneTree: (sceneName) => call_manifest_editor_api('sceneTools.listSceneTree', [sceneName]),
     reloadScene: (sceneName, projectPath = '') =>
       call_manifest_editor_api('sceneTools.reloadScene', projectPath ? [sceneName, projectPath] : [sceneName]),
+    rebindActorResource: (sceneName, actorGuid, path) =>
+      call_manifest_editor_api('sceneTools.rebindActorResource', [sceneName, actorGuid, path]),
     createActor: (sceneName, objPath, actorType = 'model', actorData = null) =>
       call_manifest_editor_api('sceneTools.createActor',
         actorData ? [sceneName, objPath, actorType, actorData] : [sceneName, objPath, actorType],
@@ -574,8 +589,11 @@ const editorApiStatic = {
       call_manifest_editor_api('sceneTools.renameActor', [sceneName, actorName, name]),
     openActor: (sceneName, actorName) =>
       call_manifest_editor_api('sceneTools.openActor', [sceneName, actorName]),
-    selectActor: (sceneName, actorType, actorName) =>
-      call_manifest_editor_api('sceneTools.selectActor', [sceneName, actorType, actorName]),
+    selectActor: (sceneName, actorType, actorName, context = null) =>
+      call_manifest_editor_api(
+        'sceneTools.selectActor',
+        context ? [sceneName, actorType, actorName, context] : [sceneName, actorType, actorName],
+      ),
     focusActor: (sceneName, actorName, cameraName) =>
       call_manifest_editor_api('sceneTools.focusActor', [sceneName, actorName, cameraName]),
     setRenderBackend: (mode, sceneName = null, cameraId = null) =>
@@ -752,6 +770,8 @@ export const sceneService = {
   loadVisionScene: (path) => editorApi.sceneTools.loadVisionScene(path),
   reloadScene: (sceneName, projectPath = '') =>
     editorApi.sceneTools.reloadScene(sceneName, projectPath),
+  rebindActorResource: (sceneName, actorGuid, path) =>
+    editorApi.sceneTools.rebindActorResource(sceneName, actorGuid, path),
   listActorTree: (sceneName) => editorApi.scene.listActorTree(sceneName),
   listSceneTree: (sceneName) => editorApi.sceneTools.listSceneTree(sceneName),
   openSceneActor: (sceneName, actorName) =>
@@ -917,8 +937,32 @@ export const aiService = {
     });
     return response?.data ?? response;
   },
-  loadCabbageContext: async () => {
-    const response = await editorApi.ai.submitRequest({ operation: 'cabbage.context.load' });
+  startNodeGraphGeneration: async (payload) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.generate.start',
+      payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  getNodeGraphGenerationStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.generate.status',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  cancelNodeGraphGeneration: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'node_graph.generate.cancel',
+      taskId: String(taskId || ''),
+    });
+    return response?.data ?? response;
+  },
+  loadCabbageContext: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.context.load',
+      payload,
+    });
     return response?.data ?? response;
   },
   recordCabbageEvent: async (payload) => {
@@ -939,6 +983,20 @@ export const aiService = {
     const response = await editorApi.ai.submitRequest({
       operation: 'cabbage.context.append_message',
       payload: payload || {},
+    });
+    return response?.data ?? response;
+  },
+  startCabbageGoalPlan: async (payload = {}) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.goal_plan.start',
+      payload,
+    });
+    return response?.data ?? response;
+  },
+  getCabbageGoalPlanStatus: async (taskId) => {
+    const response = await editorApi.ai.submitRequest({
+      operation: 'cabbage.goal_plan.status',
+      taskId: String(taskId || ''),
     });
     return response?.data ?? response;
   },
@@ -1078,6 +1136,23 @@ export const projectLauncherService = {
   // 浏览文件夹
   browseFolder: (default_path) =>
     editorApi.project.browseFolder(default_path),
+  choosePortableSceneTarget: () =>
+    editorApi.project.choosePortableSceneTarget(),
+  validatePortableScene: (payload = {}) =>
+    editorApi.project.validatePortableScene(payload),
+  importPortableAsset: (payload = {}) =>
+    editorApi.project.importPortableAsset(payload),
+  cleanupPortableSceneAssets: (payload = {}) =>
+    editorApi.project.cleanupPortableSceneAssets(payload),
+  migrateLegacyScene: (payload) =>
+    editorApi.project.migrateLegacyScene(payload).then((result) => {
+      const migrated = result?.data ?? result;
+      if (migrated?.ok && migrated?.path) {
+        window.localStorage?.setItem('corona.activeProjectPath', migrated.path);
+        window.localStorage?.setItem('corona.activeProjectLegacy', 'false');
+      }
+      return result;
+    }),
   // 浏览并选择项目文件 (.ini)
   openProjectFile: () => editorApi.project.openProjectFile(),
   // 创建项目
@@ -1090,35 +1165,23 @@ export const projectLauncherService = {
   // 创建首页联机入口使用的临时项目：{ role: 'host'|'guest' } -> { name, path, role }
   createMultiplayerProject: (projectData) =>
     editorApi.project.createMultiplayerProject(projectData),
-  // Open a project and force the active native scene to come from it.
-  openProject: async (projectPath) => {
+  // 打开项目并让原生场景同步到该项目。
+  openProject: async (projectPath, options = {}) => {
     try {
       await window.__coronaNodeGraphFlushSave?.();
     } catch (error) {
       console.warn('切换项目之前保存节点图失败，继续打开目标项目:', error);
     }
-    const result = await editorApi.project.openProject(projectPath);
+    const loadPolicy = options.loadPolicy || options.load_policy || 'prompt';
+    const result = await editorApi.project.openProject(projectPath, { load_policy: loadPolicy });
     const success = result?.data ?? result;
     const activeProjectPath = success?.path || projectPath;
-    if (success && activeProjectPath) {
+    if (success?.ok && activeProjectPath) {
       window.localStorage?.setItem('corona.activeProjectPath', activeProjectPath);
+      window.localStorage?.setItem('corona.activeProjectLegacy', success?.legacy ? 'true' : 'false');
       window.dispatchEvent(new CustomEvent('corona-active-project-changed', {
         detail: { projectPath: activeProjectPath },
       }));
-      try {
-        // Different projects commonly reuse Scene/default.scene. Reload the
-        // native scene so actors from the previous project cannot leak across.
-        const initResult = await editorApi.main.onInit(activeProjectPath);
-        const initData = initResult?.data ?? initResult;
-        const scenes = Array.isArray(initData?.scenes) ? initData.scenes : [];
-        const activeIndex = Number(initData?.active_index ?? 0);
-        const activeScene = scenes[activeIndex] || scenes[0];
-        if (activeScene?.path) {
-          await editorApi.sceneTools.reloadScene(activeScene.path, activeProjectPath);
-        }
-      } catch (error) {
-        console.warn('Project opened, but the active scene could not be reloaded:', error);
-      }
     }
     return result;
   },
@@ -1127,6 +1190,8 @@ export const projectLauncherService = {
     editorApi.project.setProjectMode(mode, settings),
   // 获取版本信息
   getAppVersion: () => editorApi.project.getAppVersion(),
+  // 获取当前项目异步资源加载进度
+  getProjectLoadStatus: () => editorApi.project.getProjectLoadStatus(),
   // 获取最近项目列表
   getRecentProjects: () => editorApi.project.getRecentProjects(),
 };

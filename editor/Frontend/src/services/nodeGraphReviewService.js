@@ -217,6 +217,7 @@ export function startNodeGraphReview({
           graphRevision: task.revision,
           projectScopeId: task.projectScopeId,
           graphExcerpt: task.workspace,
+          projectContext: task.projectContext,
         });
       } else {
         publishErrorOnce(result, task.requestId, task.revision, task.projectScopeId);

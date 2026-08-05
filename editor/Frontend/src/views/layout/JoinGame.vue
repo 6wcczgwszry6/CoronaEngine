@@ -4,15 +4,15 @@
   >
     <!-- 背景装饰：径向辉光，延续 StartScreen 视觉 -->
     <div class="absolute inset-0 bg-gradient-to-b from-[#1a2a1a]/30 via-transparent to-transparent pointer-events-none"></div>
-    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#84a65b]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
-    <div class="absolute bottom-0 left-1/3 w-[400px] h-[400px] bg-[#84a65b]/[0.025] rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#d8b86c]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute bottom-0 left-1/3 w-[400px] h-[400px] bg-[#d8b86c]/[0.025] rounded-full blur-3xl pointer-events-none"></div>
 
     <div class="relative z-10 flex-1 flex flex-col items-center px-8 py-6 overflow-hidden">
 
       <!-- 标题 -->
       <div class="text-center mb-6 shrink-0">
         <h1 class="text-3xl font-light tracking-wide">
-          局域<span class="text-[#84a65b] font-medium">联机</span>
+          局域<span class="text-[#d8b86c] font-medium">联机</span>
         </h1>
         <p class="text-sm text-gray-500 mt-1">与同一网络下的伙伴一起创造</p>
       </div>
@@ -23,7 +23,7 @@
           v-for="t in tabs"
           :key="t.id"
           class="px-10 py-2.5 rounded-lg text-base font-medium transition-all duration-300 inline-flex items-center gap-2"
-          :class="activeTab === t.id ? 'bg-[#84a65b] text-white shadow-lg' : 'text-gray-400 hover:text-white'"
+          :class="activeTab === t.id ? 'bg-[#d8b86c] text-white shadow-lg' : 'text-gray-400 hover:text-white'"
           @click="activeTab = t.id"
         >
           <span v-html="t.icon" class="w-5 h-5 inline-flex"></span>
@@ -34,7 +34,7 @@
       <!-- 本机网络信息条 -->
       <div class="w-full max-w-3xl flex items-center justify-between mb-4 px-1 shrink-0">
         <div class="flex items-center gap-2 text-sm text-gray-400">
-          <span class="w-2 h-2 rounded-full bg-[#84a65b] animate-pulse"></span>
+          <span class="w-2 h-2 rounded-full bg-[#d8b86c] animate-pulse"></span>
           本机局域网 IP
           <span class="text-[#b9d39a] font-mono">{{ localIp }}</span>
         </div>
@@ -45,7 +45,7 @@
             type="text"
             maxlength="16"
             class="w-36 bg-[#161616] border border-[#333] rounded px-3 py-1.5 text-sm text-white
-                   focus:border-[#84a65b] outline-none transition-all"
+                   focus:border-[#d8b86c] outline-none transition-all"
             placeholder="玩家名"
           />
         </div>
@@ -66,7 +66,7 @@
             发现的房间 <span class="text-gray-600">({{ rooms.length }})</span>
           </h3>
           <button
-            class="text-sm text-gray-400 hover:text-[#84a65b] transition-colors inline-flex items-center gap-1.5"
+            class="text-sm text-gray-400 hover:text-[#d8b86c] transition-colors inline-flex items-center gap-1.5"
             :class="{ 'pointer-events-none opacity-60': scanning }"
             @click="handleRefresh"
           >
@@ -84,14 +84,14 @@
               class="group p-4 rounded-xl bg-[#181818] border transition-all cursor-pointer
                      flex items-center gap-4"
               :class="selectedRoom === room.id
-                ? 'border-[#84a65b] bg-[#84a65b]/[0.06]'
+                ? 'border-[#d8b86c] bg-[#d8b86c]/[0.06]'
                 : 'border-[#2a2a2a] hover:border-[#3d3d3d] hover:bg-[#1d1d1d]'"
               @click="selectedRoom = room.id"
               @dblclick="handleJoinRoom(room)"
             >
               <!-- 信号/锁 -->
               <div class="shrink-0 w-10 h-10 rounded-lg bg-[#222] flex items-center justify-center"
-                   :class="selectedRoom === room.id ? 'text-[#84a65b]' : 'text-gray-500'">
+                   :class="selectedRoom === room.id ? 'text-[#d8b86c]' : 'text-gray-500'">
                 <svg v-if="room.locked" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
                 <svg v-else class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12.55a11 11 0 0 1 14.08 0"/><path d="M1.42 9a16 16 0 0 1 21.16 0"/><path d="M8.53 16.11a6 6 0 0 1 6.95 0"/><line x1="12" y1="20" x2="12.01" y2="20"/></svg>
               </div>
@@ -116,7 +116,7 @@
               <!-- 加入按钮（hover/选中显现） -->
               <button
                 class="shrink-0 px-4 py-2 rounded-lg text-sm font-medium transition-all
-                       bg-[#84a65b] text-white hover:bg-[#95b86c]
+                       bg-[#d8b86c] text-white hover:bg-[#95b86c]
                        opacity-0 group-hover:opacity-100"
                 :class="{ '!opacity-100': selectedRoom === room.id }"
                 :disabled="room.players >= room.maxPlayers || busy"
@@ -142,21 +142,21 @@
               v-model="manual.ip"
               type="text"
               class="flex-1 bg-[#161616] border border-[#333] rounded-lg px-3 py-2.5 text-sm font-mono
-                     focus:border-[#84a65b] outline-none transition-all placeholder:text-gray-600"
+                     focus:border-[#d8b86c] outline-none transition-all placeholder:text-gray-600"
               placeholder="主机 IP，如 192.168.1.42"
             />
             <input
               v-model="manual.port"
               type="text"
               class="w-24 bg-[#161616] border border-[#333] rounded-lg px-3 py-2.5 text-sm font-mono
-                     focus:border-[#84a65b] outline-none transition-all placeholder:text-gray-600"
+                     focus:border-[#d8b86c] outline-none transition-all placeholder:text-gray-600"
               placeholder="端口"
             />
             <input
               v-model="manual.password"
               type="password"
               class="w-32 bg-[#161616] border border-[#333] rounded-lg px-3 py-2.5 text-sm
-                     focus:border-[#84a65b] outline-none transition-all placeholder:text-gray-600"
+                     focus:border-[#d8b86c] outline-none transition-all placeholder:text-gray-600"
               placeholder="密码(可选)"
             />
             <button
@@ -179,7 +179,7 @@
               v-model="host.roomName"
               type="text"
               class="w-full bg-[#161616] border border-[#333] rounded-lg px-4 py-3 text-base
-                     focus:border-[#84a65b] outline-none transition-all placeholder:text-gray-600"
+                     focus:border-[#d8b86c] outline-none transition-all placeholder:text-gray-600"
               placeholder="给你的房间起个名字…"
             />
           </div>
@@ -191,7 +191,7 @@
                 v-model="host.password"
                 type="password"
                 class="w-full bg-[#161616] border border-[#333] rounded-lg px-4 py-3 text-base
-                       focus:border-[#84a65b] outline-none transition-all placeholder:text-gray-600"
+                       focus:border-[#d8b86c] outline-none transition-all placeholder:text-gray-600"
                 placeholder="留空则公开"
               />
             </div>
@@ -201,7 +201,7 @@
                 v-model="host.port"
                 type="text"
                 class="w-full bg-[#161616] border border-[#333] rounded-lg px-4 py-3 text-base font-mono
-                       focus:border-[#84a65b] outline-none transition-all placeholder:text-gray-600"
+                       focus:border-[#d8b86c] outline-none transition-all placeholder:text-gray-600"
                 placeholder="27960"
               />
             </div>
@@ -215,7 +215,7 @@
                 :key="n"
                 class="flex-1 py-2.5 rounded-lg text-sm font-medium border transition-all"
                 :class="host.maxPlayers === n
-                  ? 'border-[#84a65b] bg-[#84a65b]/15 text-[#84a65b]'
+                  ? 'border-[#d8b86c] bg-[#d8b86c]/15 text-[#d8b86c]'
                   : 'border-[#2a2a2a] bg-[#161616] text-gray-400 hover:border-[#3d3d3d]'"
                 @click="host.maxPlayers = n"
               >
@@ -224,8 +224,8 @@
             </div>
           </div>
 
-          <div class="rounded-lg bg-[#84a65b]/[0.05] border border-[#84a65b]/20 p-3 text-xs text-gray-400 flex items-start gap-2">
-            <svg class="w-4 h-4 text-[#84a65b] shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
+          <div class="rounded-lg bg-[#d8b86c]/[0.05] border border-[#d8b86c]/20 p-3 text-xs text-gray-400 flex items-start gap-2">
+            <svg class="w-4 h-4 text-[#d8b86c] shrink-0 mt-0.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>
             创建房间后将以当前项目作为联机世界，房间会在同一局域网内自动广播，伙伴无需手动输入 IP 即可发现。
           </div>
         </div>
@@ -244,7 +244,7 @@
         <!-- 主 CTA：加入 tab 走选中房间；创建 tab 走开房 -->
         <button
           v-if="activeTab === 'join'"
-          class="px-14 py-3 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
+          class="px-14 py-3 bg-[#d8b86c] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                  rounded-lg font-bold text-base transition-all shadow-lg inline-flex items-center gap-2"
           :disabled="!selectedRoom || busy"
           @click="handleJoinSelected"
@@ -254,7 +254,7 @@
         </button>
         <button
           v-else
-          class="px-14 py-3 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
+          class="px-14 py-3 bg-[#d8b86c] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                  rounded-lg font-bold text-base transition-all shadow-lg inline-flex items-center gap-2"
           :disabled="!host.roomName.trim() || busy"
           @click="handleCreateRoom"
@@ -422,6 +422,6 @@ const goHome = () => {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

@@ -4,8 +4,8 @@
   >
     <!-- 背景装饰：径向辉光，延续 StartScreen 视觉 -->
     <div class="absolute inset-0 bg-gradient-to-b from-[#1a2a1a]/30 via-transparent to-transparent pointer-events-none"></div>
-    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#84a65b]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
-    <div class="absolute bottom-0 left-1/4 w-[400px] h-[400px] bg-[#84a65b]/[0.025] rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute top-0 left-1/2 -translate-x-1/2 w-[700px] h-[700px] bg-[#d8b86c]/[0.04] rounded-full blur-3xl pointer-events-none"></div>
+    <div class="absolute bottom-0 left-1/4 w-[400px] h-[400px] bg-[#d8b86c]/[0.025] rounded-full blur-3xl pointer-events-none"></div>
 
     <!-- 主体三段式 -->
     <div class="relative z-10 flex-1 flex flex-col px-8 py-6 overflow-hidden">
@@ -16,8 +16,8 @@
           v-for="(hint, i) in floatingHints"
           :key="hint.text"
           class="hint-chip absolute px-4 py-2 rounded-full text-sm whitespace-nowrap
-                 bg-[#84a65b]/[0.06] border border-[#84a65b]/25 text-[#b9d39a]
-                 backdrop-blur-sm hover:bg-[#84a65b]/20 hover:border-[#84a65b]/60 hover:text-white
+                 bg-[#d8b86c]/[0.06] border border-[#d8b86c]/25 text-[#b9d39a]
+                 backdrop-blur-sm hover:bg-[#d8b86c]/20 hover:border-[#d8b86c]/60 hover:text-white
                  transition-colors duration-300 cursor-pointer"
           :style="{
             top: hint.top,
@@ -35,9 +35,9 @@
       <div class="flex-1 flex flex-col items-center justify-center min-h-0">
         <h1 class="text-3xl font-light tracking-wide mb-2 text-center">
           你想创造一个怎样的
-          <span class="text-[#84a65b] font-medium">世界</span>？
+          <span class="text-[#d8b86c] font-medium">世界</span>？
         </h1>
-        <p class="text-sm text-gray-500 mb-7 text-center">用一句话描述它，AI 会替你把它构建出来</p>
+        <p class="text-sm text-gray-500 mb-7 text-center">用一句话描述它，AI 会生成一步一步的专属搭建任务</p>
 
         <div class="w-full max-w-3xl">
           <textarea
@@ -45,7 +45,7 @@
             v-model="worldPrompt"
             rows="5"
             class="w-full bg-[#161616] border border-[#333] rounded-xl p-5 text-lg leading-relaxed
-                   focus:border-[#84a65b] focus:shadow-[0_0_40px_rgba(132,166,91,0.12)]
+                   focus:border-[#d8b86c] focus:shadow-[0_0_40px_rgba(216,184,108,0.12)]
                    outline-none transition-all resize-none placeholder:text-gray-600"
             placeholder="例如：一座漂浮在云海之上的赛博朋克城市，永远是雨夜，霓虹倒映在湿漉漉的街道……"
             @keydown.ctrl.enter="handleCreate"
@@ -62,7 +62,7 @@
             :key="m.id"
             class="px-8 py-2.5 rounded-lg text-base font-medium transition-all duration-300"
             :class="mode === m.id
-              ? 'bg-[#84a65b] text-white shadow-lg'
+              ? 'bg-[#d8b86c] text-white shadow-lg'
               : 'text-gray-400 hover:text-white'"
             @click="mode = m.id"
           >
@@ -81,15 +81,15 @@
           </button>
 
           <button
-            :disabled="creating"
-            class="px-14 py-3 bg-[#84a65b] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
+            :disabled="creating || !archiveReady"
+            class="px-14 py-3 bg-[#d8b86c] hover:bg-[#95b86c] disabled:bg-gray-700 disabled:cursor-not-allowed
                    rounded-lg font-bold text-base transition-all shadow-lg
                    inline-flex items-center gap-2"
             @click="handleCreate"
           >
             <svg v-if="!creating" class="w-5 h-5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v18M3 12h18"/><path d="M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4"/></svg>
             <svg v-else class="w-5 h-5 animate-spin" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 12a9 9 0 1 1-6.219-8.56"/></svg>
-            {{ creating ? '创造中…' : '创造世界' }}
+            {{ creating ? '创造中…' : (archiveReady ? '创造世界' : '存档服务正在初始化…') }}
           </button>
         </div>
       </div>
@@ -98,16 +98,42 @@
 </template>
 
 <script setup>
-import { ref } from 'vue';
+import { onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { projectLauncherService } from '@/utils/bridge';
+import { projectLauncherService, projectSettingsService } from '@/utils/bridge';
+import { initializeWorldTasks } from '@/services/cabbageAssistantContextService.js';
+import lanchat from '@/stores/lanchat.js';
+import { translateUiText } from '@/i18n/domTranslator.js';
 
 const router = useRouter();
 
 const worldPrompt = ref('');
 const mode = ref('story'); // 'story' 剧情模式 | 'creative' 创造模式
 const creating = ref(false);
+const archiveReady = ref(false);
 const promptRef = ref(null);
+let archiveStatusTimer = null;
+
+const refreshArchiveReady = async () => {
+  try {
+    const response = await projectLauncherService.getProjectLoadStatus();
+    const status = response?.data ?? response;
+    archiveReady.value = status?.archive_service_ready === true;
+  } catch {
+    archiveReady.value = false;
+  }
+};
+
+onMounted(() => {
+  refreshArchiveReady();
+  archiveStatusTimer = window.setInterval(refreshArchiveReady, 250);
+});
+
+onUnmounted(() => {
+  if (archiveStatusTimer !== null) {
+    window.clearInterval(archiveStatusTimer);
+  }
+});
 
 const modes = [
   { id: 'story', label: '剧情模式' },
@@ -136,8 +162,34 @@ const goHome = () => {
   router.push('/StartScreen');
 };
 
+const normalizeProjectPath = (value) => String(value || '')
+  .trim()
+  .replace(/\\/g, '/')
+  .replace(/\/+$/, '')
+  .toLocaleLowerCase('en-US');
+
+const activeProjectPathFrom = (response) => String(
+  response?.project_path
+    || response?.data?.project_path
+    || response?.data?.data?.project_path
+    || '',
+);
+
+const waitForPythonProjectActivation = async (expectedPath, timeoutMs = 7000) => {
+  const expected = normalizeProjectPath(expectedPath);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const response = await projectSettingsService.getActiveProjectInfo();
+      if (normalizeProjectPath(activeProjectPathFrom(response)) === expected) return true;
+    } catch (_) {}
+    await new Promise((resolve) => window.setTimeout(resolve, 200));
+  }
+  return false;
+};
+
 const handleCreate = async () => {
-  if (creating.value) return;
+  if (creating.value || !archiveReady.value) return;
   const prompt = worldPrompt.value.trim(); // 允许为空：无提示词也可创建
 
   creating.value = true;
@@ -150,17 +202,61 @@ const handleCreate = async () => {
     const info = result?.data;
 
     if (info && info.path) {
-      await projectLauncherService.setProjectMode(mode.value, { prompt });
       const opened = await projectLauncherService.openProject(info.path);
-      if (opened?.data) {
+      const openResult = opened?.data ?? opened;
+      if (openResult?.status === 'service_initializing') {
+        alert('存档服务正在初始化，请稍后重试');
+        return;
+      }
+      if (openResult?.ok) {
+        // Never send a world description or task request until Python confirms
+        // that the newly created world is the active project. Otherwise the old
+        // world can receive the new task plan and a stale node request can cross over.
+        const projectReady = await waitForPythonProjectActivation(info.path);
+        if (projectReady) {
+          await projectLauncherService.setProjectMode(mode.value, { prompt });
+          try {
+            // This operation only creates personalized guidance tasks. It never
+            // creates or modifies the project node graph.
+            await initializeWorldTasks({
+              prompt,
+              mode: mode.value,
+              waitForCompletion: Boolean(prompt),
+            });
+          } catch (taskError) {
+            console.warn('World task initialization failed; opening the world with fallback tasks:', taskError?.message || taskError);
+          }
+        } else {
+          // project.ini already contains the prompt. MainPage will retry loading the
+          // current world and let the task service recover from that durable value.
+          console.warn('Python project activation is still pending; skipped the creation-page task request to protect the previous world.');
+        }
+        try {
+          if (lanchat.state.inRoom) {
+            if (lanchat.state.role === 'host') {
+              await lanchat.closeRoom();
+            } else {
+              await lanchat.leaveRoom();
+            }
+          }
+          lanchat.setWorkspaceMode('multiplayer_multi_agent');
+          await lanchat.openRoom({
+            room: 'world-default',
+            password: '',
+            port: 27960,
+            mode: 'multi',
+          });
+        } catch (roomError) {
+          console.warn('Default AI conversation room initialization failed:', roomError);
+        }
         router.push('/');
         return;
       }
     }
-    alert('创建失败');
+    alert(translateUiText('创建失败'));
   } catch (error) {
     console.error('创造世界失败:', error);
-    alert('创建失败: ' + (error?.message || error));
+    alert(translateUiText(`创建失败: ${error?.message || error}`));
   } finally {
     creating.value = false;
   }
@@ -176,7 +272,7 @@ const handleCreate = async () => {
 .hint-chip {
   animation: floatDrift var(--dur, 8s) ease-in-out infinite;
   animation-delay: var(--delay, 0s);
-  box-shadow: 0 0 18px rgba(132, 166, 91, 0.08);
+  box-shadow: 0 0 18px rgba(216, 184, 108, 0.08);
 }
 
 ::-webkit-scrollbar {
@@ -190,6 +286,6 @@ const handleCreate = async () => {
   border-radius: 10px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #84a65b;
+  background: #d8b86c;
 }
 </style>

@@ -32,6 +32,7 @@
 #include GLSL(../../../assets/shaders/visibility_debug_resolve.comp.glsl)
 #include GLSL(../../../assets/shaders/actor_pick.comp.glsl)
 #include GLSL(../../../assets/shaders/optics_overlay.comp.glsl)
+#include GLSL(../../../assets/shaders/optics_gizmo.comp.glsl)
 #include GLSL(../../../assets/shaders/optics_cursor.comp.glsl)
 #include GLSL(../../../assets/shaders/optics_ui_warp.comp.glsl)
 #include GLSL(../../../assets/shaders/optics_composite.comp.glsl)
@@ -124,6 +125,8 @@ struct Hardware {
     Corona::Horizon::HardwareImage finalOutputImage;
     Corona::Horizon::HardwareImage cursorIconImage;
     bool cursorIconLoadAttempted = false;
+    std::array<Corona::Horizon::HardwareImage, 3> gizmoAxisImages;
+    bool gizmoAxisLoadAttempted = false;
     Corona::Horizon::HardwareExecutor executor;
     // Horizon 移除了 HardwareExecutor::last_receipt()，Hardware 自己记住最后一次提交。
     Corona::Horizon::SubmitReceipt last_receipt;
@@ -142,13 +145,12 @@ struct Hardware {
     std::uint64_t materialTableCapacity = 0;
     std::uint64_t uiInstanceInfoCapacity = 0;
     std::uint64_t uiMaterialTableCapacity = 0;
-    Corona::Horizon::HardwareBuffer actorPickBuffer;
     Corona::Horizon::HardwareBuffer skyIrradianceSHBuffer;  // 9 vec3 SH coeffs (sky-driven ambient)
     Corona::Horizon::HardwareBuffer shadowInfoBuffer;
 
     // === Per-submission buffer 池（消除 V-buffer 共享 buffer 跨帧/跨相机覆盖竞争）===
     // 上面这些 *Buffer 单例的语义已改为"每相机从对应池租一份写入"，见 optics_system.cpp
-    // 场景/overlay pass。单例本身仅保留给冷路径（actor-pick/screenshot，均已 wait_idle）。
+    // 场景/overlay pass。单例本身仅保留给 screenshot 等冷路径。
     FramePlaceBufferPool vpUniformBufferPool;
     FramePlaceBufferPool uniformBufferPool;
     FramePlaceBufferPool shadowInfoBufferPool;
@@ -175,6 +177,7 @@ struct Hardware {
     std::optional<Corona::Horizon::ComputePipeline<visibility_debug_resolve_comp_glsl_t>> visibilityDebugResolvePipeline;
     std::optional<Corona::Horizon::ComputePipeline<actor_pick_comp_glsl_t>> actorPickPipeline;
     std::optional<Corona::Horizon::ComputePipeline<optics_overlay_comp_glsl_t>> opticsOverlayPipeline;
+    std::optional<Corona::Horizon::ComputePipeline<optics_gizmo_comp_glsl_t>> opticsGizmoPipeline;
     std::optional<Corona::Horizon::ComputePipeline<optics_cursor_comp_glsl_t>> opticsCursorPipeline;
     std::optional<Corona::Horizon::ComputePipeline<optics_ui_warp_comp_glsl_t>> opticsUiWarpPipeline;
     std::optional<Corona::Horizon::ComputePipeline<optics_composite_comp_glsl_t>> opticsCompositePipeline;

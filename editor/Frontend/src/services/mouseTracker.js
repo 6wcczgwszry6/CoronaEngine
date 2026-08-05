@@ -81,13 +81,11 @@ function detectLandmark(el) {
 
   /* ── Dock panels & sidebars ── */
   if (cls.includes('docktitlebar')) return { label: '面板标题栏', area: 'dock-titlebar' };
-  if (id.includes('AITalkBar') || (cls.includes('aitalkbar'))) return { label: 'AI 对话面板', area: 'ai-talk' };
   if (id.includes('FileManager') || cls.includes('filemanager')) return { label: '文件管理器', area: 'file-manager' };
   if (id.includes('SceneBar') || cls.includes('scenebar')) return { label: '场景管理器', area: 'scene-manager' };
   if (id.includes('Object') || cls.includes('object-panel')) return { label: '对象属性面板', area: 'object-panel' };
   if (id.includes('LogView') || cls.includes('logview')) return { label: '日志查看器', area: 'log-view' };
   if (id.includes('ProjectSettings') || cls.includes('projectsettings')) return { label: '项目设置', area: 'project-settings' };
-  if (id.includes('ProjectLauncher') || cls.includes('projectlauncher')) return { label: '项目启动器', area: 'project-launcher' };
   if (cls.includes('pet') || id.includes('Pet')) return { label: 'AI 助手白菜', area: 'cabbage' };
 
   /* ── Common UI elements (lower priority) ── */

@@ -10,6 +10,7 @@
     "format": "prettier --write \"src/**/*.{js,vue,css,html}\"",
     "format:check": "prettier --check \"src/**/*.{js,vue,css,html}\"",
     "lint": "eslint \"src/**/*.{js,vue}\"",
+    "i18n:check": "node scripts/check-i18n.mjs",
     "lint:fix": "eslint --fix \"src/**/*.{js,vue}\""
   },
   "dependencies": {
