@@ -139,7 +139,7 @@ void VulkanBackend::shutdown() {
             if (auto image = SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
                 render->resources.executor.wait(image->consumed_receipt);
             }
-            render->resources.executor.wait_idle(render->resources.executor.last_receipt());
+            render->resources.executor.wait_idle(render->resources.last_receipt);
             SharedDataHub::instance().image_storage().deallocate(render->image_handle);
             render->image_handle = 0;
         }
@@ -203,7 +203,7 @@ void VulkanBackend::unregister_surface(void* surface) {
             render.resources.executor.wait(image->consumed_receipt);
         }
     }
-    render.resources.executor.wait_idle(render.resources.executor.last_receipt());
+    render.resources.executor.wait_idle(render.resources.last_receipt);
 
     if (render.image_handle != 0) {
         SharedDataHub::instance().image_storage().deallocate(render.image_handle);
@@ -235,11 +235,11 @@ bool VulkanBackend::ensure_pipeline() {
     }
 
     pipeline_.emplace(ui_quad_vert_glsl, ui_quad_frag_glsl, make_ui_pipeline_desc());
-    pipeline_ready_ = pipeline_->getRasterizerPipelineID() != 0;
+    // getRasterizerPipelineID() 已移除；有效性改用 explicit operator bool()。
+    pipeline_ready_ = static_cast<bool>(*pipeline_);
 
     if (pipeline_ready_) {
-        CFW_LOG_INFO("VulkanBackend: ui quad pipeline created, pipeline_id={}",
-                     pipeline_->getRasterizerPipelineID());
+        CFW_LOG_INFO("VulkanBackend: ui quad pipeline created");
     } else {
         CFW_LOG_ERROR("VulkanBackend: ui quad pipeline creation returned invalid pipeline id");
     }
@@ -287,7 +287,7 @@ void VulkanBackend::present_surface(void* surface) {
 
     if (auto image_device =
             SharedDataHub::instance().image_storage().acquire_write(render->image_handle)) {
-        const auto submit_receipt = render->resources.executor.last_receipt();
+        const auto submit_receipt = render->resources.last_receipt;
         if (submit_receipt.empty()) {
             CFW_LOG_WARNING(
                 "VulkanBackend: publishing UI frame with empty submit receipt "
@@ -352,7 +352,7 @@ void VulkanBackend::rebuild(void* surface, uint32_t pixel_w, uint32_t pixel_h) {
                 render->resources.executor.wait_idle(image_device->consumed_receipt);
             }
         }
-        render->resources.executor.wait_idle(render->resources.executor.last_receipt());
+        render->resources.executor.wait_idle(render->resources.last_receipt);
     }
 
     if (!ensure_render_target(render->resources, pixel_w, pixel_h, kUiRenderTargetUsage)) {

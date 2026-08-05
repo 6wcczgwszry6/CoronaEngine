@@ -8,6 +8,7 @@
 #include <corona/systems/script/python/python_error_handler.h>
 #include <corona/systems/script/python/python_path_config.h>
 #include <nanobind/stl/string.h>
+#include <nlohmann/json.hpp>
 #include <windows.h>
 
 #include <iostream>
@@ -450,6 +451,25 @@ PythonRuntimeResponse PythonAPI::execute_runtime_request(const PythonRuntimeRequ
                 last_python_shutdown_snapshot_json_ = shutdown_snapshot_json;
             }
             return PythonRuntimeResponse::success(std::move(shutdown_snapshot_json));
+        }
+
+        if (request.kind == PythonRuntimeRequestKind::LifecycleControl &&
+            request.function == "project_context_changed") {
+            if (!pEditor.is_valid() || !nanobind::hasattr(pEditor, "update_project_context")) {
+                return PythonRuntimeResponse::failure("python editor cannot update project context");
+            }
+            const auto payload = nlohmann::json::parse(request.payload_json, nullptr, false);
+            const auto project_path = payload.is_object()
+                ? payload.value("path", std::string{})
+                : std::string{};
+            if (project_path.empty()) {
+                return PythonRuntimeResponse::failure("project context path is empty");
+            }
+            const bool updated = nanobind::cast<bool>(
+                nanobind::getattr(pEditor, "update_project_context")(project_path.c_str()));
+            return updated
+                ? PythonRuntimeResponse::success()
+                : PythonRuntimeResponse::failure("python project context update failed");
         }
 
         if (request.kind == PythonRuntimeRequestKind::ServiceCall) {

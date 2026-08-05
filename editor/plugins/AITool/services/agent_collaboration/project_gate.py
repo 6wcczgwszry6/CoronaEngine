@@ -421,7 +421,7 @@ def gameplay_plan_patch_interface_change_request(contract_hash: str) -> Interfac
         blocked_dependents=("B6.4-runtime-submit", "B7.3"),
         evidence_refs=(
             "editor/plugins/AITool/services/agent_runtime/core.py:PlanPatch",
-            "docs/R3黑盒期单人垂直切片推进计划.md:B6.4",
+            "docs/R3-min推进记录.md:B6.4",
         ),
     )
 

@@ -3904,10 +3904,6 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         bridge_source = (
             repo_root / "editor" / "Frontend" / "src" / "utils" / "bridge.js"
         ).read_text(encoding="utf-8")
-        launcher_source = (
-            repo_root / "editor" / "plugins" / "ProjectLauncher" / "main.py"
-        ).read_text(encoding="utf-8")
-
         self.assertIn('#include "scene_folder.h"', handler_source)
         self.assertIn('detect_scene_folder(project_dir)', handler_source)
         self.assertIn('{"migrate_legacy_scene"', handler_source)
@@ -3916,8 +3912,8 @@ class NativeSceneToolsRpcTests(unittest.TestCase):
         self.assertIn('ProjectLauncher, migrate_legacy_scene', api_source)
         self.assertIn("project.choosePortableSceneTarget", bridge_source)
         self.assertIn("project.migrateLegacyScene", bridge_source)
-        self.assertIn("def choose_portable_scene_target", launcher_source)
-        self.assertIn("*.ini *.scene *.json", launcher_source)
+        self.assertIn('{"choose_portable_scene_target", []', handler_source)
+        self.assertIn('L"*.ini;*.scene;*.json"', handler_source)
         open_start = handler_source.index("std::filesystem::path open_project_native")
         open_end = handler_source.index("nlohmann::json recent_projects_native", open_start)
         open_body = handler_source[open_start:open_end]

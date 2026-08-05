@@ -96,6 +96,12 @@ public:
         return Lease{&slots_.back().buffer, slots_.back().capacity, slots_.back().busy};
     }
 
+    // Horizon 移除了 HardwareBuffer::storeDescriptor()（只剩 HardwareImage::store_descriptor()）。
+    // 池返回的是原始 buffer，故提供个 store_descriptor() 包装转发。
+    static uint32_t store_descriptor(Corona::Horizon::HardwareBuffer& buffer) {
+        return buffer.store_descriptor();
+    }
+
 private:
     struct Slot {
         Corona::Horizon::HardwareBuffer buffer;
@@ -122,6 +128,8 @@ struct Hardware {
     std::array<Corona::Horizon::HardwareImage, 3> gizmoAxisImages;
     bool gizmoAxisLoadAttempted = false;
     Corona::Horizon::HardwareExecutor executor;
+    // Horizon 移除了 HardwareExecutor::last_receipt()，Hardware 自己记住最后一次提交。
+    Corona::Horizon::SubmitReceipt last_receipt;
 
     // === Uniform buffers ===
     Corona::Horizon::HardwareBuffer uniformBuffer;

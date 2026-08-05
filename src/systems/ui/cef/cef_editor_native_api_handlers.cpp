@@ -3608,19 +3608,40 @@ class ScopedComInitialization {
 #endif
 };
 
-std::optional<std::filesystem::path> show_native_path_dialog(
-    bool pick_folder,
-    const std::filesystem::path& default_path,
-    const wchar_t* title) {
+enum class NativeFileDialogMode {
+    OpenFile,
+    SaveFile,
+    PickFolder,
+};
+
+struct NativeFileDialogFilter {
+    std::wstring name;
+    std::wstring pattern;
+};
+
+struct NativeFileDialogOptions {
+    NativeFileDialogMode mode{NativeFileDialogMode::OpenFile};
+    std::filesystem::path default_path;
+    std::wstring title;
+    std::wstring default_filename;
+    std::wstring default_extension;
+    std::vector<NativeFileDialogFilter> filters;
+};
+
+std::optional<std::filesystem::path> show_native_file_dialog(
+    const NativeFileDialogOptions& dialog_options) {
 #ifdef _WIN32
     ScopedComInitialization com;
     if (!com.available()) {
         return std::nullopt;
     }
 
-    IFileOpenDialog* dialog = nullptr;
+    IFileDialog* dialog = nullptr;
+    const CLSID& dialog_class = dialog_options.mode == NativeFileDialogMode::SaveFile
+                                    ? CLSID_FileSaveDialog
+                                    : CLSID_FileOpenDialog;
     if (FAILED(CoCreateInstance(
-            CLSID_FileOpenDialog,
+            dialog_class,
             nullptr,
             CLSCTX_INPROC_SERVER,
             IID_PPV_ARGS(&dialog)))) {
@@ -3631,24 +3652,37 @@ std::optional<std::filesystem::path> show_native_path_dialog(
     HRESULT result = dialog->GetOptions(&options);
     if (SUCCEEDED(result)) {
         options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
-        options |= pick_folder ? FOS_PICKFOLDERS : FOS_FILEMUSTEXIST;
+        if (dialog_options.mode == NativeFileDialogMode::PickFolder) {
+            options |= FOS_PICKFOLDERS;
+        } else if (dialog_options.mode == NativeFileDialogMode::OpenFile) {
+            options |= FOS_FILEMUSTEXIST;
+        } else {
+            options |= FOS_OVERWRITEPROMPT;
+        }
         result = dialog->SetOptions(options);
     }
-    if (SUCCEEDED(result) && title) {
-        result = dialog->SetTitle(title);
+    if (SUCCEEDED(result) && !dialog_options.title.empty()) {
+        result = dialog->SetTitle(dialog_options.title.c_str());
     }
-    if (SUCCEEDED(result) && !pick_folder) {
-        const COMDLG_FILTERSPEC filters[] = {
-            {L"Corona 场景、项目或 Vision 文件", L"*.ini;*.scene;*.json"},
-            {L"所有文件", L"*.*"},
-        };
+    std::vector<COMDLG_FILTERSPEC> native_filters;
+    native_filters.reserve(dialog_options.filters.size());
+    for (const auto& filter : dialog_options.filters) {
+        native_filters.push_back({filter.name.c_str(), filter.pattern.c_str()});
+    }
+    if (SUCCEEDED(result) && !native_filters.empty() &&
+        dialog_options.mode != NativeFileDialogMode::PickFolder) {
         result = dialog->SetFileTypes(
-            static_cast<UINT>(std::size(filters)),
-            filters);
+            static_cast<UINT>(native_filters.size()), native_filters.data());
+    }
+    if (SUCCEEDED(result) && !dialog_options.default_filename.empty()) {
+        result = dialog->SetFileName(dialog_options.default_filename.c_str());
+    }
+    if (SUCCEEDED(result) && !dialog_options.default_extension.empty()) {
+        result = dialog->SetDefaultExtension(dialog_options.default_extension.c_str());
     }
 
     std::error_code ec;
-    auto initial_dir = default_path;
+    auto initial_dir = dialog_options.default_path;
     if (std::filesystem::is_regular_file(initial_dir, ec)) {
         initial_dir = initial_dir.parent_path();
     }
@@ -3688,11 +3722,27 @@ std::optional<std::filesystem::path> show_native_path_dialog(
     CoTaskMemFree(selected_path);
     return path;
 #else
-    (void)pick_folder;
-    (void)default_path;
-    (void)title;
+    (void)dialog_options;
     return std::nullopt;
 #endif
+}
+
+std::optional<std::filesystem::path> show_native_path_dialog(
+    bool pick_folder,
+    const std::filesystem::path& default_path,
+    const wchar_t* title) {
+    NativeFileDialogOptions options;
+    options.mode = pick_folder ? NativeFileDialogMode::PickFolder
+                               : NativeFileDialogMode::OpenFile;
+    options.default_path = default_path;
+    options.title = title ? title : L"";
+    if (!pick_folder) {
+        options.filters = {
+            {L"Corona 场景、项目或 Vision 文件", L"*.ini;*.scene;*.json"},
+            {L"所有文件", L"*.*"},
+        };
+    }
+    return show_native_file_dialog(options);
 }
 
 std::optional<std::filesystem::path> open_project_file_native() {
@@ -3729,6 +3779,66 @@ std::optional<std::filesystem::path> choose_portable_scene_target_native() {
         target = *parent / ("PortableScene_" + std::to_string(suffix));
     }
     return target;
+}
+
+const std::vector<NativeFileDialogFilter>* resource_dialog_filters(
+    const std::string& file_type) {
+    static const std::vector<NativeFileDialogFilter> model_filters{
+        {L"三维模型", L"*.obj;*.fbx;*.3ds;*.dae;*.usd;*.usda;*.usdz;*.gltf;*.glb;*.usdc;*.stl"},
+        {L"所有文件", L"*.*"},
+    };
+    static const std::vector<NativeFileDialogFilter> multimedia_filters{
+        {L"音视频", L"*.mp4;*.avi;*.mov;*.mp3;*.wav"},
+        {L"所有文件", L"*.*"},
+    };
+    static const std::vector<NativeFileDialogFilter> scene_filters{
+        {L"场景文件", L"*.json"},
+        {L"所有文件", L"*.*"},
+    };
+    static const std::vector<NativeFileDialogFilter> actor_filters{
+        {L"Actor 文件", L"*.actor"},
+        {L"所有文件", L"*.*"},
+    };
+    static const std::vector<NativeFileDialogFilter> image_filters{
+        {L"图片文件", L"*.png;*.jpg;*.jpeg;*.bmp;*.tga;*.webp"},
+        {L"所有文件", L"*.*"},
+    };
+
+    if (file_type == "model") return &model_filters;
+    if (file_type == "multimedia") return &multimedia_filters;
+    if (file_type == "scene") return &scene_filters;
+    if (file_type == "actor") return &actor_filters;
+    if (file_type == "ui_image") return &image_filters;
+    return nullptr;
+}
+
+std::optional<std::filesystem::path> select_resource_file_native(
+    const std::filesystem::path& default_path,
+    const std::string& file_type) {
+    const auto* filters = resource_dialog_filters(file_type);
+    if (!filters) {
+        return std::nullopt;
+    }
+    NativeFileDialogOptions options;
+    options.mode = NativeFileDialogMode::OpenFile;
+    options.default_path = default_path;
+    options.title = L"选择导入资源";
+    options.filters = *filters;
+    return show_native_file_dialog(options);
+}
+
+std::string compact_timestamp() {
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t raw = std::chrono::system_clock::to_time_t(now);
+    std::tm local{};
+#ifdef _WIN32
+    localtime_s(&local, &raw);
+#else
+    localtime_r(&raw, &local);
+#endif
+    std::ostringstream out;
+    out << std::put_time(&local, "%Y%m%d_%H%M%S");
+    return out.str();
 }
 
 std::filesystem::path absolute_normalized_path(const std::filesystem::path& path) {
@@ -6457,6 +6567,11 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             }
             CFW_LOG_INFO("[ProjectLauncher] open_project opened path='{}' status='{}'",
                          state.project_path, prepared.status);
+            if (!enqueue_python_project_context_changed(state.project_path)) {
+                CFW_LOG_WARNING(
+                    "[ProjectLauncher] Python project context update was not queued for '{}'",
+                    state.project_path);
+            }
             emit_editor_api_event("ProjectLauncher.projectOpened", {
                 {"path", state.project_path}, {"status", prepared.status},
             });
@@ -6651,7 +6766,65 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
 void register_main_view_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"get_menu_data", script_method},
-        {"import_resource_file", script_method},
+        {"import_resource_file", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            const auto scene_name = arg_string(request.args, 0);
+            const auto file_type = arg_string(request.args, 1, "model");
+            if (scene_name.empty()) {
+                return native_success({{"status", "error"},
+                                       {"message", "scene_name is required"},
+                                       {"code", "scene_name_missing"}});
+            }
+            if (!resource_dialog_filters(file_type)) {
+                return native_success({{"status", "error"},
+                                       {"message", "Unsupported resource type: " + file_type},
+                                       {"code", "unsupported_file_type"}});
+            }
+
+            const auto selected = select_resource_file_native(scene->project_root, file_type);
+            if (!selected) {
+                return native_success({{"status", "canceled"},
+                                       {"message", "用户取消了文件选择"}});
+            }
+
+            const auto absolute_path = absolute_normalized_path(*selected);
+            const auto route = route_for_project_storage(
+                scene->project_root, path_to_utf8(absolute_path));
+            if (file_type != "multimedia") {
+                return native_success({
+                    {"status", "success"},
+                    {"scene", scene_name},
+                    {"path", route},
+                    {"file_path", route},
+                    {"actor_type", file_type},
+                });
+            }
+
+            const auto info = Corona::API::import_media(path_to_utf8(absolute_path));
+            if (info.resource_id == 0 || info.media_type.empty()) {
+                return native_success({
+                    {"status", "error"},
+                    {"message", "无法识别的音视频文件: " + route},
+                    {"code", "media_unrecognized"},
+                });
+            }
+            return native_success({
+                {"status", "success"},
+                {"media", {
+                    {"name", path_to_utf8(absolute_path.stem())},
+                    {"path", route},
+                    {"type", info.media_type},
+                    {"resource_id", std::to_string(info.resource_id)},
+                    {"duration", info.duration_seconds},
+                    {"codec", info.codec},
+                    {"width", info.width},
+                    {"height", info.height},
+                    {"fps", info.fps},
+                    {"sample_rate", info.sample_rate},
+                    {"channels", info.channels},
+                }},
+            });
+        }},
         {"on_init", [](const NativeRequest&, const NativeContext&) {
             auto& state = native_editor_state();
             if (!state.scene) {
@@ -6756,7 +6929,32 @@ void register_main_view_api_handlers(NativeApiRegistry& registry) {
 
 void register_project_settings_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
-        {"browse_scene_file", script_method},
+        {"browse_scene_file", [](const NativeRequest&, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            auto default_path = scene->project_root / "Scene";
+            std::error_code ec;
+            if (!std::filesystem::is_directory(default_path, ec)) {
+                default_path = scene->project_root;
+            }
+            NativeFileDialogOptions options;
+            options.mode = NativeFileDialogMode::OpenFile;
+            options.default_path = default_path;
+            options.title = L"选择入口场景文件";
+            options.filters = {
+                {L"场景文件", L"*.scene"},
+                {L"所有文件", L"*.*"},
+            };
+            const auto selected = show_native_file_dialog(options);
+            if (!selected) {
+                return native_success({{"path", ""}, {"success", false},
+                                       {"error", "未选择文件"}});
+            }
+            return native_success({
+                {"path", route_for_project_storage(
+                    scene->project_root, path_to_utf8(absolute_normalized_path(*selected)))},
+                {"success", true},
+            });
+        }},
         {"get_active_project_info", [](const NativeRequest&, const NativeContext&) {
             return native_success(active_project_info_json());
         }},
@@ -6824,7 +7022,19 @@ void register_scene_datas_api_handlers(NativeApiRegistry& registry) {
                 {"actor", actor_name},
             });
         }},
-        {"select_model_file", script_method},
+        {"select_model_file", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            const auto file_type = arg_string(request.args, 2, "model");
+            if (!resource_dialog_filters(file_type)) {
+                throw std::runtime_error("Unsupported resource type: " + file_type);
+            }
+            const auto selected = select_resource_file_native(scene->project_root, file_type);
+            if (!selected) {
+                return native_success(std::string{});
+            }
+            return native_success(route_for_project_storage(
+                scene->project_root, path_to_utf8(absolute_normalized_path(*selected))));
+        }},
     };
 
     registry.register_module("SceneDatas", [](const NativeRequest& request,
@@ -7172,7 +7382,29 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             Corona::API::load_vision_scene(arg_string(request.args, 0));
             return native_success({{"status", "success"}});
         }},
-        {"select_screenshot_path", script_method},
+        {"select_screenshot_path", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = ensure_native_editor_scene();
+            NativeFileDialogOptions options;
+            options.mode = NativeFileDialogMode::SaveFile;
+            options.default_path = scene->project_root;
+            options.title = L"保存截图";
+            options.default_filename = L"screenshot_";
+            const auto timestamp = compact_timestamp();
+            options.default_filename.append(timestamp.begin(), timestamp.end());
+            options.default_filename += L".png";
+            options.default_extension = L"png";
+            options.filters = {{L"PNG 图片", L"*.png"}};
+
+            const auto selected = show_native_file_dialog(options);
+            if (!selected) {
+                return native_success({{"status", "canceled"}, {"path", ""}});
+            }
+            return native_success({
+                {"status", "success"},
+                {"path", path_to_utf8(absolute_normalized_path(*selected))},
+                {"camera_name", arg_string(request.args, 1)},
+            });
+        }},
         {"save_screenshot", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = ensure_native_editor_scene();
             const auto scene_route = normalize_route(arg_string(request.args, 0));

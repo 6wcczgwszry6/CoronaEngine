@@ -40,6 +40,9 @@ struct ViewportRenderResources {
     uint32_t width = 0;
     uint32_t height = 0;
     bool frame_ready = false;
+    // Horizon 移除了 HardwareExecutor::last_receipt()，生产者自己记住最后一次提交：
+    // 既用于 publish 时交给 Display 做跨线程 GPU 排序，也用于释放资源前排空。
+    Horizon::SubmitReceipt last_receipt;
 };
 
 // One textured (or solid) quad to draw into the UI render target.

@@ -19,6 +19,25 @@ constexpr uint64_t kDeferredTextureDestroyFrames = 4;
 UiTextureId descriptor_to_texture_id(uint32_t descriptor) {
     return static_cast<UiTextureId>(static_cast<std::uint64_t>(descriptor) + 1u);
 }
+
+// Horizon 移除了 HardwareImage::upload()。上传改为 staging buffer + copy_from()；
+// 这里的提交是异步的（receipt 存在 OwnedImage 上），staging 必须活到 GPU 用完，
+// 故用 shared_ptr + stream 的 keep_alive 移交生命周期。
+Horizon::SubmitReceipt upload_image_async(Horizon::HardwareExecutor& executor,
+                                         Horizon::HardwareImage& image,
+                                         std::span<const std::byte> bytes) {
+    Horizon::HardwareBufferDesc staging_desc;
+    staging_desc.element_count = bytes.size_bytes();
+    staging_desc.element_size = 1;
+    staging_desc.usage = Horizon::BufferUsageFlags::TransferSrc;
+    staging_desc.cpu_access = Horizon::CpuAccessMode::Write;
+    auto staging = std::make_shared<Horizon::HardwareBuffer>(staging_desc, bytes);
+
+    return executor.stream()
+        << image.copy_from(*staging)
+        << Horizon::keep_alive(staging)
+        << Horizon::commit();
+}
 }  // namespace
 
 void BrowserManager::destroy_tab_texture(BrowserTab* tab) {
@@ -75,13 +94,13 @@ UiTextureId BrowserManager::create_browser_texture(int width, int height) {
     const std::vector<uint8_t> transparent_pixels(
         static_cast<size_t>(safe_width) * static_cast<size_t>(safe_height) * 4u,
         0u);
-    owned.upload_receipt =
-        browser_upload_executor_.stream()
-        << owned.image.upload(std::as_bytes(std::span<const uint8_t>(transparent_pixels.data(),
-                                                                     transparent_pixels.size())))
-        << Horizon::commit();
+    owned.upload_receipt = upload_image_async(
+        browser_upload_executor_,
+        owned.image,
+        std::as_bytes(std::span<const uint8_t>(transparent_pixels.data(),
+                                               transparent_pixels.size())));
 
-    const uint32_t descriptor = owned.image.storeSampledDescriptor();
+    const uint32_t descriptor = owned.image.store_descriptor();
     const UiTextureId texture_id = descriptor_to_texture_id(descriptor);
 
     owned_images_[texture_id] = std::move(owned);
@@ -124,10 +143,10 @@ void BrowserManager::update_texture(int tab_id) {
     if (pixels.size() >= expected_size) {
         auto& owned = image_it->second;
         browser_upload_executor_.wait(owned.upload_receipt);
-        owned.upload_receipt =
-            browser_upload_executor_.stream()
-            << owned.image.upload(std::as_bytes(std::span<const uint8_t>(pixels.data(), expected_size)))
-            << Horizon::commit();
+        owned.upload_receipt = upload_image_async(
+            browser_upload_executor_,
+            owned.image,
+            std::as_bytes(std::span<const uint8_t>(pixels.data(), expected_size)));
     }
 }
 
