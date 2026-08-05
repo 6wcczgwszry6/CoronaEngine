@@ -10,7 +10,6 @@ from CoronaCore.core import network_sync_policy
 from CoronaCore.core.corona_editor import CoronaEditor
 from CoronaPlugin.core.corona_plugin_base import PluginBase
 from CoronaCore.core.managers import scene_manager
-from CoronaCore.utils.file_handler import FileHandler
 
 import logging
 
@@ -1706,44 +1705,6 @@ class SceneTools(PluginBase):
             return SceneTools.import_vision_scene_into_current_scene(scene_name, runtime_path)
         except Exception as exc:
             logger.exception("import_embedded_vision_scene_into_current_scene failed")
-            return {"status": "error", "message": str(exc)}
-
-    @staticmethod
-    def select_vision_scene_path() -> dict:
-        try:
-            _content, path = FileHandler.open_file(
-                caption="打开 Vision 场景",
-                file_types="Vision 场景 (*.json)",
-                read_content=False,
-                return_relative_path=False,
-            )
-            if not path:
-                return {"status": "canceled", "path": ""}
-            return {"status": "success", "path": path}
-        except Exception as exc:
-            return {"status": "error", "message": str(exc)}
-
-    @staticmethod
-    def select_screenshot_path(scene_name: str, camera_name: str = None) -> dict:
-        try:
-            init_path = _active_project_path()
-            import datetime
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            default_filename = f"screenshot_{timestamp}.png"
-
-            path = FileHandler.choose_save_path(
-                caption="保存截图",
-                file_types="PNG 图片 (*.png)",
-                default_dir=init_path,
-                default_filename=default_filename,
-                return_relative_path=False,
-            )
-
-            if not path:
-                return {"status": "canceled", "path": ""}
-
-            return {"status": "success", "path": path, "camera_name": camera_name}
-        except Exception as exc:
             return {"status": "error", "message": str(exc)}
 
     @staticmethod

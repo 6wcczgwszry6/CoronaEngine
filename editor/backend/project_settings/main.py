@@ -5,7 +5,6 @@ import logging
 import datetime
 from CoronaCore.core.corona_editor import CoronaEditor
 from CoronaCore.core.editor_api import CoronaEditorApi
-from CoronaCore.utils.file_handler import FileHandler
 from utils.settings import settings_manager
 
 logger = logging.getLogger(__name__)
@@ -120,39 +119,3 @@ class ProjectSettings:
         except Exception as e:
             logger.error(f"保存项目配置失败: {e}")
             return {"success": False, "error": str(e)}
-
-    @staticmethod
-    def browse_scene_file() -> dict:
-        """
-        浏览当前项目中的场景文件
-        :return: 选择的场景文件相对路径
-        """
-        if not settings_manager.active_project_path:
-            return {"error": "未激活任何项目", "path": ""}
-
-        project_path = settings_manager.active_project_path
-        try:
-            default_dir = os.path.join(project_path, "Scene")
-            if not os.path.exists(default_dir):
-                default_dir = project_path
-
-            title = "选择入口场景文件"
-            file_filter = "场景文件 (*.scene);;所有文件 (*)"
-
-            _, file_path = FileHandler.open_file(
-                caption=title,
-                file_types=file_filter,
-                default_dir=default_dir,
-                read_content=False
-            )
-
-            if file_path and os.path.exists(file_path):
-                rel_path = os.path.relpath(file_path, project_path)
-                rel_path = rel_path.replace('\\', '/')
-                return {"path": rel_path, "success": True}
-
-            return {"path": "", "success": False, "error": "未选择文件"}
-
-        except Exception as e:
-            logger.error(f"浏览场景文件失败: {e}")
-            return {"error": str(e), "path": ""}

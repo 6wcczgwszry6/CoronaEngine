@@ -317,6 +317,7 @@ import { coronaEventBus } from '@/utils/eventBus.js';
 import { nodeGraphToCode, validateNodeGraph } from '@/blockly/generators/index.js';
 import { generatedNodeGraphRevision, registerGeneratedNodeGraphConsumer } from '@/blockly/node-editor/aiNodeGraphService.js';
 import { actorContextNameKey, actorContextRevision, actorRecordsFromSceneTree, normalizeActorContextName } from '@/blockly/utils/actorContext.js';
+import { nextSaveAction, shouldResumeBlockedSave } from '@/blockly/utils/saveRetryPolicy.js';
 import { graphRevision as reviewGraphRevision, reviewScopeId, startNodeGraphReview } from '@/services/nodeGraphReviewService.js';
 import { useCabbageAssistantStore } from '@/stores/cabbageAssistantStore.js';
 import {
@@ -525,7 +526,8 @@ let isLoading = false,
   initialLoadComplete = false,
   graphDirty = false,
   saveInFlight = null,
-  saveQueued = false;
+  saveQueued = false,
+  saveBlockedProjectPath = '';
 const targetEnabledByKey = new Map();
 const nodeRunLifecycle = { active: false, terminalReported: false };
 const sceneActorContext = reactive({
@@ -2405,8 +2407,14 @@ async function saveNow(targetOverride = null, { force = false } = {}) {
         runnable,
         validation_errors: validationErrors,
       }));
-      if (response?.status === 'error') throw new Error(response.message || '保存节点图失败');
+      if (response?.status === 'error') {
+        if (response.code === 'NO_ACTIVE_PROJECT' || response.code === 'PROJECT_CONTEXT_CHANGED') {
+          saveBlockedProjectPath = String(response.project_path || target.projectPath || '').trim();
+        }
+        throw new Error(response.message || '保存节点图失败');
+      }
       graphDirty = JSON.stringify(graphSnapshot()) !== snapshotFingerprint;
+      saveBlockedProjectPath = '';
       saveLabel.value = runnable
         ? `已实时保存到当前世界 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', second: '2-digit' })}`
         : `已实时保存（不可运行：${validationErrors[0]}）`;
@@ -2419,13 +2427,19 @@ async function saveNow(targetOverride = null, { force = false } = {}) {
     }
   })();
 
+  let saveSucceeded = false;
   try {
-    return await saveInFlight;
+    saveSucceeded = await saveInFlight;
+    return saveSucceeded;
   } finally {
     saveInFlight = null;
-    const shouldSaveAgain = saveQueued || graphDirty;
+    const action = nextSaveAction({
+      succeeded: saveSucceeded,
+      saveQueued,
+      graphDirty,
+    });
     saveQueued = false;
-    if (shouldSaveAgain && componentMounted && initialLoadComplete && !saveTimer) {
+    if (action === 'resave' && componentMounted && initialLoadComplete && !saveTimer) {
       saveTimer = setTimeout(() => {
         saveTimer = null;
         saveNow();
@@ -3194,7 +3208,18 @@ function updateCanvasSize() {
 }
 async function onActiveProjectChanged(event) {
   const nextProjectPath = String(event?.detail?.projectPath || readActiveProjectPath()).trim();
-  if (!nextProjectPath || normalizeProjectPath(nextProjectPath) === normalizeProjectPath(activeProjectPath.value)) return;
+  if (!nextProjectPath) return;
+  if (normalizeProjectPath(nextProjectPath) === normalizeProjectPath(activeProjectPath.value)) {
+    if (shouldResumeBlockedSave({
+      dirty: graphDirty,
+      blockedProjectPath: saveBlockedProjectPath,
+      eventProjectPath: nextProjectPath,
+    })) {
+      saveBlockedProjectPath = '';
+      await saveNow(null, { force: true });
+    }
+    return;
+  }
   if (saveTimer) {
     clearTimeout(saveTimer);
     saveTimer = null;

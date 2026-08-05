@@ -17,7 +17,7 @@ class R3AuthoritativeDocument:
 R3_STABILITY_GATE_PLAN = R3AuthoritativeDocument(
     document_id="r3_stability_gate_plan",
     title="R3 稳定门禁与三职能 Agent 双轨推进计划",
-    repository_path="docs/R3稳定门禁与三职能Agent双轨推进计划.md",
+    repository_path="docs/plan/R3稳定门禁与三职能Agent双轨推进计划.md",
     purpose=(
         "Defines the authoritative Red/Yellow/Green gate, Track A Game-ready "
         "Runtime work, Track B non-executing collaboration work, and W0-W6 order."

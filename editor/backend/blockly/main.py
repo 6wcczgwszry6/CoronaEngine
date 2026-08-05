@@ -152,12 +152,27 @@ class ScratchTool:
         return os.path.normcase(str(Path(path).expanduser().resolve()))
 
     @classmethod
-    def _request_project_context(cls, data: dict) -> tuple[Path, Optional[dict]]:
+    def _request_project_context(cls, data: dict) -> tuple[Optional[Path], Optional[dict]]:
         """Pin one request to the active project and reject stale frontend requests."""
-        project_path = cls._active_project_path().resolve()
         expected_raw = str(data.get("project_path") or "").strip()
+        expected_path = Path(expected_raw).expanduser().resolve() if expected_raw else None
+
+        active_raw = settings_manager.active_project_path
+        if not active_raw and CoronaEditor.CoronaEngine is not None:
+            active_raw = getattr(CoronaEditor.CoronaEngine, "active_project_path", None)
+
+        if not active_raw:
+            if expected_path is not None and settings_manager.set_active_project(str(expected_path)):
+                return expected_path, None
+            return None, {
+                "status": "error",
+                "code": "NO_ACTIVE_PROJECT",
+                "message": "no active project is available for this Blockly request",
+                "project_path": str(expected_path) if expected_path is not None else "",
+            }
+
+        project_path = Path(active_raw).expanduser().resolve()
         if expected_raw:
-            expected_path = Path(expected_raw).expanduser().resolve()
             if cls._project_identity(expected_path) != cls._project_identity(project_path):
                 return project_path, {
                     "status": "error",

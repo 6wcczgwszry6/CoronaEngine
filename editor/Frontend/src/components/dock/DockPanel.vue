@@ -200,7 +200,8 @@ async function handlePopOut() {
   flex: 1;
   min-height: 0;
   border: 1px solid #30281c;
-  background: #11100d;
+  background: rgba(17, 16, 13, 0.72);
+  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.32);
   contain: layout style;
 }
 .dock-panel-header {
@@ -209,7 +210,7 @@ async function handlePopOut() {
   justify-content: space-between;
   min-height: 30px;
   padding: 3px 7px 3px 9px;
-  background: linear-gradient(180deg, #211d12 0%, #15130d 100%);
+  background: linear-gradient(180deg, rgba(33, 29, 18, 0.9) 0%, rgba(21, 19, 13, 0.84) 100%);
   border-bottom: 1px solid #4a3d1d;
   flex-shrink: 0;
   user-select: none;
@@ -251,6 +252,10 @@ async function handlePopOut() {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  background: transparent;
+}
+.dock-panel-body > :deep(*) {
+  background: transparent !important;
 }
 .dock-panel-loading {
   padding: 1rem;
