@@ -1,217 +1,39 @@
 {
-  "version": 8,
-  "cmakeMinimumRequired": {
-    "major": 3,
-    "minor": 29,
-    "patch": 0
-  },
+  "version": 6,
   "configurePresets": [
     {
-      "name": "base",
-      "hidden": true,
-      "binaryDir": "${sourceDir}/build",
-      "installDir": "${sourceDir}/install",
-      "cacheVariables": {
-        "CMAKE_EXPORT_COMPILE_COMMANDS": "ON"
-      }
+      "name": "relwithdebinfo",
+      "displayName": "RelWithDebInfo (default)",
+      "generator": "Ninja Multi-Config",
+      "binaryDir": "${sourceDir}/build/conan/relwithdebinfo",
+      "cacheVariables": { "CORONA_DEV_CONFIGURATION": "RelWithDebInfo" }
     },
     {
-      "name": "ninja-msvc",
-      "displayName": "Ninja MSVC",
-      "description": "Windows - Ninja Multi-Config + MSVC",
-      "inherits": "base",
+      "name": "debug",
+      "displayName": "Debug",
       "generator": "Ninja Multi-Config",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "cl",
-        "CMAKE_CXX_COMPILER": "cl"
-      }
+      "binaryDir": "${sourceDir}/build/conan/debug",
+      "cacheVariables": { "CORONA_DEV_CONFIGURATION": "Debug" }
     },
     {
-      "name": "ninja-clang",
-      "displayName": "Ninja Clang",
-      "description": "Windows - Ninja Multi-Config + LLVM Clang (GNU style)",
-      "inherits": "base",
+      "name": "release",
+      "displayName": "Release",
       "generator": "Ninja Multi-Config",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Windows"
-      },
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++"
-      }
+      "binaryDir": "${sourceDir}/build/conan/release",
+      "cacheVariables": { "CORONA_DEV_CONFIGURATION": "Release" }
     },
     {
-      "name": "ninja-linux-gcc",
-      "displayName": "Ninja GCC",
-      "description": "Linux - Ninja Multi-Config + GCC",
-      "inherits": "base",
+      "name": "minsizerel",
+      "displayName": "MinSizeRel",
       "generator": "Ninja Multi-Config",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "gcc",
-        "CMAKE_CXX_COMPILER": "g++"
-      }
-    },
-    {
-      "name": "ninja-linux-clang",
-      "displayName": "Ninja Clang",
-      "description": "Linux - Ninja Multi-Config + Clang",
-      "inherits": "base",
-      "generator": "Ninja Multi-Config",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Linux"
-      },
-      "cacheVariables": {
-        "CMAKE_C_COMPILER": "clang",
-        "CMAKE_CXX_COMPILER": "clang++"
-      }
-    },
-    {
-      "name": "ninja-macos",
-      "displayName": "Ninja",
-      "description": "macOS - Ninja Multi-Config",
-      "inherits": "base",
-      "generator": "Ninja Multi-Config",
-      "condition": {
-        "type": "equals",
-        "lhs": "${hostSystemName}",
-        "rhs": "Darwin"
-      }
+      "binaryDir": "${sourceDir}/build/conan/minsizerel",
+      "cacheVariables": { "CORONA_DEV_CONFIGURATION": "MinSizeRel" }
     }
   ],
   "buildPresets": [
-    {
-      "name": "msvc-debug",
-      "displayName": "Debug",
-      "configurePreset": "ninja-msvc",
-      "configuration": "Debug"
-    },
-    {
-      "name": "msvc-release",
-      "displayName": "Release",
-      "configurePreset": "ninja-msvc",
-      "configuration": "Release"
-    },
-    {
-      "name": "msvc-relwithdebinfo",
-      "displayName": "RelWithDebInfo",
-      "configurePreset": "ninja-msvc",
-      "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "msvc-minsizerel",
-      "displayName": "MinSizeRel",
-      "configurePreset": "ninja-msvc",
-      "configuration": "MinSizeRel"
-    },
-    {
-      "name": "clang-debug",
-      "displayName": "Debug",
-      "configurePreset": "ninja-clang",
-      "configuration": "Debug"
-    },
-    {
-      "name": "clang-release",
-      "displayName": "Release",
-      "configurePreset": "ninja-clang",
-      "configuration": "Release"
-    },
-    {
-      "name": "clang-relwithdebinfo",
-      "displayName": "RelWithDebInfo",
-      "configurePreset": "ninja-clang",
-      "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "clang-minsizerel",
-      "displayName": "MinSizeRel",
-      "configurePreset": "ninja-clang",
-      "configuration": "MinSizeRel"
-    },
-    {
-      "name": "linux-gcc-debug",
-      "displayName": "Debug",
-      "configurePreset": "ninja-linux-gcc",
-      "configuration": "Debug"
-    },
-    {
-      "name": "linux-gcc-release",
-      "displayName": "Release",
-      "configurePreset": "ninja-linux-gcc",
-      "configuration": "Release"
-    },
-    {
-      "name": "linux-gcc-relwithdebinfo",
-      "displayName": "RelWithDebInfo",
-      "configurePreset": "ninja-linux-gcc",
-      "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "linux-gcc-minsizerel",
-      "displayName": "MinSizeRel",
-      "configurePreset": "ninja-linux-gcc",
-      "configuration": "MinSizeRel"
-    },
-    {
-      "name": "linux-clang-debug",
-      "displayName": "Debug",
-      "configurePreset": "ninja-linux-clang",
-      "configuration": "Debug"
-    },
-    {
-      "name": "linux-clang-release",
-      "displayName": "Release",
-      "configurePreset": "ninja-linux-clang",
-      "configuration": "Release"
-    },
-    {
-      "name": "linux-clang-relwithdebinfo",
-      "displayName": "RelWithDebInfo",
-      "configurePreset": "ninja-linux-clang",
-      "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "linux-clang-minsizerel",
-      "displayName": "MinSizeRel",
-      "configurePreset": "ninja-linux-clang",
-      "configuration": "MinSizeRel"
-    },
-    {
-      "name": "macos-debug",
-      "displayName": "Debug",
-      "configurePreset": "ninja-macos",
-      "configuration": "Debug"
-    },
-    {
-      "name": "macos-release",
-      "displayName": "Release",
-      "configurePreset": "ninja-macos",
-      "configuration": "Release"
-    },
-    {
-      "name": "macos-relwithdebinfo",
-      "displayName": "RelWithDebInfo",
-      "configurePreset": "ninja-macos",
-      "configuration": "RelWithDebInfo"
-    },
-    {
-      "name": "macos-minsizerel",
-      "displayName": "MinSizeRel",
-      "configurePreset": "ninja-macos",
-      "configuration": "MinSizeRel"
-    }
+    { "name": "relwithdebinfo", "configurePreset": "relwithdebinfo", "configuration": "RelWithDebInfo" },
+    { "name": "debug", "configurePreset": "debug", "configuration": "Debug" },
+    { "name": "release", "configurePreset": "release", "configuration": "Release" },
+    { "name": "minsizerel", "configurePreset": "minsizerel", "configuration": "MinSizeRel" }
   ]
 }

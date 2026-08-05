@@ -6,7 +6,12 @@
 /dist/
 /cmake-build-*/
 
+# Managed source workspaces. Keep lock files tracked.
+/.workspace/*
+!/.workspace/horizon.lock.json
+
 # CMake intermediate files
+CMakeUserPresets.json
 CMakeCache.txt
 CMakeFiles/
 cmake-build-*/
@@ -19,6 +24,7 @@ Makefile
 .vscode/
 .idea/
 .vs/
+.venv/
 .claude/
 .agents/
 .superpowers/
@@ -30,7 +36,6 @@ TaskSplitting.md
 # Tool caches
 **/.cache/
 __pycache__/
-/.worktrees/
 
 # third-party libraries (manually added)
 /third_party/*

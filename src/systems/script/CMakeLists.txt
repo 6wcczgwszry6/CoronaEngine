@@ -2,12 +2,11 @@
 # Script System (with Python binding)
 # ==============================================================================
 
-# Build nanobind static library (required for Python binding)
-if(DEFINED nanobind_SOURCE_DIR)
-    include(${nanobind_SOURCE_DIR}/cmake/nanobind-config.cmake)
+find_package(nanobind CONFIG REQUIRED)
+
+# Build nanobind static library (required for Python binding).
+if(NOT TARGET nanobind-static)
     nanobind_build_library(nanobind-static)
-else()
-    message(FATAL_ERROR "[CMake] nanobind source directory not found")
 endif()
 
 add_library(CoronaPythonRuntimeCoordinator STATIC
@@ -48,7 +47,6 @@ corona_add_system(script
 # Add Python-specific include directories
 target_include_directories(corona_script_system PUBLIC
     ${Python_INCLUDE_DIRS}
-    ${nanobind_SOURCE_DIR}/include
 )
 
 target_include_directories(corona_script_system PRIVATE

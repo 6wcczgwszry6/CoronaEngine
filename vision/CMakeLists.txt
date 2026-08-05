@@ -5,8 +5,8 @@
 # This file is meant to be included via `add_subdirectory(vision)` from the
 # CoronaEngine root, gated by `CORONA_BUILD_VISION`. It no longer issues its
 # own `project()` call or overrides global output directories. Third-party
-# dependencies (assimp, glfw, cxxopts, Horizon) are fetched at the root level
-# (see misc/cmake/corona_third_party.cmake) and reused here.
+# dependencies (assimp, glfw, cxxopts, Horizon) are resolved at the root level
+# through Conan package targets (see misc/cmake/corona_third_party.cmake) and reused here.
 # ==============================================================================
 
 # Vision sources require C++20 and depend on CUDA.

@@ -1,15 +1,6 @@
-cmake_minimum_required(VERSION 3.29)
+set(CORONA_RESOURCE_ROOT "${CMAKE_CURRENT_SOURCE_DIR}")
 
-# Project definition
-project(CoronaResource
-    VERSION 0.5.0
-    DESCRIPTION "CoronaResource: Multi-format 3D scene parsing and import library"
-    LANGUAGES CXX
-)
-
-message(STATUS "Install prefix: ${CMAKE_INSTALL_PREFIX}")
-# Add CMake modules path
-list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+message(STATUS "[CoronaResource] Configuring resource libraries inside ${PROJECT_NAME}")
 
 # Include configuration modules
 include(CoronaResourceOptions)

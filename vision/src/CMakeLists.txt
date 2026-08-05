@@ -22,7 +22,7 @@ function(vision_add_plugin name)
             DEBUG_POSTFIX "")
 endfunction()
 
-# Horizon (ocarina) is fetched at the CoronaEngine root level
+# Horizon (ocarina) is resolved at the CoronaEngine root level
 # (see misc/cmake/corona_third_party.cmake). Do not re-declare here.
 
 add_subdirectory(ext)

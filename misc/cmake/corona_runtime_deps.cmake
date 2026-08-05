@@ -108,22 +108,28 @@ function(corona_install_runtime_deps target_name)
         )
     endif()
 
-    set(CEF_BIN_DIR "${PROJECT_SOURCE_DIR}/third_party/cef/src/$<IF:$<CONFIG:Debug>,Debug,Release>")
-    set(CEF_RES_DIR "${PROJECT_SOURCE_DIR}/third_party/cef/src/Resources")
+    if(CORONA_ENABLE_CEF)
+        if(NOT CEF_AVAILABLE OR NOT DEFINED CEF_ROOT OR CEF_ROOT STREQUAL "")
+            message(FATAL_ERROR
+                "[Corona:RuntimeDeps] CEF runtime copy requires CEF_ROOT from the Conan cef-binary package.")
+        endif()
 
-    # Copy CEF runtime files next to the exe. Debug uses CEF Debug binaries;
-    # Release, RelWithDebInfo, and MinSizeRel use the Release runtime.
-    add_custom_command(TARGET ${target_name} POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CEF_BIN_DIR}"
-            "${_CORONA_DESTINATION_DIR}"
+        set(_CORONA_CEF_BIN_DIR "${CEF_ROOT}/$<IF:$<CONFIG:Debug>,Debug,Release>")
+        set(_CORONA_CEF_RES_DIR "${CEF_ROOT}/Resources")
 
-            # 复制所有资源文件 (locales/, .pak, .dat 等) 到可执行文件目录
-            # 注意：CEF 默认期望这些文件就在 exe 旁边，而不是在 Resources 子目录中
-            COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CEF_RES_DIR}"
-            "${_CORONA_DESTINATION_DIR}"
-    )
+        # Copy CEF runtime files next to the exe. Debug uses CEF Debug binaries;
+        # Release, RelWithDebInfo, and MinSizeRel use the Release runtime.
+        add_custom_command(TARGET ${target_name} POST_BUILD
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${_CORONA_CEF_BIN_DIR}"
+                "${_CORONA_DESTINATION_DIR}"
+
+                # CEF expects locales/, .pak, and .dat files next to the exe.
+                COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${_CORONA_CEF_RES_DIR}"
+                "${_CORONA_DESTINATION_DIR}"
+        )
+    endif()
 
 endfunction()
 
