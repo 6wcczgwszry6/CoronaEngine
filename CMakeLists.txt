@@ -59,7 +59,7 @@ include(corona_cef)
 # Testing Support
 # ------------------------------------------------------------------------------
 include(CTest)
-if(BUILD_CORONA_TESTING AND NOT BUILD_TESTING)
+if(BUILD_CORONA_TESTING)
     enable_testing()
     set(CORONA_RESOURCE_BUILD_TESTS ON CACHE BOOL "Build CoronaResource tests" FORCE)
 endif()

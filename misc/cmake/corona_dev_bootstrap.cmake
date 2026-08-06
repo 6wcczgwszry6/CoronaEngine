@@ -2,16 +2,31 @@ function(corona_dev_bootstrap)
     if(NOT DEFINED CORONA_DEV_CONFIGURATION OR CORONA_DEV_CONFIGURATION STREQUAL "")
         set(CORONA_DEV_CONFIGURATION "RelWithDebInfo" CACHE STRING "CoronaEngine developer configuration")
     endif()
+    if(NOT DEFINED CORONA_DEV_TARGET_FAMILY OR CORONA_DEV_TARGET_FAMILY STREQUAL "")
+        set(CORONA_DEV_TARGET_FAMILY "examples" CACHE STRING "CoronaEngine developer target family")
+    endif()
+
+    set_property(CACHE CORONA_DEV_TARGET_FAMILY PROPERTY STRINGS
+        core examples tests vision vision-tests vision-oidn)
+    set(_corona_target_families core examples tests vision vision-tests vision-oidn)
+    list(FIND _corona_target_families "${CORONA_DEV_TARGET_FAMILY}" _corona_target_family_index)
+    if(_corona_target_family_index EQUAL -1)
+        message(FATAL_ERROR
+            "Unsupported CORONA_DEV_TARGET_FAMILY='${CORONA_DEV_TARGET_FAMILY}'. "
+            "Expected one of: ${_corona_target_families}")
+    endif()
+
     string(TOLOWER "${CORONA_DEV_CONFIGURATION}" _corona_configuration_slug)
     set(_corona_toolchain
-        "${CMAKE_CURRENT_SOURCE_DIR}/build/conan/${_corona_configuration_slug}/generators/conan_toolchain.cmake")
+        "${CMAKE_CURRENT_SOURCE_DIR}/build/conan/${CORONA_DEV_TARGET_FAMILY}/${_corona_configuration_slug}/generators/conan_toolchain.cmake")
     set(_corona_build_environment
-        "${CMAKE_CURRENT_SOURCE_DIR}/build/conan/${_corona_configuration_slug}/generators/dev_build_environment.cmake")
+        "${CMAKE_CURRENT_SOURCE_DIR}/build/conan/${CORONA_DEV_TARGET_FAMILY}/${_corona_configuration_slug}/generators/dev_build_environment.cmake")
     if(NOT DEFINED ENV{CORONA_DEV_BOOTSTRAP_ACTIVE})
         find_program(_corona_uv uv REQUIRED)
         execute_process(
             COMMAND "${_corona_uv}" run --frozen python tools/dev.py _bootstrap
                     --configuration "${CORONA_DEV_CONFIGURATION}"
+                    --target-family "${CORONA_DEV_TARGET_FAMILY}"
             WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
             RESULT_VARIABLE _corona_bootstrap_result
             OUTPUT_VARIABLE _corona_bootstrap_stdout
