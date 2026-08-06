@@ -18,7 +18,7 @@ uv / Python
 
 - Conan 是第三方库版本、二进制变体和 CMake package target 的唯一所有者；CMake 只查找并链接 Conan 生成的 target。
 - Horizon 是锁定提交的源码子项目，不是由 Conan 安装的 Horizon 包。父工程和 Horizon 共用一次 Conan 解析结果、profile 与 generators 目录。
-- 构建目录按配置隔离：<code>build/conan/debug</code>、<code>build/conan/release</code>、<code>build/conan/relwithdebinfo</code> 和 <code>build/conan/minsizerel</code>。不要把不同配置的生成文件混用。
+- 构建目录按“目标族 × 配置”隔离，例如 <code>build/conan/core/debug</code>、<code>build/conan/examples/debug</code> 和 <code>build/conan/vision-tests/relwithdebinfo</code>。不要把不同目标族或配置的生成文件混用。
 
 ## 环境要求
 
@@ -78,7 +78,7 @@ uv run --frozen python tools/dev.py build corona_engine --configuration Debug
 # 只构建已配置的指定 target
 uv run --frozen python tools/dev.py build-fast corona_engine --configuration Debug
 
-# 构建该配置中的全部默认 target
+# 构建 Examples 目标族中已配置的全部 target
 uv run --frozen python tools/dev.py build-fast all --configuration Debug
 ~~~
 
@@ -89,18 +89,29 @@ uv run --frozen python tools/dev.py build-fast all --configuration Debug
 | 命令 | 用途 |
 | --- | --- |
 | <code>uv run --frozen python tools/dev.py install --configuration Debug</code> | 只准备 Horizon 并运行 Conan install |
-| <code>uv run --frozen python tools/dev.py configure --configuration Debug</code> | Conan install 后执行 CMake configure |
+| <code>uv run --frozen python tools/dev.py configure --configuration Debug --target-family core</code> | Conan install 后配置指定目标族 |
 | <code>uv run --frozen python tools/dev.py build &lt;target&gt; --configuration Debug</code> | 完整安装、配置、构建流程 |
 | <code>uv run --frozen python tools/dev.py build-fast &lt;target&gt; --configuration Debug</code> | 只构建现有 CMake cache；不会自动配置 |
-| <code>uv run --frozen python tools/dev.py rebuild &lt;target&gt; --configuration Debug</code> | 删除该配置的构建目录后重新构建 |
+| <code>uv run --frozen python tools/dev.py rebuild &lt;target&gt; --configuration Debug</code> | 删除该目标族与配置的构建目录后重新构建 |
 | <code>uv run --frozen python tools/dev.py update --configuration Debug</code> | 在 Horizon 工作区干净时更新锁定源码和 Conan 解析结果 |
 | <code>uv run --frozen python tools/dev.py clean</code> | 删除本仓库的 build、install、out、dist；执行前确认不需要其中产物 |
 
-构建测试 target 时，名称中包含 <code>test</code> 的 target 会让脚本启用 Conan 的 <code>with_tests</code> 选项。例如：
+脚本会由 target 名称推断目标族，也可用 <code>--target-family</code> 显式指定。一个命令不能混合需要不同目标族的 target。
+
+| 目标族 | 示例 target | 主要内容 |
+| --- | --- | --- |
+| <code>core</code> | <code>CoronaEngine</code> | 引擎核心与资源系统，不构建示例、测试或 Vision |
+| <code>examples</code> | <code>corona_engine</code>、<code>all</code> | 默认示例与编辑器运行时部署；旧 preset 的兼容默认值 |
+| <code>tests</code> | <code>corona_resource_tests</code> | Corona/CoronaResource 的非 Vision 测试 |
+| <code>vision</code> | <code>vision-gui</code> | CUDA Vision 应用 |
+| <code>vision-tests</code> | <code>test-render_graph</code> | Vision 与依赖 CUDA 的 Corona Vision 测试 |
+| <code>vision-oidn</code> | <code>CP_OIDN_CUDA</code> | 启用 Open Image Denoise 的 Vision 构建 |
+
+例如，构建并运行非 Vision 的资源测试：
 
 ~~~powershell
 uv run --frozen python tools/dev.py build corona_resource_tests --configuration Debug
-ctest --test-dir build/conan/debug -C Debug --output-on-failure
+ctest --test-dir build/conan/tests/debug -C Debug --output-on-failure
 ~~~
 
 工作流脚本自身的快速回归测试不需要原生构建：
@@ -111,7 +122,9 @@ uv run --frozen python -m unittest tools/test_workflow.py
 
 ## 通过 CMake preset 构建
 
-脚本是推荐入口。若使用 CMake Tools，选择与所需配置对应的 <code>debug</code>、<code>release</code>、<code>relwithdebinfo</code> 或 <code>minsizerel</code> configure preset，再执行 Configure 和 Build。根 CMakeLists.txt 会调用开发 bootstrap，生成并加载对应配置的 Conan toolchain。
+脚本是推荐入口。若使用 CMake Tools，选择目标族 preset，例如 <code>core-debug</code>、<code>examples-debug</code>、<code>tests-debug</code>、<code>vision-debug</code>、<code>vision-tests-debug</code> 或 <code>vision-oidn-debug</code>，再执行 Configure 和 Build。根 CMakeLists.txt 会调用开发 bootstrap，生成并加载对应目标族和配置的 Conan toolchain。
+
+旧的 <code>debug</code>、<code>release</code>、<code>relwithdebinfo</code> 和 <code>minsizerel</code> preset 保留为 <code>examples-*</code> 的兼容别名。新开发应直接选择带目标族前缀的 preset。
 
 不要把 [.workspace/Horizon/README.md](.workspace/Horizon/README.md) 中的独立 Horizon preset 或工具命令直接套用于父工程：它们用于单独构建 Horizon，目录结构和 target family 与 CoronaEngine 不同。父工程只应使用根目录的 preset 和 tools/dev.py。
 
@@ -139,7 +152,7 @@ uv run --frozen python -m unittest tools/test_workflow.py
 - target 名称不兼容时，在 [misc/cmake/corona_third_party.cmake](misc/cmake/corona_third_party.cmake) 添加兼容别名或明确的 target 校验；只有 Horizon 使用时，通常应由 Horizon 的 CMake 模块完成查找。
 - 不要在 CMake 中重新引入 FetchContent、ExternalProject、file(DOWNLOAD) 或另一套包管理器来下载同一第三方库。
 
-根 Conan recipe 的主要 feature option 包括 <code>with_editor</code>、<code>with_examples</code>、<code>with_tests</code>、<code>with_vision</code>、<code>with_oidn</code> 与 <code>with_cef</code>。它们会生成相应的 CMake cache 变量。当前 tools/dev.py 会从 target 名称推断 tests、Vision 与 OIDN；需要新增独立 feature 时，应同步调整 Conan option、脚本映射和 Horizon 子项目开关，而不是只手改 CMake cache。
+根 Conan recipe 的主要 feature option 包括 <code>with_editor</code>、<code>with_examples</code>、<code>with_tests</code>、<code>with_vision</code>、<code>with_vision_tests</code>、<code>with_oidn</code> 与 <code>with_cef</code>。它们会生成相应的 CMake cache 变量。tools/dev.py 的目标族是这些 option 的唯一开发者入口；需要新增独立 feature 时，应同步调整 Conan option、目标族映射、preset、bootstrap 和 Horizon 子项目开关，而不是只手改 CMake cache。
 
 ### CUDA 与 Vision
 
@@ -177,7 +190,7 @@ echo $env:CUDA_PATH
 不要手工删除 generators 目录的一部分。重新运行：
 
 ~~~powershell
-uv run --frozen python tools/dev.py configure --configuration Debug
+uv run --frozen python tools/dev.py configure --configuration Debug --target-family examples
 ~~~
 
 若 cache 指向其他源码目录或配置目录，使用 <code>rebuild</code> 重新创建该配置的构建目录。

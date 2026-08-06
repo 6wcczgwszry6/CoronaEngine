@@ -1,6 +1,7 @@
 import os
 
 from conan import ConanFile
+from conan.errors import ConanInvalidConfiguration
 from conan.tools.cmake import CMake, CMakeDeps, CMakeToolchain, cmake_layout
 
 required_conan_version = ">=2.28"
@@ -10,6 +11,14 @@ class CoronaEngineConan(ConanFile):
     name = "coronaengine"
     package_type = "library"
     settings = "os", "arch", "compiler", "build_type"
+    _target_families = (
+        "core",
+        "examples",
+        "tests",
+        "vision",
+        "vision-tests",
+        "vision-oidn",
+    )
 
     options = {
         "shared": [True, False],
@@ -17,6 +26,7 @@ class CoronaEngineConan(ConanFile):
         "with_examples": [True, False],
         "with_tests": [True, False],
         "with_vision": [True, False],
+        "with_vision_tests": [True, False],
         "with_oidn": [True, False],
         "with_cef": [True, False],
     }
@@ -27,6 +37,7 @@ class CoronaEngineConan(ConanFile):
         "with_examples": True,
         "with_tests": False,
         "with_vision": True,
+        "with_vision_tests": False,
         "with_oidn": False,
         "with_cef": True,
         "sdl/*:shared": False,
@@ -42,7 +53,13 @@ class CoronaEngineConan(ConanFile):
 
     def layout(self):
         configuration = str(self.settings.build_type).lower()
-        cmake_layout(self, build_folder=f"build/conan/{configuration}")
+        target_family = self.conf.get("user.corona:target_family", default="examples")
+        if target_family not in self._target_families:
+            raise ConanInvalidConfiguration(
+                f"Unsupported user.corona:target_family='{target_family}'. "
+                f"Expected one of: {', '.join(self._target_families)}"
+            )
+        cmake_layout(self, build_folder=f"build/conan/{target_family}/{configuration}")
 
     def set_version(self):
         self.version = os.environ.get("CORONAENGINE_CONAN_VERSION", "0.5.0")
@@ -89,12 +106,17 @@ class CoronaEngineConan(ConanFile):
         deps.generate()
 
         toolchain = CMakeToolchain(self)
+        # Family-specific generators each export a conan-default preset. The
+        # checked-in presets are the single public entrypoint, so do not merge
+        # generated presets into the repository-root CMakeUserPresets.json.
+        toolchain.user_presets_path = None
         variables = toolchain.variables
         variables["BUILD_SHARED_LIBS"] = bool(self.options.shared)
         variables["BUILD_CORONA_EDITOR"] = bool(self.options.with_editor)
         variables["BUILD_CORONA_EXAMPLES"] = bool(self.options.with_examples)
         variables["BUILD_CORONA_TESTING"] = bool(self.options.with_tests)
         variables["CORONA_BUILD_VISION"] = bool(self.options.with_vision)
+        variables["VISION_BUILD_TESTS"] = bool(self.options.with_vision_tests)
         variables["VISION_BUILD_OIDN"] = bool(self.options.with_oidn)
         variables["CORONA_ENABLE_CEF"] = bool(self.options.with_cef)
 
@@ -104,7 +126,13 @@ class CoronaEngineConan(ConanFile):
 
         toolchain.generate()
 
+    def validate(self):
+        if bool(self.options.with_vision_tests) and not bool(self.options.with_vision):
+            raise ConanInvalidConfiguration("with_vision_tests=True requires with_vision=True")
+        if bool(self.options.with_oidn) and not bool(self.options.with_vision):
+            raise ConanInvalidConfiguration("with_oidn=True requires with_vision=True")
+
     def build(self):
         cmake = CMake(self)
         cmake.configure()
-        cmake.build(target="corona_engine")
+        cmake.build(target="CoronaEngine")

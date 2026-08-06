@@ -59,6 +59,16 @@ set_source_files_properties(
     PROPERTIES OBJECT_DEPENDS "${OPTICS_GIZMO_SHADER}"
 )
 
+# The Vision-enabled OpticsSystem translation unit exceeds MSVC's default COFF
+# section limit in Debug builds. Restrict /bigobj to that compiler and source
+# file so other toolchains and compilation units retain their normal flags.
+if(MSVC)
+    set_source_files_properties(
+        optics_system.cpp
+        PROPERTIES COMPILE_OPTIONS "/bigobj"
+    )
+endif()
+
 if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
     add_executable(corona_vision_model_normalization_tests
         tests/test_vision_model_normalization.cpp
