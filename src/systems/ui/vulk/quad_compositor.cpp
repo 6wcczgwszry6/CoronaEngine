@@ -59,9 +59,20 @@ bool QuadCompositor::ensure_white_texture() {
     const unsigned char pixel[4] = {255, 255, 255, 255};
     const auto bytes = std::span<const std::byte>(
         reinterpret_cast<const std::byte*>(pixel), sizeof(pixel));
+
+    // Horizon 移除了 HardwareImage::upload()：改为 staging buffer + copy_from()。
+    // 提交是异步的（receipt 存成员），staging 必须活到 GPU 用完，故挂 keep_alive。
+    Horizon::HardwareBufferDesc staging_desc;
+    staging_desc.element_count = bytes.size_bytes();
+    staging_desc.element_size = 1;
+    staging_desc.usage = Horizon::BufferUsageFlags::TransferSrc;
+    staging_desc.cpu_access = Horizon::CpuAccessMode::Write;
+    auto staging = std::make_shared<Horizon::HardwareBuffer>(staging_desc, bytes);
+
     white_upload_receipt_ =
         white_upload_executor_.stream()
-        << white_image_.upload(bytes)
+        << white_image_.copy_from(*staging)
+        << Horizon::keep_alive(staging)
         << Horizon::commit();
 
     white_ready_ = true;
@@ -208,8 +219,10 @@ bool QuadCompositor::composite(
             continue;
         }
 
+        // storeSampledDescriptor() 已移除；store_descriptor() 依 usage 自动选表，
+        // 这些纹理只有 Sampled，故取到的仍是 combined-image-sampler 索引。
         const uint32_t texture_index =
-            q.texture ? q.texture->storeSampledDescriptor() : white_image_.storeSampledDescriptor();
+            q.texture ? q.texture->store_descriptor() : white_image_.store_descriptor();
 
         pipeline[ui_quad_vert_glsl_t::pushConsts::scale] = up2(scale);
         pipeline[ui_quad_vert_glsl_t::pushConsts::translate] = up2(translate);
@@ -236,9 +249,10 @@ bool QuadCompositor::composite(
         return false;
     }
 
-    (void)(res.executor.stream()
-           << pipeline(static_cast<uint16_t>(target_width), static_cast<uint16_t>(target_height))
-           << Horizon::commit());
+    // 记住这次提交：Horizon 已移除 executor.last_receipt()，publish 与资源释放都靠它。
+    res.last_receipt = res.executor.stream()
+        << pipeline(static_cast<uint16_t>(target_width), static_cast<uint16_t>(target_height))
+        << Horizon::commit();
 
     return true;
 }

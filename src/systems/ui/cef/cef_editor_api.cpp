@@ -1248,4 +1248,3 @@ bool enqueue_python_project_context_changed(std::string_view project_path) {
 }
 
 }  // namespace Corona::Systems::UI
-

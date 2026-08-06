@@ -55,4 +55,4 @@ bool BrowserSideJSHandler::OnQuery(CefRefPtr<CefBrowser> browser,
     return true;
 }
 
-}  // namespace Corona::Systems::UI 
+}  // namespace Corona::Systems::UI

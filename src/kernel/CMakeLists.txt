@@ -31,7 +31,7 @@ target_include_directories(CoronaEngineKernel
 
 target_link_libraries(CoronaEngineKernel
     PUBLIC
-    corona::kernel
+    Horizon
 )
 
 target_compile_features(CoronaEngineKernel PUBLIC cxx_std_20)

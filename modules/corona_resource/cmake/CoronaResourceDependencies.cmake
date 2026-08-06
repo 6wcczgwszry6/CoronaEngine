@@ -1,133 +1,25 @@
 # =============================================================================
-# CoronaResource External Dependencies
+# CoronaResource dependency checks
+#
+# Dependencies are resolved by Conan in misc/cmake/corona_third_party.cmake.
+# This module keeps resource-local assumptions explicit.
 # =============================================================================
 
-include(FetchContent)
+include_guard(GLOBAL)
 
-# Fetch ktm math library
-message(STATUS "Fetching ktm math library...")
-FetchContent_Declare(
-    ktm
-    GIT_REPOSITORY https://github.com/YGXXD/ktm.git
-    GIT_TAG main
-    EXCLUDE_FROM_ALL
-)
+foreach(_target
+        ktm::ktm
+        assimp::assimp
+        stb_headers
+        miniaudio_headers
+        nlohmann_json::nlohmann_json
+        tinyexr_headers
+        meshoptimizer
+        astcenc-native-static
+        TBB::tbb)
+    if(NOT TARGET ${_target})
+        message(FATAL_ERROR "[CoronaResource] Expected dependency target '${_target}'")
+    endif()
+endforeach()
 
-# Fetch Assimp 3D model import library
-message(STATUS "Fetching Assimp library...")
-FetchContent_Declare(
-    assimp
-    GIT_REPOSITORY https://github.com/assimp/assimp.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-)
-
-# Fetch stb single-file public domain libraries
-message(STATUS "Fetching stb library...")
-FetchContent_Declare(
-    stb
-    GIT_REPOSITORY https://github.com/nothings/stb.git
-    GIT_TAG master
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-)
-
-# Fetch miniaudio single-header audio decode/playback library
-message(STATUS "Fetching miniaudio library...")
-FetchContent_Declare(
-    miniaudio
-    GIT_REPOSITORY https://github.com/mackron/miniaudio.git
-    GIT_TAG 0.11.21
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-)
-
-# Fetch nlohmann/json single-header JSON library
-message(STATUS "Fetching nlohmann/json library...")
-FetchContent_Declare(
-    nlohmann_json
-    GIT_REPOSITORY https://github.com/nlohmann/json.git
-    GIT_TAG v3.12.0
-    GIT_SHALLOW TRUE
-    EXCLUDE_FROM_ALL
-)
-
-# Fetch tinyexr library
-message(STATUS "Fetching tinyexr library...")
-FetchContent_Declare(
-    tinyexr
-    GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
-    GIT_TAG 438361c2ec0b52dec940644bba677f0421a262e6
-    EXCLUDE_FROM_ALL
-)
-
-message(STATUS "Fetching meshoptimizer library...")
-FetchContent_Declare(
-    meshoptimizer
-    GIT_REPOSITORY https://github.com/zeux/meshoptimizer.git
-    GIT_TAG v0.25  # Recommend specifying a specific version tag or commit hash, avoid using master
-)
-
-message(STATUS "Fetching astc-encoder library...")
-FetchContent_Declare(
-    astc-encoder
-    GIT_REPOSITORY https://github.com/ARM-software/astc-encoder.git
-    GIT_TAG 5.3.0  # Recommend locking to a specific commit hash or release tag (e.g., 4.6.0)
-)
-
-# Configure Assimp options before making it available
-set(ASSIMP_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_ASSIMP_TOOLS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_SAMPLES OFF CACHE BOOL "" FORCE)
-set(ASSIMP_INSTALL OFF CACHE BOOL "" FORCE)
-set(ASSIMP_INJECT_DEBUG_POSTFIX OFF CACHE BOOL "" FORCE)
-set(ASSIMP_NO_EXPORT ON CACHE BOOL "" FORCE)
-set(ASSIMP_WARNINGS_AS_ERRORS OFF CACHE BOOL "" FORCE)
-set(ASSIMP_BUILD_USD_IMPORTER ON CACHE BOOL "" FORCE)
-
-# Configure tinyexr options before making it available
-set(TINYEXR_BUILD_SAMPLE OFF CACHE BOOL "" FORCE)
-
-# Configure astc-encoder options before making it available
-set(ASTCENC_CLI OFF CACHE BOOL "Disable ASTC CLI tools" FORCE)
-set(ASTCENC_UNITTEST OFF CACHE BOOL "Disable ASTC Unit Tests" FORCE)
-set(ASTCENC_SHAREDLIB OFF CACHE BOOL "Build shared library" FORCE)
-
-# Make dependencies available
-set(_CORONA_RESOURCE_FETCH_DEPS
-    ktm
-    assimp
-    stb
-    miniaudio
-    nlohmann_json
-    tinyexr
-    meshoptimizer
-    astc-encoder
-)
-
-if(NOT TARGET corona::kernel)
-    list(APPEND _CORONA_RESOURCE_FETCH_DEPS CoronaFramework)
-endif()
-
-FetchContent_MakeAvailable(${_CORONA_RESOURCE_FETCH_DEPS})
-
-# Create interface library for stb (header-only)
-FetchContent_GetProperties(stb)
-
-if (NOT stb_POPULATED)
-    FetchContent_Populate(stb)
-endif ()
-
-add_library(stb_headers INTERFACE)
-target_include_directories(stb_headers INTERFACE ${stb_SOURCE_DIR})
-
-# Create interface library for miniaudio (header-only)
-FetchContent_GetProperties(miniaudio)
-
-if (NOT miniaudio_POPULATED)
-    FetchContent_Populate(miniaudio)
-endif ()
-
-add_library(miniaudio_headers INTERFACE)
-target_include_directories(miniaudio_headers INTERFACE ${miniaudio_SOURCE_DIR})
+unset(_target)

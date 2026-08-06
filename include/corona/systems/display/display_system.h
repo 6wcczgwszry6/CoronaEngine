@@ -81,6 +81,10 @@ class DisplaySystem : public Kernel::SystemBase {
         Horizon::HardwareImage output;
         uint32_t width = 0;
         uint32_t height = 0;
+        // Horizon 移除了 HardwareExecutor::last_receipt()，Display 自己记住最后一次
+        // composite+present 提交：它就是回写给生产者的 consumed_receipt，
+        // 生产者据此判断何时可以安全复用自己的图像。
+        Horizon::SubmitReceipt last_receipt;
     };
 
     Detail::PresentOutcome compose_and_present(

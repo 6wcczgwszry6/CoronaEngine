@@ -1,64 +1,62 @@
 include_guard(GLOBAL)
 
-include(corona_tbb_package)
-
-get_filename_component(
-    _corona_default_tbb_dir
-    "${PROJECT_SOURCE_DIR}/third_party/tbb/oneapi-tbb-2022.3.0/lib/cmake/tbb"
-    ABSOLUTE
-)
-
-if(TARGET TBB::tbb)
-    set(TBB_FOUND TRUE)
-    set(TBB_IMPORTED_TARGETS TBB::tbb)
-    if(NOT DEFINED TBB_VERSION)
-        set(TBB_VERSION "provided-by-target")
-    endif()
-else()
-    set(_corona_candidate_tbb_dirs "${_corona_default_tbb_dir}")
-
-    if(WIN32)
-        if(FETCHCONTENT_BASE_DIR)
-            list(APPEND _corona_candidate_tbb_dirs
-                "${FETCHCONTENT_BASE_DIR}/horizon-src/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb")
-        endif()
-
-        list(APPEND _corona_candidate_tbb_dirs
-            "${CMAKE_BINARY_DIR}/_deps/horizon-src/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb"
-            "${CMAKE_SOURCE_DIR}/cmake-build-relwithdebinfo/_deps/horizon-src/modules/corona/third_party/win/oneapi-tbb-2022.3.0/lib/cmake/tbb")
-    endif()
-
-    if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "")
-        corona_tbb_package_has_runtime("${TBB_DIR}" _corona_tbb_dir_ok)
-    else()
-        set(_corona_tbb_dir_ok FALSE)
-    endif()
-
-    if(NOT DEFINED TBB_DIR
-       OR TBB_DIR STREQUAL ""
-       OR NOT EXISTS "${TBB_DIR}/TBBConfig.cmake"
-       OR NOT _corona_tbb_dir_ok
-       OR TBB_DIR MATCHES [=[[/\\]build[/\\]_deps[/\\]horizon-src[/\\]modules[/\\]corona[/\\]]=]
-       OR TBB_DIR MATCHES [=[[/\\]build[/\\]_deps[/\\]coronaframework-src[/\\]]=])
-        corona_select_valid_tbb_dir(_corona_selected_tbb_dir ${_corona_candidate_tbb_dirs})
-
-        if(_corona_selected_tbb_dir)
-            set(TBB_DIR "${_corona_selected_tbb_dir}" CACHE PATH
-                "Path to TBB cmake configuration directory" FORCE)
-        else()
-            set(TBB_DIR "${_corona_default_tbb_dir}" CACHE PATH
-                "Path to TBB cmake configuration directory" FORCE)
-        endif()
-    endif()
-
-    unset(_corona_selected_tbb_dir)
-    unset(_corona_tbb_dir_ok)
-    unset(_corona_candidate_tbb_dirs)
-
-    find_package(TBB REQUIRED)
+if(NOT TARGET TBB::tbb)
+    message(FATAL_ERROR
+        "CoronaEngine expects the Conan package target TBB::tbb. "
+        "Include corona_third_party before corona_tbb and install dependencies with Conan.")
 endif()
 
-unset(_corona_default_tbb_dir)
+set(TBB_FOUND TRUE)
+set(TBB_IMPORTED_TARGETS TBB::tbb)
+if(NOT DEFINED TBB_VERSION)
+    set(TBB_VERSION "provided-by-conan")
+endif()
+
+function(_corona_append_existing_dirs _out_var)
+    set(_result "${${_out_var}}")
+
+    foreach(_dir IN LISTS ARGN)
+        if(_dir STREQUAL "" OR NOT EXISTS "${_dir}")
+            continue()
+        endif()
+
+        get_filename_component(_dir_abs "${_dir}" ABSOLUTE)
+        list(APPEND _result "${_dir_abs}")
+    endforeach()
+
+    if(_result)
+        list(REMOVE_DUPLICATES _result)
+    endif()
+
+    set(${_out_var} "${_result}" PARENT_SCOPE)
+endfunction()
+
+function(_corona_collect_tbb_package_roots _out_var)
+    set(_roots "")
+
+    foreach(_var IN ITEMS
+            TBB_PACKAGE_FOLDER_DEBUG
+            TBB_PACKAGE_FOLDER_RELEASE
+            TBB_PACKAGE_FOLDER_RELWITHDEBINFO
+            TBB_PACKAGE_FOLDER_MINSIZEREL
+            TBB_PACKAGE_FOLDER
+            onetbb_PACKAGE_FOLDER_DEBUG
+            onetbb_PACKAGE_FOLDER_RELEASE
+            onetbb_PACKAGE_FOLDER_RELWITHDEBINFO
+            onetbb_PACKAGE_FOLDER_MINSIZEREL
+            onetbb_PACKAGE_FOLDER)
+        if(DEFINED ${_var})
+            _corona_append_existing_dirs(_roots "${${_var}}")
+        endif()
+    endforeach()
+
+    if(DEFINED TBB_DIR AND NOT TBB_DIR STREQUAL "" AND EXISTS "${TBB_DIR}/TBBConfig.cmake")
+        get_filename_component(_tbb_root "${TBB_DIR}/../../.." ABSOLUTE)
+        _corona_append_existing_dirs(_roots "${_tbb_root}")
+    endif()
+
+    set(${_out_var} "${_roots}" PARENT_SCOPE)
+endfunction()
 
 function(_corona_collect_files_with_ext _out_var _extension)
     set(_result "")
@@ -82,9 +80,6 @@ function(_corona_collect_tbb_redist_artifacts)
         return()
     endif()
 
-    get_filename_component(_tbb_config_dir "${TBB_DIR}" ABSOLUTE)
-    get_filename_component(_tbb_root "${_tbb_config_dir}/../../.." ABSOLUTE)
-
     if(CMAKE_SIZEOF_VOID_P STREQUAL "8")
         set(_tbb_intel_arch intel64)
         set(_tbb_arch_suffix "")
@@ -107,10 +102,54 @@ function(_corona_collect_tbb_redist_artifacts)
     )
 
     set(_candidate_dirs "")
+    _corona_collect_tbb_package_roots(_tbb_roots)
 
-    foreach(_suffix IN LISTS _candidate_suffixes)
-        get_filename_component(_dir "${_tbb_root}/${_suffix}" ABSOLUTE)
-        list(APPEND _candidate_dirs "${_dir}")
+    foreach(_tbb_root IN LISTS _tbb_roots)
+        foreach(_suffix IN LISTS _candidate_suffixes)
+            get_filename_component(_dir "${_tbb_root}/${_suffix}" ABSOLUTE)
+            list(APPEND _candidate_dirs "${_dir}")
+        endforeach()
+    endforeach()
+
+    foreach(_var IN ITEMS
+            TBB_BINDIRS_DEBUG
+            TBB_BINDIRS_RELEASE
+            TBB_BINDIRS_RELWITHDEBINFO
+            TBB_BINDIRS_MINSIZEREL
+            TBB_BINDIRS
+            TBB_BIN_DIRS_DEBUG
+            TBB_BIN_DIRS_RELEASE
+            TBB_BIN_DIRS_RELWITHDEBINFO
+            TBB_BIN_DIRS_MINSIZEREL
+            TBB_BIN_DIRS
+            onetbb_BINDIRS_DEBUG
+            onetbb_BINDIRS_RELEASE
+            onetbb_BINDIRS_RELWITHDEBINFO
+            onetbb_BINDIRS_MINSIZEREL
+            onetbb_BINDIRS
+            onetbb_BIN_DIRS_DEBUG
+            onetbb_BIN_DIRS_RELEASE
+            onetbb_BIN_DIRS_RELWITHDEBINFO
+            onetbb_BIN_DIRS_MINSIZEREL
+            onetbb_BIN_DIRS
+            onetbb_TBB_tbb_BIN_DIRS_DEBUG
+            onetbb_TBB_tbb_BIN_DIRS_RELEASE
+            onetbb_TBB_tbb_BIN_DIRS_RELWITHDEBINFO
+            onetbb_TBB_tbb_BIN_DIRS_MINSIZEREL
+            onetbb_TBB_tbb_BIN_DIRS
+            onetbb_TBB_tbbmalloc_BIN_DIRS_DEBUG
+            onetbb_TBB_tbbmalloc_BIN_DIRS_RELEASE
+            onetbb_TBB_tbbmalloc_BIN_DIRS_RELWITHDEBINFO
+            onetbb_TBB_tbbmalloc_BIN_DIRS_MINSIZEREL
+            onetbb_TBB_tbbmalloc_BIN_DIRS
+            onetbb_TBB_tbbmalloc_proxy_BIN_DIRS_DEBUG
+            onetbb_TBB_tbbmalloc_proxy_BIN_DIRS_RELEASE
+            onetbb_TBB_tbbmalloc_proxy_BIN_DIRS_RELWITHDEBINFO
+            onetbb_TBB_tbbmalloc_proxy_BIN_DIRS_MINSIZEREL
+            onetbb_TBB_tbbmalloc_proxy_BIN_DIRS)
+        if(DEFINED ${_var})
+            _corona_append_existing_dirs(_candidate_dirs ${${_var}})
+        endif()
     endforeach()
 
     _corona_collect_files_with_ext(CORONA_TBB_REDIS_DLLS dll ${_candidate_dirs})
@@ -119,6 +158,9 @@ function(_corona_collect_tbb_redist_artifacts)
     set(CORONA_TBB_REDIS_DLLS "${CORONA_TBB_REDIS_DLLS}" CACHE STRING "Collected TBB redist DLLs" FORCE)
     set(CORONA_TBB_REDIS_PDBS "${CORONA_TBB_REDIS_PDBS}" CACHE STRING "Collected TBB redist PDBs" FORCE)
     mark_as_advanced(CORONA_TBB_REDIS_DLLS CORONA_TBB_REDIS_PDBS)
+
+    unset(_tbb_roots)
+    unset(_candidate_dirs)
 endfunction()
 
 function(corona_copy_tbb_runtime_artifacts target_name)

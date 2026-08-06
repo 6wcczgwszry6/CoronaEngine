@@ -37,17 +37,6 @@ function(corona_examples_copy_assets target_name)
         VERBATIM
     )
 
-    if(CORONA_BUILD_VISION AND TARGET ocarina)
-        add_custom_command(
-            TARGET ${target_name}
-            POST_BUILD
-            COMMAND ${CMAKE_COMMAND} -E echo "[${target_name}] Copy vision runtime deps from $<TARGET_FILE_DIR:ocarina>/. to $<TARGET_FILE_DIR:${target_name}>/"
-            COMMAND ${CMAKE_COMMAND} -E copy_directory $<TARGET_FILE_DIR:ocarina>/. $<TARGET_FILE_DIR:${target_name}>/.
-            VERBATIM
-        )
-    elseif(CORONA_BUILD_VISION)
-        message(STATUS "[${target_name}] Skip Ocarina runtime deps copy because target 'ocarina' is not available")
-    endif()
 endfunction()
 
 # ------------------------------------------------------------------------------

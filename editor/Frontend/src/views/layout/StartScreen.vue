@@ -19,7 +19,6 @@
       >
         {{ t(item.label) }}
       </button>
-      
     </div>
 
     <!-- 右侧面板 -->
@@ -607,15 +606,3 @@ font-size: 1.15rem;
   box-shadow: 0 0 18px rgba(255, 68, 68, 0.1);
 }
 </style>
-
-
-
-
-
-
-
-
-
-
-
-
