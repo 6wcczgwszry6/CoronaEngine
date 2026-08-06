@@ -18,7 +18,7 @@ uv run --frozen python tools/dev.py clean
 可在命令后指定目标，并用 `--configuration Debug|Release|RelWithDebInfo|MinSizeRel` 选择配置。例如：
 
 ```text
-uv run --frozen python tools/dev.py build corona_engine --configuration Release
+uv run --frozen python tools/dev.py build corona_engine --configuration RelWithDebInfo
 ```
 
 `build` 会安装依赖、配置并编译；`build-fast` 只复用已配置的构建树；`rebuild` 只删除当前配置目录后重建；`clean` 删除仓库生成的构建/安装目录，但保留 `.workspace/Horizon`。
