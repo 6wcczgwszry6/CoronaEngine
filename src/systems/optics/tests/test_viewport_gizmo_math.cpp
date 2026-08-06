@@ -37,6 +37,17 @@ int main() {
     ok &= expect(near(ktm::length(layout.axes[1].tip - layout.origin), 128.0f),
                  "Y axis must keep a constant 128 pixel length");
 
+    ok &= expect(near(kViewportGizmoSpriteMetadata[1].anchor.x, 808.3f) &&
+                     near(kViewportGizmoSpriteMetadata[1].anchor.y, 511.1f) &&
+                     near(kViewportGizmoSpriteMetadata[1].tip.x, 266.0f) &&
+                     near(kViewportGizmoSpriteMetadata[1].tip.y, 780.0f),
+                 "Y metadata must follow the green Y sprite");
+    ok &= expect(near(kViewportGizmoSpriteMetadata[2].anchor.x, 622.5f) &&
+                     near(kViewportGizmoSpriteMetadata[2].anchor.y, 752.8f) &&
+                     near(kViewportGizmoSpriteMetadata[2].tip.x, 622.0f) &&
+                     near(kViewportGizmoSpriteMetadata[2].tip.y, 224.0f),
+                 "Z metadata must follow the blue Z sprite");
+
     const auto behind = make_viewport_gizmo_layout(
         identity, {0.0f, 0.0f, -2.0f}, 800, 600, 128.0f);
     ok &= expect(!behind.visible, "origin outside clip depth must be hidden");

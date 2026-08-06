@@ -1682,10 +1682,6 @@ const handleViewportFocus = () => {
   });
 };
 
-const focusViewportInput = () => {
-  viewportPickSurfaceRef.value?.focus?.({ preventScroll: true });
-};
-
 const handleKeyDown = (event) => {
   // 检查输入框是否聚焦
   const inputElement = document.getElementById('new-tab-name');
@@ -2111,10 +2107,11 @@ const handleViewportPointer = (event) => {
 };
 
 const handleViewportPointerDown = (event) => {
-  focusViewportInput();
-  // Detached docks and project initialization may reload the native scene after
-  // MainPage's first snapshot. Rebind before the user starts interacting.
-  void refreshSceneCameraBinding({ preservePose: true });
+  try {
+    viewportPickSurfaceRef.value?.setPointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture is best effort on embedded browser surfaces.
+  }
   gizmoDownConsumed = false;
   gizmoDownPointerId = event.pointerId;
   gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
@@ -2127,6 +2124,7 @@ const handleViewportPointerDown = (event) => {
 };
 
 const handleViewportPointerCancel = (event) => {
+  if (event.pointerId !== gizmoDownPointerId) return;
   try {
     viewportPickSurfaceRef.value?.releasePointerCapture?.(event.pointerId);
   } catch (_) {
@@ -2143,11 +2141,6 @@ const handleViewportGizmoPointerResult = (payload = {}) => {
   const result = viewportGizmoController.handleResult(payload);
   if (payload.requestId === gizmoDownRequestId && payload.consumed) {
     gizmoDownConsumed = true;
-    try {
-      viewportPickSurfaceRef.value?.setPointerCapture?.(gizmoDownPointerId);
-    } catch (_) {
-      // Pointer capture is best effort on embedded browser surfaces.
-    }
   }
   if (result.status === 'ended' || result.status === 'cancelled') {
     gizmoDownRequestId = '';
@@ -3322,6 +3315,10 @@ onUnmounted(() => {
 </script>
 
 <style scoped>
+[data-viewport-pick-surface] {
+  touch-action: none;
+}
+
 .viewport-cursor-hidden,
 .viewport-cursor-hidden * {
   cursor: none !important;

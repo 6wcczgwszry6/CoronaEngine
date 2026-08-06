@@ -1,8 +1,85 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { createViewportGizmoController } from './viewportGizmo.js';
 import * as viewportGizmoModule from './viewportGizmo.js';
+
+const frontendRoot = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+
+const pointerDownHandler = (source) => {
+  const start = source.indexOf('const handleViewportPointerDown = (event) => {');
+  const end = source.indexOf('\n};', start);
+  assert.notEqual(start, -1, 'viewport pointerdown handler must exist');
+  assert.notEqual(end, -1, 'viewport pointerdown handler must terminate');
+  return source.slice(start, end);
+};
+
+test('both viewport surfaces capture the pointer synchronously on pointerdown', () => {
+  for (const relativePath of [
+    'src/views/layout/MainPage.vue',
+    'src/views/tools/CameraView.vue',
+  ]) {
+    const source = readFileSync(join(frontendRoot, relativePath), 'utf8');
+    const handler = pointerDownHandler(source);
+    assert.notEqual(handler.indexOf('setPointerCapture'), -1, `${relativePath} must capture pointerdown`);
+    assert.ok(
+      handler.indexOf('setPointerCapture') < handler.indexOf('viewportUiPointerController.send'),
+      `${relativePath} must capture before forwarding other pointer work`,
+    );
+    assert.ok(
+      handler.indexOf('setPointerCapture') < handler.indexOf('viewportGizmoController.pointer'),
+      `${relativePath} must capture before forwarding the gizmo pointerdown`,
+    );
+  }
+});
+
+test('main viewport pointerdown does not refresh the scene camera binding', () => {
+  const source = readFileSync(
+    join(frontendRoot, 'src/views/layout/MainPage.vue'),
+    'utf8',
+  );
+  const handler = pointerDownHandler(source);
+  assert.equal(
+    handler.includes('refreshSceneCameraBinding'),
+    false,
+    'scene camera binding must not refresh during the native pointerdown sequence',
+  );
+});
+
+test('viewport pointercancel only cancels the active gizmo pointer', () => {
+  for (const relativePath of [
+    'src/views/layout/MainPage.vue',
+    'src/views/tools/CameraView.vue',
+  ]) {
+    const source = readFileSync(join(frontendRoot, relativePath), 'utf8');
+    const start = source.indexOf('const handleViewportPointerCancel = (event) => {');
+    const end = source.indexOf('\n};', start);
+    assert.notEqual(start, -1, `${relativePath} pointercancel handler must exist`);
+    assert.notEqual(end, -1, `${relativePath} pointercancel handler must terminate`);
+    const handler = source.slice(start, end);
+    assert.match(
+      handler,
+      /event\.pointerId\s*!==\s*gizmoDownPointerId/,
+      `${relativePath} must ignore cancellation from another pointer`,
+    );
+  }
+});
+
+test('main viewport pointerdown does not force a focus transition during drag start', () => {
+  const source = readFileSync(
+    join(frontendRoot, 'src/views/layout/MainPage.vue'),
+    'utf8',
+  );
+  const handler = pointerDownHandler(source);
+  assert.equal(
+    handler.includes('focusViewportInput'),
+    false,
+    'pointerdown must not force a CEF focus transition while starting a drag',
+  );
+});
 
 test('sets and clears the native gizmo target', () => {
   const calls = [];
@@ -70,6 +147,41 @@ test('drag end is reported once for persistence', () => {
   controller.handleResult({ requestId: 'gizmo-end', consumed: true, ended: true });
   controller.handleResult({ requestId: 'gizmo-end', consumed: true, ended: true });
   assert.equal(ended.length, 1);
+});
+
+test('pointercancel forwards cancellation and clears the active drag once', () => {
+  const calls = [];
+  const cancelled = [];
+  const controller = createViewportGizmoController({
+    getBridge: () => ({ viewportGizmoPointer: (...args) => calls.push(args) }),
+    getCameraBinding: () => ({ cameraHandle: 11, sceneId: 'Scene/default.scene' }),
+    getHitRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+    getRenderRect: () => ({ left: 0, top: 0, width: 100, height: 100 }),
+    onDragCancel: (payload) => cancelled.push(payload),
+    makeRequestId: (() => {
+      let index = 0;
+      return () => `gizmo-cancel-${++index}`;
+    })(),
+  });
+
+  const downRequest = controller.pointer(
+    { clientX: 10, clientY: 10, button: 0, buttons: 1 },
+    'pointerdown',
+  );
+  controller.handleResult({ requestId: downRequest, consumed: true, dragging: true, axis: 'x' });
+
+  const cancelRequest = controller.cancel('pointercancel');
+  assert.equal(calls.at(-1)[2], 'pointercancel');
+  assert.equal(controller.isDragging(), true);
+
+  const cancelPayload = { requestId: cancelRequest, cancelled: true, dragging: false, axis: 'x' };
+  const result = controller.handleResult(cancelPayload);
+  assert.equal(result.status, 'cancelled');
+  assert.equal(controller.isDragging(), false);
+  assert.deepEqual(cancelled, [cancelPayload]);
+
+  assert.equal(controller.cancel('pointercancel'), false);
+  assert.equal(cancelled.length, 1);
 });
 
 test('coalesces active drag moves to one animation frame', () => {

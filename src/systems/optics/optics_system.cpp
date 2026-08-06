@@ -5056,26 +5056,6 @@ Horizon::HardwareImage* OpticsSystem::compose_surface_ui_overlay(
     opticsComposite.pushConsts.outputWidth = hardware_->gbufferSize.x;
     opticsComposite.pushConsts.outputHeight = hardware_->gbufferSize.y;
 
-    if (gizmo_visible) {
-        const auto overlayExtent = target.ui_overlay.extent();
-        const auto compositeExtent = target.composite_output.extent();
-        CFW_LOG_INFO("Optics gizmo diagnostics: origin=({}, {}) xdir=({}, {}) ydir=({}, {}) zdir=({}, {}) overlay_desc={} overlay_extent={}x{} composite_extent={}x{} composite_fg_desc={}",
-                     gizmo_layout.origin.x,
-                     gizmo_layout.origin.y,
-                     gizmo_layout.axes[0].direction.x,
-                     gizmo_layout.axes[0].direction.y,
-                     gizmo_layout.axes[1].direction.x,
-                     gizmo_layout.axes[1].direction.y,
-                     gizmo_layout.axes[2].direction.x,
-                     gizmo_layout.axes[2].direction.y,
-                     overlayDescriptor,
-                     overlayExtent.width,
-                     overlayExtent.height,
-                     compositeExtent.width,
-                     compositeExtent.height,
-                     compositeOverlayDescriptor);
-    }
-
     opticsComposite.set_debug_label(make_optics_dispatch_label(
         "ui_composite",
         static_cast<std::uint32_t>(frame_index),

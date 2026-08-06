@@ -922,11 +922,6 @@ const handleViewportGizmoPointerResult = (payload = {}) => {
   const result = viewportGizmoController.handleResult(payload);
   if (payload.requestId === gizmoDownRequestId && payload.consumed) {
     gizmoDownConsumed = true;
-    try {
-      inputLayerRef.value?.setPointerCapture?.(gizmoDownPointerId);
-    } catch (_) {
-      // Pointer capture is best effort on embedded browser surfaces.
-    }
   }
   if (result.status === 'ended' || result.status === 'cancelled') {
     gizmoDownRequestId = '';
@@ -1020,6 +1015,11 @@ const handleViewportPointer = (event) => {
 };
 
 const handleViewportPointerDown = (event) => {
+  try {
+    inputLayerRef.value?.setPointerCapture?.(event.pointerId);
+  } catch (_) {
+    // Pointer capture is best effort on embedded browser surfaces.
+  }
   gizmoDownConsumed = false;
   gizmoDownPointerId = event.pointerId;
   gizmoDownRequestId = viewportGizmoController.pointer(event, event.type) || '';
@@ -1031,6 +1031,7 @@ const handleViewportPointerDown = (event) => {
 };
 
 const handleViewportPointerCancel = (event) => {
+  if (event.pointerId !== gizmoDownPointerId) return;
   try {
     inputLayerRef.value?.releasePointerCapture?.(event.pointerId);
   } catch (_) {
@@ -1222,7 +1223,7 @@ onBeforeUnmount(() => {
   background: rgba(22, 22, 22, 0.86);
   border-bottom: 1px solid rgba(255, 255, 255, 0.14);
 }
-.input-layer { position: absolute; inset: 34px 0 0; z-index: 1; }
+.input-layer { position: absolute; inset: 34px 0 0; z-index: 1; touch-action: none; }
 .input-layer.viewport-cursor-hidden,
 .input-layer.viewport-cursor-hidden * {
   cursor: none !important;

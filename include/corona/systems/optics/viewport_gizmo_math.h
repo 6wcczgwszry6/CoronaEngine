@@ -50,8 +50,10 @@ struct ViewportGizmoSpriteMetadata {
 inline constexpr std::array<ViewportGizmoSpriteMetadata, 3>
     kViewportGizmoSpriteMetadata{{
         {{363.7f, 500.2f}, {968.0f, 773.0f}},
-        {{622.5f, 752.8f}, {622.0f, 224.0f}},
+        // axis_y.png now contains the former Z (green) sprite.
         {{808.3f, 511.1f}, {266.0f, 780.0f}},
+        // axis_z.png now contains the former Y (blue) sprite.
+        {{622.5f, 752.8f}, {622.0f, 224.0f}},
     }};
 
 struct ViewportGizmoSpriteMask {
