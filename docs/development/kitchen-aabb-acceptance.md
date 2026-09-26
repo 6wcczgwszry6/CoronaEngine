@@ -110,3 +110,5 @@ External Vision scene import failed: .../scene.ini.embedded
 在该分支重新执行 CLion configure、正式构建和全部测试：**38/38 通过、0 跳过，4.94 秒**，包含 `VisionCameraDirectionTests`、实际 GPU 冒烟测试和 AABB 回归。证据为同目录 `svgf-commit-configure.log`、`svgf-commit-engine-build.log`、`svgf-commit-test-build.log`、`svgf-commit-ctest.log`／`.xml`。上文 kitchen 性能和运行时操作数据仍属于切换分支前的测量，本次未重新运行整套场景采样。
 
 本次提交现有优化和验收记录；失败项的生产修复尚未实施，具体步骤见 [后续修复计划](../superpowers/plans/2026-09-27-kitchen-acceptance-fixes.md)。
+
+各问题另有独立的 [解决方案文档及总览](kitchen-fixes/README.md)，包含原因、修改位置、数据流、异常处理与验收标准。

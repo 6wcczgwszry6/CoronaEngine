@@ -12,6 +12,8 @@
 
 状态：本文件为后续方案，尚未实施。当前提交保存 AABB 优化、测试设施修复和验收证据，不代表下列问题已经解决。
 
+各问题的独立方案、依赖顺序和验收出口已整理至 [解决方案总览](../../development/kitchen-fixes/README.md)：[场景总范围](../../development/kitchen-fixes/01-world-bounds.md)、[嵌入场景模式切换](../../development/kitchen-fixes/02-embedded-mode-switch.md)、[跨运行时几何](../../development/kitchen-fixes/03-runtime-geometry-sync.md)、[截图与双视图](../../development/kitchen-fixes/04-capture-and-multiview.md)。本文件保留执行任务清单，独立方案补充数据流和边界规则；实施时一起阅读。
+
 ## 全局约束
 
 - 保留 `svgf_magic` 原有相机方向修复，以及路径规范化、AABB 复用。
