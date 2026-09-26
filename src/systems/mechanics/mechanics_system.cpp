@@ -1128,11 +1128,11 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             object_bottom_y += corr_it->second.y;
         }
 
-        // 碰撞检测开关判断：若物体关闭碰撞，跳过地板碰撞处理
+        // Phantom 物体不参与地板碰撞
         bool collision_enabled = true;
         auto frame_it = frame_params.find(h);
         if (frame_it != frame_params.end()) {
-            collision_enabled = frame_it->second.collision_enabled;
+            collision_enabled = frame_it->second.body_type != BodyType::Phantom;
         }
 
         // 水平 floor_y：穿插时整体上抬，并做法向/切向「处方」（非完整接触流形）
