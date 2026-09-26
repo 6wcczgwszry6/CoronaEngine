@@ -193,6 +193,7 @@ struct VisionSceneResource {
     std::uint64_t logical_transform_version{0};
     std::uint64_t scene_gpu_transform_version{0};
     std::unordered_map<std::uintptr_t, std::size_t> external_live_transform_signatures;
+    std::uint64_t external_live_cache_generation{0};
     std::unordered_map<std::uintptr_t, std::size_t>
         external_live_original_transform_signatures;
     std::unordered_map<VisionLogicalInstanceKey,
@@ -252,6 +253,7 @@ struct VisionSceneResource {
         logical_transform_version = 0;
         scene_gpu_transform_version = 0;
         external_live_transform_signatures.clear();
+        ++external_live_cache_generation;
         external_live_original_transform_signatures.clear();
         logical_instances.clear();
         external_live_original_instances.clear();
@@ -305,6 +307,7 @@ struct VisionSceneResource {
     }
 
     void replace_logical_instances(std::vector<VisionLogicalInstanceRecord> records) {
+        ++external_live_cache_generation;
         logical_instances.clear();
         for (auto& record : records) {
             logical_instances.emplace(record.key, std::move(record));
@@ -377,6 +380,7 @@ struct VisionSceneResource {
             }
         }
         external_live_shapes_by_actor.erase(actor_handle);
+        ++external_live_cache_generation;
         external_live_transform_signatures.erase(actor_handle);
         external_live_original_transform_signatures.erase(actor_handle);
     }
@@ -397,6 +401,7 @@ struct VisionSceneResource {
         if (removed_shape_index < 0) {
             return actors_to_rewrite;
         }
+        ++external_live_cache_generation;
 
         std::vector<VisionLogicalInstanceRecord> remapped_logical_instances;
         remapped_logical_instances.reserve(logical_instances.size());

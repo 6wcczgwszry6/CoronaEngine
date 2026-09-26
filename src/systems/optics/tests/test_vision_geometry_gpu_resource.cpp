@@ -23,6 +23,8 @@
 #include <type_traits>
 #include <utility>
 
+#include "test_external_live_aabb.h"
+
 namespace {
 
 [[noreturn]] void fail(std::string_view message) {
@@ -453,6 +455,7 @@ void two_pipelines_consume_one_shared_logical_scene() {
 }  // namespace
 
 int main() {
+    external_live_aabb_regressions();
     geometry_gpu_resource_is_external_ownership_boundary();
     geometry_requires_explicit_command_stream_for_gpu_updates();
     scene_tables_accept_explicit_scene_gpu_bindless();

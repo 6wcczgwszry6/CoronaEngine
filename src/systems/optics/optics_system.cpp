@@ -69,6 +69,7 @@
 #include "base/sensor/sensor.h"
 #include "rhi/context.h"
 #include "vision/vision_geometry_adapter.h"
+#include "vision/vision_external_live_aabb.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
 #include "vision/vision_render_mode_config.h"
@@ -2285,6 +2286,7 @@ struct OpticsSystem::VisionPipelineRuntime {
     Corona::CameraVisionRenderMode mode{Corona::CameraVisionRenderMode::PathTracing};
     uint64_t last_used_frame{0};
     uint64_t scene_gpu_transform_version{0};
+    Vision::ExternalLiveAabbCache external_live_aabb_cache;
 
     // Zero-copy path: shares Vision's pre-tonemap linear color buffer with Vulkan
     // and resolves it via the vision_resolve compute pass.
@@ -2436,6 +2438,7 @@ struct OpticsSystem::VisionPipelineRuntime {
         base_dir.clear();
         mode = next_mode;
         scene_gpu_transform_version = 0;
+        external_live_aabb_cache = {};
         bind_shared_scene_gpu_resource();
     }
 };
@@ -6006,6 +6009,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         }
     }
 
+    bool mesh_content_changed = false;
     bool changed = removal_transform_changed;
     std::size_t updated_actors = tombstoned_instance_count;
 
@@ -6033,36 +6037,6 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         }
 
         auto& group = groups[group_index];
-        const bool first_time_actor_sync =
-            scene_resource->external_live_transform_signatures.find(actor_handle) ==
-            scene_resource->external_live_transform_signatures.end();
-
-        if (original_external_shape) {
-            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                                std::uint32_t instance_index) {
-                if (!instance) {
-                    return;
-                }
-                scene_resource->cache_external_live_original_instance({
-                    .key = {.shape_index = resolved->shape_index,
-                            .instance_index = static_cast<int>(instance_index)},
-                    .actor_handle = actor_handle,
-                    .transform_signature = normal_signature,
-                    .object_to_world = flatten_vision_matrix(instance->o2w()),
-                });
-            });
-            scene_resource->external_live_original_transform_signatures.try_emplace(
-                actor_handle,
-                normal_signature);
-        }
-
-        const auto original_signature =
-            scene_resource->external_live_original_transform_signatures.find(actor_handle);
-        const bool actor_transform_changed_from_original =
-            original_external_shape &&
-            original_signature != scene_resource->external_live_original_transform_signatures.end() &&
-            original_signature->second != normal_signature;
-
         scene_resource->upsert_external_live_shape({
             .actor_handle = actor_handle,
             .shape_index = resolved->shape_index,
@@ -6073,85 +6047,20 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
                                    : false,
         });
 
-        if (original_external_shape && !actor_hidden && first_time_actor_sync) {
-            scene_resource->external_live_transform_signatures[actor_handle] =
-                normal_signature;
-            continue;
-        }
-
         std::size_t target_signature = normal_signature;
         auto target_o2w = resolved->o2w;
         if (actor_hidden) {
             target_signature = external_live_hidden_transform_signature(resolved->shape_index);
             target_o2w = hidden_external_live_o2w();
         }
-        const bool restore_original =
-            original_external_shape && !actor_hidden && !actor_transform_changed_from_original;
-
-        const auto cached =
-            scene_resource->external_live_transform_signatures.find(actor_handle);
-        const bool actor_signature_changed =
-            cached == scene_resource->external_live_transform_signatures.end() ||
-            cached->second != target_signature;
-
-        group->aabb = ::vision::Box3f{};
-        bool logical_instance_changed = false;
-        if (restore_original) {
-            const auto original_instances =
-                scene_resource->restore_external_live_original_instances(resolved->shape_index);
-            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                                std::uint32_t instance_index) {
-                if (!instance) {
-                    return;
-                }
-                const auto original =
-                    std::find_if(original_instances.begin(),
-                                 original_instances.end(),
-                                 [&](const auto& record) {
-                                     return record.key.instance_index ==
-                                            static_cast<int>(instance_index);
-                                 });
-                if (original == original_instances.end()) {
-                    return;
-                }
-                const auto original_o2w = unflatten_vision_matrix(original->object_to_world);
-                logical_instance_changed |= scene_resource->upsert_logical_instance({
-                    .key = original->key,
-                    .actor_handle = actor_handle,
-                    .transform_signature = target_signature,
-                    .object_to_world = original->object_to_world,
-                });
-                instance->set_o2w(original_o2w);
-                instance->init_aabb();
-                group->aabb.extend(instance->aabb);
-            });
-        } else {
-            const auto object_to_world = flatten_vision_matrix(target_o2w);
-            group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                                std::uint32_t instance_index) {
-                if (!instance) {
-                    return;
-                }
-                logical_instance_changed |= scene_resource->upsert_logical_instance({
-                    .key = {.shape_index = resolved->shape_index,
-                            .instance_index = static_cast<int>(instance_index)},
-                    .actor_handle = actor_handle,
-                    .transform_signature = target_signature,
-                    .object_to_world = object_to_world,
-                });
-                instance->set_o2w(target_o2w);
-                instance->init_aabb();
-                group->aabb.extend(instance->aabb);
-            });
-        }
-
-        scene_resource->external_live_transform_signatures[actor_handle] =
-            target_signature;
-        if ((actor_hidden || restore_original || !first_time_actor_sync) &&
-            (actor_signature_changed || logical_instance_changed)) {
+        const auto result = Vision::sync_external_live_group(
+            *scene_resource, runtime.external_live_aabb_cache, actor_handle, resolved->shape_index, group,
+            normal_signature, target_signature, target_o2w, actor_hidden, original_external_shape);
+        if (result.changed) {
             changed = true;
             ++updated_actors;
         }
+        mesh_content_changed |= result.geometry_changed;
     }
 
     for (auto it = scene_resource->external_live_transform_signatures.begin();
@@ -6170,7 +6079,26 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
     try {
         pipeline->activate_view_context(0u);
         scene_resource->mark_transforms_changed();
-        pipeline->update_geometry();
+        if (mesh_content_changed) {
+            // Writable Mesh vectors have no revision signal. A content change must
+            // rebuild BLAS and resized buffers as well as the CPU bounds.
+            vision_scene.instances().clear();
+            for (const auto& current_group : groups) {
+                if (!current_group) continue;
+                current_group->for_each([&](::vision::SP<::vision::ShapeInstance> instance, ::vision::uint) {
+                    if (instance) {
+                        instance->mesh()->reset_hash();
+                        vision_scene.instances().push_back(instance);
+                    }
+                });
+            }
+            vision_scene.geometry().data()->clear_meshes();
+            vision_scene.register_instance_meshes();
+            vision_scene.fill_instances();
+            pipeline->rebuild_geometry_gpu();
+        } else {
+            pipeline->update_geometry();
+        }
         scene_resource->mark_scene_gpu_transforms_uploaded();
         runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
         pipeline->invalidate_all_view_contexts();
