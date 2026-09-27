@@ -10,7 +10,7 @@
 
 **Spec:** [Kitchen AABB 验收报告](../../development/kitchen-aabb-acceptance.md)、[原优化方案](../../development/kitchen-scene-sync-optimization.md)。
 
-状态：任务1、2已交付，见[第01项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)、[第02项审核](../../development/kitchen-fixes/reviews/02-embedded-mode-switch-review.md)。任务3实现、正式构建和47项测试通过，见[第03项审核](../../development/kitchen-fixes/reviews/03-runtime-geometry-sync-review.md)，交付以执行记录为准；任务4尚未实施。
+状态：任务1、2已交付，见[第01项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)、[第02项审核](../../development/kitchen-fixes/reviews/02-embedded-mode-switch-review.md)。任务3实现、正式构建和47项测试通过，已推送并核对远端SHA，见[第03项审核](../../development/kitchen-fixes/reviews/03-runtime-geometry-sync-review.md)。按用户最新要求在任务3完成后停止，任务4不启动。
 
 各问题的独立方案、依赖顺序和验收出口已整理至 [解决方案总览](../../development/kitchen-fixes/README.md)：[场景总范围](../../development/kitchen-fixes/01-world-bounds.md)、[嵌入场景模式切换](../../development/kitchen-fixes/02-embedded-mode-switch.md)、[跨运行时几何](../../development/kitchen-fixes/03-runtime-geometry-sync.md)、[截图与双视图](../../development/kitchen-fixes/04-capture-and-multiview.md)。本文件保留执行任务清单，独立方案补充数据流和边界规则；实施时一起阅读。
 
@@ -71,7 +71,7 @@
 - [x] 将新几何快照发布与版本递增作为一次操作；渲染前先消费几何版本，再应用实例变换、聚合范围、上传 GPU。仅变换变化走现有 TLAS 更新，网格／拓扑变化才重建相应缓冲与 BLAS/TLAS。
 - [x] 等旧 GPU 提交完成再替换资源，上传成功后才记录消费版本。保留另一 runtime 的 framebuffer 和 denoiser 所有权，但使受影响历史失效。CUDA替换/退休实测通过；待完成interop receipt分支仍仅源码审查。
 - [x] 覆盖原位编辑、网格替换、实例增删／重排、隐藏恢复、休眠 runtime、重载和上传前CPU导入失败；同一次变更每个 runtime 只消费一次。集成测试直接调用生产同步入口，不复制同步算法到测试中。设备级上传故障恢复未测试。
-- [ ] 构建、GPU 集成测试和双 runtime 实际渲染通过后单独提交。
+- [x] 构建、GPU 集成测试和双 runtime 实际渲染通过后单独提交。实现 `4176fa956d3baeff663e71325fbb745e4c335320` 已推送并核对远端SHA。
 
 ## 任务 4：恢复可验证的截图及双视图验收
 
