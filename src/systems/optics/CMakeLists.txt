@@ -199,7 +199,9 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
     )
     add_test(NAME VisionGeometryGpuResourceTests
              COMMAND corona_vision_geometry_gpu_resource_tests)
-    set_tests_properties(VisionGeometryGpuResourceTests PROPERTIES
+    add_test(NAME VisionWorldBoundsGpuTests
+             COMMAND corona_vision_geometry_gpu_resource_tests --world-bounds-gpu)
+    set_tests_properties(VisionGeometryGpuResourceTests VisionWorldBoundsGpuTests PROPERTIES
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
 endif()
 

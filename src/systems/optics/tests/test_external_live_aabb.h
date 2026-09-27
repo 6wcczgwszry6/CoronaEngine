@@ -2,6 +2,7 @@
 
 #include "../vision/vision_external_live_aabb.h"
 #include "math/transform.h"
+#include "base/mgr/scene.h"
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -20,6 +21,9 @@ inline void external_live_aabb_regressions() {
     ShapeInstance initial(mesh);
     initial.set_o2w(translation<H>(make_float3(4, 0, 0)));
     auto group = std::make_shared<ShapeGroup>(std::move(initial));
+    Scene scene;
+    scene.set_min_radius(10.f);
+    scene.add_shape(group);
     VisionSceneResource resource;
     ExternalLiveAabbCache cache;
     resource.upsert_external_live_shape({.actor_handle = 42, .shape_index = 0});
@@ -37,6 +41,11 @@ inline void external_live_aabb_regressions() {
             expected.extend(box);
         });
         check(aabb_equal(group->aabb, expected), "group bounds differ from union of exact instance bounds");
+        scene.recompute_world_bounds();
+        check(all(scene.world_center() == expected.center()), "scene center must follow current group bounds");
+        check(std::abs(scene.world_radius() - std::max(10.f, expected.radius())) < 1e-5f,
+              "scene radius must follow current group bounds and minimum radius");
+        check(!scene.recompute_world_bounds(), "unchanged bounds must report no change");
     };
     exact();
     check(group->aabb.lower[0] == 3.f && group->aabb.upper[0] == 6.f && group->aabb.upper[1] == 3.f,
@@ -101,6 +110,8 @@ inline void external_live_aabb_regressions() {
     ShapeInstance remaining(replacement);
     remaining.set_o2w(identity);
     group = std::make_shared<ShapeGroup>(std::move(remaining));
+    scene.clear_shapes();
+    scene.add_shape(group);
     check(sync(10, 10, identity).geometry_changed, "group replacement/removal must rebuild geometry");
     check(resource.logical_instance_count() == 1, "removed instances must leave no stale logical records");
     exact();
@@ -111,5 +122,24 @@ inline void external_live_aabb_regressions() {
     check(sync(10, 10, identity).aabb_updates > 0, "scene reload must invalidate bounds cache");
     exact();
     check(sync(10, 10, identity).aabb_updates == 0, "camera-only changes require no world-bound update");
+    auto far_group = std::make_shared<ShapeGroup>();
+    far_group->aabb = Box3f(make_float3(100, 200, 300), make_float3(102, 204, 306));
+    scene.add_shape(far_group);
+    scene.recompute_world_bounds();
+    check(scene.world_radius() > 180.f, "distant group must enlarge scene radius");
+    scene.remove_shape(1, true);
+    check(scene.recompute_world_bounds(), "batched removal must shrink bounds at the commit boundary");
+    exact();
+    scene.remove_shape(0);
+    check(all(scene.world_center() == make_float3(0)) && scene.world_radius() == 10.f,
+          "removing final group must give finite origin and minimum radius");
+    scene.groups().push_back(nullptr);
+    scene.groups().push_back(std::make_shared<ShapeGroup>());
+    scene.recompute_world_bounds();
+    check(all(scene.world_center() == make_float3(0)) && scene.world_radius() == 10.f,
+          "null and empty groups must not poison scene bounds");
+    scene.clear_shapes();
+    scene.add_shape(group);
+    exact();
     std::cout << "ExternalLiveAabb regressions passed\n";
 }

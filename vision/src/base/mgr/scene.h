@@ -172,7 +172,8 @@ public:
     [[nodiscard]] const vector<SP<ShapeInstance>> &instances() const noexcept { return data_->instances_; }
     void load_shapes(const vector<ShapeDesc> &descs);
     void add_shape(const SP<ShapeGroup> &group, ShapeDesc desc = {});
-    void remove_shape(uint group_index) noexcept;
+    // Batch callers defer the union until Pipeline commits the geometry update.
+    void remove_shape(uint group_index, bool defer_world_bounds = false) noexcept;
     void clear_shapes() noexcept;
 
     // Materials
@@ -206,8 +207,13 @@ public:
     [[nodiscard]] const ShapeInstance *get_instance(uint id) const noexcept { return data_->instances_[id].get(); }
 
     // World bounds
-    [[nodiscard]] float3 world_center() const noexcept { return data_->aabb_.center(); }
-    [[nodiscard]] float world_radius() const noexcept { return ocarina::max(data_->aabb_.radius(), data_->min_radius_); }
+    bool recompute_world_bounds() noexcept;
+    [[nodiscard]] float3 world_center() const noexcept {
+        return data_->aabb_.empty() ? make_float3(0.f) : data_->aabb_.center();
+    }
+    [[nodiscard]] float world_radius() const noexcept {
+        return ocarina::max(data_->aabb_.empty() ? 0.f : data_->aabb_.radius(), data_->min_radius_);
+    }
     [[nodiscard]] float world_diameter() const noexcept { return world_radius() * 2; }
 
     void tidy_up() noexcept;

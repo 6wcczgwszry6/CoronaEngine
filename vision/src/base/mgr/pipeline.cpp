@@ -271,6 +271,7 @@ void Pipeline::prepare_geometry() noexcept {
     scene_view_.geometry().upload(stream());
     scene_view_.geometry().build_accel(stream());
     scene_view_.geometry().upload_bindless_array(stream());
+    refresh_world_bounds_dependents();
 }
 
 void Pipeline::rebuild_geometry_gpu() noexcept {
@@ -283,6 +284,49 @@ void Pipeline::update_geometry() noexcept {
     scene_view_.geometry().upload(stream());
     scene_view_.geometry().update_accel(stream());
     scene_view_.geometry().upload_bindless_array(stream());
+    refresh_world_bounds_dependents();
+}
+
+void Pipeline::refresh_world_bounds_dependents() noexcept {
+    activate_global_context();
+    scene_view_.recompute_world_bounds();
+    const auto center = scene_view_.world_center();
+    const auto radius = scene_view_.world_radius();
+    // Compare the last consumed sphere, not recompute's return value: add/remove
+    // can already have updated SceneData, and each pipeline owns its light data.
+    if (all(center == light_world_center_) && radius == light_world_radius_) {
+        return;
+    }
+
+    // prepare_lights replaces encoded buffers and power-sampling tables. Drain
+    // users of the old tables before replacement; compiled kernels may capture
+    // their handles (and, in EInstance mode, the light values themselves).
+    stream() << synchronize() << commit();
+    Global::SceneGpuContextScope scope{scene_view_.geometry().bindless_array(), device()};
+    auto *previous_renderer = active_renderer_;
+    auto *previous_sensor = scene_view_.sensor_override_;
+    // Lights themselves are shared by the views. Finish every prepare before
+    // compiling any consumer of their final encoded values and sampling tables.
+    activate_view_context(0u);
+    renderer().prepare_lights(scene_view_);
+    for (const auto &[view_id, context] : view_contexts_) {
+        activate_view_context(view_id);
+        renderer().prepare_lights(scene_view_);
+    }
+    upload_scene_bindless_array();
+    upload_bindless_array();
+    activate_view_context(0u);
+    compile();
+    invalidate();
+    for (const auto &[view_id, context] : view_contexts_) {
+        activate_view_context(view_id);
+        compile();
+        invalidate();
+    }
+    active_renderer_ = previous_renderer;
+    scene_view_.sensor_override_ = previous_sensor;
+    light_world_center_ = center;
+    light_world_radius_ = radius;
 }
 
 void Pipeline::upload_scene_bindless_array() noexcept {

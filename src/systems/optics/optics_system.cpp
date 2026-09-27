@@ -5987,28 +5987,6 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
             result.material_topology_after != result.material_topology_before;
     }
 
-    if (geometry_changed) {
-        try {
-            pipeline->activate_view_context(0u);
-            vision_scene.register_instance_meshes();
-            vision_scene.tidy_up();
-            if (material_registry_changed) {
-                vision_scene.prepare_materials();
-            }
-            vision_scene.fill_instances();
-            pipeline->rebuild_geometry_gpu();
-            if (needs_compile) {
-                pipeline->compile();
-            }
-            scene_resource->mark_transforms_changed();
-            scene_resource->mark_scene_gpu_transforms_uploaded();
-            runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
-            pipeline->invalidate_all_view_contexts();
-        } catch (const std::exception& e) {
-            CFW_LOG_ERROR("OpticsSystem: external_live geometry sync failed: {}", e.what());
-        }
-    }
-
     bool mesh_content_changed = false;
     bool changed = removal_transform_changed;
     std::size_t updated_actors = tombstoned_instance_count;
@@ -6072,7 +6050,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         }
     }
 
-    if (!changed) {
+    if (!changed && !geometry_changed) {
         return;
     }
 
@@ -6093,9 +6071,18 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
                 });
             }
             vision_scene.geometry().data()->clear_meshes();
+        }
+        if (geometry_changed || mesh_content_changed) {
             vision_scene.register_instance_meshes();
+            vision_scene.tidy_up();
+            if (material_registry_changed) {
+                vision_scene.prepare_materials();
+            }
             vision_scene.fill_instances();
             pipeline->rebuild_geometry_gpu();
+            if (needs_compile) {
+                pipeline->compile();
+            }
         } else {
             pipeline->update_geometry();
         }
@@ -6232,6 +6219,54 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
             result.material_topology_after != result.material_topology_before;
     }
 
+    // Transform sync for tracked engine-native shapes (driven by the engine
+    // geometry's ModelTransform; no binding). Newly-added shapes have
+    // transform_signature==0 so they also pass through here once to register their
+    // logical instances before the single geometry commit below.
+    bool changed = false;
+    std::size_t updated_actors = 0;
+    for (auto& [actor_handle, record] : scene_resource->engine_mixed_shapes_by_actor) {
+        const auto resolved = resolve_engine_native_transform(actor_handle, record.shape_index);
+        if (!resolved) {
+            continue;
+        }
+        const auto group_index = static_cast<std::size_t>(resolved->shape_index);
+        if (group_index >= groups.size() || !groups[group_index]) {
+            continue;
+        }
+        if (record.transform_signature == resolved->signature) {
+            continue;
+        }
+
+        auto& group = groups[group_index];
+        group->aabb = ::vision::Box3f{};
+        const auto object_to_world = flatten_vision_matrix(resolved->o2w);
+        group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
+                            std::uint32_t instance_index) {
+            if (!instance) {
+                return;
+            }
+            scene_resource->upsert_logical_instance({
+                .key = {.shape_index = resolved->shape_index,
+                        .instance_index = static_cast<int>(instance_index)},
+                .actor_handle = actor_handle,
+                .transform_signature = resolved->signature,
+                .object_to_world = object_to_world,
+            });
+            instance->set_o2w(resolved->o2w);
+            instance->init_aabb();
+            group->aabb.extend(instance->aabb);
+        });
+        record.transform_signature = resolved->signature;
+        // Newly added shapes join the membership rebuild below. Count only
+        // existing actors here for the transform-only update path.
+        if (just_added_actors.contains(actor_handle)) {
+            continue;
+        }
+        changed = true;
+        ++updated_actors;
+    }
+
     if (geometry_changed) {
         try {
             pipeline->activate_view_context(0u);
@@ -6275,61 +6310,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
         } catch (const std::exception& e) {
             CFW_LOG_ERROR("OpticsSystem: engine-native mixed geometry sync failed: {}", e.what());
         }
-    }
-
-    // Transform sync for tracked engine-native shapes (driven by the engine
-    // geometry's ModelTransform; no binding). Newly-added shapes have
-    // transform_signature==0 so they also pass through here once to register their
-    // logical instances.
-    bool changed = false;
-    std::size_t updated_actors = 0;
-    for (auto& [actor_handle, record] : scene_resource->engine_mixed_shapes_by_actor) {
-        const auto resolved = resolve_engine_native_transform(actor_handle, record.shape_index);
-        if (!resolved) {
-            continue;
-        }
-        const auto group_index = static_cast<std::size_t>(resolved->shape_index);
-        if (group_index >= groups.size() || !groups[group_index]) {
-            continue;
-        }
-        if (record.transform_signature == resolved->signature) {
-            continue;
-        }
-
-        auto& group = groups[group_index];
-        group->aabb = ::vision::Box3f{};
-        const auto object_to_world = flatten_vision_matrix(resolved->o2w);
-        group->for_each([&](::vision::SP<::vision::ShapeInstance> instance,
-                            std::uint32_t instance_index) {
-            if (!instance) {
-                return;
-            }
-            scene_resource->upsert_logical_instance({
-                .key = {.shape_index = resolved->shape_index,
-                        .instance_index = static_cast<int>(instance_index)},
-                .actor_handle = actor_handle,
-                .transform_signature = resolved->signature,
-                .object_to_world = object_to_world,
-            });
-            instance->set_o2w(resolved->o2w);
-            instance->init_aabb();
-            group->aabb.extend(instance->aabb);
-        });
-        record.transform_signature = resolved->signature;
-        // Mirror sync_external_live_vision_transforms' first_time_actor_sync guard:
-        // an actor ADDED this frame was already fully built+uploaded by the geometry
-        // block above (prepare_geometry/rebuild_geometry_gpu), so it must NOT also
-        // trigger the transform-block update_geometry() �� issuing an update_accel
-        // (TLAS refit) right after a full build_accel + compile corrupts the
-        // accel/SBT and faults the render kernel. We still apply o2w + register the
-        // logical instance above (needed for shared-resource transform tracking);
-        // we just skip flagging a GPU transform flush this frame. Subsequent real
-        // moves (not in just_added_actors) flush normally.
-        if (just_added_actors.contains(actor_handle)) {
-            continue;
-        }
-        changed = true;
-        ++updated_actors;
+        return;
     }
 
     if (!changed) {

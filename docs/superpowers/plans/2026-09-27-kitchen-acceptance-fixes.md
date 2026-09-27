@@ -10,7 +10,7 @@
 
 **Spec:** [Kitchen AABB 验收报告](../../development/kitchen-aabb-acceptance.md)、[原优化方案](../../development/kitchen-scene-sync-optimization.md)。
 
-状态：本文件为后续方案，尚未实施。当前提交保存 AABB 优化、测试设施修复和验收证据，不代表下列问题已经解决。
+状态：任务 1 已实现并验证，审核与交付记录见 [第 01 项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)。任务 2–4 尚未实施，不能由任务 1 的通过推定其他问题已解决。
 
 各问题的独立方案、依赖顺序和验收出口已整理至 [解决方案总览](../../development/kitchen-fixes/README.md)：[场景总范围](../../development/kitchen-fixes/01-world-bounds.md)、[嵌入场景模式切换](../../development/kitchen-fixes/02-embedded-mode-switch.md)、[跨运行时几何](../../development/kitchen-fixes/03-runtime-geometry-sync.md)、[截图与双视图](../../development/kitchen-fixes/04-capture-and-multiview.md)。本文件保留执行任务清单，独立方案补充数据流和边界规则；实施时一起阅读。
 
@@ -40,11 +40,11 @@
 
 **拟定接口：** `bool Scene::recompute_world_bounds() noexcept`，只对当前有效 group AABB 求并集、返回是否改变；不调用 instance 的逐三角形算法。`void Pipeline::refresh_world_bounds_dependents() noexcept` 更新依赖范围的光源编码数据及采样分布，使用该 pipeline 的 stream/bindless；清除受影响的累积历史。
 
-- [ ] 添加失败测试：已加载的 Scene 中移动组后，`world_center()` 等于最新组并集中心，`world_radius()` 等于 `max(并集半径,min_radius)`；移回、隐藏／恢复、删除、空场景、非均匀缩放分别断言。
-- [ ] 运行测试确认旧实现保留初始 Scene 范围而失败；另测方向光 CPU 编码值及上传后的结果，防止 CPU 修好但 GPU 仍旧。
-- [ ] 实现聚合；在 external-live、共享变换应用、几何替换／增删的批次结束后执行一次。仅在几何或边界实际变化时刷新依赖，静止路径直接复用。
-- [ ] 重跑测试及 kitchen `[100,200,300]` 位移复现；在 GeometrySystem 距离卸载前的更新帧取值。验收时从最新组范围计算期望值，不硬编码会受场景和坐标系影响的 189.32784。
-- [ ] 构建、测试通过后单独提交范围修复。
+- [x] 添加失败测试：已加载的 Scene 中移动组后，`world_center()` 等于最新组并集中心，`world_radius()` 等于 `max(并集半径,min_radius)`；移回、隐藏／恢复、删除、空场景、非均匀缩放分别断言。
+- [x] 运行测试确认旧实现保留初始 Scene 范围而失败；另测方向光 CPU 编码值及上传后的结果，防止 CPU 修好但 GPU 仍旧。
+- [x] 实现聚合；在 external-live、共享变换应用、几何替换／增删的批次结束后执行一次。仅在几何或边界实际变化时刷新依赖，静止路径直接复用。
+- [x] 重跑测试及 kitchen `[100,200,300]` 位移复现；在 GeometrySystem 距离卸载前的更新帧取值。验收时从最新组范围计算期望值，不硬编码会受场景和坐标系影响的 189.32784。
+- [x] 构建、测试通过后单独提交范围修复。
 
 ## 任务 2：模式切换保留嵌入场景来源（最高优先级）
 
@@ -96,4 +96,4 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/clion-bui
 
 配置变化才重新 configure。测试目标使用同一 CLion/MSVC 环境编译；CTest 工作目录使用实际插件目录，PATH 包含构建的 `bin` 和 `examples/engine`，并设置 `CORONA_RUN_GPU_SMOKE=1`。运行全量 `ctest --test-dir cmake-build-relwithdebinfo --output-on-failure --timeout 180`；成功条件为 0 失败、0 跳过，CUDA 集成输出无内部 SKIP。目标分支有额外相机方向测试，不把历史 37 项写死为预期数量。
 
-本轮只交付方案，后续实现前沿用验收报告的失败复现。方案已自检覆盖两项实测失败、跨 runtime 缺口、GPU 生命周期、空／缩小范围和不可观察的图像结果。
+第 01 项已按失败测试、CPU/GPU 回归和实际 kitchen 验证执行；本次仅关闭任务 1。后续任务继续沿用各自失败复现和验收边界。

@@ -6,7 +6,7 @@
 
 | 顺序 | 内容 | 状态 | 执行会话 | 审核文档 |
 |---|---|---|---|---|
-| 01 | 场景总包围盒与光照同步 | 待启动 | 待创建 | `reviews/01-world-bounds-review.md` |
+| 01 | 场景总包围盒与光照同步 | 验证通过，待提交及远端核对 | `01a0e00d-5f21-7040-980e-8ecfc858591b` | `reviews/01-world-bounds-review.md` |
 | 02 | 嵌入场景 PT/SVGF 切换 | 待启动 | 待创建 | `reviews/02-embedded-mode-switch-review.md` |
 | 03 | 跨 runtime 完整几何同步 | 待启动 | 待创建 | `reviews/03-runtime-geometry-sync-review.md` |
 | 04 | 截图读回与双视图验收 | 待启动 | 待创建 | `reviews/04-capture-and-multiview-review.md` |

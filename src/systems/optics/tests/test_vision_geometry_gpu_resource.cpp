@@ -372,6 +372,8 @@ vision::ProjectDesc make_empty_project_desc() {
     return project_desc;
 }
 
+#include "test_world_bounds_gpu.h"
+
 void two_scene_views_bind_one_real_scene_gpu_resource() {
     try {
         ocarina::RHIContext::instance().init(std::filesystem::current_path());
@@ -454,7 +456,12 @@ void two_pipelines_consume_one_shared_logical_scene() {
 
 }  // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (argc == 2 && std::string_view{argv[1]} == "--world-bounds-gpu") {
+        world_bounds_gpu_regressions();
+        world_bounds_multiview_area_regression();
+        return 0;
+    }
     external_live_aabb_regressions();
     geometry_gpu_resource_is_external_ownership_boundary();
     geometry_requires_explicit_command_stream_for_gpu_updates();

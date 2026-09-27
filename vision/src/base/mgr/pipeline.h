@@ -59,6 +59,8 @@ protected:
     Postprocessor postprocessor_{this};
     bool need_save_{false};
     OutputDesc output_desc_{};
+    float3 light_world_center_{};
+    float light_world_radius_{};
 
     vision::Window *window_{};
 
@@ -125,6 +127,8 @@ public:
         }
         scene_view_.init(project_desc.scene_desc);
         scene_view_.set_min_radius(project_desc.renderer_desc.render_setting.min_world_radius);
+        light_world_center_ = scene_view_.world_center();
+        light_world_radius_ = scene_view_.world_radius();
         renderer_.init(project_desc.renderer_desc, scene_view_);
         sync_output_denoise();
     };
@@ -137,6 +141,7 @@ public:
     virtual void prepare_geometry() noexcept;
     virtual void rebuild_geometry_gpu() noexcept;
     virtual void update_geometry() noexcept;
+    void refresh_world_bounds_dependents() noexcept;
     void upload_scene_bindless_array() noexcept;
     virtual void prepare_render_graph() noexcept {}
     virtual void compile() noexcept {

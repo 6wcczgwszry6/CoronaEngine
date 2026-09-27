@@ -260,7 +260,20 @@ void Scene::clear_shapes() noexcept {
     data_->aabb_ = {};
 }
 
-void Scene::remove_shape(uint group_index) noexcept {
+bool Scene::recompute_world_bounds() noexcept {
+    Box3f bounds;
+    for (const auto &group : groups()) {
+        if (group && !group->aabb.empty()) {
+            bounds.extend(group->aabb);
+        }
+    }
+    const bool changed = any(bounds.lower != data_->aabb_.lower) ||
+                         any(bounds.upper != data_->aabb_.upper);
+    data_->aabb_ = bounds;
+    return changed;
+}
+
+void Scene::remove_shape(uint group_index, bool defer_world_bounds) noexcept {
     if (group_index >= data_->groups_.size()) {
         return;
     }
@@ -279,11 +292,8 @@ void Scene::remove_shape(uint group_index) noexcept {
     }
 
     data_->groups_.erase(data_->groups_.begin() + group_index);
-    data_->aabb_ = {};
-    for (const auto &remaining_group : data_->groups_) {
-        if (remaining_group) {
-            data_->aabb_.extend(remaining_group->aabb);
-        }
+    if (!defer_world_bounds) {
+        recompute_world_bounds();
     }
 }
 
