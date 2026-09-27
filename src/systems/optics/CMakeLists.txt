@@ -184,6 +184,16 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
     set_tests_properties(VisionInteropLifetimeTests PROPERTIES
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
 
+    add_executable(corona_vision_embedded_mode_switch_tests
+        tests/test_vision_embedded_mode_switch.cpp)
+    target_include_directories(corona_vision_embedded_mode_switch_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/vision/src)
+    target_link_libraries(corona_vision_embedded_mode_switch_tests PRIVATE
+        corona::engine vision-all_libs)
+    add_test(NAME VisionEmbeddedModeSwitchTests COMMAND corona_vision_embedded_mode_switch_tests)
+    set_tests_properties(VisionEmbeddedModeSwitchTests PROPERTIES
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
+
     add_executable(corona_vision_geometry_gpu_resource_tests
         tests/test_vision_geometry_gpu_resource.cpp
     )

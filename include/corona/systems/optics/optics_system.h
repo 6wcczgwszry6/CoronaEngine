@@ -91,6 +91,7 @@ class OpticsSystem : public Kernel::SystemBase {
     void shutdown() override;
 
    private:
+    friend struct VisionEmbeddedModeSwitchTest;
     bool initialize_vision_backend_if_enabled();
     bool initialize_hardware_resources();
     bool initialize_render_pipelines();
@@ -153,6 +154,9 @@ class OpticsSystem : public Kernel::SystemBase {
     VisionPipelineRuntime* ensure_external_vision_runtime(
         const VisionPipelineKey& key,
         bool force_reload_scene_resource = false);
+    VisionPipelineRuntime* load_vision_runtime_source(
+        const VisionPipelineKey& key, const Vision::VisionSceneSourceDesc& source,
+        bool force_reload_scene_resource);
     void evict_idle_vision_runtimes(uint64_t frame_index);
     void activate_single_vision_runtime_key(const VisionPipelineKey& key);
     void clear_vision_runtimes();

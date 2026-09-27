@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <unordered_map>
@@ -183,9 +184,24 @@ struct EngineMixedShapeRecord {
     std::size_t transform_signature{0};
 };
 
+enum class VisionSceneSourceKind { File, Embedded };
+
+// Scene identity is not a filename. Retain the import source independently of
+// render-mode runtimes; paths are captured once when a load request is accepted.
+struct VisionSceneSourceDesc {
+    VisionSceneSourceKind kind{VisionSceneSourceKind::File};
+    std::string file_path;
+    std::string scene_json;
+    std::string base_dir;
+
+    friend bool operator==(const VisionSceneSourceDesc&, const VisionSceneSourceDesc&) = default;
+};
+
 struct VisionSceneResource {
     VisionSceneResourceKey key;
     std::string display_source_path;
+    std::optional<VisionSceneSourceDesc> source_desc;
+    std::uint64_t source_revision{0};
     std::string overlay_path;
     std::string overlay_guid;
     std::shared_ptr<::vision::SceneData> logical_scene;
@@ -209,6 +225,10 @@ struct VisionSceneResource {
     // Engine-native actors mixed into this ExternalLive scene (no binding).
     std::unordered_map<std::uintptr_t, EngineMixedShapeRecord>
         engine_mixed_shapes_by_actor;
+
+    [[nodiscard]] bool is_embedded() const noexcept {
+        return source_desc && source_desc->kind == VisionSceneSourceKind::Embedded;
+    }
 
     [[nodiscard]] bool is_external_live() const noexcept {
         return key.source == VisionPipelineSource::ExternalLive;

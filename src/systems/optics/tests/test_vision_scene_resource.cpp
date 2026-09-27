@@ -468,6 +468,21 @@ void embedded_tombstones_preserve_indices_until_clean_reload() {
            "clean reload should register the new Ball with a fresh identity");
 }
 
+void loaded_scene_reset_preserves_published_source() {
+    VisionSceneResource resource;
+    resource.source_desc = Corona::Systems::Vision::VisionSceneSourceDesc{
+        Corona::Systems::Vision::VisionSceneSourceKind::Embedded, "", "{scene-data}", "D:/assets"};
+    resource.source_revision = 9;
+    resource.reset_loaded_scene();
+    expect(resource.is_embedded() && resource.source_revision == 9 &&
+               resource.source_desc->scene_json == "{scene-data}" &&
+               resource.source_desc->base_dir == "D:/assets",
+           "loaded cache reset must not discard or republish the source");
+    resource.source_desc->kind = Corona::Systems::Vision::VisionSceneSourceKind::File;
+    resource.source_desc->file_path = "D:/identity.embedded";
+    expect(!resource.is_embedded(), "source kind must not be inferred from path suffix");
+}
+
 void ownership_names_are_stable() {
     expect(Corona::Systems::Vision::vision_resource_ownership_name(
                VisionResourceOwnership::SharedLogicalScene) == "shared_logical_scene",
@@ -497,6 +512,7 @@ int main() {
     logical_instance_identity_is_shared_per_scene_resource();
     external_live_shape_removal_policy_preserves_embedded_topology();
     embedded_tombstones_preserve_indices_until_clean_reload();
+    loaded_scene_reset_preserves_published_source();
     ownership_names_are_stable();
     return 0;
 }

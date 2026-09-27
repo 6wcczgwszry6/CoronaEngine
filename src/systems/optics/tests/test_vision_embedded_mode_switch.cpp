@@ -1,0 +1,198 @@
+#include <corona/systems/optics/optics_system.h>
+#include "base/mgr/global.h"
+#include "base/mgr/pipeline.h"
+#include "../vision/vision_external_live_aabb.h"
+#include <filesystem>
+#include <fstream>
+#include <cmath>
+#include <iostream>
+#include <stdexcept>
+
+namespace Corona::Systems {
+struct VisionEmbeddedModeSwitchTest {
+    static void expect(bool value, const char* message) {
+        if (!value) throw std::runtime_error(message);
+    }
+    static void render(vision::Pipeline& pipeline, const char* label, bool lit = true) {
+        const auto before = pipeline.frame_index();
+        for (int i = 0; i < 3; ++i) pipeline.display(1.0 / 60.0);
+        expect(pipeline.frame_index() > before, "real integrator must advance frames");
+        std::vector<vision::float4> pixels(pipeline.pixel_num());
+        pipeline.final_picture(pipeline.output_desc(), pixels.data());
+        float sum = 0;
+        for (const auto& pixel : pixels) {
+            expect(std::isfinite(pixel.x) && std::isfinite(pixel.y) && std::isfinite(pixel.z),
+                   "GPU output must be finite");
+            sum += pixel.x + pixel.y + pixel.z;
+        }
+        expect(lit ? sum > 0.f : sum == 0.f, "GPU output must match geometry visibility");
+        std::cout << "GPU frames: " << label << " frame=" << pipeline.frame_index()
+                  << " rgb_sum=" << sum << '\n';
+    }
+    static void run() {
+        namespace fs = std::filesystem;
+        const auto original_cwd = fs::current_path();
+        const auto base = original_cwd / "embedded-mode-switch-test-assets";
+        fs::create_directories(base);
+        std::ofstream(base / "triangle.obj") << "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n";
+        const unsigned char white_tga[] = {0,0,2,0,0,0,0,0,0,0,0,0,1,0,1,0,24,0,255,255,255};
+        std::ofstream(base / "albedo.tga", std::ios::binary).write(
+            reinterpret_cast<const char*>(white_tga), sizeof(white_tga));
+        ocarina::RHIContext::instance().init(original_cwd);
+        // Keep the device alive until process exit: Vision's global kernel tools own GPU state.
+        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+        OpticsSystem system;
+        OpticsSystem::VisionSceneLoadRequest request;
+        request.scene_key = (base / "memory-only.embedded").string();
+        request.base_dir = base.filename().string();
+        request.external_live = true;
+        request.scene_json = R"({
+          "scene": {
+            "camera":{"type":"thin_lens","param":{"transform":{"type":"look_at","param":{"position":[0,0,3],"target_pos":[0,0,0],"up":[0,1,0]}}}},
+            "materials":[{"type":"diffuse","name":"mat","param":{"color":{"channels":"xyz","node":{"type":"image","param":{"fn":"albedo.tga"}}}}}],"shapes":[{"type":"model","param":{"fn":"triangle.obj","material":"mat"}}],"lights":[{"type":"point","param":{"position":[0,0,2]}}]
+          },
+          "render":{"sampler":{"type":"independent","param":{"spp":1}},"integrator":{"type":"pt","param":{"max_depth":2}},"light_sampler":{"type":"uniform"}},
+          "pipeline":{"type":"fixed","param":{"frame_buffer":{"type":"normal","param":{"resolution":[16,16]}}}},
+          "output":{"spp":1,"denoise":false}
+        })";
+        expect(!fs::exists(request.scene_key), "fixture must never create an embedded file");
+        expect(system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::PathTracing),
+               "in-memory PT must initialize");
+        auto pt = vision::Global::instance().pipeline_shared();
+        render(*pt, "PT");
+        const auto resource_key = system.make_vision_scene_resource_key(request.scene_key,
+            Vision::VisionPipelineSource::ExternalLive);
+        auto resource = system.vision_scene_resources_.at(resource_key);
+        expect(resource->is_embedded() && resource->source_revision == 1,
+               "only successful import publishes first source revision");
+        expect(fs::path(resource->source_desc->base_dir).is_absolute(), "source base must be absolute");
+        request.base_dir = resource->source_desc->base_dir;
+        Vision::ExternalLiveAabbCache pt_cache;
+        auto original_matrix = pt->scene().instances()[0]->o2w();
+        const auto hidden_matrix = vision::make_float4x4(0.f);
+        auto hidden = Vision::sync_external_live_group(*resource, pt_cache, 42, 0,
+            pt->scene().groups()[0], 10, 11, hidden_matrix, true, true);
+        expect(hidden.changed, "hiding must update production instance state");
+        resource->mark_transforms_changed();
+        pt->update_geometry();
+        // Changing CWD must not change the meaning of relative source resources.
+        // The alternate working directory also contains Vision CUDA compiler headers.
+        fs::current_path(original_cwd.parent_path() / "examples" / "engine");
+        const auto key = system.make_vision_pipeline_key(request.scene_key, CameraVisionRenderMode::SVGF,
+                                                         Vision::VisionPipelineSource::ExternalLive);
+        expect(system.ensure_external_vision_runtime(key) != nullptr,
+               "second mode must import the in-memory source, not the identity as a file");
+        auto svgf = vision::Global::instance().pipeline_shared();
+        expect(svgf && svgf != pt, "new mode must own a distinct pipeline");
+        expect(svgf->frame_buffer() != pt->frame_buffer(), "framebuffer histories must be per runtime");
+        expect(svgf->scene().instances().size() == 1, "relative model must load in new mode");
+        render(*svgf, "SVGF-hidden", false);
+        Vision::ExternalLiveAabbCache svgf_cache;
+        auto restored = Vision::sync_external_live_group(*resource, svgf_cache, 42, 0,
+            svgf->scene().groups()[0], 10, 10, original_matrix, false, true);
+        expect(restored.changed, "restoring after mode switch must update geometry");
+        expect(Vision::aabb_matrix_values(svgf->scene().instances()[0]->o2w()) ==
+                   Vision::aabb_matrix_values(original_matrix), "hidden mode must preserve original transform");
+        resource->mark_transforms_changed();
+        svgf->update_geometry();
+        render(*svgf, "SVGF-restored");
+        // Restore the PT view through the same production group helper. The
+        // editor test additionally exercises automatic runtime transform upload.
+        Vision::sync_external_live_group(*resource, pt_cache, 42, 0,
+            pt->scene().groups()[0], 10, 10, original_matrix, false, true);
+        pt->update_geometry();
+        pt->invalidate_all_view_contexts();
+        expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
+            Vision::VisionPipelineSource::ExternalLive), "switch back to PT");
+        render(*pt, "PT-return");
+        expect(resource->source_revision == 1, "mode changes do not republish source");
+        const auto original_json = request.scene_json;
+        for (const auto& invalid : {std::string{}, std::string{"{"}, std::string{"[]"}, std::string{"{}"},
+                std::string{R"({"scene":{"shapes":1}})"}, std::string{R"({"scene":{"mediums":1}})"},
+                std::string{R"({"scene":{"mediums":{"global":2}}})"},
+                std::string{R"({"scene":{"mediums":{"process":1}}})"},
+                std::string{R"({"scene":{"mediums":{"list":1}}})"}}) {
+            request.scene_json = invalid;
+            expect(!system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::SVGF, true),
+                   "invalid reload must fail");
+            expect(resource->source_revision == 1 && resource->source_desc->scene_json == original_json,
+                   "failed reload must preserve last successful source");
+        }
+        request.scene_json = original_json;
+        const auto filename = request.scene_json.find("triangle.obj");
+        request.scene_json.replace(filename, 12, "missing.obj");
+        expect(!system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::SVGF, true),
+               "missing model must fail before GPU import");
+        expect(resource->source_revision == 1, "missing resource cannot publish a revision");
+        request.scene_json = original_json;
+        request.scene_json.replace(request.scene_json.find("albedo.tga"), 10, "missing.tga");
+        expect(!system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::SVGF, true),
+               "missing relative texture must fail before GPU import");
+        expect(resource->source_revision == 1, "missing texture cannot publish a revision");
+        render(*pt, "PT-after-failed-reload");
+        // Same identity, different JSON must replace both previous modes even without force.
+        request.scene_json = original_json;
+        const auto resolution = request.scene_json.find("[16,16]");
+        request.scene_json.replace(resolution, 7, "[24,16]");
+        expect(system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::SVGF),
+               "same-key new JSON must load");
+        expect(resource->source_revision == 2, "new JSON must publish a new revision");
+        expect(system.vision_runtimes_.size() == 1, "reload must retire all previous modes");
+        pt.reset(); svgf.reset();
+        auto reloaded = vision::Global::instance().pipeline_shared();
+        expect(reloaded->resolution().x == 24, "new JSON must actually change pipeline resolution");
+        render(*reloaded, "SVGF-new-JSON");
+        // A force reload with identical JSON also reloads changed on-disk resources.
+        std::ofstream(base / "triangle.obj") << "v -2 -1 0\nv 2 -1 0\nv 0 1 0\nf 1 2 3\n";
+        expect(system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::PathTracing, true),
+               "resource reload must import again");
+        reloaded.reset();
+        reloaded = vision::Global::instance().pipeline_shared();
+        expect(resource->source_revision == 3, "forced resource reload must publish a new revision");
+        expect(reloaded->scene().groups()[0]->aabb.upper.x == 2.f, "reloaded model must use new vertices");
+        render(*reloaded, "PT-resource-reload");
+        std::weak_ptr<vision::GeometryGpuResource> retired_gpu = reloaded->scene().geometry().gpu_resource();
+        reloaded.reset();
+        // Use production teardown to remove every external runtime, leaving only
+        // an engine-built placeholder. The shared source must survive this boundary.
+        system.activate_single_vision_runtime_key(system.make_vision_pipeline_key("",
+            CameraVisionRenderMode::PathTracing, Vision::VisionPipelineSource::EngineBuilt));
+        expect(retired_gpu.expired(), "retiring the last runtime must release scene GPU resources");
+        expect(system.ensure_external_vision_runtime(key) != nullptr, "rebuild after runtime retirement");
+        reloaded = vision::Global::instance().pipeline_shared();
+        expect(reloaded->resolution().x == 24 && resource->source_revision == 3,
+               "recreated runtime must consume latest source without republishing");
+        render(*reloaded, "SVGF-recreated");
+        reloaded.reset();
+        expect(!fs::exists(request.scene_key), "embedded scene must remain memory-only");
+        std::ofstream(base / "file-scene.json") << original_json;
+        expect(system.load_external_vision_scene((base / "file-scene.json").string(),
+            CameraVisionRenderMode::SVGF, Vision::VisionPipelineSource::ExternalFile),
+            "explicit file source must continue to import");
+        const auto file_resource = system.vision_scene_resources_.at(system.make_vision_scene_resource_key(
+            (base / "file-scene.json").string(), Vision::VisionPipelineSource::ExternalFile));
+        expect(file_resource->source_desc->kind == Vision::VisionSceneSourceKind::File &&
+                   fs::path(file_resource->source_desc->base_dir).is_absolute(),
+               "file source must retain explicit kind and absolute base");
+        expect(system.load_external_vision_scene((base / "file-scene.json").string(),
+            CameraVisionRenderMode::PathTracing, Vision::VisionPipelineSource::ExternalFile),
+            "file source must also support a second mode");
+        expect(file_resource->source_revision == 1, "file mode switch must not republish source");
+        render(*vision::Global::instance().pipeline(), "File-PT");
+        system.clear_vision_runtimes();
+        resource.reset();
+        fs::current_path(original_cwd);
+        fs::remove(base / "file-scene.json");
+        fs::remove(base / "albedo.tga");
+        fs::remove(base / "triangle.obj");
+        fs::remove(base);
+        std::cout << "PASS: embedded PT/SVGF runtime initialization\n";
+    }
+};
+}
+int main() {
+    try { Corona::Systems::VisionEmbeddedModeSwitchTest::run(); }
+    catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
+}
