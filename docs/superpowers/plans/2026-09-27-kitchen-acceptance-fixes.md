@@ -10,7 +10,7 @@
 
 **Spec:** [Kitchen AABB 验收报告](../../development/kitchen-aabb-acceptance.md)、[原优化方案](../../development/kitchen-scene-sync-optimization.md)。
 
-状态：任务 1 已实现并验证，审核与交付记录见 [第 01 项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)。任务 2–4 尚未实施，不能由任务 1 的通过推定其他问题已解决。
+状态：任务 1 已实现并验证，审核与交付记录见 [第 01 项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)。任务2也已实现并验证，见[第02项审核](../../development/kitchen-fixes/reviews/02-embedded-mode-switch-review.md)；任务3、4尚未实施。
 
 各问题的独立方案、依赖顺序和验收出口已整理至 [解决方案总览](../../development/kitchen-fixes/README.md)：[场景总范围](../../development/kitchen-fixes/01-world-bounds.md)、[嵌入场景模式切换](../../development/kitchen-fixes/02-embedded-mode-switch.md)、[跨运行时几何](../../development/kitchen-fixes/03-runtime-geometry-sync.md)、[截图与双视图](../../development/kitchen-fixes/04-capture-and-multiview.md)。本文件保留执行任务清单，独立方案补充数据流和边界规则；实施时一起阅读。
 
@@ -52,12 +52,12 @@
 
 **拟定数据：** 在 `VisionSceneResource` 增加显式来源描述 `VisionSceneSourceDesc`：来源种类 File/Embedded、文件路径或 `scene_json`、绝对 `base_dir`、单调递增 `source_revision`。规范化的资源 key 仍是身份，不承担内容或加载方式。沿用现有 `import_vision_scene_from_data()` 与 `import_vision_scene_from_file()`。
 
-- [ ] 添加失败测试：资源只提供内存 JSON，不创建任何 `.embedded` 磁盘文件；先建 PT，再建 SVGF，应均得到非空 pipeline、相同场景身份、正确相对纹理／模型路径。
-- [ ] 明确重载语义：新来源描述先校验并发布；重置加载缓存不意外清除已发布来源。runtime 清理／淘汰不能带走共享来源。
-- [ ] `load_vision_scene_from_json` 接收来源时保存到共享资源；`ensure_external_vision_runtime()` 按显式来源种类选择导入器，不从文件名后缀猜测。`reset_pipeline()` 后恢复 runtime 所需的 embedded 标记，保留现有增删行为。
-- [ ] 补测 PT→SVGF→PT、隐藏后切模式再恢复、修改来源后重载、同 key 新版本、空 JSON 和导入失败；失败不得发布“已加载”版本。
-- [ ] 在 kitchen 实际渲染中确认 SVGF pipeline 存在且持续产帧，日志无文件查找错误。记录实际相机／runtime 数量，而不是只检查相机 mode 字段。
-- [ ] 构建、测试通过后单独提交来源修复。
+- [x] 添加失败测试：资源只提供内存 JSON，不创建任何 `.embedded` 磁盘文件；先建 PT，再建 SVGF，应均得到非空 pipeline、相同场景身份、正确相对纹理／模型路径。
+- [x] 明确重载语义：新来源描述先校验并完成候选导入，成功后再发布；重置加载缓存不意外清除已发布来源。runtime 清理／淘汰不能带走共享来源。
+- [x] `load_vision_scene_from_json` 接收来源时保存到共享资源；`ensure_external_vision_runtime()` 按显式来源种类选择导入器，不从文件名后缀猜测。`reset_pipeline()` 后恢复 runtime 所需的 embedded 标记，保留现有增删行为。
+- [x] 补测 PT→SVGF→PT、隐藏后切模式再恢复、修改来源后重载、同 key 新版本、空 JSON 和导入失败；失败不得发布“已加载”版本。
+- [x] 在 kitchen 实际渲染中确认 SVGF pipeline 存在且持续产帧，日志无文件查找错误。记录实际相机／runtime 数量，而不是只检查相机 mode 字段。
+- [x] 构建、测试通过后单独提交来源修复。
 
 ## 任务 3：独立 runtime 消费完整几何变更
 
@@ -96,4 +96,4 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/clion-bui
 
 配置变化才重新 configure。测试目标使用同一 CLion/MSVC 环境编译；CTest 工作目录使用实际插件目录，PATH 包含构建的 `bin` 和 `examples/engine`，并设置 `CORONA_RUN_GPU_SMOKE=1`。运行全量 `ctest --test-dir cmake-build-relwithdebinfo --output-on-failure --timeout 180`；成功条件为 0 失败、0 跳过，CUDA 集成输出无内部 SKIP。目标分支有额外相机方向测试，不把历史 37 项写死为预期数量。
 
-第 01 项已按失败测试、CPU/GPU 回归和实际 kitchen 验证执行；本次仅关闭任务 1。后续任务继续沿用各自失败复现和验收边界。
+第 01 项已按失败测试、CPU/GPU 回归和实际 kitchen 验证执行；任务2也已完成失败复现、GPU及kitchen模式切换验收并交付。后续任务3、4继续沿用各自失败复现和验收边界。
