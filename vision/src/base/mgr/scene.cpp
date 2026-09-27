@@ -305,6 +305,29 @@ void Scene::load_shapes(const vector<ShapeDesc> &descs) {
 }
 
 void Scene::fill_instances() {
+    // Membership/order can change independently of the source light registry.
+    // Area-light CPU and generated GPU code both consume this instance index.
+    std::unordered_set<IAreaLight*> live_emissions;
+    for (uint i = 0; i < data_->instances_.size(); ++i) {
+        auto& instance = data_->instances_[i];
+        if (!instance->has_emission()) continue;
+        auto light = instance->emission();
+        if (!live_emissions.insert(light.get()).second) {
+            auto desc = light->source_desc();
+            desc.set_value("inst_id", i);
+            light = dynamic_object_cast<IAreaLight>(load_light(desc)).impl();
+            instance->set_emission(light);
+            live_emissions.insert(light.get());
+        }
+        light->bind_instance(i);
+    }
+    auto& lights = light_manager().lights();
+    for (auto it = lights.begin(); it != lights.end();) {
+        if ((*it)->match(LightType::Area) &&
+            !live_emissions.contains(static_cast<IAreaLight*>(it->get()))) it = lights.erase(it);
+        else ++it;
+    }
+    light_manager().tidy_up();
     for (auto &instance : data_->instances_) {
         if (instance->has_material()) {
             const Material *material = instance->material().get();

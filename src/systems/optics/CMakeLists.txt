@@ -1,4 +1,4 @@
-﻿# ==============================================================================
+# ==============================================================================
 # Optics System
 # ==============================================================================
 
@@ -183,6 +183,19 @@ if((BUILD_CORONA_TESTING OR BUILD_TESTING) AND CORONA_BUILD_VISION)
              COMMAND corona_vision_interop_lifetime_tests)
     set_tests_properties(VisionInteropLifetimeTests PROPERTIES
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
+
+    add_executable(corona_vision_runtime_geometry_sync_tests tests/test_vision_runtime_geometry_sync.cpp)
+    target_include_directories(corona_vision_runtime_geometry_sync_tests PRIVATE
+        ${PROJECT_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/vision/src)
+    target_link_libraries(corona_vision_runtime_geometry_sync_tests PRIVATE corona::engine vision-all_libs)
+    add_test(NAME VisionRuntimeGeometrySyncTests COMMAND corona_vision_runtime_geometry_sync_tests)
+    set_tests_properties(VisionRuntimeGeometrySyncTests PROPERTIES
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
+    foreach(case fresh material topology lights stale eviction)
+        add_test(NAME VisionRuntimeGeometry_${case} COMMAND corona_vision_runtime_geometry_sync_tests ${case})
+        set_tests_properties(VisionRuntimeGeometry_${case} PROPERTIES
+            WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
+    endforeach()
 
     add_executable(corona_vision_embedded_mode_switch_tests
         tests/test_vision_embedded_mode_switch.cpp)

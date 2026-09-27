@@ -264,18 +264,18 @@ void Pipeline::change_resolution(uint2 res) noexcept {
     upload_bindless_array();
 }
 
-void Pipeline::prepare_geometry() noexcept {
+void Pipeline::prepare_geometry(bool geometry_changed) noexcept {
     activate_global_context();
     scene_view_.update_geometry_instances();
     scene_view_.geometry().reset_device_buffer();
     scene_view_.geometry().upload(stream());
     scene_view_.geometry().build_accel(stream());
     scene_view_.geometry().upload_bindless_array(stream());
-    refresh_world_bounds_dependents();
+    refresh_world_bounds_dependents(geometry_changed);
 }
 
 void Pipeline::rebuild_geometry_gpu() noexcept {
-    prepare_geometry();
+    prepare_geometry(true);
 }
 
 void Pipeline::update_geometry() noexcept {
@@ -287,14 +287,14 @@ void Pipeline::update_geometry() noexcept {
     refresh_world_bounds_dependents();
 }
 
-void Pipeline::refresh_world_bounds_dependents() noexcept {
+void Pipeline::refresh_world_bounds_dependents(bool geometry_changed) noexcept {
     activate_global_context();
     scene_view_.recompute_world_bounds();
     const auto center = scene_view_.world_center();
     const auto radius = scene_view_.world_radius();
     // Compare the last consumed sphere, not recompute's return value: add/remove
     // can already have updated SceneData, and each pipeline owns its light data.
-    if (all(center == light_world_center_) && radius == light_world_radius_) {
+    if (!geometry_changed && all(center == light_world_center_) && radius == light_world_radius_) {
         return;
     }
 

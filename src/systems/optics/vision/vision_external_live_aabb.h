@@ -113,6 +113,7 @@ struct ExternalLiveAabbState {
 struct ExternalLiveAabbCache {
     std::uint64_t generation{0};
     std::unordered_map<std::uintptr_t, std::shared_ptr<ExternalLiveAabbState>> actors;
+    std::unordered_map<uint64_t, std::shared_ptr<ExternalLiveAabbState>> loaded_groups;
 };
 
 struct ExternalLiveGroupSyncResult {
@@ -131,6 +132,13 @@ inline ExternalLiveGroupSyncResult sync_external_live_group(
         cache.generation = resource.external_live_cache_generation;
     }
     auto& state = cache.actors[actor];
+    if (!state) {
+        if (auto loaded = cache.loaded_groups.find(group->geometry_sync_identity);
+            loaded != cache.loaded_groups.end()) {
+            state = std::move(loaded->second);
+            cache.loaded_groups.erase(loaded);
+        }
+    }
     const auto signature = resource.external_live_transform_signatures.find(actor);
     const bool first_sync = signature == resource.external_live_transform_signatures.end();
     const bool signature_changed = first_sync || signature->second != target_signature;

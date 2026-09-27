@@ -138,10 +138,10 @@ public:
     virtual void change_resolution(uint2 res) noexcept;
     virtual void invalidate() noexcept;
     virtual void clear_geometry() noexcept;
-    virtual void prepare_geometry() noexcept;
+    virtual void prepare_geometry(bool geometry_changed = false) noexcept;
     virtual void rebuild_geometry_gpu() noexcept;
     virtual void update_geometry() noexcept;
-    void refresh_world_bounds_dependents() noexcept;
+    void refresh_world_bounds_dependents(bool geometry_changed = false) noexcept;
     void upload_scene_bindless_array() noexcept;
     virtual void prepare_render_graph() noexcept {}
     virtual void compile() noexcept {

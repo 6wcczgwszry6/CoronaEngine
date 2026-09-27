@@ -22,6 +22,8 @@ class SceneData;
 
 namespace Corona::Systems::Vision {
 
+struct VisionGeometrySnapshot;
+
 enum class VisionResourceOwnership {
     SharedLogicalScene,
     SharedSceneGpu,
@@ -202,6 +204,11 @@ struct VisionSceneResource {
     std::string display_source_path;
     std::optional<VisionSceneSourceDesc> source_desc;
     std::uint64_t source_revision{0};
+    // CPU-only publication survives idle runtime eviction; a new source replaces
+    // the whole resource. No SceneData or GPU object is owned by this snapshot.
+    std::shared_ptr<const VisionGeometrySnapshot> geometry_snapshot;
+    std::uint64_t geometry_version{0};
+    std::uint64_t next_geometry_identity{1};
     std::string overlay_path;
     std::string overlay_guid;
     std::shared_ptr<::vision::SceneData> logical_scene;

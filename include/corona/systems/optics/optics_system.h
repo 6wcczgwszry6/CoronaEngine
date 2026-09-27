@@ -92,6 +92,7 @@ class OpticsSystem : public Kernel::SystemBase {
 
    private:
     friend struct VisionEmbeddedModeSwitchTest;
+    friend struct VisionRuntimeGeometrySyncTest;
     bool initialize_vision_backend_if_enabled();
     bool initialize_hardware_resources();
     bool initialize_render_pipelines();
@@ -195,6 +196,7 @@ class OpticsSystem : public Kernel::SystemBase {
     /// proxy actor transform -> mapped Vision ShapeInstance::set_o2w()
     /// -> Pipeline::update_geometry() -> invalidate view contexts.
     void sync_external_live_vision_transforms(VisionPipelineRuntime& runtime);
+    bool sync_shared_vision_scene(VisionPipelineRuntime& runtime);
 
     /// Mixed-rendering path: incrementally add/remove/transform engine-native
     /// actors (those WITHOUT an external_vision_binding) into an ExternalLive

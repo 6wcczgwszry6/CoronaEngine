@@ -10,7 +10,7 @@
 
 **Spec:** [Kitchen AABB 验收报告](../../development/kitchen-aabb-acceptance.md)、[原优化方案](../../development/kitchen-scene-sync-optimization.md)。
 
-状态：任务 1 已实现并验证，审核与交付记录见 [第 01 项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)。任务2也已实现并验证，见[第02项审核](../../development/kitchen-fixes/reviews/02-embedded-mode-switch-review.md)；任务3、4尚未实施。
+状态：任务1、2已交付，见[第01项审核](../../development/kitchen-fixes/reviews/01-world-bounds-review.md)、[第02项审核](../../development/kitchen-fixes/reviews/02-embedded-mode-switch-review.md)。任务3实现、正式构建和47项测试通过，见[第03项审核](../../development/kitchen-fixes/reviews/03-runtime-geometry-sync-review.md)，交付以执行记录为准；任务4尚未实施。
 
 各问题的独立方案、依赖顺序和验收出口已整理至 [解决方案总览](../../development/kitchen-fixes/README.md)：[场景总范围](../../development/kitchen-fixes/01-world-bounds.md)、[嵌入场景模式切换](../../development/kitchen-fixes/02-embedded-mode-switch.md)、[跨运行时几何](../../development/kitchen-fixes/03-runtime-geometry-sync.md)、[截图与双视图](../../development/kitchen-fixes/04-capture-and-multiview.md)。本文件保留执行任务清单，独立方案补充数据流和边界规则；实施时一起阅读。
 
@@ -61,16 +61,16 @@
 
 ## 任务 3：独立 runtime 消费完整几何变更
 
-当前为代码检查发现的缺口，先做红色集成测试确认，不将 CPU 双缓存测试当作跨 GPU 证明。直接共享整个 `SceneData` 不是本计划的快捷修复：其中含 `Geometry`、材质等运行时相关状态，当前每个 runtime 有独立 GPU 资源。
+生产路径红色集成测试已确认第二runtime的CPU顶点和CUDA命中滞后，现通过CPU快照发布/消费修复。各runtime继续拥有独立SceneData、Geometry GPU资源及渲染状态。
 
-**文件：** `vision_scene_resource.h`、`optics_system.cpp`、`vision_external_live_aabb.h`；测试 `test_vision_geometry_gpu_resource.cpp`。
+**文件：** `vision_scene_resource.h`、`optics_system.cpp`、`vision_external_live_aabb.h`、`vision_geometry_snapshot.h`及Vision材质/光源/几何生命周期协作；测试 `test_vision_runtime_geometry_sync.cpp`。
 
 **拟定机制：** `VisionSceneResource` 持有不含 GPU 句柄的最新几何快照及 `geometry_version`；每个 runtime 保存 `applied_geometry_version`，与已有 transform version 分离。快照包括网格顶点／索引、稳定形状身份、实例成员和材质映射；只在变更时发布，不逐帧复制。消费方不能将自己的旧网格重新发布为最新内容。
 
-- [ ] 创建两个独立 SceneData 和独立 GPU 几何资源的实际 PT/SVGF runtime。修改一个场景的顶点／索引，验证另一 runtime 的 CPU 顶点、AABB、GPU 射线命中结果也更新；确认当前版本的具体失败。
-- [ ] 将新几何快照发布与版本递增作为一次操作；渲染前先消费几何版本，再应用实例变换、聚合范围、上传 GPU。仅变换变化走现有 TLAS 更新，网格／拓扑变化才重建相应缓冲与 BLAS/TLAS。
-- [ ] 等旧 GPU 提交完成再替换资源，上传成功后才记录消费版本。保留另一 runtime 的 framebuffer 和 denoiser 所有权，但使受影响历史失效。
-- [ ] 覆盖原位编辑、网格替换、实例增删／重排、隐藏恢复、休眠 runtime、重载和导入失败；同一次变更每个 runtime 只消费一次。若生产入口没有几何编辑 API，集成测试直接调用生产同步入口，不复制同步算法到测试中。
+- [x] 创建两个独立 SceneData 和独立 GPU 几何资源的实际 PT/SVGF runtime。修改一个场景的顶点／索引，验证另一 runtime 的 CPU 顶点、AABB、GPU 射线命中结果也更新；确认当前版本的具体失败。
+- [x] 将新几何快照发布与版本递增作为一次操作；渲染前先消费几何版本，再应用实例变换、聚合范围、上传 GPU。仅变换变化走现有 TLAS 更新，网格／拓扑变化才重建相应缓冲与 BLAS/TLAS。
+- [x] 等旧 GPU 提交完成再替换资源，上传成功后才记录消费版本。保留另一 runtime 的 framebuffer 和 denoiser 所有权，但使受影响历史失效。CUDA替换/退休实测通过；待完成interop receipt分支仍仅源码审查。
+- [x] 覆盖原位编辑、网格替换、实例增删／重排、隐藏恢复、休眠 runtime、重载和上传前CPU导入失败；同一次变更每个 runtime 只消费一次。集成测试直接调用生产同步入口，不复制同步算法到测试中。设备级上传故障恢复未测试。
 - [ ] 构建、GPU 集成测试和双 runtime 实际渲染通过后单独提交。
 
 ## 任务 4：恢复可验证的截图及双视图验收
@@ -96,4 +96,4 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/clion-bui
 
 配置变化才重新 configure。测试目标使用同一 CLion/MSVC 环境编译；CTest 工作目录使用实际插件目录，PATH 包含构建的 `bin` 和 `examples/engine`，并设置 `CORONA_RUN_GPU_SMOKE=1`。运行全量 `ctest --test-dir cmake-build-relwithdebinfo --output-on-failure --timeout 180`；成功条件为 0 失败、0 跳过，CUDA 集成输出无内部 SKIP。目标分支有额外相机方向测试，不把历史 37 项写死为预期数量。
 
-第 01 项已按失败测试、CPU/GPU 回归和实际 kitchen 验证执行；任务2也已完成失败复现、GPU及kitchen模式切换验收并交付。后续任务3、4继续沿用各自失败复现和验收边界。
+第01、02项已交付；任务3已完成失败复现、GPU双runtime和kitchen回归，交付状态见执行记录。任务4继续沿用其截图与实际双视图验收边界。

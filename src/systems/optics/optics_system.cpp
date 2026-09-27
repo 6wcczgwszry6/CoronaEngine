@@ -70,6 +70,7 @@
 #include "rhi/context.h"
 #include "vision/vision_geometry_adapter.h"
 #include "vision/vision_external_live_aabb.h"
+#include "vision/vision_geometry_snapshot.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
 #include "vision/vision_render_mode_config.h"
@@ -2342,6 +2343,7 @@ struct OpticsSystem::VisionPipelineRuntime {
     Corona::CameraVisionRenderMode mode{Corona::CameraVisionRenderMode::PathTracing};
     uint64_t last_used_frame{0};
     uint64_t scene_gpu_transform_version{0};
+    uint64_t applied_geometry_version{0};
     Vision::ExternalLiveAabbCache external_live_aabb_cache;
 
     // Zero-copy path: shares Vision's pre-tonemap linear color buffer with Vulkan
@@ -2482,6 +2484,33 @@ struct OpticsSystem::VisionPipelineRuntime {
         scene_gpu_transform_version = scene_resource->logical_transform_version;
     }
 
+    void wait_for_geometry_users() {
+        pipeline->commit_command();
+        for (const auto& [camera, receipt] : interop_submissions) {
+            if (receipt.serial == 0) continue;
+            if (!interop_executor) throw std::runtime_error("missing geometry interop executor");
+            interop_executor->wait_idle(receipt);
+        }
+        interop_submissions.clear();
+    }
+
+    void publish_geometry() {
+        auto snapshot = Vision::capture_geometry_snapshot(*scene_resource, pipeline->scene());
+        scene_resource->geometry_snapshot = std::move(snapshot);
+        applied_geometry_version = ++scene_resource->geometry_version;
+    }
+
+    void seed_geometry_cache() {
+        external_live_aabb_cache = {};
+        external_live_aabb_cache.generation = scene_resource->external_live_cache_generation;
+        for (const auto& group : pipeline->scene().groups()) {
+            if (!group) continue;
+            auto state = std::make_shared<Vision::ExternalLiveAabbState>();
+            state->capture(group, true);
+            external_live_aabb_cache.loaded_groups.emplace(group->geometry_sync_identity, std::move(state));
+        }
+    }
+
     void reset_pipeline(ocarina::SP<vision::Pipeline> next_pipeline,
                         VisionPipelineSource next_source,
                         std::string next_scene_path,
@@ -2493,6 +2522,7 @@ struct OpticsSystem::VisionPipelineRuntime {
         source_revision = scene_resource ? scene_resource->source_revision : 0;
         mode = next_mode;
         scene_gpu_transform_version = 0;
+        applied_geometry_version = 0;
         external_live_aabb_cache = {};
         bind_shared_scene_gpu_resource();
     }
@@ -2553,10 +2583,11 @@ void OpticsSystem::release_unused_vision_scene_resources() {
         if (in_use) {
             ++it;
         } else if (resource && resource->source_desc) {
-            // Teardown callers drained the last runtime. Drop SceneData (which
-            // itself owns Geometry/ImagePool GPU objects), retain only import data.
+            // Teardown callers drained the last runtime. Keep CPU publications
+            // and matching transforms, including edits newer than the snapshot.
             if (resource->has_logical_scene() || resource->has_scene_gpu_resource()) {
-                resource->reset_loaded_scene();
+                resource->logical_scene.reset();
+                resource->scene_gpu_resource.reset();
             }
             ++it;
         } else {
@@ -2662,6 +2693,13 @@ OpticsSystem::VisionPipelineRuntime* OpticsSystem::load_vision_runtime_source(
         auto& runtime = get_or_create_runtime(key);
         runtime.scene_resource = resource;
         runtime.reset_pipeline(std::move(pipeline), key.source, key.scene_path, key.mode);
+        if (key.source == VisionPipelineSource::ExternalLive) {
+            if (!resource->geometry_snapshot) {
+                runtime.publish_geometry();
+                runtime.seed_geometry_cache();
+            }
+            else if (!sync_shared_vision_scene(runtime)) throw std::runtime_error("geometry snapshot import failed");
+        }
         runtime.pipeline->activate_global_context();
         log_vision_pipeline_diagnostics(*runtime.pipeline,
             std::string("source import mode=") + std::string(Vision::vision_render_mode_name(key.mode)));
@@ -5852,12 +5890,56 @@ void OpticsSystem::sync_vision_dynamic_scene(VisionPipelineRuntime& runtime) {
     }
 }
 
+bool OpticsSystem::sync_shared_vision_scene(VisionPipelineRuntime& runtime) {
+    auto& resource = runtime.scene_resource;
+    if (!runtime.pipeline || !resource) return false;
+    try {
+        if (runtime.applied_geometry_version != resource->geometry_version) {
+            const auto snapshot = resource->geometry_snapshot;
+            if (!snapshot || snapshot->source_revision != runtime.source_revision)
+                throw std::runtime_error("geometry snapshot source mismatch");
+            auto& pipeline = *runtime.pipeline;
+            pipeline.activate_global_context();
+            runtime.wait_for_geometry_users();
+            ::vision::Global::SceneGpuContextScope scope{pipeline.geometry().bindless_array(), pipeline.device()};
+            auto staged = Vision::stage_geometry_snapshot(*snapshot, pipeline.scene());
+            auto& scene = pipeline.scene();
+            const bool materials_added = !staged.new_materials.empty();
+            for (auto& material : staged.new_materials) scene.add_material(std::move(material));
+            for (auto& light : staged.new_lights) scene.add_light(std::move(light));
+            scene.groups() = std::move(staged.groups);
+            scene.instances().clear();
+            for (const auto& group : scene.groups()) {
+                group->for_each([&](::vision::SP<::vision::ShapeInstance> instance, ::vision::uint) { scene.instances().push_back(instance); });
+            }
+            scene.geometry().data()->clear_meshes();
+            scene.register_instance_meshes();
+            scene.tidy_up();
+            if (materials_added) scene.prepare_materials();
+            apply_logical_instances_to_pipeline_scene(*resource, scene);
+            pipeline.rebuild_geometry_gpu();
+            pipeline.commit_command();
+            pipeline.invalidate_all_view_contexts();
+            runtime.seed_geometry_cache();
+            runtime.applied_geometry_version = resource->geometry_version;
+            runtime.scene_gpu_transform_version = resource->logical_transform_version;
+        }
+        runtime.upload_shared_scene_transforms_if_needed();
+        return true;
+    } catch (const std::exception& e) {
+        CFW_LOG_ERROR("OpticsSystem: shared geometry consume failed: {}", e.what());
+        return false;
+    }
+}
+
 void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& runtime) {
     auto& pipeline = runtime.pipeline;
     auto scene_resource = runtime.scene_resource;
     if (!vision_initialized_ || !pipeline || !scene_resource || runtime.scene_path.empty()) {
         return;
     }
+    // An idle/second mode must consume before it can become this frame's producer.
+    if (!sync_shared_vision_scene(runtime)) return;
 
     const auto& current_scene_key = scene_resource->key.source_path_key;
     if (current_scene_key.empty()) {
@@ -6140,6 +6222,7 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
     }
 
     try {
+        runtime.wait_for_geometry_users();
         pipeline->activate_view_context(0u);
         scene_resource->mark_transforms_changed();
         if (mesh_content_changed) {
@@ -6173,6 +6256,10 @@ void OpticsSystem::sync_external_live_vision_transforms(VisionPipelineRuntime& r
         }
         scene_resource->mark_scene_gpu_transforms_uploaded();
         runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
+        if (geometry_changed || mesh_content_changed) {
+            pipeline->commit_command();
+            runtime.publish_geometry();
+        }
         pipeline->invalidate_all_view_contexts();
         CFW_LOG_DEBUG("OpticsSystem: external_live updated {} proxy actor transform(s)",
                       updated_actors);
@@ -6189,6 +6276,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
         runtime.scene_path.empty()) {
         return;
     }
+    if (!sync_shared_vision_scene(runtime)) return;
 
     auto& hub = SharedDataHub::instance();
     auto& vision_scene = pipeline->scene();
@@ -6354,6 +6442,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
 
     if (geometry_changed) {
         try {
+            runtime.wait_for_geometry_users();
             pipeline->activate_view_context(0u);
             if (needs_compile) {
                 // A new material TYPE was introduced (e.g. the first engine-native
@@ -6391,6 +6480,8 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
             scene_resource->mark_transforms_changed();
             scene_resource->mark_scene_gpu_transforms_uploaded();
             runtime.scene_gpu_transform_version = scene_resource->logical_transform_version;
+            pipeline->commit_command();
+            runtime.publish_geometry();
             pipeline->invalidate_all_view_contexts();
         } catch (const std::exception& e) {
             CFW_LOG_ERROR("OpticsSystem: engine-native mixed geometry sync failed: {}", e.what());
@@ -6998,7 +7089,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             }
             if (runtime->source == VisionPipelineSource::ExternalLive &&
                 runtime->scene_resource) {
-                runtime->upload_shared_scene_transforms_if_needed();
+                if (!sync_shared_vision_scene(*runtime)) continue;
             }
 
             std::unordered_set<std::uintptr_t> active_contexts;
@@ -7080,6 +7171,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                runtime.source == VisionPipelineSource::ExternalLive) {
         sync_external_live_vision_transforms(runtime);
         sync_engine_native_mixed_shapes(runtime);
+        if (!sync_shared_vision_scene(runtime)) return;
     }
 #endif
 

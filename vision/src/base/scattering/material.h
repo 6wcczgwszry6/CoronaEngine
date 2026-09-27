@@ -137,6 +137,7 @@ public:
 
 protected:
     uint index_{InvalidUI32};
+    MaterialDesc source_desc_;
     VS_MAKE_SLOT(normal);
     /// use for integral albedo
     static uint exp_of_two_;
@@ -193,6 +194,7 @@ protected:
 
 public:
     Material() = default;
+    [[nodiscard]] const MaterialDesc& source_desc() const noexcept { return source_desc_; }
     explicit Material(const MaterialDesc &desc);
     [[nodiscard]] static SP<Material> create_root(const Desc &desc) noexcept;
     void add_material_reference(SP<ShapeInstance> shape_instance) noexcept;

@@ -2,13 +2,13 @@
 
 日期：2026-09-27。适用分支：`svgf_magic`；文档依据为 `a0780e4b` 的源码、[验收报告](../kitchen-aabb-acceptance.md)及[执行计划](../../superpowers/plans/2026-09-27-kitchen-acceptance-fixes.md)。
 
-**状态：第01、02项已实现并验证，交付状态见[执行记录](execution-tracker.md)；第03、04项尚未实施。** 第02项正式构建及40项自动化测试通过，kitchen模式切换持续产帧，证据见[第02项审核](reviews/02-embedded-mode-switch-review.md)；第01项历史证据见[第01项审核](reviews/01-world-bounds-review.md)。这不代表第03、04项已解决。性能测量与问题复现的具体环境、日期和限制以验收报告为准。
+**状态：第01、02、03项已实现并验证，交付状态见[执行记录](execution-tracker.md)；第04项尚未实施。** 第03项正式构建及47项自动化测试通过，PT/SVGF双runtime完成GPU几何同步与实际产帧验证，证据与限制见[第03项审核](reviews/03-runtime-geometry-sync-review.md)。前两项历史证据见[第01项审核](reviews/01-world-bounds-review.md)、[第02项审核](reviews/02-embedded-mode-switch-review.md)。这不代表第04项的截图与编辑器双视图已解决。
 
 | 编号 | 问题及证据状态 | 方案 | 优先级 |
 |---|---|---|---|
 | 01 | 场景总范围与光照同步已修复并验证 | [场景总包围盒与光照数据同步](01-world-bounds.md) | 高 |
 | 02 | 嵌入来源及 PT/SVGF 切换已修复并验证 | [嵌入场景的模式切换](02-embedded-mode-switch.md) | 高 |
-| 03 | 独立 runtime 缺少完整几何传播路径，源码风险，尚缺 GPU 复现 | [跨运行时几何同步](03-runtime-geometry-sync.md) | 高，先建立失败测试 |
+| 03 | 独立 runtime 完整几何传播已修复，双GPU红绿测试通过 | [跨运行时几何同步](03-runtime-geometry-sync.md) | 高 |
 | 04 | 截图接口禁用；第二相机尚未形成实际双视图渲染证据 | [截图读回与双视图验收](04-capture-and-multiview.md) | 验收前必须完成 |
 
 ## 实施顺序
@@ -40,4 +40,4 @@
 | 性能 | kitchen 预热 20 秒、采样 25 秒，保存条件、样本数、均值、P95 和重算计数 |
 | 自动化 | 按 CLion 配置构建；全部已注册测试通过，开启 GPU 冒烟，无内部 SKIP |
 
-构建和测试环境见[执行计划的验证说明](../../superpowers/plans/2026-09-27-kitchen-acceptance-fixes.md)。本轮为文档整理，不更新历史测试数字，也不将未执行的修复测试记为通过。
+构建和测试环境见[执行计划的验证说明](../../superpowers/plans/2026-09-27-kitchen-acceptance-fixes.md)。各项审核保留当时的测试数量与证据；总体完成仍须通过第04项验收。
