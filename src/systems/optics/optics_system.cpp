@@ -3146,17 +3146,18 @@ OpticsSystem::SurfaceRenderTarget& OpticsSystem::acquire_surface_target(void* su
 
     auto& target = surface_targets_[surface];
 
-    // �״γ��ָ� surface����������� image_storage �����
+    // Allocate one ImageStorage slot when this surface first needs an output.
     if (target.image_handle == 0) {
         target.image_handle = SharedDataHub::instance().image_storage().allocate();
-        // ����һ��д����Ա���洢���֡�� image/executor ����Ⱦ�ύ����¡�
+        target.published_image = Detail::PublishedImage(target.image_handle);
+        // Clear any image and GPU receipts retained from a previous allocation.
         if (auto accessor =
                 SharedDataHub::instance().image_storage().acquire_write(target.image_handle)) {
-            // keep-alive only
+            *accessor = ImageDevice{};
         }
     }
 
-    // �ֱ��ʱ仯���״Σ�����/�ؽ��� surface �� Optics ���ͼ��
+    // Create or rebuild this surface's output images when its resolution changes.
     if (!target.final_output || !target.ui_overlay || !target.ui_warped_overlay ||
         !target.composite_output ||
         target.width != width || target.height != height) {
@@ -3223,13 +3224,36 @@ void OpticsSystem::evict_idle_surface_targets(uint64_t frame_index) {
             (frame_index - target.last_used_frame) > kSurfaceTargetIdleEvictFrames;
         if (idle) {
             if (target.image_handle != 0) {
-                SharedDataHub::instance().image_storage().deallocate(target.image_handle);
+                release_surface_target(it->second);
             }
             it = surface_targets_.erase(it);
         } else {
             ++it;
         }
     }
+}
+
+void OpticsSystem::release_surface_target(SurfaceRenderTarget& target) {
+    if (target.image_handle == 0) {
+        return;
+    }
+    // Invalidate cached Display layers and snapshots before waiting. An entered
+    // frame keeps its image access until its final consumed receipt is written.
+    target.published_image.retire().wait();
+    auto& storage = SharedDataHub::instance().image_storage();
+    {
+        auto image = storage.acquire_write(target.image_handle);
+        if (image->submit_receipt.serial != 0) {
+            hardware_->executor.wait_idle(image->submit_receipt);
+        }
+        if (image->consumed_receipt.serial != 0) {
+            hardware_->executor.wait_idle(image->consumed_receipt);
+        }
+        *image = ImageDevice{};
+    }
+    storage.deallocate(target.image_handle);
+    target.image_handle = 0;
+    target.published_image = {};
 }
 
 void OpticsSystem::evict_idle_offscreen_screenshot_targets(uint64_t frame_index) {
@@ -4859,7 +4883,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                                        viewport.x,
                                                                        viewport.y,
                                                                        viewport.width,
-                                                                       viewport.height});
+                                                                       viewport.height,
+                                                                       target.published_image});
                 }
 
 #ifdef CORONA_ENABLE_VISION
@@ -5629,11 +5654,9 @@ void OpticsSystem::shutdown() {
         });
     }
 
-    // �ͷ����� per-surface ��ȾĿ��Ĵ洢����� GPU ͼ������1����
+    // Retire per-surface publications before releasing their storage and GPU images.
     for (auto& [surface, target] : surface_targets_) {
-        if (target.image_handle != 0) {
-            SharedDataHub::instance().image_storage().deallocate(target.image_handle);
-        }
+        release_surface_target(target);
     }
     surface_targets_.clear();
     offscreen_screenshot_targets_.clear();
@@ -6987,7 +7010,8 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                          viewport.x,
                          viewport.y,
                          viewport.width,
-                         viewport.height});
+                         viewport.height,
+                         target.published_image});
                 }
             } catch (const std::exception& error) {
                 CFW_LOG_ERROR("OpticsSystem: Vision camera {} failed: {}",

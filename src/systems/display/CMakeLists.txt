@@ -15,6 +15,15 @@ helicon_compile_shaders(corona_display_system
 )
 
 if(BUILD_CORONA_TESTING OR BUILD_TESTING)
+    add_executable(corona_published_image_tests tests/test_published_image.cpp)
+    target_include_directories(corona_published_image_tests PRIVATE ${PROJECT_SOURCE_DIR}/include)
+    target_link_libraries(corona_published_image_tests PRIVATE Horizon)
+    if(COMMAND helicon_install_runtime_deps)
+        helicon_install_runtime_deps(corona_published_image_tests)
+    endif()
+    add_test(NAME PublishedImageTests COMMAND corona_published_image_tests)
+    set_tests_properties(PublishedImageTests PROPERTIES TIMEOUT 15)
+
     add_executable(corona_ui_surface_removal_race_tests
         tests/test_ui_surface_removal_race.cpp
         ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
