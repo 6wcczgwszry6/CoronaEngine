@@ -58,16 +58,9 @@ class DisplaySystem : public Kernel::SystemBase {
    private:
     using CallbackGate = Detail::OwnerCallbackGate<DisplaySystem>;
 
-    struct PendingLayer {
+    struct PendingLayer : Detail::ImageFrameMetadata {
         std::uintptr_t image_handle = 0;
         Detail::PublishedImage published_image;
-        uint64_t frame_index = 0;
-        uint32_t width = 0;
-        uint32_t height = 0;
-        uint32_t viewport_x = 0;
-        uint32_t viewport_y = 0;
-        uint32_t viewport_width = 0;
-        uint32_t viewport_height = 0;
         Detail::SurfaceLifecycleAcks::FirstPresentBoundary
             first_present_boundary = 0;
     };

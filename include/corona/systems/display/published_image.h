@@ -4,6 +4,7 @@
 #include <memory>
 #include <optional>
 
+#include "corona/systems/display/image_frame_metadata.h"
 #include "corona/systems/display/surface_frame_coordinator.h"
 
 namespace Corona::Systems::Detail {
@@ -44,6 +45,15 @@ class PublishedImage {
         return state_->coordinator.begin_frame(state_->snapshot, [&]() {
             return storage.acquire_write(state_->image_handle);
         });
+    }
+
+    template <typename Storage>
+    [[nodiscard]] auto acquire_write(Storage& storage, ImageFrameMetadata& metadata) const {
+        auto access = acquire_write(storage);
+        // Event snapshots can lag behind a producer replacing the image in the
+        // same slot. Resolve all sampling metadata while holding that slot's lock.
+        metadata = access ? access->images()->metadata : ImageFrameMetadata{};
+        return access;
     }
 
     // Nonblocking invalidation; the producer must wait without holding a

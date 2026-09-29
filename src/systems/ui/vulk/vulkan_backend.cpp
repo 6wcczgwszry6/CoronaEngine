@@ -322,6 +322,9 @@ void VulkanBackend::present_surface(void* surface) {
         }
         image_device->image = render->resources.render_target;
         image_device->submit_receipt = submit_receipt;
+        image_device->metadata = {++render->frame_index,
+                                  render->resources.width,
+                                  render->resources.height};
     } else {
         return;
     }
@@ -332,7 +335,6 @@ void VulkanBackend::present_surface(void* surface) {
     }
 
     if (auto* event_bus = Kernel::KernelContext::instance().event_bus()) {
-        ++render->frame_index;
         Events::UIFrameReadyEvent frame{surface,
                                         render->image_handle,
                                         render->frame_index,

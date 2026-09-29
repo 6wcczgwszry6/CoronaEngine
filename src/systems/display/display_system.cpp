@@ -654,8 +654,8 @@ void DisplaySystem::update() {
             gate_it->second,
             [&]() -> FrameImages {
                 auto& storage = SharedDataHub::instance().image_storage();
-                return {state.optics.published_image.acquire_write(storage),
-                        state.ui.published_image.acquire_write(storage)};
+                return {state.optics.published_image.acquire_write(storage, state.optics),
+                        state.ui.published_image.acquire_write(storage, state.ui)};
             });
         if (!frame_access) {
             continue;
@@ -928,10 +928,8 @@ Detail::PresentOutcome DisplaySystem::compose_and_present(
     //                  state.ui.frame_index);
     // }
 
-    // WORKAROUND for Horizon API change (removed HardwareImage::extent()):
-    // Images passed through SharedDataHub have different addresses than when created,
-    // so address-based extent cache lookups fail. Use state.width/height directly
-    // instead of querying from the image objects.
+    // These extents and viewport coordinates were refreshed from the acquired
+    // ImageDevice under its write lock, so they describe the images used here.
     const PixelExtent optics_extent{state.optics.width, state.optics.height};
     const PixelExtent ui_extent{state.ui.width, state.ui.height};
 

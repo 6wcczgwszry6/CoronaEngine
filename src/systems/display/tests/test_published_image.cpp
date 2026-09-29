@@ -9,6 +9,7 @@
 #include "corona/systems/display/published_image.h"
 
 namespace {
+using Corona::Systems::Detail::ImageFrameMetadata;
 using Corona::Systems::Detail::PublishedImage;
 using Storage = Corona::Kernel::Utils::Storage<int, 2, 1>;
 
@@ -140,6 +141,82 @@ void partial_image_acquisition_releases_image_and_surface_leases() {
     storage.deallocate(ui_id);
     expect(storage.count() == 0, "retirement must leave no occupied slots");
 }
+
+void acquired_image_replaces_stale_frame_metadata() {
+    struct Frame {
+        int image = 0;
+        ImageFrameMetadata metadata;
+    };
+    Corona::Kernel::Utils::Storage<Frame, 2, 1> storage;
+    const auto handle = storage.allocate();
+    PublishedImage producer(handle);
+
+    // Display has copied an event, but has not acquired its image yet.
+    // Exercise shrinking, growing, and a viewport change without resizing.
+    const ImageFrameMetadata updates[] = {
+        {8, 960, 540, 20, 30, 900, 480},
+        {9, 2560, 1440, 40, 50, 2400, 1300},
+        {10, 1920, 1080, 60, 70, 1800, 900},
+    };
+    for (const auto& updated : updates) {
+        struct Layer : ImageFrameMetadata {
+            uint64_t first_present_boundary = 19;
+        } snapshot;
+        static_cast<ImageFrameMetadata&>(snapshot) = {7, 1920, 1080, 0, 0, 1920, 1080};
+        {
+            auto write = storage.acquire_write(handle);
+            write->image = 7;
+            write->metadata = snapshot;
+        }
+        const auto cached_publication = producer;
+
+        // The producer replaces the frame in the same allocation before Display
+        // acquires it. The cached publication remains valid across this update.
+        {
+            auto write = storage.acquire_write(handle);
+            write->image = 42;
+            write->metadata = updated;
+        }
+        auto access = cached_publication.acquire_write(storage, snapshot);
+        expect(access && access->images()->image == 42, "Display should acquire the updated image");
+        expect(snapshot.width == updated.width && snapshot.height == updated.height,
+               "acquired image must not use the cached event's dimensions");
+        expect(snapshot.frame_index == updated.frame_index,
+               "consumption must identify the acquired frame rather than the cached event");
+        expect(snapshot.viewport_x == updated.viewport_x &&
+                   snapshot.viewport_y == updated.viewport_y &&
+                   snapshot.viewport_width == updated.viewport_width &&
+                   snapshot.viewport_height == updated.viewport_height,
+               "acquired image must use its own viewport");
+        expect(snapshot.first_present_boundary == 19,
+               "refreshing image metadata must preserve the captured UI acknowledgement boundary");
+        expect(!storage.try_acquire_write_nowait(handle),
+               "image and metadata must remain protected through Display receipt writeback");
+    }
+    producer.retire().wait();
+    storage.deallocate(handle);
+}
+
+void missing_images_clear_cached_frame_metadata() {
+    struct Frame {
+        ImageFrameMetadata metadata;
+    };
+    Corona::Kernel::Utils::Storage<Frame, 2, 1> storage;
+    const auto handle = storage.allocate();
+    PublishedImage producer(handle);
+    const auto cached = producer;
+    producer.retire().wait();
+    storage.deallocate(handle);
+
+    for (const auto& publication : {cached, PublishedImage{}}) {
+        ImageFrameMetadata metadata{7, 1920, 1080, 20, 30, 1800, 900};
+        expect(!publication.acquire_write(storage, metadata), "missing image must reject acquisition");
+        expect(metadata.frame_index == 0 && metadata.width == 0 && metadata.height == 0 &&
+                   metadata.viewport_x == 0 && metadata.viewport_y == 0 &&
+                   metadata.viewport_width == 0 && metadata.viewport_height == 0,
+               "missing image must not leave stale dimensions or viewport coordinates");
+    }
+}
 }  // namespace
 
 int main() {
@@ -147,6 +224,8 @@ int main() {
     retirement_waits_for_image_access_and_receipt_writeback();
     layer_retirement_does_not_retire_the_surface_or_ui();
     partial_image_acquisition_releases_image_and_surface_leases();
+    acquired_image_replaces_stale_frame_metadata();
+    missing_images_clear_cached_frame_metadata();
     Storage storage;
     expect(!PublishedImage{}.acquire_write(storage), "unpublished layers have no access");
     std::cout << "Published image lifecycle tests passed\n";

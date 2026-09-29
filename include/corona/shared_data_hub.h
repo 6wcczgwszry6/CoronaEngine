@@ -2,6 +2,7 @@
 #include <horizon/core/storage.h>
 #include <corona/memory/gpu_mem_ledger.h>
 #include <corona/resource/types/scene.h>  // Resource::IkChain（GeometryDevice::ik_chains）
+#include <corona/systems/display/image_frame_metadata.h>
 #include <corona/systems/optics/viewport_gizmo_math.h>
 
 #include <ktm/ktm.h>
@@ -538,6 +539,7 @@ struct ImageDevice {
     /// Written by DisplaySystem after compositing finishes reading the image.
     /// Producers wait on this before overwriting with new content to prevent GPU read/write races.
     Horizon::SubmitReceipt consumed_receipt;
+    Systems::Detail::ImageFrameMetadata metadata;
 };
 
 class SharedDataHub {

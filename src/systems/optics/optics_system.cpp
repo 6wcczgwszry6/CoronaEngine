@@ -4854,6 +4854,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 process_pending_screenshots(cam_handle, *presented_target);
 
                 // ��ʾ������Լ� surface ����������� DisplaySystem���� surface ���֣���
+                const ImagePixelExtent presented_extent{target.width, target.height};
+                const auto viewport = optics_event_viewport(*camera, presented_extent);
                 if (auto image_device =
                         SharedDataHub::instance().image_storage().acquire_write(target.image_handle)) {
                     if (latest_submit_receipt.serial == 0) {
@@ -4869,12 +4871,16 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
                     image_device->image = *presented_target;
                     image_device->submit_receipt = latest_submit_receipt;
+                    image_device->metadata = {frame_index,
+                                              presented_extent.width,
+                                              presented_extent.height,
+                                              viewport.x,
+                                              viewport.y,
+                                              viewport.width,
+                                              viewport.height};
                 }
 
                 if (auto* event_bus = context()->event_bus()) {
-                    const ImagePixelExtent presented_extent{target.width, target.height};
-                    const auto viewport =
-                        optics_event_viewport(*camera, presented_extent);
                     event_bus->publish<Events::OpticsFrameReadyEvent>({surface,
                                                                        target.image_handle,
                                                                        frame_index,
@@ -6980,6 +6986,8 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
 
                 process_pending_screenshots(cam_handle, *presented);
 
+                const ImagePixelExtent presented_extent{target.width, target.height};
+                const auto viewport = optics_event_viewport(camera, presented_extent);
                 if (auto image_device =
                         SharedDataHub::instance().image_storage().acquire_write(
                             target.image_handle)) {
@@ -6996,11 +7004,16 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     }
                     image_device->image = *presented;
                     image_device->submit_receipt = vision_submit_receipt;
+                    image_device->metadata = {frame_index,
+                                              presented_extent.width,
+                                              presented_extent.height,
+                                              viewport.x,
+                                              viewport.y,
+                                              viewport.width,
+                                              viewport.height};
                 }
 
                 if (auto* event_bus = context()->event_bus()) {
-                    const ImagePixelExtent presented_extent{target.width, target.height};
-                    const auto viewport = optics_event_viewport(camera, presented_extent);
                     event_bus->publish<Events::OpticsFrameReadyEvent>(
                         {surface,
                          target.image_handle,
