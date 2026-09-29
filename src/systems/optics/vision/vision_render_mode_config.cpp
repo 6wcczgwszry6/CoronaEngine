@@ -6,6 +6,8 @@ namespace Corona::Systems::Vision {
 
 std::string_view vision_render_mode_name(CameraVisionRenderMode mode) noexcept {
     switch (mode) {
+        case CameraVisionRenderMode::ProgressivePathTracing:
+            return "progressive_path_tracing";
         case CameraVisionRenderMode::SVGF:
             return "svgf";
         case CameraVisionRenderMode::SSAT:
@@ -17,7 +19,7 @@ std::string_view vision_render_mode_name(CameraVisionRenderMode mode) noexcept {
 }
 
 bool vision_render_mode_uses_denoise(CameraVisionRenderMode mode) noexcept {
-    return mode != CameraVisionRenderMode::PathTracing;
+    return mode != CameraVisionRenderMode::ProgressivePathTracing;
 }
 
 namespace {
@@ -102,6 +104,9 @@ void configure_vision_scene_for_mode(::vision::DataWrap& data,
         set_default_vision_json_value(frame_buffer, "type", "normal");
     }
     auto& frame_buffer_param = ensure_vision_json_object(frame_buffer, "param");
+    if (mode == CameraVisionRenderMode::ProgressivePathTracing) {
+        frame_buffer_param["accumulation"] = true;
+    }
     if (mode == CameraVisionRenderMode::SSAT) {
         apply_ssat_framebuffer_defaults(frame_buffer_param);
     }

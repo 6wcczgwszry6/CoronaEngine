@@ -7360,32 +7360,29 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
         return;
     }
 
-    if (mode == CameraVisionRenderMode::PathTracing) {
-        pipeline->set_output_denoise(false);
-        runtime.mode = mode;
-        current_vision_render_mode_ = mode;
-        rekey_active_runtime();
-        log_vision_pipeline_diagnostics(
-            *pipeline,
-            std::string("mode switch ") + std::string(Vision::vision_render_mode_name(mode)));
-        return;
-    }
-
     if (runtime.scene_path.empty()) {
         const bool was_denoise_enabled =
             Vision::vision_render_mode_uses_denoise(current_vision_render_mode_);
-        pipeline->set_output_denoise(true);
-        if (!was_denoise_enabled) {
+        const bool denoise_enabled = Vision::vision_render_mode_uses_denoise(mode);
+        runtime.commit_and_clear_contexts();
+        pipeline->set_output_denoise(denoise_enabled);
+        if (denoise_enabled && !was_denoise_enabled) {
             prepare_enabled_denoiser_for_runtime_switch(*pipeline);
-            pipeline->clear_view_contexts();
         }
+        if (mode == CameraVisionRenderMode::ProgressivePathTracing) {
+            pipeline->frame_buffer()->set_enable_accumulation(true);
+            pipeline->frame_buffer()->auto_manage_accumulation_buffer(true);
+        }
+        pipeline->invalidate();
         runtime.mode = mode;
         current_vision_render_mode_ = mode;
         rekey_active_runtime();
-        CFW_LOG_WARNING(
-            "OpticsSystem: requested Vision mode '{}' on engine-built scene; "
-            "Phase 2 only toggles denoise without changing framebuffer or denoiser type",
-            std::string(Vision::vision_render_mode_name(mode)));
+        if (mode == CameraVisionRenderMode::SVGF || mode == CameraVisionRenderMode::SSAT) {
+            CFW_LOG_WARNING(
+                "OpticsSystem: requested Vision mode '{}' on engine-built scene; "
+                "Phase 2 only toggles denoise without changing framebuffer or denoiser type",
+                std::string(Vision::vision_render_mode_name(mode)));
+        }
         log_vision_pipeline_diagnostics(
             *pipeline,
             std::string("mode switch ") + std::string(Vision::vision_render_mode_name(mode)));

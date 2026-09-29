@@ -1,6 +1,7 @@
 #include <corona/systems/optics/optics_system.h>
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
+#include "../vision/vision_camera_adapter.h"
 #include "../vision/vision_external_live_aabb.h"
 #include <filesystem>
 #include <fstream>
@@ -62,6 +63,56 @@ struct VisionEmbeddedModeSwitchTest {
                "in-memory PT must initialize");
         auto pt = vision::Global::instance().pipeline_shared();
         render(*pt, "PT");
+        expect(!pt->frame_buffer()->enable_accumulation(), "realtime PT must not accumulate SVGF output");
+        expect(system.load_external_vision_scene(request.scene_key,
+            CameraVisionRenderMode::ProgressivePathTracing, Vision::VisionPipelineSource::ExternalLive),
+            "progressive PT must load from the same embedded source");
+        auto progressive = vision::Global::instance().pipeline_shared();
+        expect(progressive != pt, "PT modes must keep independent histories");
+        expect(!progressive->output_desc().denoise && progressive->frame_buffer()->enable_accumulation(),
+            "progressive PT must accumulate without realtime denoise");
+        auto* illumination = dynamic_cast<vision::IlluminationIntegrator*>(progressive->renderer().integrator().get());
+        expect(illumination && illumination->denoiser() && !illumination->denoiser()->enabled(),
+            "the actual denoiser must remain disabled, not just the output flag");
+        progressive->invalidate();
+        auto* fb = progressive->frame_buffer();
+        std::vector<vision::float4> first(progressive->pixel_num()), second(first.size()), average(first.size());
+        progressive->display(1.0 / 60.0);
+        progressive->stream() << fb->rt_buffer().device_buffer().download(first.data())
+                              << vision::synchronize() << vision::commit();
+        progressive->display(1.0 / 60.0);
+        progressive->stream() << fb->rt_buffer().device_buffer().download(second.data())
+                              << fb->accumulation_buffer().device_buffer().download(average.data())
+                              << vision::synchronize() << vision::commit();
+        for (size_t i = 0; i < first.size(); ++i) {
+            expect(std::isfinite(average[i].x) &&
+                   std::abs(average[i].x - (first[i].x + second[i].x) * 0.5f) < 0.0001f &&
+                   std::abs(average[i].y - (first[i].y + second[i].y) * 0.5f) < 0.0001f &&
+                   std::abs(average[i].z - (first[i].z + second[i].z) * 0.5f) < 0.0001f,
+                   "progressive output must average actual consecutive PT samples");
+        }
+        Corona::CameraDevice camera;
+        camera.width = 16; camera.height = 16;
+        camera.position = {0.f, 0.f, -3.f}; camera.forward = {0.f, 0.f, 1.f};
+        camera.world_up = {0.f, 1.f, 0.f}; camera.fov = 45.f;
+        Vision::sync_vision_camera(*progressive, camera);
+        render(*progressive, "Progressive");
+        const auto accumulated_frames = progressive->frame_index();
+        Vision::sync_vision_camera(*progressive, camera);
+        expect(progressive->frame_index() == accumulated_frames, "a stationary camera must keep accumulating");
+        camera.position.x += 0.1f;
+        Vision::sync_vision_camera(*progressive, camera);
+        expect(progressive->frame_index() == 0, "moving the camera must restart convergence");
+        progressive->stream() << fb->accumulation_buffer().device_buffer().download(average.data())
+                              << vision::synchronize() << vision::commit();
+        for (const auto& pixel : average) {
+            expect(pixel.x == 0.f && pixel.y == 0.f && pixel.z == 0.f,
+                   "camera changes must clear old accumulated pixels");
+        }
+        expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
+            Vision::VisionPipelineSource::ExternalLive), "switch back to realtime PT");
+        render(*pt, "PT-after-progressive");
+        progressive.reset();
         const auto resource_key = system.make_vision_scene_resource_key(request.scene_key,
             Vision::VisionPipelineSource::ExternalLive);
         auto resource = system.vision_scene_resources_.at(resource_key);

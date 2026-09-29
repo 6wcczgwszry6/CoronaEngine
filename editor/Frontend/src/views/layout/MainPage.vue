@@ -1163,7 +1163,8 @@ const pluginStates = computed(() =>
 );
 const mainRenderModeOptions = [
   { value: 'native', backend: 'native', label: 'Native' },
-  { value: 'path_tracing', backend: 'vision', label: 'Vision Path Tracing' },
+  { value: 'path_tracing', backend: 'vision', label: 'Vision PT · 实时' },
+  { value: 'progressive_path_tracing', backend: 'vision', label: 'Vision PT · 渐进收敛' },
   { value: 'svgf', backend: 'vision', label: 'Vision SVGF' },
   { value: 'ssat', backend: 'vision', label: 'Vision SSAT' },
 ];
@@ -1172,7 +1173,7 @@ const mainRenderModeLabel = computed(() => {
     return 'Native';
   }
   return mainRenderModeOptions.find((mode) => mode.value === mainVisionRenderMode.value)?.label
-    || 'Vision Path Tracing';
+    || 'Vision PT · 实时';
 });
 let pendingMainRenderSelection = null;
 const currentMainCameraId = () =>
@@ -2646,6 +2647,16 @@ const handleViewportControlsRequest = async (payload = {}) => {
 
   if (payload.action === 'setViewportUiMode') {
     setViewportUiModeFromPanel(payload.mode);
+    return;
+  }
+
+  if (payload.action === 'selectRenderMode') {
+    if (payload.sceneId === getEditorControlsState().sceneId &&
+        mainRenderModeOptions.some((mode) => mode.value === payload.mode &&
+          (mode.backend !== 'vision' || visionAvailable.value))) {
+      await selectMainRenderMode(payload.mode);
+    }
+    broadcastViewportControlsState();
     return;
   }
 

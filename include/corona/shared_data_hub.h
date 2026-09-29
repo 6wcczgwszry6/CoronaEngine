@@ -254,6 +254,7 @@ enum class CameraVisionRenderMode : uint8_t {
     PathTracing,
     SVGF,
     SSAT,
+    ProgressivePathTracing,
 };
 
 struct CameraDevice {

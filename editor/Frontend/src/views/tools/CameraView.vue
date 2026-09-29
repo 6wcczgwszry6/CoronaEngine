@@ -28,7 +28,7 @@
           aria-label="Vision render mode"
           @click.stop="visionModeMenuOpen = !visionModeMenuOpen"
         >
-          {{ visionRenderModes.find((mode) => mode.value === visionRenderMode)?.label || 'Vision Path Tracing' }}
+          {{ visionRenderModes.find((mode) => mode.value === visionRenderMode)?.label || 'Vision PT · 实时' }}
         </button>
         <div v-if="visionModeMenuOpen" class="dropdown-menu vision-mode-menu">
           <button
@@ -214,7 +214,8 @@ const outputModes = [
   { value: 'shadow_mask', label: 'Shadow Mask' },
 ];
 const visionRenderModes = [
-  { value: 'path_tracing', label: 'Vision Path Tracing' },
+  { value: 'path_tracing', label: 'Vision PT · 实时' },
+  { value: 'progressive_path_tracing', label: 'Vision PT · 渐进收敛' },
   { value: 'svgf', label: 'Vision SVGF' },
   { value: 'ssat', label: 'Vision SSAT' },
 ];

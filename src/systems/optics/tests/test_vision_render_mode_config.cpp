@@ -85,14 +85,27 @@ void path_tracing_preserves_source_lightfield_framebuffer() {
     Corona::Systems::Vision::configure_vision_scene_for_mode(
         data, CameraVisionRenderMode::PathTracing);
 
-    expect(!data["output"]["denoise"].get<bool>(),
-           "path_tracing should set output.denoise=false");
+    expect(data["output"]["denoise"].get<bool>(),
+           "realtime path_tracing should explicitly enable denoise");
     expect(data["pipeline"]["param"]["frame_buffer"]["type"].get<std::string>() ==
                "lightfield",
            "path_tracing should preserve the source lightfield framebuffer");
     expect(data["render"]["integrator"]["param"]["denoiser"]["type"].get<std::string>() ==
                "svgf",
            "path_tracing should not keep SSAT denoiser descriptor");
+}
+
+void progressive_pt_enables_accumulation_without_denoise() {
+    auto data = make_base_scene();
+    data["pipeline"]["param"]["frame_buffer"]["param"]["accumulation"] = false;
+    const auto progressive = CameraVisionRenderMode::ProgressivePathTracing;
+    Corona::Systems::Vision::configure_vision_scene_for_mode(data, progressive);
+    expect(!data["output"]["denoise"].get<bool>(),
+           "progressive PT must disable realtime denoising");
+    expect(data["pipeline"]["param"]["frame_buffer"]["param"]["accumulation"].get<bool>(),
+           "progressive PT must override a source that disables accumulation");
+    expect(Corona::Systems::Vision::vision_render_mode_name(progressive) == "progressive_path_tracing",
+           "progressive PT must round trip through camera settings");
 }
 
 void svgf_preserves_source_lightfield_framebuffer() {
@@ -240,9 +253,9 @@ void mode_names_and_denoise_flags_are_stable() {
     expect(Corona::Systems::Vision::vision_render_mode_name(
                CameraVisionRenderMode::SSAT) == "ssat",
            "ssat mode name should be stable");
-    expect(!Corona::Systems::Vision::vision_render_mode_uses_denoise(
+    expect(Corona::Systems::Vision::vision_render_mode_uses_denoise(
                CameraVisionRenderMode::PathTracing),
-           "path_tracing should disable denoise");
+           "realtime path_tracing should enable denoise");
     expect(Corona::Systems::Vision::vision_render_mode_uses_denoise(
                CameraVisionRenderMode::SVGF),
            "svgf should enable denoise");
@@ -265,8 +278,8 @@ void cbox_lf_scene_supports_pt_and_ssat_mode_import() {
     pt_desc.scene_path = scene_path->parent_path();
     pt_desc.init(pt_data);
 
-    expect(!pt_desc.output_desc.denoise,
-           "PT import from cbox-lf should disable realtime denoise");
+    expect(pt_desc.output_desc.denoise,
+           "realtime PT import should explicitly request denoise");
     expect(pt_desc.pipeline_desc.frame_buffer_desc.sub_type == "lightfield",
            "PT import from cbox-lf should preserve its lightfield framebuffer");
     expect(pt_desc.renderer_desc.integrator_desc.denoiser_desc.sub_type == "svgf",
@@ -294,6 +307,7 @@ void cbox_lf_scene_supports_pt_and_ssat_mode_import() {
 }  // namespace
 
 int main() {
+    progressive_pt_enables_accumulation_without_denoise();
     mode_names_and_denoise_flags_are_stable();
     path_tracing_preserves_source_lightfield_framebuffer();
     svgf_preserves_source_lightfield_framebuffer();

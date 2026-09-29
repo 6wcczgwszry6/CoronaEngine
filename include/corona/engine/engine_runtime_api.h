@@ -455,7 +455,7 @@ void set_render_backend(const std::string& mode, std::uintptr_t camera_handle = 
 /// 获取当前请求的渲染后端，返回 "native" 或 "vision"。
 [[nodiscard]] std::string get_render_backend(std::uintptr_t camera_handle = 0);
 
-/// 设置 Vision 后端的渲染技术。mode: "path_tracing", "svgf" 或 "ssat"。
+/// Set the Vision rendering mode: "path_tracing", "progressive_path_tracing", "svgf", or "ssat".
 void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handle = 0);
 
 /// 获取当前 camera 请求的 Vision 渲染技术。

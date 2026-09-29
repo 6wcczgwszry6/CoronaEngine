@@ -168,6 +168,9 @@ Corona::CameraVisionRenderMode parse_vision_render_mode(const std::string& mode)
         return static_cast<char>(std::tolower(ch));
     });
     std::replace(value.begin(), value.end(), '-', '_');
+    if (value == "progressive_path_tracing") {
+        return Corona::CameraVisionRenderMode::ProgressivePathTracing;
+    }
     if (value == "svgf" || value == "vision_svgf") {
         return Corona::CameraVisionRenderMode::SVGF;
     }
@@ -179,6 +182,8 @@ Corona::CameraVisionRenderMode parse_vision_render_mode(const std::string& mode)
 
 std::string vision_render_mode_to_string(Corona::CameraVisionRenderMode mode) {
     switch (mode) {
+        case Corona::CameraVisionRenderMode::ProgressivePathTracing:
+            return "progressive_path_tracing";
         case Corona::CameraVisionRenderMode::SVGF:
             return "svgf";
         case Corona::CameraVisionRenderMode::SSAT:
