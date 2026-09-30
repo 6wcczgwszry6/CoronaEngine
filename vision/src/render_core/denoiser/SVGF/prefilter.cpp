@@ -121,6 +121,11 @@ auto compute_spatial_weight = [](Float history) -> Float {
                             
                             Float w_total_direct = w * w_lum_direct;
                             Float w_total_indirect = w * w_lum_indirect;
+                            // Match the a-trous specular boundary rule during
+                            // low-history reconstruction as well. Direct/indirect
+                            // producers keep their original cross-surface weights.
+                            w_total_indirect *= ocarina::select(
+                                param.channel_kind != 0u || center_hit.inst_id == n_hit.inst_id, 1.f, 0.f);
                             
                             sum_direct += n_direct * w_total_direct;
                             sum_indirect += n_indirect * w_total_indirect;
@@ -143,7 +148,9 @@ auto compute_spatial_weight = [](Float history) -> Float {
                 RadType3Var firefly_clamped_direct = center_direct;
                 RadType3Var firefly_clamped_indirect = center_indirect;
                 
-                $if(spatial_weight_sum > 0.5f) {
+                // Only stabilize newly exposed pixels. Repeated clipping of an
+                // established estimate removes real indirect light and reflections.
+                $if(history < Cfg::Variance::kHistoryThreshold && spatial_weight_sum > 0.5f) {
                     Float inv_spatial_w = 1.f / max(spatial_weight_sum, 1e-4f);
                     Float safe_spatial_mean_direct = max(luminance(spatial_sum_direct * inv_spatial_w), 0.01f);
                     Float safe_spatial_mean_indirect = max(luminance(spatial_sum_indirect * inv_spatial_w), 0.01f);
@@ -258,6 +265,7 @@ CommandBatch Prefilter::dispatch(RealTimeDenoiseInput &input) noexcept {
     param.svgf_buffer = svgf_->svgf_buffer_cur(input.frame_index).descriptor();
     param.visibility_buffer = input.visibility.descriptor();
     param.camera_pos = input.camera_pos;
+    param.channel_kind = static_cast<uint>(input.channel_kind);
 
     CommandBatch ret;
     ret << prefilter_shader_(param).dispatch(input.resolution);

@@ -114,7 +114,12 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
 
                 Float w_direct = h * w_geo *
                     LuminanceWeightUtils::compute_variance_guided(lum_center_direct, lum_neighbor_direct, phi_l_direct);
-                Float w_indirect = h * w_geo *
+                // Specular illumination depends on the surface BRDF as well as
+                // lighting. Borrowing demodulated values across objects can turn
+                // a small reflectance guide into a bright halo after remodulation.
+                Float w_specular_geo = ocarina::select(
+                    param.channel_kind != 0u || center_hit.inst_id == neighbor_hit.inst_id, w_geo, 0.f);
+                Float w_indirect = h * w_specular_geo *
                     LuminanceWeightUtils::compute_variance_guided(lum_center_indirect, lum_neighbor_indirect, phi_l_indirect);
 
                 Float var_neighbor_direct = max(Float(direct_neighbor.w), Cfg::Epsilon::kVariance);
@@ -157,8 +162,8 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
         // full multi-iteration result. Moments (M1/M2/history) are intentionally left
         // untouched: they must keep tracking the RAW signal so variance still drives
         // edge stopping. svgf_buffer is not read by this pass (only input buffers are),
-        // so this center-only write is race-free. The history-clamp in the temporal
-        // stage keeps the fed-back history from drifting (ReLAX-style pairing).
+        // so this center-only write is race-free. Feedback is disabled by default
+        // to avoid compounding spatial blur in the temporal illumination history.
         //
         // illumi_direct = DIFFUSE channel, illumi_indirect = SPECULAR channel. The
         // specular channel is NOT fed back by default (kFeedbackSpecular=false): feeding
@@ -223,6 +228,7 @@ CommandBatch AtrousFilter::dispatch_combined(vision::RealTimeDenoiseInput &input
     param.frame_index = input.frame_index;
     // Feed back only the first a-trous iteration as colour history (Schied 2017).
     param.write_history = (iteration == 0u) ? 1u : 0u;
+    param.channel_kind = static_cast<uint>(input.channel_kind);
     
     CommandBatch ret;
     ret << combined_shader_(param).dispatch(input.resolution);

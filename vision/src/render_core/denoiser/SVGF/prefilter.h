@@ -16,13 +16,14 @@ struct PrefilterParam {
     BufferDesc<SVGFDataDual> svgf_buffer;
     BufferDesc<TriangleHit> visibility_buffer;
     array_float3 camera_pos{};
+    uint channel_kind{};
 };
 
 }// namespace vision::svgf
 
 OC_PARAM_STRUCT(vision::svgf, PrefilterParam,
     radiance_direct, radiance_indirect, svgf_buffer,
-    visibility_buffer, camera_pos){};
+    visibility_buffer, camera_pos, channel_kind){};
 
 namespace vision::svgf {
 class SVGF;

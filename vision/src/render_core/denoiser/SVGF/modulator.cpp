@@ -45,8 +45,8 @@ auto linear_modulate = [&](RadType3Var value, Float3 albedo,
             !PixelStateUtils::is_emissive(pipeline_ref, cur_hit)) {
             RadType4Var radiance_direct = param.radiance_direct.read(idx);
             RadType4Var radiance_indirect = param.radiance_indirect.read(idx);
-            // channel_kind == DiffuseSpecular: diffuse channel demodulated by DIFFUSE
-            // albedo; specular channel left in radiance space (unless kDemodulateSpecular).
+            // channel_kind == DiffuseSpecular: use each channel's reflectance guide.
+            // Composite glossy lobes can carry diffuse textures in the specular channel.
             // channel_kind == DirectIndirect (ReSTIR): both channels are lighting signals,
             // demodulate BOTH by the full surface albedo (canonical SVGF).
             $if(param.channel_kind == 0u) {

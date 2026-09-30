@@ -32,7 +32,7 @@ private:
     struct Params {
         float sigma_rt_{4.0f};
         float sigma_normal_{128.f};
-        float sigma_depth_{1.0f};
+        float sigma_depth_{SVGFConfig::GeometryWeight::kAtrousDepthScaleDefault};
         bool spatial_filter_{true};
         bool switch_{true};
 
@@ -40,7 +40,7 @@ private:
         explicit Params(const DenoiserDesc &desc)
             : sigma_rt_(desc["sigma_rt"].as_float(4.0f)),
               sigma_normal_(desc["sigma_normal"].as_float(128.f)),
-              sigma_depth_(desc["sigma_depth"].as_float(1.0f)),
+              sigma_depth_(desc["sigma_depth"].as_float(SVGFConfig::GeometryWeight::kAtrousDepthScaleDefault)),
               spatial_filter_(desc["spatial_filter"].as_bool(true)),
         //
         switch_(false) {}

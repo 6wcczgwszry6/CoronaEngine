@@ -26,12 +26,13 @@ struct CombinedAtrousParam {
     uint iteration{};
     uint frame_index{};
     uint write_history{};
+    uint channel_kind{};
 };
 
 }// namespace vision::svgf
 
 OC_PARAM_STRUCT(vision::svgf, CombinedAtrousParam, direct_src, direct_dst, indirect_src, indirect_dst,
-visibility_buffer, svgf_buffer, camera_pos, l_phi, n_phi, z_phi, step_size, iteration, frame_index, write_history){};
+visibility_buffer, svgf_buffer, camera_pos, l_phi, n_phi, z_phi, step_size, iteration, frame_index, write_history, channel_kind){};
 
 namespace vision::svgf {
 class SVGF;
