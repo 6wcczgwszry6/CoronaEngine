@@ -41,8 +41,8 @@
 |---|---|
 | `src/systems/optics/optics_system.cpp` | 截图请求处理、帧资源及完成通知 |
 | `src/systems/ui/cef/cef_editor_native_api_handlers.cpp` | 相机／可见视口入口，保护原有相机状态 |
-| `src/systems/ui/tests/ui_multisurface_smoke.cpp` | 参考已有 GPU 像素、surface 生命周期验证 |
-| `src/systems/optics/tests/test_vision_geometry_gpu_resource.cpp` | Vision 输出及多 runtime 结果验证 |
+| `tests/integration/ui_multisurface_smoke.cpp` | 参考已有 GPU 像素、surface 生命周期验证 |
+| `tests/systems/optics/test_vision_geometry_gpu_resource.cpp` | Vision 输出及多 runtime 结果验证 |
 | Horizon 公开接口与后端 | 仅当缺少公开读回能力时修改，保持依赖锁与测试版本一致 |
 
 不同模式的双视图验收依赖 [02](02-embedded-mode-switch.md)；共享几何结果验收依赖 [03](03-runtime-geometry-sync.md)。

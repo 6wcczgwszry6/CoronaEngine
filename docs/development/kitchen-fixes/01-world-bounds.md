@@ -31,7 +31,7 @@
 | `vision/src/base/mgr/pipeline.h`、`pipeline.cpp` | 刷新范围相关 GPU 数据及历史 |
 | `src/systems/optics/optics_system.cpp` | external-live、共享变换应用、增删／重建批次的调用顺序 |
 | `vision/src/render_core/light/environments/directional.cpp` | 核对中心／半径缓存及更新路径 |
-| `src/systems/optics/tests/test_external_live_aabb.h`、`test_vision_geometry_gpu_resource.cpp` | CPU 与 GPU 回归 |
+| `tests/systems/optics/test_external_live_aabb.h`、`test_vision_geometry_gpu_resource.cpp` | CPU 与 GPU 回归 |
 
 ## 边界规则
 

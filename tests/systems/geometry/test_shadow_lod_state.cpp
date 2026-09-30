@@ -1,4 +1,4 @@
-#include "../shadow_lod_state.h"
+#include "shadow_lod_state.h"
 
 #include <array>
 #include <iostream>

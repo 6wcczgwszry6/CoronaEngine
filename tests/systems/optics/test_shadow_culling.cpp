@@ -1,4 +1,4 @@
-#include "../shadow_culling.h"
+#include "shadow_culling.h"
 
 #include <array>
 #include <cmath>

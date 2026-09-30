@@ -1,4 +1,4 @@
-#include "../storage_snapshot.h"
+#include "storage_snapshot.h"
 
 #include <cassert>
 

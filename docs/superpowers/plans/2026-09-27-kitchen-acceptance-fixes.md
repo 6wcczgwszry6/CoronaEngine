@@ -36,7 +36,7 @@
 - 修改 `vision/src/base/mgr/scene.h`、`scene.cpp`：总范围聚合。
 - 修改 `vision/src/base/mgr/pipeline.h`、`pipeline.cpp`、`src/systems/optics/optics_system.cpp`：更新顺序与 GPU 刷新。
 - 核对 `vision/src/render_core/light/environments/directional.cpp`：`prepare()` 缓存了中心和半径，不能只修 CPU getter。
-- 测试 `src/systems/optics/tests/test_external_live_aabb.h`、`test_vision_geometry_gpu_resource.cpp`。
+- 测试 `tests/systems/optics/test_external_live_aabb.h`、`test_vision_geometry_gpu_resource.cpp`。
 
 **拟定接口：** `bool Scene::recompute_world_bounds() noexcept`，只对当前有效 group AABB 求并集、返回是否改变；不调用 instance 的逐三角形算法。`void Pipeline::refresh_world_bounds_dependents() noexcept` 更新依赖范围的光源编码数据及采样分布，使用该 pipeline 的 stream/bindless；清除受影响的累积历史。
 
@@ -75,7 +75,7 @@
 
 ## 任务 4：恢复可验证的截图及双视图验收
 
-**文件：** `src/systems/optics/optics_system.cpp` 的截图处理、`src/systems/ui/cef/cef_editor_native_api_handlers.cpp` 相机入口、`src/systems/optics/tests/test_vision_geometry_gpu_resource.cpp`；复用 `src/systems/ui/tests/ui_multisurface_smoke.cpp` 的像素验证经验。
+**文件：** `src/systems/optics/optics_system.cpp` 的截图处理、`src/systems/ui/cef/cef_editor_native_api_handlers.cpp` 相机入口、`tests/systems/optics/test_vision_geometry_gpu_resource.cpp`；复用 `tests/integration/ui_multisurface_smoke.cpp` 的像素验证经验。
 
 **边界：** `HardwareExecutor::wait(const SubmitReceipt&)` 可用于等待提交；当前截图的旧 `copy_to_buffer` 已移除。采用 Horizon 现有公开读回接口；若缺失，应在 Horizon 增加并测试公开 image→host readback 能力、单独提交和更新依赖锁，不能在 Engine 偷用 Vulkan 私有句柄或假定旧 API 存在。
 

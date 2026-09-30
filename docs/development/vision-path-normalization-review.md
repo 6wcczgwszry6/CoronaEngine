@@ -30,7 +30,7 @@ git diff <本次提交SHA>^ <本次提交SHA> -- src/systems/optics/optics_syste
 | 6 | `src/systems/ui/cef/cef_editor_native_api_handlers.cpp`：`register_embedded_vision_actor_binding()` | 编辑器是否传入当前项目根目录？重载是否清除并重建绑定？ |
 | 7 | `src/systems/optics/optics_system.cpp`：加载事件回调、两个 `load_external_vision_scene*()` | 延迟加载前是否固定路径上下文？显式重载是否刷新保留的绑定？ |
 | 8 | 同文件：`has_external_live_bindings_for_scene()`、`sync_external_live_vision_transforms()` | 逐绑定比较是否只读 `source_path_key`？有没有退回逐帧补算？AABB 和渲染逻辑是否保持原样？ |
-| 9 | `src/systems/network/tests/test_network_protocol.cpp`：`test_external_vision_binding_path_identity()` | 测试是否覆盖身份改变、复用和拒绝无效输入，而非只检查字段存在？ |
+| 9 | `tests/systems/network/test_network_protocol.cpp`：`test_external_vision_binding_path_identity()` | 测试是否覆盖身份改变、复用和拒绝无效输入，而非只检查字段存在？ |
 
 可用以下搜索核实所有入口与消费位置：
 
@@ -66,7 +66,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .agents/skills/clion-bui
 在 CLion 的相同工具链和 RelWithDebInfo 配置中构建现有 `corona_network_protocol_tests` target，然后从仓库根目录运行：
 
 ```powershell
-& ./cmake-build-relwithdebinfo/src/systems/network/corona_network_protocol_tests.exe
+& ./cmake-build-relwithdebinfo/tests/systems/network/corona_network_protocol_tests.exe
 if ($LASTEXITCODE -ne 0) { throw 'Network protocol regression failed' }
 ```
 

@@ -1,8 +1,8 @@
 #include <corona/systems/optics/optics_system.h>
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
-#include "../vision/vision_camera_adapter.h"
-#include "../vision/vision_external_live_aabb.h"
+#include "vision/vision_camera_adapter.h"
+#include "vision/vision_external_live_aabb.h"
 #include <filesystem>
 #include <fstream>
 #include <cmath>

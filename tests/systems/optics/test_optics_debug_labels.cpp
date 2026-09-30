@@ -1,4 +1,4 @@
-#include "../optics_debug_labels.h"
+#include "optics_debug_labels.h"
 
 #include <iostream>
 

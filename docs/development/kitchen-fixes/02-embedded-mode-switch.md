@@ -35,8 +35,8 @@
 
 - `include/corona/systems/optics/vision_scene_resource.h`：来源描述、版本及重载语义。
 - `src/systems/optics/optics_system.cpp`：接收 embedded 来源、选择导入器、runtime 重置／淘汰。
-- `src/systems/optics/tests/test_vision_scene_resource.cpp`：来源生命周期。
-- `src/systems/optics/tests/test_vision_render_mode_config.cpp`、`test_vision_geometry_gpu_resource.cpp`：模式与实际 pipeline 初始化。
+- `tests/systems/optics/test_vision_scene_resource.cpp`：来源生命周期。
+- `tests/systems/optics/test_vision_render_mode_config.cpp`、`test_vision_geometry_gpu_resource.cpp`：模式与实际 pipeline 初始化。
 
 ## 实施与验收
 

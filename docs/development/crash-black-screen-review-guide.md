@@ -35,7 +35,7 @@ git -C .workspace/Horizon status --short
 | 2 | [display_system.cpp](E:/work/corona/CoronaEngine/src/systems/display/display_system.cpp:869)：`ensure_composite_resources` | 首次创建合成输出时是否等待了空记录 |
 | 3 | [optics_system.cpp](E:/work/corona/CoronaEngine/src/systems/optics/optics_system.cpp:2935)：资源重建、提交记录更新 | 等待条件和实际 GPU 提交是否匹配 |
 | 4 | [quad_compositor.cpp](E:/work/corona/CoronaEngine/src/systems/ui/vulk/quad_compositor.cpp:109)：`composite` | 索引存储格式、上传长度和绘制解释是否一致 |
-| 5 | [ui_multisurface_smoke.cpp](E:/work/corona/CoronaEngine/src/systems/ui/tests/ui_multisurface_smoke.cpp:23)：`verify_quad_pixels`、`run_smoke` | 测试能否检出原缺陷，而不只是证明程序没有退出 |
+| 5 | [ui_multisurface_smoke.cpp](E:/work/corona/CoronaEngine/tests/integration/ui_multisurface_smoke.cpp:23)：`verify_quad_pixels`、`run_smoke` | 测试能否检出原缺陷，而不只是证明程序没有退出 |
 
 ## 2. 先确认两条独立的故障链
 

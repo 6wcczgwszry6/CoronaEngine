@@ -1,5 +1,5 @@
 #include <corona/systems/optics/actor_pick_readback_worker.h>
-#include "../actor_pick_result.h"
+#include "actor_pick_result.h"
 
 #include <atomic>
 #include <chrono>

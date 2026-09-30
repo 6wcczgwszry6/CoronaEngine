@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../vision/vision_external_live_aabb.h"
+#include "vision/vision_external_live_aabb.h"
 #include "math/transform.h"
 #include "base/mgr/scene.h"
 #include <cmath>

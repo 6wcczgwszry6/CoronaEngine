@@ -1,4 +1,4 @@
-#include "../native_frame_throttle.h"
+#include "native_frame_throttle.h"
 
 #include <cassert>
 #include <vector>

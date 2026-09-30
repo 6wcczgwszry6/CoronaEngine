@@ -40,7 +40,7 @@
 - `src/systems/optics/optics_system.cpp`：发布入口、每个 runtime 的消费顺序与 GPU 生命周期。
 - `src/systems/optics/vision/vision_external_live_aabb.h`：几何变化信号和缓存失效协作。
 - `src/systems/optics/vision/vision_geometry_snapshot.h`：CPU快照与本地暂存导入。
-- `src/systems/optics/tests/test_vision_runtime_geometry_sync.cpp`：实际双 runtime 集成测试。
+- `tests/integration/test_vision_runtime_geometry_sync.cpp`：实际双 runtime 集成测试。
 - Vision的Shape、Scene、Geometry、Pipeline、Material、Light：稳定身份、build计数、几何重建光照刷新、CPU描述保留与面积光成员映射。
 
 ## 实施与验收

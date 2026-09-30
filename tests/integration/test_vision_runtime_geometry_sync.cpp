@@ -1,7 +1,7 @@
 #include <corona/systems/optics/optics_system.h>
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
-#include "../vision/vision_geometry_snapshot.h"
+#include "vision/vision_geometry_snapshot.h"
 #include <filesystem>
 #include <fstream>
 #include <cmath>
