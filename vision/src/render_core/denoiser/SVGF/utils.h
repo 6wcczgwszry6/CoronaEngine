@@ -275,7 +275,13 @@ struct PixelStateUtils {
                     MaterialEvaluator bsdf = material->create_evaluator(it, swl);
                     SampledSpectrum diffuse_spec{swl.dimension()};
                     SampledSpectrum specular_spec{swl.dimension()};
-                    bsdf.albedo_split(it.wo, diffuse_spec, specular_spec);
+                    // Reflectance guides use an absolute incidence cosine. A
+                    // back-facing substrate otherwise feeds a negative cosine
+                    // into Fresnel, creating poles that filtering amplifies into
+                    // bright bands when the guide is multiplied back in.
+                    Float3 guide_wo = ocarina::select(
+                        dot(bsdf.shading_frame().normal(), it.wo) < 0.f, -it.wo, it.wo);
+                    bsdf.albedo_split(guide_wo, diffuse_spec, specular_spec);
                     albedo = sp->linear_srgb(specular_spec, swl);
                 });
             };
