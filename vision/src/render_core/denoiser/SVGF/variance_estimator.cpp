@@ -28,7 +28,10 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         Float lum_indirect = luminance(cur_indirect.xyz());
             
         Interaction cur_it = pipeline_ref->geometry().compute_surface_interaction(cur_hit, false);
-        Float cur_depth = length(cur_it.pos - param.camera_pos.as_vec3());
+        // Reprojection tests the current surface against the previous view.
+        // Both distances must use that same eye position: comparing current-eye
+        // and previous-eye distances rejects a stationary surface on dolly moves.
+        Float expected_prev_depth = length(cur_it.pos - param.prev_camera_pos.as_vec3());
             
         Float2 motion_vec = param.motion_vectors.read(index);
         Float motion_length = length(motion_vec);
@@ -55,7 +58,7 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         Float acc_history = 0.f;
         Float total_weight = 0.f;
         
-        auto check_tap_consistency = [&](Int2 tap_pixel, Float bilinear_w) {
+        auto check_tap_consistency = [&](Int2 tap_pixel, Float bilinear_w, bool fallback = false) {
             $if(bilinear_w > 0.001f && 
                 all(tap_pixel >= 0) && all(tap_pixel < screen_size)) {
                 
@@ -68,7 +71,7 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
                     Float tap_depth = length(tap_it.pos - param.prev_camera_pos.as_vec3());
                     Bool tap_is_emissive = PixelStateUtils::is_emissive(pipeline_ref, tap_hit);
                     
-                    Float depth_diff = abs(cur_depth - tap_depth) / max(cur_depth, 0.1f);
+                    Float depth_diff = abs(expected_prev_depth - tap_depth) / max(expected_prev_depth, 0.1f);
                     Float normal_sim = pow(max(dot(cur_it.ng, tap_it.ng), 0.f), Cfg::Temporal::kNormalExp);
                     Bool same_instance = cur_hit.inst_id == tap_hit.inst_id;
                     Bool emission_match = (cur_it.has_emission() == tap_is_emissive) &&
@@ -78,6 +81,13 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
                         (depth_diff < Cfg::Temporal::kDepthThreshold) &&
                         (normal_sim > Cfg::Temporal::kNormalThreshold) &&
                         emission_match;
+                    if (fallback) {
+                        // Nearby history may lie on another parallel surface of
+                        // this instance. Keep the search on the current plane.
+                        tap_consistent = tap_consistent &&
+                            abs(dot(tap_it.pos - cur_it.pos, cur_it.ng)) <
+                                Cfg::Temporal::kFallbackPlaneThreshold * max(expected_prev_depth, 0.1f);
+                    }
                     
                     Float effective_weight = 0.f;
                     
@@ -106,6 +116,29 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         check_tap_consistency(base_pixel + make_int2(1, 0), w10);
         check_tap_consistency(base_pixel + make_int2(0, 1), w01);
         check_tap_consistency(base_pixel + make_int2(1, 1), w11);
+
+        // Jitter can change the covered surface at a thin edge even with a fixed
+        // camera. If all bilinear taps miss it, recover nearby history belonging
+        // to the same surface instead of cold-starting the filter every frame.
+        // A real disocclusion with no matching geometry still rejects history.
+        Bool fallback_history = false;
+        $if(param.frame_index > 0u && total_weight <= 0.01f &&
+            motion_length < Cfg::Temporal::kFallbackMotionThreshold) {
+            fallback_history = true;
+            acc_direct = make_float3(0.f);
+            acc_indirect = make_float3(0.f);
+            acc_m1_direct = 0.f; acc_m2_direct = 0.f;
+            acc_m1_indirect = 0.f; acc_m2_indirect = 0.f;
+            acc_history = 0.f; total_weight = 0.f;
+            Int2 nearest_pixel = make_int2(floor(prev_texel + 0.5f));
+            for (int y = -1; y <= 1; ++y) {
+                for (int x = -1; x <= 1; ++x) {
+                    Int2 tap_pixel = nearest_pixel + make_int2(x, y);
+                    Float2 delta = make_float2(tap_pixel) - prev_texel;
+                    check_tap_consistency(tap_pixel, 1.f / (1.f + dot(delta, delta)), true);
+                }
+            }
+        };
         
         // Explicit integrator invalidation (including lighting edits) starts a
         // new history even when the camera and surface geometry are unchanged.
@@ -145,6 +178,10 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
             (Cfg::Temporal::kMaxHistoryStatic - Cfg::Temporal::kMaxHistoryFast),
             Cfg::Temporal::kMaxHistoryFast);
         Float base_history = min(prev_history + 1.f, max_history_for_motion);
+        // Spatially borrowed colour must not inherit a neighbour's full age:
+        // that would freeze a shifted shadow or highlight behind alpha=1/128.
+        base_history = ocarina::select(fallback_history,
+            min(base_history, Cfg::Temporal::kFallbackMaxHistory), base_history);
         
         Float history_scale = 1.f - ghosting_factor * 0.85f;
         Float effective_history = max(base_history * history_scale, 1.f);
@@ -160,6 +197,11 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         
         Float max_alpha = 0.95f;
         alpha = min(alpha, max_alpha);
+
+        // Motion can raise alpha above 1/history. Store the corresponding
+        // effective window, not the camera's age, so stopping does not freeze
+        // a noisy moving estimate behind an artificially long history.
+        new_history = min(new_history, 1.f / max(alpha, 1e-6f));
         
         Bool use_history = valid_history;
         
@@ -204,7 +246,10 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         output.illumi_direct = make_RadType4(new_direct, temporal_var_direct);
         output.illumi_indirect = make_RadType4(new_indirect, temporal_var_indirect);
         output.moments_direct = make_RadType4(new_m1_direct, new_m2_direct, new_history, 0.f);
-        output.moments_indirect = make_RadType4(new_m1_indirect, new_m2_indirect, 0.f, 0.f);
+        // Current reflectance scales, not temporal moments. The raw PT path
+        // supplies 1; demodulation supplies the luminance of its safe RGB guide.
+        output.moments_indirect = make_RadType4(new_m1_indirect, new_m2_indirect,
+                                               cur_direct.w, cur_indirect.w);
         param.svgf_buffer_cur.write(index, output);
     };
 };

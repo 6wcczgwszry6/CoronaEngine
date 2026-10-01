@@ -11,6 +11,24 @@
 #include "base/using.h"
 
 namespace vision::svgf {
+
+struct ResolveParam {
+    BufferDesc<RadType4> direct;
+    BufferDesc<RadType4> indirect;
+    BufferDesc<float4> history_direct;
+    BufferDesc<float4> history_indirect;
+    BufferDesc<TriangleHit> visibility;
+    array_float3 camera_pos;
+    float alpha{1.f};
+    float interior_alpha{1.f};
+};
+
+}// namespace vision::svgf
+
+OC_PARAM_STRUCT(vision::svgf, ResolveParam, direct, indirect,
+                history_direct, history_indirect, visibility, camera_pos, alpha, interior_alpha){};
+
+namespace vision::svgf {
 class SVGF : public Denoiser, public GBufferCallback, public enable_shared_from_this<SVGF> {
 public:
     // Temporal history is double-buffered to remove the read/write hazard in the
@@ -27,6 +45,18 @@ private:
     HotfixSlot<SP<Modulator>> modulator_{};
     HotfixSlot<SP<VarianceEstimator>> variance_estimator_{};
     HotfixSlot<SP<Prefilter>> prefilter_{};
+    // Same-pixel reads/writes only: these buffers need no ping-pong copy.
+    RegistrableBuffer<float4> resolve_direct_;
+    RegistrableBuffer<float4> resolve_indirect_;
+    Shader<void(ResolveParam)> resolve_shader_;
+    float4x4 resolve_camera_{};
+    float resolve_fov_{};
+    uint resolve_frame_{InvalidUI32};
+    uint resolve_history_{0u};
+
+    void prepare_resolve(uint pixel_num);
+    void compile_resolve();
+    [[nodiscard]] CommandBatch resolve(RealTimeDenoiseInput &input);
 
 private:
     struct Params {
@@ -53,13 +83,17 @@ public:
         : Denoiser(desc),
           svgf_data(pipeline()->bindless_array()),
           svgf_data2(pipeline()->bindless_array()),
+          resolve_direct_(pipeline()->bindless_array()),
+          resolve_indirect_(pipeline()->bindless_array()),
           params_(desc) {}
 
     void initialize_(const vision::NodeDesc &node_desc) noexcept override;
     void compute_GBuffer(const vision::RayState &rs, const vision::Interaction &it) noexcept override;
 
     VS_HOTFIX_MAKE_RESTORE(Denoiser, svgf_data, svgf_data2,
-                           atrous_, modulator_, variance_estimator_, prefilter_, params_)
+                           atrous_, modulator_, variance_estimator_, prefilter_, params_,
+                           resolve_direct_, resolve_indirect_, resolve_shader_, resolve_camera_,
+                           resolve_fov_, resolve_frame_, resolve_history_)
     VS_MAKE_PLUGIN_NAME_FUNC
 
 #define VS_MAKE_MEMBER_GETTER(member, modifier)                                             \

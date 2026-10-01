@@ -32,7 +32,8 @@ if(CORONA_BUILD_VISION)
             WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
     endforeach()
     add_executable(corona_vision_embedded_mode_switch_tests
-        test_vision_embedded_mode_switch.cpp)
+        test_vision_embedded_mode_switch.cpp
+        test_vision_svgf_reprojection.cpp)
     target_include_directories(corona_vision_embedded_mode_switch_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/src/systems/optics

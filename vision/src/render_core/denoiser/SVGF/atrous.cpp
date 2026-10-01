@@ -72,8 +72,21 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
         Float inv_var_gw = 1.f / max(var_gw_sum, 1e-4f);
         Float var_direct_clamped = max(var_sum_direct * inv_var_gw, Cfg::Epsilon::kVariance);
         Float var_indirect_clamped = max(var_sum_indirect * inv_var_gw, Cfg::Epsilon::kVariance);
-        Float phi_l_direct = LuminanceWeightUtils::compute_phi_l(param.l_phi, var_direct_clamped);
-        Float phi_l_indirect = LuminanceWeightUtils::compute_phi_l(param.l_phi, var_indirect_clamped);
+        // The absolute filter floors are specified in radiance units. Convert
+        // them with the current reflectance guide, just like the signal itself.
+        // Otherwise a dark guide (e.g. 0.03) makes the effective radiance floor
+        // ~33 times smaller and leaves fine noise even after spatial filtering.
+        // A scalar guide is a luminance approximation for coloured reflectance;
+        // RGB illumination and texture reconstruction remain unchanged.
+        auto metadata = param.svgf_buffer.read(cur_idx).moments_indirect;
+        // A producer may write a zero signal with w=0 when demodulation is
+        // bypassed. Only positive metadata represents a reflectance scale.
+        Float scale_direct = ocarina::select(metadata.z > 0.f, Float(metadata.z), 1.f);
+        Float scale_indirect = ocarina::select(metadata.w > 0.f, Float(metadata.w), 1.f);
+        Float phi_l_direct = LuminanceWeightUtils::compute_phi_l(param.l_phi, var_direct_clamped,
+            Cfg::Atrous::kMinVariance / (scale_direct * scale_direct), Cfg::Atrous::kMinPhi / scale_direct);
+        Float phi_l_indirect = LuminanceWeightUtils::compute_phi_l(param.l_phi, var_indirect_clamped,
+            Cfg::Atrous::kMinVariance / (scale_indirect * scale_indirect), Cfg::Atrous::kMinPhi / scale_indirect);
 
         // Center tap: kernel weight h(0)*h(0), geometry/luminance weight == 1.
         constexpr float kW0 = Cfg::Atrous::kBSpline1D[0] * Cfg::Atrous::kBSpline1D[0];

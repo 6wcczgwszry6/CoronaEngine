@@ -54,24 +54,24 @@ auto linear_modulate = [&](RadType3Var value, Float3 albedo,
                 param.radiance_direct.write(idx, make_RadType4(
                                                      linear_demodulate(radiance_direct.xyz(), diff_albedo,
                                                                        Cfg::Modulator::kSoftEpsilon),
-                                                     0.f));
+                                                     luminance(safe_albedo(diff_albedo, Cfg::Modulator::kSoftEpsilon))));
                 if constexpr (Cfg::Modulator::kDemodulateSpecular) {
                     Float3 spec_albedo = PixelStateUtils::query_specular_albedo(pipeline_ref, cur_hit, param.camera_pos.as_vec3());
                     param.radiance_indirect.write(idx, make_RadType4(
                                                            linear_demodulate(radiance_indirect.xyz(), spec_albedo,
                                                                            Cfg::Modulator::kSoftEpsilon),
-                                                           0.f));
+                                                           luminance(safe_albedo(spec_albedo, Cfg::Modulator::kSoftEpsilon))));
                 }
             } $else {
                 Float3 albedo = PixelStateUtils::query_albedo(pipeline_ref, cur_hit, param.camera_pos.as_vec3());
                 param.radiance_direct.write(idx, make_RadType4(
                                                      linear_demodulate(radiance_direct.xyz(), albedo,
                                                                      Cfg::Modulator::kSoftEpsilon),
-                                                     0.f));
+                                                     luminance(safe_albedo(albedo, Cfg::Modulator::kSoftEpsilon))));
                 param.radiance_indirect.write(idx, make_RadType4(
                                                        linear_demodulate(radiance_indirect.xyz(), albedo,
                                                                        Cfg::Modulator::kSoftEpsilon),
-                                                       0.f));
+                                                       luminance(safe_albedo(albedo, Cfg::Modulator::kSoftEpsilon))));
             };
         };
     };

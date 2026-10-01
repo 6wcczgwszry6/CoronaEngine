@@ -46,6 +46,21 @@ struct Epsilon {
         static constexpr float kMotionScaleDivisor = 16.f;
         static constexpr float kMotionAlphaScale = 0.5f;   // motion can reach alpha 0.5 (was 0.15)
         static constexpr float kMotionAlphaDivisor = 8.f;
+        static constexpr float kFallbackMotionThreshold = 0.01f;
+        static constexpr float kFallbackPlaneThreshold = 0.005f;
+        static constexpr float kFallbackMaxHistory = 16.f;
+    };
+
+    struct Resolve {
+        // A stationary image must keep converging. A short, fixed EMA leaves a
+        // permanent noise floor and makes jittered silhouettes slowly breathe.
+        // This is only a numerical guard: FP32 represents every integer up to 2^24.
+        static constexpr uint kHistoryPrecisionLimit = 1u << 24u;
+        // Surface interiors retain responsive illumination history. Only pixels
+        // near geometric coverage boundaries use the progressively longer mean.
+        static constexpr uint kInteriorHistory = 32u;
+        static constexpr float kNormalThreshold = 0.99f;
+        static constexpr float kPlaneThreshold = 0.005f;
     };
 
     struct Ghosting {

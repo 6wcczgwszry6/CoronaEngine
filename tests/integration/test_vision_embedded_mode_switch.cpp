@@ -1,6 +1,7 @@
 #include <corona/systems/optics/optics_system.h>
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
+#include "base/sensor/sensor.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_external_live_aabb.h"
 #include <filesystem>
@@ -8,6 +9,11 @@
 #include <cmath>
 #include <iostream>
 #include <stdexcept>
+#include <iomanip>
+#include <sstream>
+
+void check_camera_dolly_reprojection(vision::Pipeline& pipeline);
+void check_motion_visibility_history(vision::Pipeline& pipeline);
 
 namespace Corona::Systems {
 struct VisionEmbeddedModeSwitchTest {
@@ -29,6 +35,134 @@ struct VisionEmbeddedModeSwitchTest {
         expect(lit ? sum > 0.f : sum == 0.f, "GPU output must match geometry visibility");
         std::cout << "GPU frames: " << label << " frame=" << pipeline.frame_index()
                   << " rgb_sum=" << sum << '\n';
+    }
+    static void check_stationary_history_reset(vision::Pipeline& pipeline) {
+        pipeline.activate_global_context();
+        pipeline.invalidate();
+        pipeline.display(1.0 / 60.0);
+        std::vector<vision::float4> first(pipeline.pixel_num()), restarted(first.size());
+        pipeline.final_picture(pipeline.output_desc(), first.data());
+        // Build stationary boundary history well beyond the interior EMA window.
+        for (int i = 0; i < 320; ++i) pipeline.display(1.0 / 60.0);
+        expect(pipeline.frame_index() == 321u, "stationary SVGF must advance its sample sequence");
+        pipeline.invalidate();
+        pipeline.display(1.0 / 60.0);
+        pipeline.final_picture(pipeline.output_desc(), restarted.data());
+        for (size_t i = 0; i < first.size(); ++i) {
+            expect(std::isfinite(restarted[i].x) &&
+                   std::abs(first[i].x - restarted[i].x) < 1e-6f &&
+                   std::abs(first[i].y - restarted[i].y) < 1e-6f &&
+                   std::abs(first[i].z - restarted[i].z) < 1e-6f,
+                   "explicit invalidation must discard long SVGF history on its first frame");
+        }
+        std::cout << "PASS: stationary SVGF history resets after 321 frames\n";
+    }
+    static void check_realtime_camera_history(vision::Pipeline& pipeline) {
+        Corona::CameraDevice camera;
+        camera.width = 16; camera.height = 16;
+        camera.position = {0.f, 0.f, -3.f}; camera.forward = {0.f, 0.f, 1.f};
+        camera.world_up = {0.f, 1.f, 0.f}; camera.fov = 45.f;
+        Vision::sync_vision_camera(pipeline, camera);
+        pipeline.upload_data();
+        render(pipeline, "SVGF-before-camera-motion");
+        const auto initial_frame = pipeline.frame_index();
+        std::vector<vision::float4> before(pipeline.pixel_num()), after(before.size());
+        pipeline.final_picture(pipeline.output_desc(), before.data());
+        for (unsigned i = 0; i < 16; ++i) {
+            camera.position.x += 0.01f;
+            camera.forward.x += 0.005f;
+            Vision::sync_vision_camera(pipeline, camera);
+            expect(pipeline.frame_index() == initial_frame + i,
+                   "realtime camera movement must retain SVGF reprojection history and sample sequence");
+            pipeline.upload_data();
+            pipeline.display(1.0 / 60.0);
+        }
+        pipeline.final_picture(pipeline.output_desc(), after.data());
+        float difference = 0.f;
+        for (size_t i = 0; i < after.size(); ++i) {
+            expect(std::isfinite(after[i].x) && std::isfinite(after[i].y) && std::isfinite(after[i].z),
+                   "moving realtime output must remain finite");
+            difference += std::abs(after[i].x - before[i].x);
+        }
+        expect(difference > 0.01f, "retaining history must still render the new camera pose");
+        camera.fov += 5.f;
+        Vision::sync_vision_camera(pipeline, camera);
+        expect(pipeline.frame_index() == 0, "projection changes must discard incompatible history");
+        pipeline.upload_data();
+        pipeline.display(1.0 / 60.0);
+        camera.width = 24;
+        Vision::sync_vision_camera(pipeline, camera);
+        expect(pipeline.frame_index() == 0 && pipeline.resolution().x == 24,
+               "resizing must discard old history and allocate the new output");
+        pipeline.upload_data();
+        render(pipeline, "SVGF-after-camera-resize");
+        camera.width = 16;
+        Vision::sync_vision_camera(pipeline, camera);
+        pipeline.upload_data();
+        std::cout << "PASS: realtime camera translation/rotation preserves history; projection/resize resets\n";
+    }
+    // Optional visual regression capture uses the same camera adapter and active
+    // view context as OpticsSystem's editor render loop. It is not a CTest job.
+    static void capture_camera_motion(const char* scene, const char* destination, bool fast = false) {
+        namespace fs = std::filesystem;
+        ocarina::RHIContext::instance().init(fs::current_path());
+        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+        OpticsSystem system;
+        expect(system.load_external_vision_scene(scene, CameraVisionRenderMode::SVGF,
+                   Vision::VisionPipelineSource::ExternalFile), "motion capture scene must load");
+        auto pipeline = vision::Global::instance().pipeline_shared();
+        const auto resolution = pipeline->resolution();
+        // The editor owns a separate renderer/sensor for each camera.
+        expect(pipeline->create_view_context(42, resolution), "capture view must be created");
+        expect(pipeline->activate_view_context(42), "capture view must be active");
+        auto* sensor = pipeline->scene().sensor().get();
+        const auto position = sensor->position();
+        const float yaw = sensor->yaw(), pitch = sensor->pitch();
+        Corona::CameraDevice camera;
+        camera.width = resolution.x; camera.height = resolution.y;
+        camera.fov = sensor->fov_y(); camera.world_up = {0.f, 1.f, 0.f};
+        const fs::path out = fs::absolute(destination);
+        fs::create_directories(out);
+        std::ofstream metrics(out / "frames.csv");
+        metrics << "frame,history_before,history_after,yaw,pitch,x,y,z,gpu_ms\n" << std::setprecision(9);
+        std::vector<vision::float4> pixels(pipeline->pixel_num());
+        constexpr float radians = 0.017453292519943295f;
+        for (unsigned frame = 0; frame < 224; ++frame) {
+            const auto excursion = [fast](unsigned step, float distance) {
+                // The fast path reaches its endpoint in eight frames and holds
+                // there to expose trails and the first frames after stopping.
+                return fast ? std::min(float(step) / 8.f, 1.f) * distance
+                            : float(step) / 32.f * distance;
+            };
+            const float rotation = frame <= 64 ? 0.f : frame <= 96 ? excursion(frame - 64, fast ? 15.f : 3.f)
+                : frame <= 128 ? (fast ? 15.f - excursion(frame - 96, 15.f) : excursion(128 - frame, 3.f)) : 0.f;
+            const float translation = frame <= 128 ? 0.f : frame <= 160 ? excursion(frame - 128, fast ? 0.48f : 0.12f)
+                : frame <= 192 ? (fast ? 0.48f - excursion(frame - 160, 0.48f) : excursion(192 - frame, 0.12f)) : 0.f;
+            const float yr = (yaw + rotation) * radians, pr = pitch * radians;
+            camera.position = {position.x + translation, position.y, -position.z};
+            camera.forward = {std::sin(yr)*std::cos(pr), std::sin(pr), std::cos(yr)*std::cos(pr)};
+            Vision::sync_vision_camera(*pipeline, camera);
+            const auto history = pipeline->frame_index();
+            pipeline->upload_data();
+            pipeline->display(1.0 / 60.0);
+            metrics << frame << ',' << history << ',' << pipeline->frame_index() << ','
+                    << sensor->yaw() << ',' << sensor->pitch() << ',' << sensor->position().x << ','
+                    << sensor->position().y << ',' << sensor->position().z << ','
+                    << pipeline->cur_render_time() << '\n';
+            if (frame >= 64) {
+                std::ostringstream name;
+                name << "frame_" << std::setfill('0') << std::setw(4) << frame << ".png";
+                auto desc = pipeline->output_desc();
+                desc.fn = name.str();
+                pipeline->final_picture(desc, pixels.data());
+                vision::Image::save_image(out / name.str(), vision::PixelStorage::FLOAT4, resolution, pixels.data());
+            }
+        }
+        pipeline.reset();
+        system.clear_vision_runtimes();
+        std::cout << "PASS: captured 160 frames through the production camera adapter\n";
     }
     static void run() {
         namespace fs = std::filesystem;
@@ -149,6 +283,10 @@ struct VisionEmbeddedModeSwitchTest {
         resource->mark_transforms_changed();
         svgf->update_geometry();
         render(*svgf, "SVGF-restored");
+        check_stationary_history_reset(*svgf);
+        check_motion_visibility_history(*svgf);
+        check_realtime_camera_history(*svgf);
+        check_camera_dolly_reprojection(*svgf);
         // Restore the PT view through the same production group helper. The
         // editor test additionally exercises automatic runtime transform upload.
         Vision::sync_external_live_group(*resource, pt_cache, 42, 0,
@@ -243,7 +381,15 @@ struct VisionEmbeddedModeSwitchTest {
     }
 };
 }
-int main() {
-    try { Corona::Systems::VisionEmbeddedModeSwitchTest::run(); }
+int main(int argc, char** argv) {
+    try {
+        if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
+                          std::string(argv[1]) == "--capture-fast-camera-motion")) {
+            Corona::Systems::VisionEmbeddedModeSwitchTest::capture_camera_motion(
+                argv[2], argv[3], std::string(argv[1]) == "--capture-fast-camera-motion");
+        } else {
+            Corona::Systems::VisionEmbeddedModeSwitchTest::run();
+        }
+    }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
 }

@@ -179,6 +179,11 @@ struct VisionRuntimeGeometrySyncTest {
             expect(system.sync_shared_vision_scene(*sr), "emissive consumer");
             expect(svgf->scene().instances()[1]->emission()->instance()->geometry_sync_identity == emitter->geometry_sync_identity,
                    "consumer area light must follow stable instance identity after reorder");
+            // Removing a light after a long stationary interval must not retain
+            // its old radiance in the post-denoise coverage history.
+            svgf->activate_global_context();
+            for (int i = 0; i < 320; ++i) svgf->display(1.0 / 60.0);
+            render(*svgf, "emitter-before-removal-SVGF");
             auto reduced = std::make_shared<vision::ShapeGroup>(reordered->instance(0));
             reduced->geometry_sync_identity = reordered->geometry_sync_identity;
             pt->scene().groups()[0] = reduced;
