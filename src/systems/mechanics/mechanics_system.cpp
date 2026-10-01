@@ -176,7 +176,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             }
             // 跳过未加载的 actor — 无 GPU 资源 / 无全量物理数据
             // TODO: 后续实现 offline physics proxy —— Unloaded + body_type=Dynamic
-            //       的 actor 用简化 AABB 碰撞体继续参与物理            //       的 actor 用简化 AABB 碰撞体继续参与物理
+            //       的 actor 用简化 AABB 碰撞体继续参与物理
             {
                 std::shared_lock lock(impl_->residency_mtx_);
                 if (!impl_->resident_actors_.count(actor_handle)) continue;
@@ -352,6 +352,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
 
         MechanicsWorldAABB entry;  // 本物体本帧用的缓存结构
         entry.handle = h;
+        entry.geom_handle = m.geometry_handle;             // geometry actor 句柄（蒙皮缓存键）
         entry.transform_handle = geom_acc->transform_handle;  // 之后写位置修正用同一 handle
         entry.model_id = entry_model_id;
         entry.local_min = m.min_xyz;
@@ -422,9 +423,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         mechanics_data.push_back(entry);
     }
 
-    // 预加载所有物理物体的碰撞网格（用于三角形碰撞检测和精确地板碰撞）
-    // 只要有 model_id 就尝试建碰撞网格；SIGGRAPH 替换后此阶段由新代码接管。
-    // AABB 宽相已经完成粗筛；三角窄相是精化阶段，不需要额外的形状类型过滤。
+    // 预加载所有物理物体的碰撞网格（三角形碰撞检测）
+    // 有 model_id 就尝试建碰撞网格；AABB 宽相已完成粗筛，三角窄相是精化阶段。
     for (const auto& entry : mechanics_data) {
         if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
             return;
@@ -450,6 +450,23 @@ void MechanicsSystem::update_physics(float fixed_dt) {
 
     // 临时校正表：记录 Phase 5 迭代后处理（每子步一次）的位置校正量，在 Phase 6 积分后统一应用
     std::unordered_map<std::uintptr_t, ktm::fvec3> position_correction;
+
+    // 阶段 2：为每个有碰撞网格的物体建/refit TriangleOctree
+    // 静态物体（非蒙皮）：按 model_id 缓存，建一次不 refit。
+    // 蒙皮物体：键为 geom_handle，每子步用当前世界顶点 refit（拓扑固定，只更新拟合盒）。
+    // 世界顶点在下面的 ensure_world_verts 路径中惰性建立；此处只确保静态树存在。
+    for (const auto& entry : mechanics_data) {
+        if (entry.model_id == 0 || entry.is_skinned) continue;
+        auto cit = impl_->collision_mesh_cache.find(entry.model_id);
+        if (cit == impl_->collision_mesh_cache.end() || cit->second.triangles.empty()) continue;
+        auto oit = impl_->triangle_octree_cache.find(entry.model_id);
+        if (oit == impl_->triangle_octree_cache.end()) {
+            // 首次：用绑定姿态顶点建树
+            MechanicsInternal::TriangleOctree tree;
+            tree.build(cit->second.vertices, cit->second);
+            impl_->triangle_octree_cache[entry.model_id] = std::move(tree);
+        }
+    }
 
     // 阶段 5：从 GeometrySystem 获取宽相候选对 → 窄相（AABB 或 OBB+SAT）→ 顺序冲量 + 摩擦 + 迭代后位置校正 ---
     //GeometrySystem 八叉树 payload 是 actor_handle，query_pairs() 返回 (actor_a, actor_b)
@@ -527,8 +544,26 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             float inv_ma = 0.f;
             float inv_mb = 0.f;
             float last_j = 0.f;       // 最后一轮施加的法向冲量；该轮处于分离（未施加）则为 0
+            // E2：累积冲量（跨迭代轮次，本子步内累加，warm start 用）
+            float accumulated_j  = 0.f;  // 法向累积冲量（≥ 0，不允许负值即拉力）
+            float accumulated_jt = 0.f;  // 切向累积冲量绝对值（不超过 μ * accumulated_j）
+            // 反弹：迭代前记录的初始法向接近速度（v_n_initial > 0 表示接近）
+            float v_n_initial = 0.f;
         };
         std::vector<PairContactRecord> pair_records(collision_pairs.size());
+
+        // E2 Bug-3 修复：从跨子步缓存预加载上一子步的 accumulated_j（warm start 数据）
+        for (std::size_t pair_idx = 0; pair_idx < collision_pairs.size(); ++pair_idx) {
+            const auto& pair = collision_pairs[pair_idx];
+            const auto sorted = (pair.first < pair.second)
+                ? std::make_pair(pair.first, pair.second)
+                : std::make_pair(pair.second, pair.first);
+            auto ws_it = impl_->warm_start_cache.find(sorted);
+            if (ws_it != impl_->warm_start_cache.end()) {
+                pair_records[pair_idx].accumulated_j  = ws_it->second.first;
+                pair_records[pair_idx].accumulated_jt = ws_it->second.second;
+            }
+        }
 
         for (int impulse_iter = 0; impulse_iter < k_impulse_iterations; ++impulse_iter) {
             float max_delta_v_sq_this_iter = 0.0f;  // 本轮最大速度修正平方，用于收敛检测
@@ -576,7 +611,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 {
                     auto get_mesh = [&](const MechanicsWorldAABB& body) -> const CollisionMesh* {
                         if (body.is_skinned) {
-                            auto it = impl_->skinned_collision_cache.find(body.handle);
+                            auto it = impl_->skinned_collision_cache.find(body.geom_handle);
                             if (it != impl_->skinned_collision_cache.end() && !it->second.triangles.empty())
                                 return &it->second;
                         } else if (body.model_id != 0) {
@@ -610,10 +645,81 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                         const auto* verts_b = get_verts(hb);
 
                         if (mesh_a && mesh_b && verts_a && verts_b) {
-                            // ── 双方都有三角网格：三角-三角 SAT 是最终判断 ──
+                            // ── 双方都有三角网格：精确三角-三角检测（阶段 2 窄相）──
+                            // 优先使用 TriangleOctree 缩减候选对，退回暴力遍历作为兜底。
                             TriangleContactResult tri;
-                            triangle_narrowphase(*verts_a, *mesh_a, *verts_b, *mesh_b,
-                                                 a.center_world, b.center_world, tri);
+
+                            // 获取两方的 octree
+                            // 非蒙皮：按 model_id 缓存（所有实例共享，只建一次）
+                            // 蒙皮：按 geom_handle 缓存（每实例独立，每帧 refit）
+                            const TriangleOctree* oa = nullptr;
+                            const TriangleOctree* ob = nullptr;
+                            if (!a.is_skinned && a.model_id != 0) {
+                                auto oit = impl_->triangle_octree_cache.find(a.model_id);
+                                if (oit != impl_->triangle_octree_cache.end() && !oit->second.empty())
+                                    oa = &oit->second;
+                            } else if (a.is_skinned && a.geom_handle != 0) {
+                                auto oit = impl_->skinned_octree_cache.find(a.geom_handle);
+                                if (oit != impl_->skinned_octree_cache.end() && !oit->second.empty())
+                                    oa = &oit->second;
+                            }
+                            if (!b.is_skinned && b.model_id != 0) {
+                                auto oit = impl_->triangle_octree_cache.find(b.model_id);
+                                if (oit != impl_->triangle_octree_cache.end() && !oit->second.empty())
+                                    ob = &oit->second;
+                            } else if (b.is_skinned && b.geom_handle != 0) {
+                                auto oit = impl_->skinned_octree_cache.find(b.geom_handle);
+                                if (oit != impl_->skinned_octree_cache.end() && !oit->second.empty())
+                                    ob = &oit->second;
+                            }
+
+                            if (oa && ob) {
+                                // 两方都有 octree：B2 扫掠 refit 后用 query_pairs 得到候选对
+                                auto get_oct_ref = [&](const MechanicsWorldAABB& body) -> TriangleOctree& {
+                                    if (!body.is_skinned)
+                                        return impl_->triangle_octree_cache.at(body.model_id);
+                                    return impl_->skinned_octree_cache.at(body.geom_handle);
+                                };
+
+                                // 取上一帧世界顶点（静态物体从 prev_transform_cache 重建，蒙皮从 prev_skinned_verts_cache 取）
+                                auto get_prev_verts = [&](const MechanicsWorldAABB& body,
+                                                           const CollisionMesh* mesh,
+                                                           const std::vector<ktm::fvec3>* curr_world)
+                                    -> const std::vector<ktm::fvec3>* {
+                                    if (body.is_skinned) {
+                                        auto it = impl_->prev_skinned_verts_cache.find(body.geom_handle);
+                                        return (it != impl_->prev_skinned_verts_cache.end() &&
+                                                it->second.size() == (mesh ? mesh->vertices.size() : 0))
+                                               ? &it->second : nullptr;
+                                    } else {
+                                        auto it = impl_->prev_transform_cache.find(body.transform_handle);
+                                        if (it == impl_->prev_transform_cache.end() || !mesh) return nullptr;
+                                        // 用上一帧变换重建世界顶点，惰性缓存到 prev_world_verts_cache（键：mechanics handle）
+                                        auto& prev_buf = impl_->prev_world_verts_cache[body.handle];
+                                        transform_vertices_to_world_matrix(mesh->vertices, it->second, prev_buf);
+                                        return &prev_buf;
+                                    }
+                                };
+
+                                auto& oa_mut = get_oct_ref(a);
+                                auto& ob_mut = get_oct_ref(b);
+                                const auto* prev_a = get_prev_verts(a, mesh_a, verts_a);
+                                const auto* prev_b = get_prev_verts(b, mesh_b, verts_b);
+                                oa_mut.refit(*verts_a, *mesh_a, prev_a);
+                                ob_mut.refit(*verts_b, *mesh_b, prev_b);
+
+                                std::vector<std::pair<std::uint32_t, std::uint32_t>> candidate_pairs;
+                                TriangleOctree::query_pairs(oa_mut, *verts_a, ob_mut, *verts_b, candidate_pairs);
+
+                                // candidate_pairs 传入窄相，octree 加速真正生效（O(候选对) 替代 O(T_a×T_b)）
+                                triangle_narrowphase2(*verts_a, *mesh_a, *verts_b, *mesh_b,
+                                                     a.center_world, b.center_world, tri, 0.02f,
+                                                     &candidate_pairs);
+                            } else {
+                                // 无 octree（树尚未建立的首帧）：暴力遍历
+                                triangle_narrowphase2(*verts_a, *mesh_a, *verts_b, *mesh_b,
+                                                     a.center_world, b.center_world, tri);
+                            }
                             if (!tri.has_contact) {
                                 continue;  // AABB 重叠但三角无接触：真的没碰，跳过整对
                             }
@@ -622,63 +728,46 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                             contact_point = tri.contact_point;
 
                             // Phase 3：IK 反馈
+                            // G2：同帧已入队的骨骼节点集合，防止多对接触重复覆盖同一骨骼
+                            constexpr float k_ik_skin_offset = 0.03f;  // G1：表皮余量（接触点沿法线后退）
                             auto enqueue_ik = [&](bool skinned, std::uintptr_t mh,
-                                                  int tri_idx, const MechanicsWorldAABB& body) {
+                                                  int tri_idx, const MechanicsWorldAABB& body,
+                                                  const ktm::fvec3& contact_normal,
+                                                  std::unordered_set<int>& queued_nodes) {
                                 if (!skinned || tri_idx < 0) return;
-                                auto sit = impl_->skinned_collision_cache.find(body.handle);
+                                auto sit = impl_->skinned_collision_cache.find(body.geom_handle);
                                 if (sit == impl_->skinned_collision_cache.end()) return;
                                 const auto& sc = sit->second;
                                 if (tri_idx >= static_cast<int>(sc.triangle_bone_ids.size())) return;
                                 int node = sc.triangle_bone_ids[static_cast<std::size_t>(tri_idx)];
                                 if (node < 0) return;
+                                // G2：每骨只入队一次（第一次命中），忽略后续更浅的接触
+                                if (!queued_nodes.insert(node).second) return;
                                 std::uintptr_t gh = 0;
                                 { auto m = mechanics_storage.try_acquire_read(mh); if (m) gh = m->geometry_handle; }
                                 if (!gh) return;
+                                // G1：接触点沿法线后退 skin_offset，避免 IK 把骨骼拉进表面
+                                const ktm::fvec3 offset_contact = make_fvec3(
+                                    tri.contact_point.x + contact_normal.x * k_ik_skin_offset,
+                                    tri.contact_point.y + contact_normal.y * k_ik_skin_offset,
+                                    tri.contact_point.z + contact_normal.z * k_ik_skin_offset);
                                 impl_->deferred_ik_target_updates.push_back(
-                                    {gh, body.transform_handle, node, tri.contact_point});
+                                    {gh, body.transform_handle, node, offset_contact});
                             };
-                            enqueue_ik(a.is_skinned, ha, tri.best_tri_a, a);
-                            enqueue_ik(b.is_skinned, hb, tri.best_tri_b, b);
+                            std::unordered_set<int> ik_queued_a, ik_queued_b;
+                            enqueue_ik(a.is_skinned, ha, tri.best_tri_a, a, tri.normal, ik_queued_a);
+                            enqueue_ik(b.is_skinned, hb, tri.best_tri_b, b,
+                                       make_fvec3(-tri.normal.x, -tri.normal.y, -tri.normal.z), ik_queued_b);
 
-                        } else if ((mesh_a && verts_a) || (mesh_b && verts_b)) {
-                            // ── 只有一方有三角网格：找对方质心最近的三角面法线 ──
-                            // 对方（无网格方）用质心作为"点探针"，检测是否在有网格方的表面附近。
-                            // 找到有效接触面则精化法线，找不到则 continue（AABB 重叠但三角面不命中）。
-                            const CollisionMesh* mesh_ref  = mesh_a ? mesh_a : mesh_b;
-                            const auto*          verts_ref = mesh_a ? verts_a : verts_b;
-                            const ktm::fvec3&    probe     = mesh_a ? b.center_world : a.center_world;
-
-                            // 使用固定阈值而非 AABB penetration，以覆盖首帧刚接触时穿透深度接近零的情况
-                            constexpr float k_surface_threshold = 0.05f;
-                            float best_d = std::numeric_limits<float>::max();
-                            ktm::fvec3 best_n{};
-                            bool found = false;
-                            for (const auto& tri_idx : mesh_ref->triangles) {
-                                const ktm::fvec3& v0 = (*verts_ref)[tri_idx[0]];
-                                const ktm::fvec3& v1 = (*verts_ref)[tri_idx[1]];
-                                const ktm::fvec3& v2 = (*verts_ref)[tri_idx[2]];
-                                ktm::fvec3 fn = normalize_safe(cross(sub(v1, v0), sub(v2, v0)));
-                                float d = dot(fn, sub(probe, v0));
-                                if (d >= 0.0f && d <= k_surface_threshold && d < best_d) {
-                                    best_d = d;
-                                    best_n = fn;
-                                    found  = true;
-                                }
+                        } else {
+                            // 单边无碰撞网格：跳过，不施加冲量。
+                            // 这种情况表示该物体的碰撞网格尚未加载完成；下一帧重试。
+                            static bool s_logged_missing = false;
+                            if (!s_logged_missing) {
+                                CFW_LOG_ERROR("MechanicsSystem: collision pair skipped — one side has no triangle mesh "
+                                              "(model not yet loaded or ensure_collision_mesh failed). First occurrence only.");
+                                s_logged_missing = true;
                             }
-                            if (!found) {
-                                continue;
-                            }
-                            if (dot(best_n, sub(b.center_world, a.center_world)) < 0.0f)
-                                best_n = make_fvec3(-best_n.x, -best_n.y, -best_n.z);
-                            normal = best_n;
-                            penetration = k_surface_threshold - best_d;
-                            contact_point = make_fvec3(
-                                probe.x - best_n.x * best_d,
-                                probe.y - best_n.y * best_d,
-                                probe.z - best_n.z * best_d);
-                        }
-                        // 两方都没有有效世界顶点：跳过（网格尚未加载完成的首帧保护）
-                        else {
                             continue;
                         }
                     }
@@ -706,11 +795,9 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 rec.penetration = penetration;
                 rec.inv_ma = inv_ma;
                 rec.inv_mb = inv_mb;
-                const float rest_a = frame_params[ha].restitution;  // 双方恢复系数各取组件；此处简单平均
+                const float rest_a = frame_params[ha].restitution;
                 const float rest_b = frame_params[hb].restitution;
                 const float rest = (rest_a + rest_b) * 0.5f;
-                // 前几轮 e=0：先把接触簇里的相对法向「扎进」速度吃掉；末轮再加 e，减轻来回弹
-                const float rest_use = (impulse_iter == k_impulse_iterations - 1) ? rest : 0.f;
 
                 const ktm::fvec3 p_contact = contact_point;
                 const ktm::fvec3 r_a = vec3_sub(p_contact, a.center_world);
@@ -721,29 +808,130 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 ktm::fvec3& wa = impl_->body(ha).angular_velocity;
                 ktm::fvec3& wb = impl_->body(hb).angular_velocity;
 
+                // E2：warm start — 第 0 轮把上一子步的累积冲量重新施加
+                if (impulse_iter == 0 && rec.accumulated_j > 0.f) {
+                    const ktm::fvec3 Jws = make_fvec3(normal.x * rec.accumulated_j,
+                                                      normal.y * rec.accumulated_j,
+                                                      normal.z * rec.accumulated_j);
+                    va.x += Jws.x * inv_ma; va.y += Jws.y * inv_ma; va.z += Jws.z * inv_ma;
+                    vb.x -= Jws.x * inv_mb; vb.y -= Jws.y * inv_mb; vb.z -= Jws.z * inv_mb;
+                    if (!sleep_a) {
+                        const ktm::fvec3 dw = world_inertia_inv_apply(a.rot_body_to_world, a.inertia_inv_body, ktm::cross(r_a, Jws));
+                        wa.x += dw.x; wa.y += dw.y; wa.z += dw.z;
+                    }
+                    if (!sleep_b) {
+                        const ktm::fvec3 dw = world_inertia_inv_apply(b.rot_body_to_world, b.inertia_inv_body,
+                            ktm::cross(r_b, make_fvec3(-Jws.x, -Jws.y, -Jws.z)));
+                        wb.x += dw.x; wb.y += dw.y; wb.z += dw.z;
+                    }
+                }
+
                 ktm::fvec3 v_pa = velocity_at_point_world(va, wa, r_a);
                 ktm::fvec3 v_pb = velocity_at_point_world(vb, wb, r_b);
+
+                // 反弹修正：第 0 轮在加入表面速度之前记录纯刚体法向接近速度
+                // warm start 已施加（速度已修正），但不含表面速度，用于确定反弹目标
+                if (impulse_iter == 0) {
+                    const float v_n_pre_surface = ktm::dot(
+                        make_fvec3(v_pa.x - v_pb.x, v_pa.y - v_pb.y, v_pa.z - v_pb.z), normal);
+                    rec.v_n_initial = v_n_pre_surface;
+                }
+
+                // E3：动画表面速度 — 蒙皮物体的接触点速度还要加上表面本身的运动速度。
+                // 从 prev_skinned_verts_cache 和当前帧顶点插值出接触点处的表面速度（Δpos / fixed_dt）。
+                auto add_surface_vel = [&](const MechanicsWorldAABB& body,
+                                           ktm::fvec3& v_contact,
+                                           const ktm::fvec3& cp_world) {
+                    if (!body.is_skinned || fixed_dt < 1e-10f) return;
+                    auto prev_it = impl_->prev_skinned_verts_cache.find(body.geom_handle);
+                    auto curr_it = impl_->skinned_collision_cache.find(body.geom_handle);
+                    if (prev_it == impl_->prev_skinned_verts_cache.end() ||
+                        curr_it == impl_->skinned_collision_cache.end()) return;
+                    const auto& prev_v = prev_it->second;
+                    const auto& curr_m = curr_it->second;
+                    if (prev_v.empty() || curr_m.vertices.empty() ||
+                        prev_v.size() != curr_m.vertices.size()) return;
+
+                    // 将世界空间接触点逆变换到模型空间，再与模型空间顶点比距离
+                    ktm::fvec3 cp_model = cp_world;  // 默认兜底（无变换时）
+                    {
+                        auto tx = transform_storage.try_acquire_read(body.transform_handle);
+                        if (tx) {
+                            // 逆变换：先减平移，再除以缩放，再逆旋转
+                            // 用完整逆矩阵避免非均匀缩放引起误差
+                            ktm::fmat4x4 M    = tx->compute_matrix();
+                            ktm::fmat4x4 Minv = ktm::inverse(M);
+                            ktm::fvec4 cp_h   = make_fvec4(cp_world.x, cp_world.y, cp_world.z, 1.0f);
+                            ktm::fvec4 res    = Minv * cp_h;
+                            if (std::abs(res.w) > 1e-8f)
+                                cp_model = make_fvec3(res.x / res.w, res.y / res.w, res.z / res.w);
+                        }
+                    }
+
+                    // 找距接触点（模型空间）最近的顶点，用其 Δpos 近似表面速度
+                    float best_d2 = std::numeric_limits<float>::max();
+                    ktm::fvec3 surf_vel = make_fvec3(0.0f, 0.0f, 0.0f);
+                    for (std::size_t vi = 0; vi < curr_m.vertices.size(); ++vi) {
+                        const ktm::fvec3& cv = curr_m.vertices[vi];
+                        const ktm::fvec3 d = sub(cv, cp_model);  // 均为模型空间
+                        float d2 = dot(d, d);
+                        if (d2 < best_d2) {
+                            best_d2 = d2;
+                            const ktm::fvec3& pv = prev_v[vi];
+                            // Δpos 在模型空间；变换到世界空间需乘旋转矩阵（忽略平移 delta）
+                            // 近似：对小位移直接用模型空间差值作为世界空间速度（误差 = 缩放因子）
+                            surf_vel = vec3_mul(sub(cv, pv), 1.0f / fixed_dt);
+                        }
+                    }
+                    v_contact.x += surf_vel.x;
+                    v_contact.y += surf_vel.y;
+                    v_contact.z += surf_vel.z;
+                };
+                add_surface_vel(a, v_pa, p_contact);
+                add_surface_vel(b, v_pb, p_contact);
+
                 ktm::fvec3 v_rel = make_fvec3(v_pa.x - v_pb.x, v_pa.y - v_pb.y, v_pa.z - v_pb.z);
                 // n 从 A 指向 B：v_rel = v_pa - v_pb，v_n > 0 表示沿 n 相互接近（需法向冲量）
                 const float v_n = ktm::dot(v_rel, normal);
-                if (v_n < -1e-4f) {
-                    continue;
+                // v_n_initial 已在上方 warm start 之后、E3 表面速度之前记录（纯刚体值），此处不覆盖
+
+                // 预判接触（消除悬浮）：
+                //   穿透 > 0（已穿入）→ 原始法向冲量逻辑；
+                //   穿透 ≤ 0（近接未穿透）→ 仅限制接近速度 ≤ dist/step（不主动推离），不做位置校正。
+                //   两种情况下，已分离（v_n < 0）的对都跳过。
+                if (penetration <= 0.0f) {
+                    // 近接未穿透：只阻止进一步接近，不做推离
+                    // 允许速度为 0（静止接触），只阻止 v_n > 0（继续接近）
+                    if (v_n <= 0.0f) continue;
+                    // 将接近速度限制到 0（不再用 -e*v0 反弹，只是停住）
+                    // 使用标准冲量公式，但目标速度 = 0
+                } else {
+                    // 已穿透：常规分离检测
+                    if (v_n < -1e-4f) continue;
                 }
 
-                const ktm::fvec3 raxn = ktm::cross(r_a, normal);  // r×n，进入 ω 的有效惯量投影公式
+                const ktm::fvec3 raxn = ktm::cross(r_a, normal);
                 const ktm::fvec3 rbxn = ktm::cross(r_b, normal);
-                // 标量 ang_n：世界系下 (I_w^{-1} (r×n))·(r×n)，即柔度矩阵 K 中法对角项
                 const float ang_n_a = (sleep_a || fixed_a) ? 0.f
                                               : ktm::dot(raxn, world_inertia_inv_apply(a.rot_body_to_world, a.inertia_inv_body, raxn));
                 const float ang_n_b = (sleep_b || fixed_b) ? 0.f
                                               : ktm::dot(rbxn, world_inertia_inv_apply(b.rot_body_to_world, b.inertia_inv_body, rbxn));
-                const float denom_n = inv_ma + inv_mb + ang_n_a + ang_n_b + eps;  // 1 / (有效质量)
-                if (denom_n <= 1e-12f) {
-                    continue;  // 近奇异（例如双臂共线且惯量项异常）
-                }
-                const float j_raw = -(1.0f + rest_use) * v_n / denom_n;  // 法向冲量标量（未钳制）
+                const float denom_n = inv_ma + inv_mb + ang_n_a + ang_n_b + eps;
+                if (denom_n <= 1e-12f) continue;
+
+                // 反弹目标：用迭代前记录的 v_n_initial，避免逐轮累加弹性
+                // 只在最后一轮加反弹目标，前几轮只消除接近速度（e=0）
+                const float v_target = (impulse_iter == k_impulse_iterations - 1)
+                                           ? (-rest * std::max(0.0f, rec.v_n_initial))
+                                           : 0.0f;
+                const float j_raw = -(v_n - v_target) / denom_n;
+
+                // E2：累积冲量 clamp（法向累积 ≥ 0，不允许拉力）
+                const float j_prev = rec.accumulated_j;
+                const float j_new = std::max(0.0f, j_prev + j_raw);
                 const float j = std::max(-max_impulse_per_contact,
-                                         std::min(max_impulse_per_contact, j_raw));  // 钳制防止单帧爆炸
+                                         std::min(max_impulse_per_contact, j_new - j_prev));
+                rec.accumulated_j = j_new;
                 rec.last_j = j;
 
                 va.x += normal.x * j * inv_ma;
@@ -811,8 +999,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 // （jt_abs 在摩擦块内赋值，此处默认为0；仅在摩擦块执行后被设为非零）
                 float jt_abs = 0.0f;
                 if (vt_len > eps) {
-                    const ktm::fvec3 tdir = make_fvec3(v_t.x / vt_len, v_t.y / vt_len, v_t.z / vt_len);  // 滑移方向单位向量
-                    const float v_slip = ktm::dot(v_rel, tdir);                                          // 沿 tdir 的标量滑移速度
+                    const ktm::fvec3 tdir = make_fvec3(v_t.x / vt_len, v_t.y / vt_len, v_t.z / vt_len);
+                    const float v_slip = ktm::dot(v_rel, tdir);
                     const ktm::fvec3 raxt = ktm::cross(r_a, tdir);
                     const ktm::fvec3 rbxt = ktm::cross(r_b, tdir);
                     const float ang_t_a = sleep_a ? 0.f
@@ -821,15 +1009,19 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                                                   : ktm::dot(rbxt, world_inertia_inv_apply(b.rot_body_to_world, b.inertia_inv_body, rbxt));
                     const float denom_t = inv_ma + inv_mb + ang_t_a + ang_t_b + eps;
                     if (denom_t > 1e-12f) {
-                        const float jt_free = -v_slip / denom_t;                        // 无摩擦上限时的切向冲量（完全粘滞）
-                        // 静/动摩擦区分：极低滑移速度时使用更高的静摩擦系数，防止坡面微滑循环
-                        constexpr float k_static_slip_threshold = 0.02f;               // 低于此速度视为"欲动未动"
+                        const float jt_free = -v_slip / denom_t;
+                        constexpr float k_static_slip_threshold = 0.02f;
                         const float eff_friction = (vt_len < k_static_slip_threshold)
                                                    ? static_friction_coeff
                                                    : friction_coeff;
-                        const float jt_cap = eff_friction * std::fabs(j);              // 库仑锥 |jt| ≤ μ|j|
-                        const float jt = std::max(-jt_cap, std::min(jt_cap, jt_free));  // 钳位到摩擦锥内
-                        jt_abs = std::abs(jt);  // 记录用于收敛判断
+                        // E2：切向累积 clamp（|accumulated_jt| ≤ μ * accumulated_j）
+                        const float jt_cap = eff_friction * rec.accumulated_j;
+                        const float jt_prev = rec.accumulated_jt;  // 上轮累计（带符号，正/负表示方向）
+                        const float jt_new_raw = jt_prev + jt_free;
+                        const float jt_new = std::max(-jt_cap, std::min(jt_cap, jt_new_raw));
+                        const float jt = jt_new - jt_prev;
+                        rec.accumulated_jt = jt_new;
+                        jt_abs = std::abs(jt);
 
                         va.x += tdir.x * jt * inv_ma;
                         va.y += tdir.y * jt * inv_ma;
@@ -892,6 +1084,21 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 break;
             }
         }  // 外层：impulse_iter
+
+        // E2 Bug-3 修复：把本子步最终的 accumulated_j 写回跨子步缓存，供下一子步 warm start 使用
+        for (std::size_t pair_idx = 0; pair_idx < collision_pairs.size(); ++pair_idx) {
+            const auto& pair = collision_pairs[pair_idx];
+            const PairContactRecord& rec = pair_records[pair_idx];
+            const auto sorted = (pair.first < pair.second)
+                ? std::make_pair(pair.first, pair.second)
+                : std::make_pair(pair.second, pair.first);
+            if (rec.in_contact && rec.accumulated_j > 0.f) {
+                impl_->warm_start_cache[sorted] = {rec.accumulated_j, rec.accumulated_jt};
+            } else {
+                // 本子步无接触：清除缓存，防止下一子步因过期数据注入无效冲量
+                impl_->warm_start_cache.erase(sorted);
+            }
+        }
 
         // ===== E1：迭代后处理（每子步恰好一次，与是否收敛早退无关）=====
         // 原先这四项放在 impulse_iter == 末轮 的分支里，而收敛早退在其后：静止接触通常
@@ -1133,6 +1340,9 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         auto tx_w = transform_storage.try_acquire_write(data.transform_handle);
         if (!tx_w) continue;
 
+        // F1：积分前保存本帧变换矩阵（供下一子步 CCD 重建上帧世界顶点）
+        impl_->prev_transform_cache[data.transform_handle] = tx_w->compute_matrix();
+
         // 为轴锁定准备一份清零后的速度副本（用于积分，不修改全局缓存）
         ktm::fvec3 vel_for_pos = impl_->body(h).velocity;
         uint8_t lin_lock = impl_->body(h).linear_lock;
@@ -1224,27 +1434,110 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         }
     }
 
+    // --- 阶段 4.5：Kinematic/蒙皮物体地板接触 ---
+    // Dynamic 物体已在上方积分循环里处理地板碰撞。
+    // Kinematic/蒙皮物体由动画驱动，跳过了积分器，需要在这里单独处理地板：
+    //   - 从 skinned_collision_cache 取碰撞顶点，找到所有低于 floor_y + floor_eps 的顶点
+    //   - 不修改速度（Kinematic 无速度）；只触发 IK/回调
+    //   - 用于让角色脚部 IK 感知地板，防止穿地板视觉
+    for (const auto& data : mechanics_data) {
+        if (impl_->shutdown_requested.load(std::memory_order_acquire)) return;
+        std::uintptr_t h = data.handle;
+        if (!data.is_skinned) continue;
+        // Bug 5 修复：用 find 而非 operator[]，避免向 frame_params 插入默认条目
+        auto fp_it = frame_params.find(h);
+        if (fp_it == frame_params.end()) continue;
+        if (fp_it->second.body_type == BodyType::Phantom) continue;
+        if (fp_it->second.body_type == BodyType::Dynamic) continue;
+
+        // 从蒙皮碰撞缓存取模型空间顶点 + 变换到世界空间，找最低顶点
+        auto sc_it = impl_->skinned_collision_cache.find(data.geom_handle);
+        if (sc_it == impl_->skinned_collision_cache.end() || sc_it->second.vertices.empty()) continue;
+        const auto& sc = sc_it->second;
+
+        // 取当前世界变换（只读，不写位置）
+        auto tx_r = transform_storage.try_acquire_read(data.transform_handle);
+        if (!tx_r) continue;
+        const ktm::fmat4x4 world_mat = tx_r->compute_matrix();
+
+        // 找世界空间中低于地板的顶点
+        float lowest_vy = std::numeric_limits<float>::max();
+        int   lowest_vi = -1;
+        for (std::size_t vi = 0; vi < sc.vertices.size(); ++vi) {
+            const auto& lv = sc.vertices[vi];
+            const float wy = world_mat[0][1]*lv.x + world_mat[1][1]*lv.y + world_mat[2][1]*lv.z + world_mat[3][1];
+            if (wy < lowest_vy) { lowest_vy = wy; lowest_vi = static_cast<int>(vi); }
+        }
+        if (lowest_vi < 0 || lowest_vy >= floor_y + floor_eps) continue;
+
+        // 最低顶点低于地板：生成地板接触，触发 IK 更新
+        // 接触点 = 世界空间最低顶点投影到 floor_y
+        const auto& lv = sc.vertices[lowest_vi];
+        const ktm::fvec3 contact_world = make_fvec3(
+            world_mat[0][0]*lv.x + world_mat[1][0]*lv.y + world_mat[2][0]*lv.z + world_mat[3][0],
+            floor_y,  // 投影到地板
+            world_mat[0][2]*lv.x + world_mat[1][2]*lv.y + world_mat[2][2]*lv.z + world_mat[3][2]);
+
+        // 查找对应的 geom_handle 用于 IK 更新入队
+        // 取最近三角形对应的骨骼（用 triangle_bone_ids 中与 lowest_vi 最近的三角形）
+        int best_bone = -1;
+        if (!sc.triangle_bone_ids.empty()) {
+            float best_d2 = std::numeric_limits<float>::max();
+            for (std::size_t ti = 0; ti < sc.triangles.size(); ++ti) {
+                for (int c = 0; c < 3; ++c) {
+                    const std::uint32_t vi = resolve_vertex(sc, static_cast<std::uint32_t>(ti), c);
+                    if (vi >= sc.vertices.size()) continue;
+                    const auto& v = sc.vertices[vi];
+                    const float dx = v.x - lv.x, dy = v.y - lv.y, dz = v.z - lv.z;
+                    float d2 = dx*dx + dy*dy + dz*dz;
+                    if (d2 < best_d2 && ti < sc.triangle_bone_ids.size()) {
+                        best_d2 = d2;
+                        best_bone = sc.triangle_bone_ids[ti];
+                    }
+                }
+            }
+        }
+        if (best_bone >= 0 && data.geom_handle != 0) {
+            impl_->deferred_ik_target_updates.push_back(
+                {data.geom_handle, data.transform_handle, best_bone, contact_world});
+        }
+    }
+
     for (std::uintptr_t h : mechanics_handles) {
         if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
             return;
         }
         if (impl_->body(h).sleeping) continue;
 
-        const auto& v = impl_->body(h).velocity;
-        const auto& av = impl_->body(h).angular_velocity;
+        // E4：Kinematic/蒙皮物体永不进入休眠（由动画驱动，速度恒为零，不应进入休眠状态）
+        const bool is_dynamic = (frame_params.count(h) && frame_params.at(h).body_type == BodyType::Dynamic);
+        // 通过 handle_to_index（O(1)）查 is_skinned，不做 O(n) 线性搜索
+        bool is_skinned_body = false;
+        {
+            auto idx_it = handle_to_index.find(h);
+            if (idx_it != handle_to_index.end())
+                is_skinned_body = mechanics_data[idx_it->second].is_skinned;
+        }
+        const bool can_sleep = is_dynamic && !is_skinned_body;
 
-        float v_sq = v.x * v.x + v.y * v.y + v.z * v.z;
-        float av_sq = av.x * av.x + av.y * av.y + av.z * av.z;
+        if (can_sleep) {
+            const auto& v = impl_->body(h).velocity;
+            const auto& av = impl_->body(h).angular_velocity;
+            const float v_sq = v.x*v.x + v.y*v.y + v.z*v.z;
+            const float av_sq = av.x*av.x + av.y*av.y + av.z*av.z;
 
-        if (v_sq < sleep_threshold_sq && av_sq < sleep_threshold_sq) {
-            impl_->body(h).sleep_timer += fixed_dt;  // 低速窗口累加
-            if (impl_->body(h).sleep_timer >= sleep_time_needed) {
-                impl_->body(h).sleeping = true;
-                impl_->body(h).velocity = make_fvec3(0.0f, 0.0f, 0.0f);
-                impl_->body(h).angular_velocity = make_fvec3(0.0f, 0.0f, 0.0f);  // 冻结动力学状态
+            if (v_sq < sleep_threshold_sq && av_sq < sleep_threshold_sq) {
+                impl_->body(h).sleep_timer += fixed_dt;
+                if (impl_->body(h).sleep_timer >= sleep_time_needed) {
+                    impl_->body(h).sleeping = true;
+                    impl_->body(h).velocity = make_fvec3(0.0f, 0.0f, 0.0f);
+                    impl_->body(h).angular_velocity = make_fvec3(0.0f, 0.0f, 0.0f);
+                }
+            } else {
+                impl_->body(h).sleep_timer = 0.0f;
             }
         } else {
-            impl_->body(h).sleep_timer = 0.0f;  // 一有运动就打断休眠倒计时
+            impl_->body(h).sleep_timer = 0.0f;  // 重置计时，永不进入休眠
         }
 
         // ========== 异步执行移动回调 ==========
@@ -1359,7 +1652,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 if (!chain.contact_driven) continue;
                 if (chain.end_node != upd.node_idx) continue;
                 chain.target = {mx, my, mz};
-                chain.weight = 1.0f;
+                // 平滑叠加权重：每次接触累加一步而非硬赋 1.0，避免持续接触时动画被瞬间锁定
+                chain.weight = std::min(chain.weight + chain.contact_weight_decay * (1.0f / 60.0f), 1.0f);
                 chain.enabled = true;
                 break;  // 每个 node_idx 只驱动一条链
             }
@@ -1370,11 +1664,82 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     // 清理无效句柄的缓存
     std::unordered_set<std::uintptr_t> alive_handles(mechanics_handles.begin(), mechanics_handles.end());
 
+    // 收集存活的 geom_handle 和 transform_handle，用于清理 geom/transform 键的缓存
+    std::unordered_set<std::uintptr_t> alive_geom_handles;
+    std::unordered_set<std::uintptr_t> alive_transform_handles;
+    for (const auto& data : mechanics_data) {
+        if (data.geom_handle) alive_geom_handles.insert(data.geom_handle);
+        if (data.transform_handle) alive_transform_handles.insert(data.transform_handle);
+    }
+
     for (auto it = impl_->bodies.begin(); it != impl_->bodies.end();) {
-        if (!alive_handles.count(it->first)) {
-            it = impl_->bodies.erase(it);  // 本帧未出现的 mechanics 句柄：删掉 stale 条目防 map 膨胀
-        } else {
+        if (!alive_handles.count(it->first))
+            it = impl_->bodies.erase(it);
+        else
             ++it;
+    }
+
+    // G4：清理 geom_handle 键的 stale 缓存（物体离开场景时释放内存）
+    for (auto it = impl_->skinned_collision_cache.begin(); it != impl_->skinned_collision_cache.end();) {
+        if (!alive_geom_handles.count(it->first)) it = impl_->skinned_collision_cache.erase(it);
+        else ++it;
+    }
+    for (auto it = impl_->prev_skinned_verts_cache.begin(); it != impl_->prev_skinned_verts_cache.end();) {
+        if (!alive_geom_handles.count(it->first)) it = impl_->prev_skinned_verts_cache.erase(it);
+        else ++it;
+    }
+    for (auto it = impl_->skinned_octree_cache.begin(); it != impl_->skinned_octree_cache.end();) {
+        if (!alive_geom_handles.count(it->first)) it = impl_->skinned_octree_cache.erase(it);
+        else ++it;
+    }
+    for (auto it = impl_->prev_world_verts_cache.begin(); it != impl_->prev_world_verts_cache.end();) {
+        if (!alive_handles.count(it->first)) it = impl_->prev_world_verts_cache.erase(it);
+        else ++it;
+    }
+    for (auto it = impl_->prev_transform_cache.begin(); it != impl_->prev_transform_cache.end();) {
+        if (!alive_transform_handles.count(it->first)) it = impl_->prev_transform_cache.erase(it);
+        else ++it;
+    }
+
+    // Bug-8：triangle_octree_cache 按 model_id 缓存，没有随物体消失的清理机制
+    // 收集本帧出现的所有 model_id，清理不再使用的静态 octree（防 model 卸载后内存泄漏）
+    {
+        std::unordered_set<std::uint64_t> alive_model_ids;
+        for (const auto& data : mechanics_data) {
+            if (data.model_id != 0) alive_model_ids.insert(data.model_id);
+        }
+        for (auto it = impl_->triangle_octree_cache.begin(); it != impl_->triangle_octree_cache.end();) {
+            if (!alive_model_ids.count(it->first)) it = impl_->triangle_octree_cache.erase(it);
+            else ++it;
+        }
+        // collision_mesh_cache 和 static_triangle_index_cache 同样按 model_id 缓存，一并清理
+        for (auto it = impl_->collision_mesh_cache.begin(); it != impl_->collision_mesh_cache.end();) {
+            if (!alive_model_ids.count(it->first)) it = impl_->collision_mesh_cache.erase(it);
+            else ++it;
+        }
+        for (auto it = impl_->static_triangle_index_cache.begin(); it != impl_->static_triangle_index_cache.end();) {
+            if (!alive_model_ids.count(it->first)) it = impl_->static_triangle_index_cache.erase(it);
+            else ++it;
+        }
+        for (auto it = impl_->static_triangle_bone_cache.begin(); it != impl_->static_triangle_bone_cache.end();) {
+            if (!alive_model_ids.count(it->first)) it = impl_->static_triangle_bone_cache.erase(it);
+            else ++it;
+        }
+    }
+
+    // E2 warm_start_cache stale 清理：移除本帧不再有接触的 pair
+    {
+        for (auto it = impl_->warm_start_cache.begin(); it != impl_->warm_start_cache.end();) {
+            const auto& k = it->first;
+            bool found = false;
+            for (const auto& pair : collision_pairs) {
+                const auto sorted = (pair.first < pair.second)
+                    ? std::make_pair(pair.first, pair.second)
+                    : std::make_pair(pair.second, pair.first);
+                if (sorted == k) { found = true; break; }
+            }
+            if (!found) it = impl_->warm_start_cache.erase(it);
+            else ++it;
         }
     }
 
@@ -1693,28 +2058,88 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
                                                 : std::vector<int>{};
 
                     MechanicsInternal::CollisionMesh& sc = impl_->skinned_collision_cache[geom_handle];
-                    sc.triangles        = static_tris;
+                    sc.triangles         = static_tris;
                     sc.triangle_bone_ids = static_bones;
 
-                    // 从 skinned_cpu_vertices（bytes → Resource::Vertex）提取位置坐标
-                    sc.vertices.clear();
-                    float min_y = std::numeric_limits<float>::max();
+                    // 从静态绑定姿态网格复制子网格元数据和顶点基底
+                    // 非蒙皮子网格保留绑定姿态坐标；蒙皮子网格下方用 blob 覆盖
+                    auto static_it = impl_->collision_mesh_cache.find(model_id);
+                    if (static_it != impl_->collision_mesh_cache.end() &&
+                        !static_it->second.vertices.empty()) {
+                        sc.vertices  = static_it->second.vertices;  // 复制绑定姿态顶点
+                        sc.submeshes = static_it->second.submeshes;
+                        sc.total_vertex_count = static_it->second.total_vertex_count;
+                    } else {
+                        sc.vertices.clear();
+                    }
+
+                    // 用蒙皮 blob 覆盖各蒙皮子网格的顶点
+                    float min_y = sc.vertices.empty()
+                                      ? 0.0f
+                                      : std::numeric_limits<float>::max();
+                    if (!sc.vertices.empty()) {
+                        for (const auto& v : sc.vertices) min_y = std::min(min_y, v.y);
+                    }
+
                     for (std::size_t mi = 0; mi < geom_write->skinned_cpu_vertices.size(); ++mi) {
                         const auto& blob = geom_write->skinned_cpu_vertices[mi];
-                        if (blob.empty()) continue;
+                        if (blob.empty()) continue;  // 非蒙皮子网格：保留绑定姿态（已复制）
+
+                        // 找该子网格在扁平顶点数组中的基址
+                        std::uint32_t v_base = 0;
+                        if (static_it != impl_->collision_mesh_cache.end() &&
+                            mi < static_it->second.submeshes.size()) {
+                            v_base = static_it->second.submeshes[mi].vertex_base;
+                        }
+
                         constexpr std::size_t kVertexStride = sizeof(Corona::Resource::Vertex);
                         const std::size_t vert_count = blob.size() / kVertexStride;
                         const auto* vptr = reinterpret_cast<const Corona::Resource::Vertex*>(blob.data());
                         for (std::size_t vi = 0; vi < vert_count; ++vi) {
-                            ktm::fvec3 p;
-                            p.x = vptr[vi].position[0];
-                            p.y = vptr[vi].position[1];
-                            p.z = vptr[vi].position[2];
-                            sc.vertices.push_back(p);
-                            min_y = std::min(min_y, p.y);
+                            const std::uint32_t flat_idx = v_base + static_cast<std::uint32_t>(vi);
+                            if (flat_idx >= sc.vertices.size()) break;  // 防越界
+                            sc.vertices[flat_idx].x = vptr[vi].position[0];
+                            sc.vertices[flat_idx].y = vptr[vi].position[1];
+                            sc.vertices[flat_idx].z = vptr[vi].position[2];
+                            min_y = std::min(min_y, sc.vertices[flat_idx].y);
                         }
                     }
                     sc.min_local_y = (sc.vertices.empty() ? 0.0f : min_y);
+
+                    // B3：用 sc.vertices（含全部段，包括非蒙皮段绑定姿态坐标）
+                    // 重新计算完整 skinned_aabb，覆盖上方只含蒙皮段的值
+                    if (!sc.vertices.empty()) {
+                        float full_min_x = std::numeric_limits<float>::max();
+                        float full_min_y = std::numeric_limits<float>::max();
+                        float full_min_z = std::numeric_limits<float>::max();
+                        float full_max_x = std::numeric_limits<float>::lowest();
+                        float full_max_y = std::numeric_limits<float>::lowest();
+                        float full_max_z = std::numeric_limits<float>::lowest();
+                        for (const auto& v : sc.vertices) {
+                            full_min_x = std::min(full_min_x, v.x);
+                            full_min_y = std::min(full_min_y, v.y);
+                            full_min_z = std::min(full_min_z, v.z);
+                            full_max_x = std::max(full_max_x, v.x);
+                            full_max_y = std::max(full_max_y, v.y);
+                            full_max_z = std::max(full_max_z, v.z);
+                        }
+                        geom_write->skinned_aabb_min = ktm::fvec3{full_min_x, full_min_y, full_min_z};
+                        geom_write->skinned_aabb_max = ktm::fvec3{full_max_x, full_max_y, full_max_z};
+                        geom_write->skinned_aabb_valid = true;
+                    }
+
+                    // E3：更新上一帧顶点缓存（保存本帧蒙皮世界顶点，下一子步用于表面速度插值）
+                    impl_->prev_skinned_verts_cache[geom_handle] = sc.vertices;
+
+                    // 阶段 4 L4：建/维护蒙皮 octree（拓扑固定，只在首帧 build，后续每帧 refit）
+                    // build 用模型空间顶点建拓扑（首帧接受坐标系不精确，refit 第一帧立即修正）
+                    auto& soct = impl_->skinned_octree_cache;
+                    auto soct_it = soct.find(geom_handle);
+                    if (soct_it == soct.end()) {
+                        MechanicsInternal::TriangleOctree tree;
+                        tree.build(sc.vertices, sc);
+                        soct[geom_handle] = std::move(tree);
+                    }
                 }
             }
         }
