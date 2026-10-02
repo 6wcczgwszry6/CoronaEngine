@@ -1,6 +1,7 @@
 #include "variance_estimator.h"
 #include "svgf.h"
 #include "svgf_config.h"
+#include "base/sensor/sensor.h"
 
 namespace vision::svgf {
 
@@ -178,16 +179,28 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
             ghosting_factor = max(ghosting_factor, t * t * (3.f - 2.f * t));
         };
         
+        Bool diffuse_specular = param.channel_kind ==
+            uint(RealTimeDenoiseInput::ChannelKind::DiffuseSpecular);
+        // Surface-reprojected specular history depends on the outgoing world
+        // direction, as in RELAX's surface-motion confidence. Pure camera
+        // rotation moves pixels but does not change that direction. Convert
+        // angular parallax to pixel units so translation retains the existing
+        // response scale, including when rotation cancels its screen motion.
+        Float3 current_to_eye = param.camera_pos.as_vec3() - cur_it.pos;
+        Float3 previous_to_eye = param.prev_camera_pos.as_vec3() - cur_it.pos;
+        Float3 current_view = current_to_eye / max(length(current_to_eye), 1e-6f);
+        Float3 previous_view = previous_to_eye / max(length(previous_to_eye), 1e-6f);
+        Float view_motion = length(current_view - previous_view) * param.pixels_per_radian;
+        Float response_motion = ocarina::select(diffuse_specular, view_motion, motion_length);
+
         Float max_history_for_motion = max(
             Cfg::Temporal::kMaxHistoryStatic - 
-            tanh(motion_length / Cfg::Temporal::kMotionScaleDivisor) * 
+            tanh(response_motion / Cfg::Temporal::kMotionScaleDivisor) *
             (Cfg::Temporal::kMaxHistoryStatic - Cfg::Temporal::kMaxHistoryFast),
             Cfg::Temporal::kMaxHistoryFast);
         // PT's first channel contains view-independent diffuse lighting. A
         // matching surface can retain it during camera motion; specular and
         // legacy direct/indirect producers retain the responsive motion policy.
-        Bool diffuse_specular = param.channel_kind ==
-            uint(RealTimeDenoiseInput::ChannelKind::DiffuseSpecular);
         Float max_history_direct = ocarina::select(diffuse_specular,
             Cfg::Temporal::kMaxHistoryStatic, max_history_for_motion);
         Float base_history = min(prev_history + 1.f, max_history_direct);
@@ -208,7 +221,7 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         
         Float base_alpha = 1.f / new_history;
         
-        Float motion_boost = tanh(motion_length / Cfg::Temporal::kMotionAlphaDivisor) * 
+        Float motion_boost = tanh(response_motion / Cfg::Temporal::kMotionAlphaDivisor) *
                              Cfg::Temporal::kMotionAlphaScale;
         
         Float alpha = max(base_alpha, ocarina::select(diffuse_specular, 0.f, motion_boost));
@@ -291,7 +304,9 @@ CommandBatch VarianceEstimator::dispatch_variance(RealTimeDenoiseInput &input) n
     param.motion_vectors = input.motion_vec.descriptor();
     param.camera_pos = input.camera_pos;
     param.prev_camera_pos = input.prev_camera_pos;
-    param.screen_short_edge = compute_screen_short_edge(input.resolution);
+    // Sensor projects the configured FOV across the shorter image dimension.
+    param.pixels_per_radian = 0.5f * compute_screen_short_edge(input.resolution) /
+        tan(radians(pipeline()->scene().sensor()->fov_y()) * 0.5f);
     param.frame_index = input.frame_index;
     param.channel_kind = static_cast<uint>(input.channel_kind);
     CommandBatch ret;

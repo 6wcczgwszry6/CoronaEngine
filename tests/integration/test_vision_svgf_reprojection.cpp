@@ -187,15 +187,17 @@ void check_camera_dolly_reprojection(vision::Pipeline& pipeline) {
     auto center_history = [&]() {
         std::vector<vision::svgf::SVGFDataDual> history(pipeline.pixel_num());
         std::vector<vision::TriangleHit> visibility(pipeline.pixel_num());
+        const auto resolution = pipeline.resolution();
+        const auto center_index = (resolution.y / 2u) * resolution.x + resolution.x / 2u;
         const auto rendered_frame = pipeline.frame_index() - 1;
         auto& buffer = (rendered_frame & 1u) == 0u ? svgf->svgf_data : svgf->svgf_data2;
         pipeline.stream() << buffer.view().download(history.data())
             << pipeline.frame_buffer()->cur_visibility_buffer_view(rendered_frame).subview(0, visibility.size()).download(visibility.data())
             << vision::synchronize() << vision::commit();
-        expect(visibility[8 * 16 + 8].inst_id != vision::InvalidUI32,
+        expect(visibility[center_index].inst_id != vision::InvalidUI32,
                "dolly regression center must hit the triangle, not stale sky history");
-        center_specular_history = static_cast<float>(history[8 * 16 + 8].moments_direct.w);
-        return static_cast<float>(history[8 * 16 + 8].moments_direct.z);
+        center_specular_history = static_cast<float>(history[center_index].moments_direct.w);
+        return static_cast<float>(history[center_index].moments_direct.z);
     };
     expect(center_history() > 1.5f, "dolly regression needs valid initial history");
     // A jittered boundary can miss this surface at exactly the reprojected
@@ -262,5 +264,59 @@ void check_camera_dolly_reprojection(vision::Pipeline& pipeline) {
            "stationary history must recover after camera movement");
     expect(center_specular_history > moving_specular_history + 8.f,
            "specular history must independently recover after camera movement");
+
+    // Turning at a fixed eye moves pixels without changing the outgoing
+    // direction at a reprojected world-space surface point.
+    sensor->set_position(vision::make_float3(0.f, 0.f, 3.f));
+    sensor->set_yaw(0.f);
+    sensor->update_device_data();
+    pipeline.invalidate();
+    for (int i = 0; i < 16; ++i) {
+        pipeline.upload_data();
+        pipeline.display(1.0 / 60.0);
+    }
+    sensor->set_yaw(6.f);
+    sensor->update_device_data();
+    pipeline.upload_data();
+    pipeline.display(1.0 / 60.0);
+    center_history();
+    std::cout << "Rotation specular history=" << center_specular_history << '\n';
+    expect(center_specular_history > 14.f,
+           "pure camera rotation must retain valid specular history when the world-space view direction is unchanged");
+
+    // The sensor's FOV spans the shorter dimension. Swapping width/height
+    // must not change the angular response at the same surface point.
+    float landscape_history = 0.f;
+    for (bool portrait : {false, true}) {
+        pipeline.change_resolution(portrait ? vision::make_uint2(16u, 24u)
+                                            : vision::make_uint2(24u, 16u));
+        sensor->set_position(vision::make_float3(0.f, 0.f, 3.f));
+        sensor->set_yaw(0.f);
+        sensor->update_device_data();
+        pipeline.invalidate();
+        for (int i = 0; i < 16; ++i) {
+            pipeline.upload_data();
+            pipeline.display(1.0 / 60.0);
+        }
+        sensor->set_position(vision::make_float3(0.4f, 0.f, 3.f));
+        sensor->update_device_data();
+        pipeline.upload_data();
+        pipeline.display(1.0 / 60.0);
+        center_history();
+        expect(center_specular_history > 1.5f && center_specular_history < 12.f,
+               "both image orientations must remain responsive to view parallax");
+        std::cout << "Aspect specular history portrait=" << portrait << " history="
+                  << center_specular_history << '\n';
+        if (!portrait) landscape_history = center_specular_history;
+        else expect(std::abs(center_specular_history - landscape_history) < landscape_history * 0.1f,
+                    "portrait and landscape views with the same short side must use the same angular history response");
+    }
+    // The following spatial fixture uses a 16x16 visibility buffer.
+    pipeline.change_resolution(vision::make_uint2(16u, 16u));
+    sensor->set_position(vision::make_float3(0.f, 0.f, 3.f));
+    sensor->update_device_data();
+    pipeline.invalidate();
+    pipeline.upload_data();
+    pipeline.display(1.0 / 60.0);
 
 }
