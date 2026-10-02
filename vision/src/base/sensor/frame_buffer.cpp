@@ -225,7 +225,7 @@ void FrameBuffer::compile_compute_hit() noexcept {
         TriangleHitVar hit = pipeline()->geometry().trace_closest(rs.ray);
         hit_buffer.write(0, hit);
     };
-    compute_hit_ = device().compile(kernel, "FrameBuffer::compute_hit_");
+    compute_hit_ = device().compile(kernel, "FrameBuffer_compute_hit_");
 }
 
 void FrameBuffer::compile() noexcept {
@@ -309,7 +309,7 @@ CommandBatch FrameBuffer::clear_accumulation_history() const noexcept {
     CommandBatch ret;
     if (accumulation_buffer_.device_buffer().size() != 0) {
         ret << pipeline()->reset_buffer(accumulation_buffer_.view(), make_float4(0.f),
-                                        "FrameBuffer::clear_accumulation_history");
+                                        "FrameBuffer_clear_accumulation_history");
     }
     return ret;
 }
