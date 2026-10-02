@@ -14,6 +14,9 @@
 
 void check_camera_dolly_reprojection(vision::Pipeline& pipeline);
 void check_motion_visibility_history(vision::Pipeline& pipeline);
+void check_substrate_sample_classification(vision::Pipeline& pipeline);
+void check_svgf_shading_guide(vision::Pipeline& pipeline);
+void check_svgf_spatial_bypass(vision::Pipeline& pipeline);
 
 namespace Corona::Systems {
 struct VisionEmbeddedModeSwitchTest {
@@ -287,6 +290,7 @@ struct VisionEmbeddedModeSwitchTest {
         check_motion_visibility_history(*svgf);
         check_realtime_camera_history(*svgf);
         check_camera_dolly_reprojection(*svgf);
+        check_svgf_spatial_bypass(*svgf);
         // Restore the PT view through the same production group helper. The
         // editor test additionally exercises automatic runtime transform upload.
         Vision::sync_external_live_group(*resource, pt_cache, 42, 0,
@@ -370,6 +374,8 @@ struct VisionEmbeddedModeSwitchTest {
             "file source must also support a second mode");
         expect(file_resource->source_revision == 1, "file mode switch must not republish source");
         render(*vision::Global::instance().pipeline(), "File-PT");
+        check_substrate_sample_classification(*vision::Global::instance().pipeline());
+        check_svgf_shading_guide(*vision::Global::instance().pipeline());
         system.clear_vision_runtimes();
         resource.reset();
         fs::current_path(original_cwd);

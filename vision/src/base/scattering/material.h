@@ -235,6 +235,10 @@ protected:
     [[nodiscard]] SampledSpectrum integral_albedo(const Float3 &wo, const Lobe *lobe_set) const noexcept;
 
 public:
+    [[nodiscard]] Float3 shading_normal(const Interaction &it,
+                                       const SampledWavelengths &swl) const noexcept {
+        return compute_shading_frame(it, swl).normal();
+    }
     [[nodiscard]] static Uint combine_flag(const Float3 &wo, const Float3 &wi,
                                            Uint flag) noexcept;
     [[nodiscard]] Evaluator create_evaluator(const Interaction &it,

@@ -23,11 +23,13 @@ struct SVGFDataDual {
     RadType4 illumi_indirect{};
     RadType4 moments_direct{};
     RadType4 moments_indirect{};
+    // World-space shading normal, including smooth vertex normals and normal maps.
+    RadType4 surface_normal{};
 };
 
 }// namespace vision::svgf
 
-OC_STRUCT(vision::svgf, SVGFDataDual, illumi_direct, illumi_indirect, moments_direct, moments_indirect) {
+OC_STRUCT(vision::svgf, SVGFDataDual, illumi_direct, illumi_indirect, moments_direct, moments_indirect, surface_normal) {
     [[nodiscard]] vision::RadTypeVar variance_direct() const noexcept { return illumi_direct.w; }
     [[nodiscard]] vision::RadType3Var illumination_direct() const noexcept { return illumi_direct.xyz(); }
     [[nodiscard]] vision::RadTypeVar first_moment_direct() const noexcept { return moments_direct.x; }
@@ -39,6 +41,7 @@ OC_STRUCT(vision::svgf, SVGFDataDual, illumi_direct, illumi_indirect, moments_di
     [[nodiscard]] vision::RadTypeVar second_moment_indirect() const noexcept { return moments_indirect.y; }
     
     [[nodiscard]] vision::RadTypeVar history_count() const noexcept { return moments_direct.z; }
+    [[nodiscard]] vision::RadTypeVar history_count_indirect() const noexcept { return moments_direct.w; }
 };
 
 
@@ -182,6 +185,23 @@ struct LuminanceWeightUtils {
 };
 
 struct PixelStateUtils {
+    [[nodiscard]] static Float3 query_shading_normal(Pipeline *pipeline,
+        const TriangleHitVar &hit, const Float3 &camera_pos) noexcept {
+        Interaction it = pipeline->geometry().compute_surface_interaction(hit, camera_pos);
+        Float3 normal = it.shading.normal();
+        if (MaterialRegistry::instance().individual_ns()) {
+            $if(it.has_material()) {
+                SampledWavelengths swl{pipeline->renderer().spectrum()->dimension()};
+                pipeline->scene().materials().dispatch(it.material_id(), [&](const Material *material) {
+                    normal = material->shading_normal(it, swl);
+                });
+            };
+        }
+        normal = ocarina::zero_if_nan_inf(normal);
+        Float norm2 = dot(normal, normal);
+        return ocarina::select(norm2 > 1e-10f, normal / sqrt(max(norm2, 1e-10f)), it.ng);
+    }
+
 [[nodiscard]] static Bool is_sky(const TriangleHitVar &hit) noexcept {
     return hit->is_miss() || hit.inst_id == InvalidUI32;
 }

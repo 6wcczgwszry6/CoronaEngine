@@ -116,9 +116,13 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
                 Float w_geo = 0.f;
                 $if(!neighbor_is_sky && boundary_weight > 0.f) {
                     Interaction neighbor_it = pipeline_ref->geometry().compute_surface_interaction(neighbor_hit, false);
-                    w_geo = GeometryWeightUtils::compute_geometry_weight(
-                        center_it.pos, center_it.ng, neighbor_it.pos, neighbor_it.ng,
-                        param.n_phi, param.z_phi, Cfg::GeometryWeight::kEpsilon);
+                    w_geo = GeometryWeightUtils::compute_depth_weight(
+                        center_it.pos, neighbor_it.pos, center_it.ng, param.z_phi) *
+                        GeometryWeightUtils::compute_normal_weight(
+                            ocarina::select(param.use_shading_normal != 0u,
+                                make_float3(param.svgf_buffer.read(cur_idx).surface_normal.xyz()), center_it.ng),
+                            ocarina::select(param.use_shading_normal != 0u,
+                                make_float3(param.svgf_buffer.read(idx).surface_normal.xyz()), neighbor_it.ng), param.n_phi);
                 };
                 w_geo *= boundary_weight;
 
@@ -205,8 +209,9 @@ Kernel kernel = [&, pipeline_ref](Var<CombinedAtrousParam> param) {
 
 
 CommandBatch AtrousFilter::dispatch_combined(vision::RealTimeDenoiseInput &input,
-                                         uint step_width, uint iteration) noexcept {
+                                         uint step_width, uint iteration, bool use_shading_normal) noexcept {
     CombinedAtrousParam param;
+    param.use_shading_normal = use_shading_normal;
     
     bool read_from_temp = (iteration % 2 == 1);
     if (!read_from_temp) {

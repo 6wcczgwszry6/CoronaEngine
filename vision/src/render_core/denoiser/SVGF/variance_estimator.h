@@ -21,13 +21,14 @@ struct VarianceEstimatorParam {
     array_float3 prev_camera_pos{};
     float screen_short_edge{};
     uint frame_index{};
+    uint channel_kind{};
 };
 
 }// namespace vision::svgf
 
 OC_PARAM_STRUCT(vision::svgf, VarianceEstimatorParam,
 radiance_direct, radiance_indirect, svgf_buffer_prev, svgf_buffer_cur,
-visibility_buffer, visibility_buffer_prev, motion_vectors, camera_pos, prev_camera_pos, screen_short_edge, frame_index){};
+visibility_buffer, visibility_buffer_prev, motion_vectors, camera_pos, prev_camera_pos, screen_short_edge, frame_index, channel_kind){};
 
 namespace vision::svgf {
 class SVGF;

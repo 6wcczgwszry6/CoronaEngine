@@ -205,12 +205,14 @@ CommandBatch SVGF::dispatch(vision::RealTimeDenoiseInput &input) noexcept {
             ret << variance_estimator_->dispatch_variance(input);
         }
         if (!skip_prefilter) {
-            ret << prefilter_->dispatch(input);
+            // The temporal bypass does not produce current shading guides.
+            // Preserve geometry-guided spatial filtering for this ablation.
+            ret << prefilter_->dispatch(input, !skip_variance);
         }
         
         if (!skip_atrous) {
             for (uint i = 0; i < Cfg::Atrous::kIterationCount; ++i) {
-                ret << atrous_->dispatch_combined(input, Cfg::Atrous::kStepSizes[i], i);
+                ret << atrous_->dispatch_combined(input, Cfg::Atrous::kStepSizes[i], i, !skip_variance);
             }
         }
         if (!radiance_domain) {
