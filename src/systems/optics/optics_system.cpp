@@ -1002,6 +1002,10 @@ void apply_pending_camera_state_updates() {
                 camera->vision_denoise = update.vision_denoise;
             }
             if (Corona::has_camera_state_field(
+                    update.fields, Corona::CameraStateUpdateField::VisionAccumulation)) {
+                camera->vision_accumulation = update.vision_accumulation;
+            }
+            if (Corona::has_camera_state_field(
                     update.fields, Corona::CameraStateUpdateField::ShadowCascadeDebug)) {
                 camera->shadow_cascade_debug = update.shadow_cascade_debug;
             }
@@ -1024,6 +1028,10 @@ void apply_pending_camera_state_updates() {
         if (Corona::has_camera_state_field(
                 update.fields, Corona::CameraStateUpdateField::VisionDenoise)) {
             hub.acknowledge_camera_vision_denoise(update.camera_handle, update.sequence);
+        }
+        if (Corona::has_camera_state_field(
+                update.fields, Corona::CameraStateUpdateField::VisionAccumulation)) {
+            hub.acknowledge_camera_vision_accumulation(update.camera_handle, update.sequence);
         }
     }
 }
@@ -2557,7 +2565,7 @@ struct OpticsSystem::VisionPipelineRuntime {
 bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
                                             std::uintptr_t camera_handle,
                                             uint32_t width, uint32_t height,
-                                            bool denoise) {
+                                            bool denoise, bool accumulation) {
     auto& pipeline = runtime.pipeline;
     if (!pipeline || camera_handle == 0) return false;
     const auto resolution = ocarina::make_uint2(std::max(width, 1u), std::max(height, 1u));
@@ -2599,11 +2607,15 @@ bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
     // Output settings are shared by the pipeline, while renderers and histories
     // belong to cameras. Restore the active camera's preference on every visit.
     pipeline->set_output_denoise(denoise);
-    const bool accumulate = runtime.mode == CameraVisionRenderMode::ProgressivePathTracing;
     if (runtime.mode != CameraVisionRenderMode::SSAT &&
-        pipeline->frame_buffer()->enable_accumulation() != accumulate) {
-        pipeline->frame_buffer()->set_enable_accumulation(accumulate);
-        pipeline->frame_buffer()->auto_manage_accumulation_buffer(accumulate);
+        pipeline->frame_buffer()->enable_accumulation() != accumulation) {
+        // Accumulation belongs to the active camera, independently of its
+        // integrator and denoiser. Drain GPU readers before reallocating buffers.
+        pipeline->commit_command();
+        runtime.wait_for_interop_submission(camera_handle, "accumulation toggle");
+        pipeline->frame_buffer()->set_enable_accumulation(accumulation);
+        pipeline->frame_buffer()->auto_manage_accumulation_buffer(accumulation);
+        pipeline->invalidate();
     }
     return true;
 }
@@ -6929,7 +6941,8 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                 const bool denoise = camera.vision_denoise ||
                     Vision::vision_render_mode_uses_denoise(runtime.mode);
                 if (!prepare_vision_camera_view(runtime, cam_handle,
-                                               camera.width, camera.height, denoise)) {
+                                               camera.width, camera.height, denoise,
+                                               camera.vision_accumulation)) {
                     return;
                 }
 

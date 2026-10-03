@@ -1,13 +1,18 @@
 // Shared by the main viewport and detached camera windows.
 export const visionRenderModes = [
-  { value: 'path_tracing', backend: 'vision', label: 'Vision PT · 实时' },
-  { value: 'progressive_path_tracing', backend: 'vision', label: 'Vision PT · 渐进收敛' },
-  { value: 'restir', backend: 'vision', label: 'Vision ReSTIR · 实时' },
+  { value: 'path_tracing', backend: 'vision', label: 'Vision PT' },
+  { value: 'restir', backend: 'vision', label: 'Vision ReSTIR' },
   { value: 'ssat', backend: 'vision', label: 'Vision SSAT' },
 ];
 
 export const normalizeVisionRenderMode = (mode) =>
-  mode === 'svgf' ? 'path_tracing' : mode || 'path_tracing';
+  mode === 'svgf' || mode === 'progressive_path_tracing' ? 'path_tracing' : mode || 'path_tracing';
+
+export const visionAccumulationFromCamera = (camera) => {
+  const enabled = camera?.vision_accumulation;
+  if (enabled !== undefined) return enabled === true || enabled === 'true';
+  return camera?.vision_render_mode === 'progressive_path_tracing';
+};
 
 export const visionDenoiseFromCamera = (camera) => {
   const enabled = camera?.vision_denoise;

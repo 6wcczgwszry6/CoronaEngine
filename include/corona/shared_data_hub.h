@@ -276,6 +276,7 @@ struct CameraDevice {
     CameraRenderBackend render_backend{CameraRenderBackend::Native};
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
     bool vision_denoise{false};
+    bool vision_accumulation{false};
     bool shadow_cascade_debug{false};
     bool ssao_enabled{true};
     bool view_open{false};
@@ -384,6 +385,7 @@ enum class CameraStateUpdateField : std::uint32_t {
     ShadowCascadeDebug = 1u << 6,
     SsaoEnabled = 1u << 7,
     VisionDenoise = 1u << 8,
+    VisionAccumulation = 1u << 9,
 };
 
 constexpr CameraStateUpdateField operator|(CameraStateUpdateField lhs,
@@ -408,6 +410,7 @@ struct CameraStateUpdateCommand {
     CameraRenderBackend render_backend{CameraRenderBackend::Native};
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
     bool vision_denoise{false};
+    bool vision_accumulation{false};
     bool shadow_cascade_debug{false};
     bool ssao_enabled{true};
     bool view_open{false};
@@ -648,6 +651,10 @@ class SharedDataHub {
         std::uintptr_t camera_handle) const;
     void acknowledge_camera_vision_denoise(std::uintptr_t camera_handle,
                                           std::uint64_t applied_sequence);
+    [[nodiscard]] std::optional<bool> requested_camera_vision_accumulation(
+        std::uintptr_t camera_handle) const;
+    void acknowledge_camera_vision_accumulation(std::uintptr_t camera_handle,
+                                               std::uint64_t applied_sequence);
     void clear_camera_state_updates(std::uintptr_t camera_handle);
     void enqueue_camera_release(CameraReleaseCommand command);
     std::vector<CameraReleaseCommand> drain_camera_releases();
@@ -697,13 +704,15 @@ class SharedDataHub {
     mutable std::mutex camera_state_update_mutex_;
     std::unordered_map<std::uintptr_t, CameraStateUpdateCommand>
         pending_camera_state_updates_;
-    struct RequestedCameraVisionDenoise {
+    struct RequestedCameraBool {
         bool enabled{false};
         std::uint64_t sequence{};
     };
     // Retained after drain until the render thread commits or discards the request.
-    std::unordered_map<std::uintptr_t, RequestedCameraVisionDenoise>
+    std::unordered_map<std::uintptr_t, RequestedCameraBool>
         requested_camera_vision_denoise_;
+    std::unordered_map<std::uintptr_t, RequestedCameraBool>
+        requested_camera_vision_accumulation_;
     std::uint64_t camera_state_update_sequence_{0};
     std::mutex camera_release_mutex_;
     std::vector<CameraReleaseCommand> pending_camera_releases_;

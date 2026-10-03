@@ -261,47 +261,6 @@
       </div>
 
       <div class="ml-auto flex items-center gap-2">
-        <div class="relative">
-          <button
-            class="px-2.5 py-1 rounded border border-gray-600 text-gray-200 bg-[#252525] hover:bg-[#3d3d3d] transition-colors duration-200 whitespace-nowrap"
-            :class="{ 'bg-[#3d3d3d]': activeMenu === 'mainRenderMode' }"
-            title="主窗口渲染模式"
-            @click="toggleMenu('mainRenderMode')"
-          >
-            {{ mainRenderModeLabel }}
-          </button>
-          <div
-            v-if="activeMenu === 'mainRenderMode'"
-            class="absolute top-full right-0 mt-1 w-52 bg-[#2d2d2d] border border-gray-700 rounded shadow-lg z-50"
-          >
-            <div class="py-1">
-              <button
-                v-for="mode in mainRenderModeOptions"
-                :key="mode.value"
-                class="block w-full text-left px-4 py-2 hover:bg-[#3d3d3d] transition-colors duration-200 disabled:text-gray-600 disabled:hover:bg-transparent"
-                :disabled="mode.backend === 'vision' && !visionAvailable"
-                @click="selectMainRenderMode(mode.value)"
-              >
-                {{ mode.label }}
-              </button>
-            </div>
-          </div>
-        </div>
-        <button
-          class="px-2.5 py-1 rounded border transition-colors duration-200 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
-          :class="mainVisionDenoise
-            ? 'border-amber-500 text-amber-100 bg-amber-800/50'
-            : 'border-gray-600 text-gray-200 bg-[#252525] hover:bg-[#3d3d3d]'"
-          :aria-pressed="mainVisionDenoise"
-          :disabled="mainRenderBackend !== 'vision' || mainVisionRenderMode === 'ssat' || mainVisionDenoiseBusy || !currentMainCameraId()"
-          title="SVGF 降噪"
-          @click="toggleMainVisionDenoise"
-        >
-          SVGF
-        </button>
-        <span v-if="mainVisionDenoiseError" role="alert" class="text-red-300 text-xs">
-          {{ mainVisionDenoiseError }}
-        </span>
         <button
           class="px-2.5 py-1 rounded border transition-colors duration-200 whitespace-nowrap"
           :class="previewRunning || previewBusy
@@ -358,6 +317,69 @@
       @click.stop
       @wheel.stop
     >
+      <section class="scene-quick-render" aria-label="渲染设置" data-guidance="render-settings">
+        <div class="scene-quick-render-mode">
+          <span>渲染模式</span>
+          <!-- CEF's offscreen renderer paints PET_VIEW only, so keep the menu in the page. -->
+          <div
+            class="scene-quick-render-menu"
+            @keydown.esc.stop="activeMenu = null; $refs.mainRenderModeButton?.focus()"
+          >
+            <button
+              ref="mainRenderModeButton"
+              type="button"
+              class="scene-quick-render-trigger"
+              aria-label="渲染模式"
+              aria-haspopup="menu"
+              :aria-expanded="activeMenu === 'render'"
+              :disabled="!currentMainCameraId()"
+              @click="toggleMenu('render')"
+              @keydown.down.prevent="activeMenu = 'render'"
+            >
+              <span>{{ mainRenderModeLabel }}</span>
+              <span aria-hidden="true">▾</span>
+            </button>
+            <div v-if="activeMenu === 'render'" class="scene-quick-render-dropdown" role="menu" aria-label="渲染模式选项">
+              <button
+                v-for="mode in mainRenderModeOptions"
+                :key="mode.value"
+                type="button"
+                role="menuitemradio"
+                :aria-checked="mode.value === (mainRenderBackend === 'vision' ? mainVisionRenderMode : 'native')"
+                :disabled="mode.backend === 'vision' && !visionAvailable"
+                @click="selectMainRenderMode(mode.value)"
+              >
+                {{ mode.label }}
+              </button>
+            </div>
+          </div>
+        </div>
+        <div class="scene-quick-render-options">
+          <label title="累积 PT / ReSTIR 样本">
+            <input
+              type="checkbox"
+              aria-label="累积样本"
+              :checked="mainVisionAccumulation"
+              :disabled="mainRenderBackend !== 'vision' || mainVisionRenderMode === 'ssat' || mainVisionAccumulationBusy || !currentMainCameraId()"
+              @change="toggleMainVisionAccumulation"
+            />
+            <span>累积样本</span>
+          </label>
+          <label title="SVGF 降噪">
+            <input
+              type="checkbox"
+              aria-label="SVGF"
+              :checked="mainVisionDenoise"
+              :disabled="mainRenderBackend !== 'vision' || mainVisionRenderMode === 'ssat' || mainVisionDenoiseBusy || !currentMainCameraId()"
+              @change="toggleMainVisionDenoise"
+            />
+            <span>SVGF</span>
+          </label>
+        </div>
+        <p v-if="mainVisionAccumulationError || mainVisionDenoiseError" role="alert" class="text-red-300 text-xs">
+          {{ mainVisionAccumulationError || mainVisionDenoiseError }}
+        </p>
+      </section>
       <section
         class="scene-quick-lighting"
         data-guidance="scene-lighting"
@@ -573,7 +595,7 @@ import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
 import {
-  normalizeVisionRenderMode, visionDenoiseFromCamera, visionRenderModes,
+  normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera, visionRenderModes,
 } from '@/utils/visionRenderModes.js';
 import {
   Bridge,
@@ -1147,6 +1169,9 @@ let tutorialPreviewObservedRunning = false;
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
+const mainVisionAccumulation = ref(false);
+const mainVisionAccumulationBusy = ref(false);
+const mainVisionAccumulationError = ref('');
 const mainVisionDenoise = ref(false);
 const mainVisionDenoiseBusy = ref(false);
 const mainVisionDenoiseError = ref('');
@@ -1192,9 +1217,10 @@ const mainRenderModeLabel = computed(() => {
     return 'Native';
   }
   return mainRenderModeOptions.find((mode) => mode.value === mainVisionRenderMode.value)?.label
-    || 'Vision PT · 实时';
+    || 'Vision PT';
 });
 let pendingMainRenderSelection = null;
+let pendingMainAccumulationSelection = null;
 let pendingMainDenoiseSelection = null;
 const currentMainCameraId = () =>
   cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
@@ -1461,6 +1487,44 @@ const selectMainRenderMode = async (mode) => {
   }
 };
 
+const toggleMainVisionAccumulation = async () => {
+  const sceneId = currentMainSceneId();
+  const cameraId = currentMainCameraId();
+  if (mainRenderBackend.value !== 'vision' || mainVisionRenderMode.value === 'ssat'
+    || mainVisionAccumulationBusy.value || !cameraId) return false;
+  const previous = mainVisionAccumulation.value;
+  const previousSelection = pendingMainAccumulationSelection;
+  const selection = { sceneId, cameraId, enabled: !previous };
+  const isCurrent = () => currentMainSceneId() === sceneId && currentMainCameraId() === cameraId;
+  pendingMainAccumulationSelection = selection;
+  mainVisionAccumulationBusy.value = true;
+  mainVisionAccumulation.value = selection.enabled;
+  mainVisionAccumulationError.value = '';
+  try {
+    const result = unwrapBridgeData(
+      await editorApi.sceneTools.setVisionAccumulation(sceneId, cameraId, selection.enabled),
+    );
+    if (isCurrent()) {
+      selection.enabled = result?.pending || typeof result?.enabled !== 'boolean'
+        ? selection.enabled : result.enabled;
+      mainVisionAccumulation.value = selection.enabled;
+      if (currentMainCamera.value) currentMainCamera.value.vision_accumulation = selection.enabled;
+    }
+    return true;
+  } catch (error) {
+    if (isCurrent()) {
+      pendingMainAccumulationSelection = previousSelection;
+      mainVisionAccumulation.value = previous;
+      if (currentMainCamera.value) currentMainCamera.value.vision_accumulation = previous;
+      mainVisionAccumulationError.value = error.message;
+    }
+    logError('Failed to set main viewport sample accumulation', error);
+    return false;
+  } finally {
+    mainVisionAccumulationBusy.value = false;
+  }
+};
+
 const toggleMainVisionDenoise = async () => {
   const sceneId = currentMainSceneId();
   const cameraId = currentMainCameraId();
@@ -1501,6 +1565,10 @@ const toggleMainVisionDenoise = async () => {
 
 // 新增：点击其他地方关闭菜单
 const handleClickOutside = (event) => {
+  if (activeMenu.value === 'render') {
+    if (!event.target.closest('.scene-quick-render-menu')) activeMenu.value = null;
+    return;
+  }
   const menuBar = document.querySelector('.bg-\\[\\#2d2d2d\\]');
   if (menuBar && !menuBar.contains(event.target)) {
     activeMenu.value = null;
@@ -1543,6 +1611,8 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
     resetRealtimeCameraInput();
     currentMainCamera.value = null;
+    mainVisionAccumulation.value = false;
+    pendingMainAccumulationSelection = null;
     mainVisionDenoise.value = false;
     pendingMainDenoiseSelection = null;
     cameraBindingState.value = {
@@ -1582,7 +1652,10 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
     cameraHandle: activeCamera?.handle ?? activeCamera?.camera_handle ?? null,
   };
   currentMainCamera.value = activeCamera;
-  if (bindingChanged) mainVisionDenoiseError.value = '';
+  if (bindingChanged) {
+    mainVisionAccumulationError.value = '';
+    mainVisionDenoiseError.value = '';
+  }
   lastCameraViewportSignature = '';
   scheduleCameraViewportSync();
   syncViewportUiMode();
@@ -1599,6 +1672,15 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
     mainRenderBackend.value = activeCamera?.render_backend || 'native';
     mainVisionRenderMode.value = normalizeVisionRenderMode(activeCamera?.vision_render_mode);
   }
+  const snapshotAccumulation = visionAccumulationFromCamera(activeCamera);
+  if (pendingMainAccumulationSelection?.sceneId === normalizedSceneId
+    && pendingMainAccumulationSelection.cameraId === currentMainCameraId()) {
+    mainVisionAccumulation.value = pendingMainAccumulationSelection.enabled;
+    if (snapshotAccumulation === pendingMainAccumulationSelection.enabled) pendingMainAccumulationSelection = null;
+  } else {
+    pendingMainAccumulationSelection = null;
+    mainVisionAccumulation.value = snapshotAccumulation;
+  }
   const snapshotDenoise = visionDenoiseFromCamera(activeCamera);
   if (pendingMainDenoiseSelection?.sceneId === normalizedSceneId
     && pendingMainDenoiseSelection.cameraId === currentMainCameraId()) {
@@ -1610,6 +1692,7 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
   }
   if (currentMainCamera.value) {
     currentMainCamera.value.vision_render_mode = mainVisionRenderMode.value;
+    currentMainCamera.value.vision_accumulation = mainVisionAccumulation.value;
     currentMainCamera.value.vision_denoise = mainVisionDenoise.value;
   }
 
@@ -3003,7 +3086,7 @@ onMounted(async () => {
 
   document.addEventListener('keydown', handleKeyDown);
   document.addEventListener('keyup', handleKeyUp);
-  document.addEventListener('click', handleClickOutside);
+  document.addEventListener('click', handleClickOutside, true);
   document.addEventListener('mousedown', onMouseDown);
   document.addEventListener('mousemove', onMouseMove);
   document.addEventListener('mouseup', onMouseUp);
@@ -3167,7 +3250,7 @@ onUnmounted(() => {
   viewportUiPointerController.dispose();
   document.removeEventListener('keydown', handleKeyDown);
   document.removeEventListener('keyup', handleKeyUp);
-  document.removeEventListener('click', handleClickOutside);
+  document.removeEventListener('click', handleClickOutside, true);
   document.removeEventListener('mousedown', onMouseDown);
   document.removeEventListener('mousemove', onMouseMove);
   document.removeEventListener('mouseup', onMouseUp);
@@ -3199,6 +3282,91 @@ onUnmounted(() => {
   backdrop-filter: blur(8px);
   color: #e9dfc5;
   pointer-events: auto;
+}
+
+.scene-quick-render {
+  padding-bottom: 9px;
+  margin-bottom: 9px;
+  border-bottom: 1px solid #55431f;
+  font-size: 11px;
+}
+
+.scene-quick-render-mode,
+.scene-quick-render-options,
+.scene-quick-render-options label {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.scene-quick-render-mode {
+  justify-content: space-between;
+  font-weight: 700;
+}
+
+.scene-quick-render-menu {
+  position: relative;
+  min-width: 0;
+  flex: 0 1 180px;
+}
+
+.scene-quick-render-trigger {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 4px 6px;
+  border: 1px solid #55431f;
+  border-radius: 4px;
+  background: #0f0e0a;
+  color: #e5e7eb;
+}
+
+.scene-quick-render-dropdown {
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  right: 0;
+  z-index: 1;
+  padding: 4px;
+  border: 1px solid #77602e;
+  border-radius: 5px;
+  background: #17140d;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.6);
+}
+
+.scene-quick-render-dropdown button {
+  display: block;
+  width: 100%;
+  padding: 7px 8px;
+  border-radius: 3px;
+  text-align: left;
+}
+
+.scene-quick-render-dropdown button[aria-checked='true'] {
+  color: #f1ce78;
+  background: #3b3019;
+}
+
+.scene-quick-render-dropdown button:not(:disabled):hover,
+.scene-quick-render-dropdown button:not(:disabled):focus-visible {
+  background: #5a4521;
+  color: #fff2cd;
+}
+
+.scene-quick-render-options {
+  margin-top: 8px;
+  gap: 18px;
+}
+
+.scene-quick-render-options input {
+  accent-color: #d8b86c;
+}
+
+.scene-quick-render input:disabled,
+.scene-quick-render button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .scene-quick-lighting-header,

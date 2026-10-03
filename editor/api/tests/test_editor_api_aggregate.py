@@ -415,6 +415,20 @@ class EditorAggregateApiTest(unittest.TestCase):
             ("scene_tools.get_vision_denoise", ["level.scene", "MainCamera"]),
         ])
 
+    def test_scene_tools_accumulation_preserves_false_and_pending_response(self):
+        self.assertTrue(callable(getattr(type(CoronaEditorApi.scene_tools), "set_vision_accumulation", None)))
+        accepted = {"status": "success", "enabled": False, "pending": True}
+        with patch("api.editor_api._invoke_manifest_cpp_api", return_value=accepted) as invoke:
+            self.assertIs(
+                CoronaEditorApi.scene_tools.set_vision_accumulation("level.scene", "MainCamera", False),
+                accepted,
+            )
+            self.assertIs(CoronaEditorApi.scene_tools.get_vision_accumulation(), accepted)
+        self.assertEqual([call.args for call in invoke.call_args_list], [
+            ("scene_tools.set_vision_accumulation", ["level.scene", "MainCamera", False]),
+            ("scene_tools.get_vision_accumulation", [None, None]),
+        ])
+
     def test_scene_tools_camera_debug_uses_aggregate_contracts(self):
         with patch(
             "api.editor_api._invoke_manifest_cpp_api",

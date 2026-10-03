@@ -76,8 +76,8 @@ void sync_vision_camera(::vision::Pipeline& pipeline, const CameraDevice& camera
         invalidate = true;
     }
 
-    // Progressive PT averages samples at fixed pixels and must restart after a
-    // pose change. Realtime SVGF instead reprojects history using the previous
+    // Independent sample accumulation averages fixed pixels and must restart
+    // after a pose change. Realtime SVGF instead reprojects history using the previous
     // sensor transform. Resetting its frame index on every camera movement made
     // every moving frame a cold start (including the same random sample seed),
     // continuously triggering the aggressive low-history spatial filter.

@@ -145,7 +145,8 @@ class OpticsSystem : public Kernel::SystemBase {
     VisionPipelineRuntime& active_vision_runtime();
     bool prepare_vision_camera_view(VisionPipelineRuntime& runtime,
                                    std::uintptr_t camera_handle,
-                                   uint32_t width, uint32_t height, bool denoise);
+                                   uint32_t width, uint32_t height,
+                                   bool denoise, bool accumulation);
     VisionPipelineKey make_vision_pipeline_key(std::string scene_path,
                                                Corona::CameraVisionRenderMode mode,
                                                VisionPipelineSource source) const;

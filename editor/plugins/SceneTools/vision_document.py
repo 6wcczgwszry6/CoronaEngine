@@ -165,6 +165,15 @@ def infer_vision_denoise(document: dict) -> bool:
     return bool(value) if isinstance(value, (bool, int)) else False
 
 
+def infer_vision_accumulation(document: dict) -> bool:
+    current = document
+    for key in ("pipeline", "param", "frame_buffer", "param", "accumulation"):
+        current = current.get(key) if isinstance(current, dict) else None
+    if isinstance(current, str):
+        return current.strip().lower() in {"1", "true", "yes", "on"}
+    return bool(current) if isinstance(current, (bool, int)) else False
+
+
 def infer_vision_render_mode(document: dict) -> str:
     if not isinstance(document, dict):
         return "path_tracing"

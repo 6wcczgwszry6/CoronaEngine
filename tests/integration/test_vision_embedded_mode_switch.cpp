@@ -69,7 +69,7 @@ struct VisionEmbeddedModeSwitchTest {
                    Corona::API::get_vision_render_mode(handle) == "restir",
                "committing denoise must preserve the selected algorithm");
 
-        for (const auto* mode : {"path_tracing", "restir", "progressive_path_tracing", "ssat"}) {
+        for (const auto* mode : {"path_tracing", "restir", "ssat"}) {
             Corona::API::set_vision_render_mode(mode, handle);
             updates = hub.drain_camera_state_updates();
             expect(updates.size() == 1 &&
@@ -172,6 +172,73 @@ struct VisionEmbeddedModeSwitchTest {
                "release cleanup must preserve the render-thread release command");
         hub.camera_storage().deallocate(handle);
     }
+    static void check_accumulation_api() {
+        auto& hub = SharedDataHub::instance();
+        const auto handle = hub.camera_storage().allocate();
+        expect(!Corona::API::get_vision_accumulation(handle), "new cameras must default to no accumulation");
+        Corona::API::set_vision_render_mode("progressive_path_tracing", handle);
+        auto updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && updates[0].vision_accumulation &&
+                   updates[0].vision_render_mode == CameraVisionRenderMode::PathTracing &&
+                   updates[0].fields == (CameraStateUpdateField::VisionRenderMode |
+                                         CameraStateUpdateField::VisionAccumulation),
+               "legacy progressive PT must migrate to PT with a separate accumulation preference");
+        expect(Corona::API::get_requested_vision_accumulation(handle) &&
+                   !Corona::API::get_vision_accumulation(handle),
+               "save must see the accepted accumulation request before render-thread commit");
+        const auto old_sequence = updates[0].sequence;
+        Corona::API::set_vision_accumulation(false, handle);
+        hub.acknowledge_camera_vision_accumulation(handle, old_sequence);
+        expect(hub.requested_camera_vision_accumulation(handle).has_value() &&
+                   !Corona::API::get_requested_vision_accumulation(handle),
+               "a stale ACK must not erase a newer explicit false");
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && !updates[0].vision_accumulation &&
+                   updates[0].fields == CameraStateUpdateField::VisionAccumulation,
+               "the accumulation setter must change only its own field");
+        hub.acknowledge_camera_vision_accumulation(handle, updates[0].sequence);
+        expect(!hub.requested_camera_vision_accumulation(handle).has_value(),
+               "committed accumulation requests must retire");
+
+        for (const auto* mode : {"path_tracing", "restir"}) {
+            Corona::API::set_vision_accumulation(true, handle);
+            Corona::API::set_vision_denoise(true, handle);
+            Corona::API::set_vision_render_mode(mode, handle);
+            updates = hub.drain_camera_state_updates();
+            expect(updates.size() == 1 && updates[0].vision_accumulation && updates[0].vision_denoise &&
+                       updates[0].fields == (CameraStateUpdateField::VisionRenderMode |
+                                             CameraStateUpdateField::VisionAccumulation |
+                                             CameraStateUpdateField::VisionDenoise),
+                   "mode and both checkboxes must merge without replacing each other");
+            {
+                auto camera = hub.camera_storage().acquire_write(handle);
+                camera->vision_render_mode = updates[0].vision_render_mode;
+                camera->vision_accumulation = updates[0].vision_accumulation;
+                camera->vision_denoise = updates[0].vision_denoise;
+            }
+            hub.acknowledge_camera_vision_accumulation(handle, updates[0].sequence);
+            hub.acknowledge_camera_vision_denoise(handle, updates[0].sequence);
+            expect(Corona::API::get_vision_render_mode(handle) == mode &&
+                       Corona::API::get_vision_accumulation(handle) && Corona::API::get_vision_denoise(handle),
+                   "camera snapshots must expose three independent settings");
+            Corona::API::set_vision_render_mode(mode, handle);
+            updates = hub.drain_camera_state_updates();
+            expect(updates.size() == 1 && updates[0].fields == CameraStateUpdateField::VisionRenderMode,
+                   "selecting an algorithm must leave both preferences untouched");
+        }
+        Corona::API::set_vision_render_mode("progressive_path_tracing", handle);
+        Corona::API::set_vision_accumulation(false, handle);
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && !updates[0].vision_accumulation,
+               "an explicit saved false must override the legacy progressive default");
+        Corona::API::set_vision_accumulation(true, handle);
+        hub.enqueue_camera_release({handle});
+        expect(!hub.requested_camera_vision_accumulation(handle).has_value() &&
+                   hub.drain_camera_state_updates().empty(),
+               "camera release must clear queued and in-flight accumulation preferences");
+        hub.drain_camera_releases();
+        hub.camera_storage().deallocate(handle);
+    }
     static void render(vision::Pipeline& pipeline, const char* label, bool lit = true) {
         const auto before = pipeline.frame_index();
         for (int i = 0; i < 3; ++i) {
@@ -196,7 +263,7 @@ struct VisionEmbeddedModeSwitchTest {
                                          const char* algorithm, bool accumulation) {
         auto prepare = [&](std::uintptr_t camera, bool enabled) {
             expect(system.prepare_vision_camera_view(system.active_vision_runtime(), camera,
-                       16, 16, enabled), "camera denoise state must prepare a usable view");
+                       16, 16, enabled, accumulation), "camera denoise state must prepare a usable view");
             auto* integrator = dynamic_cast<vision::IlluminationIntegrator*>(
                 pipeline.renderer().integrator().get());
             expect(pipeline.renderer().integrator()->impl_type() == algorithm,
@@ -205,7 +272,7 @@ struct VisionEmbeddedModeSwitchTest {
                        integrator->denoiser()->enabled() == enabled,
                    "active camera must control both output and actual SVGF state");
             expect(pipeline.frame_buffer()->enable_accumulation() == accumulation,
-                   "SVGF must preserve the render mode's accumulation policy");
+                   "SVGF must preserve the independent accumulation preference");
         };
         prepare(101, false);
         render(pipeline, "camera-101-raw");
@@ -221,6 +288,68 @@ struct VisionEmbeddedModeSwitchTest {
         prepare(101, false);
         expect(pipeline.frame_index() == 0, "disabling SVGF must discard filtered history");
         render(pipeline, "camera-101-raw-return");
+        pipeline.activate_view_context(0);
+        pipeline.set_output_denoise(false);
+    }
+    static void check_independent_accumulation(OpticsSystem& system, vision::Pipeline& pipeline,
+                                              const char* algorithm) {
+        Corona::CameraDevice camera;
+        camera.width = 16; camera.height = 16;
+        camera.position = {0.f, 0.f, -3.f}; camera.forward = {0.f, 0.f, 1.f};
+        camera.world_up = {0.f, 1.f, 0.f}; camera.fov = 45.f;
+        for (const bool denoise : {false, true}) {
+            auto prepare = [&](std::uintptr_t handle, bool accumulation) {
+                expect(system.prepare_vision_camera_view(system.active_vision_runtime(), handle,
+                           16, 16, denoise, accumulation), "independent accumulation view must prepare");
+                expect(pipeline.frame_buffer()->enable_accumulation() == accumulation &&
+                           pipeline.output_desc().denoise == denoise &&
+                           pipeline.renderer().integrator()->impl_type() == algorithm,
+                       "accumulation must not change the algorithm or SVGF preference");
+            };
+            prepare(201, false);
+            Vision::sync_vision_camera(pipeline, camera);
+            render(pipeline, "accumulation-off");
+            prepare(201, true);
+            expect(pipeline.frame_index() == 0, "enabling accumulation must restart at sample zero");
+            auto* fb = pipeline.frame_buffer();
+            std::vector<vision::float4> first(pipeline.pixel_num()), second(first.size()), average(first.size());
+            pipeline.upload_data();
+            pipeline.display(1.0 / 60.0);
+            pipeline.stream() << fb->rt_buffer().device_buffer().download(first.data())
+                              << vision::synchronize() << vision::commit();
+            pipeline.upload_data();
+            pipeline.display(1.0 / 60.0);
+            pipeline.stream() << fb->rt_buffer().device_buffer().download(second.data())
+                              << fb->accumulation_buffer().device_buffer().download(average.data())
+                              << vision::synchronize() << vision::commit();
+            for (size_t i = 0; i < first.size(); ++i) {
+                expect(std::isfinite(average[i].x) &&
+                           std::abs(average[i].x - (first[i].x + second[i].x) * 0.5f) < 0.0001f &&
+                           std::abs(average[i].y - (first[i].y + second[i].y) * 0.5f) < 0.0001f &&
+                           std::abs(average[i].z - (first[i].z + second[i].z) * 0.5f) < 0.0001f,
+                       "the checkbox must average real consecutive GPU output samples");
+            }
+            const auto history = pipeline.frame_index();
+            prepare(202, false);
+            render(pipeline, "other-camera-no-accumulation");
+            prepare(201, true);
+            expect(pipeline.frame_index() == history, "another camera must preserve this camera's samples");
+            Vision::sync_vision_camera(pipeline, camera);
+            expect(pipeline.frame_index() == history, "stationary camera must retain accumulated samples");
+            camera.position.x += 0.1f;
+            Vision::sync_vision_camera(pipeline, camera);
+            expect(pipeline.frame_index() == 0, "camera movement must restart either accumulating algorithm");
+            pipeline.stream() << fb->accumulation_buffer().device_buffer().download(average.data())
+                              << vision::synchronize() << vision::commit();
+            for (const auto& pixel : average) {
+                expect(pixel.x == 0.f && pixel.y == 0.f && pixel.z == 0.f,
+                       "movement must clear the accumulated pixel buffer");
+            }
+            render(pipeline, "accumulation-after-movement");
+            prepare(201, false);
+            expect(pipeline.frame_index() == 0, "disabling accumulation must discard accumulated history");
+            render(pipeline, "accumulation-disabled-again");
+        }
         pipeline.activate_view_context(0);
         pipeline.set_output_denoise(false);
     }
@@ -415,6 +544,7 @@ struct VisionEmbeddedModeSwitchTest {
                "in-memory PT must initialize");
         auto pt = vision::Global::instance().pipeline_shared();
         render(*pt, "PT");
+        check_independent_accumulation(system, *pt, "pt");
         expect(!pt->frame_buffer()->enable_accumulation(), "realtime PT must not accumulate SVGF output");
         expect(system.load_external_vision_scene(request.scene_key,
             CameraVisionRenderMode::ProgressivePathTracing, Vision::VisionPipelineSource::ExternalLive),
@@ -475,6 +605,7 @@ struct VisionEmbeddedModeSwitchTest {
         render(*restir, "ReSTIR");
         check_stationary_history_reset(*restir);
         check_independent_denoise(system, *restir, "rt", false);
+        check_independent_accumulation(system, *restir, "rt");
         expect(restir->create_view_context(99, vision::make_uint2(16, 16)),
                "ReSTIR camera view context must initialize");
         expect(restir->renderer().integrator()->impl_type() == "rt", "detached view must also use rt");
@@ -660,6 +791,7 @@ struct VisionEmbeddedModeSwitchTest {
 int main(int argc, char** argv) {
     try {
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_mode_api();
+        Corona::Systems::VisionEmbeddedModeSwitchTest::check_accumulation_api();
         if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
                           std::string(argv[1]) == "--capture-fast-camera-motion")) {
             Corona::Systems::VisionEmbeddedModeSwitchTest::capture_camera_motion(
