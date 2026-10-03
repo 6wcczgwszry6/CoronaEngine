@@ -71,12 +71,25 @@ public:
 namespace vision {
 [[nodiscard]] inline Bool is_valid_neighbor(const SurfaceDataVar &cur_surface, const SurfaceDataVar &another_surface,
                                             const Float &dot_threshold, const Float &depth_threshold,
-                                            const Float &diff_threshold) noexcept {
-    Bool cond0 = abs_dot(cur_surface->normal(), another_surface->normal()) > dot_threshold;
-    Bool cond1 = (abs(cur_surface->depth() - another_surface->depth()) / cur_surface->depth()) < depth_threshold;
-    Bool cond2 = (abs(cur_surface->diffuse_factor() - another_surface->diffuse_factor())) / cur_surface->diffuse_factor() < diff_threshold;
+                                            const Float &diff_threshold, const Float &another_depth) noexcept {
+    Bool cond0 = dot(cur_surface->normal(), another_surface->normal()) > dot_threshold;
+    Bool cond1 = abs(cur_surface->depth() - another_depth) /
+                     max(abs(cur_surface->depth()), 1e-6f) < depth_threshold;
+    Bool cond2 = abs(cur_surface->diffuse_factor() - another_surface->diffuse_factor()) /
+                     max(abs(cur_surface->diffuse_factor()), 1e-6f) < diff_threshold;
+    // Replaced hits describe a specular-chain endpoint, while these guides
+    // still describe the primary surface. They cannot validate that endpoint.
     return cond0 && cond1 &&
-           cond2 && cur_surface.hit->is_hit() && another_surface.hit->is_hit();
+           cond2 && cur_surface.hit->is_hit() && another_surface.hit->is_hit() &&
+           !cur_surface.is_replaced && !another_surface.is_replaced;
+}
+
+[[nodiscard]] inline Bool is_valid_neighbor(const SurfaceDataVar &cur_surface, const SurfaceDataVar &another_surface,
+                                            const Float &dot_threshold, const Float &depth_threshold,
+                                            const Float &diff_threshold) noexcept {
+    // Spatial guides already store depth in the same camera space.
+    return is_valid_neighbor(cur_surface, another_surface, dot_threshold, depth_threshold,
+                             diff_threshold, another_surface->depth());
 }
 
 class ReSTIR : public Toolkit, public RenderEnv, public GUI, public RuntimeObject {

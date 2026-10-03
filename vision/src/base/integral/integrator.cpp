@@ -206,6 +206,12 @@ Float3 IlluminationIntegrator::Li(RayState rs, Float scatter_pdf, const Uint &ma
     Float3 primary_dir = rs.direction();
     auto mis_bsdf = [&](auto &bounces, bool inner) {
         hit = geometry.trace_closest(rs.ray);
+        Bool include_emission = true;
+        // The only-direct supplement is already a post-scattering segment,
+        // even though its own loop counter starts at zero.
+        if (hc.suppress_initial_emission && inner) {
+            include_emission = bounces != 0u;
+        }
         comment("miss");
         if (!inner) {
             Bool primary_miss = all(rs.direction() == primary_dir);
@@ -215,10 +221,12 @@ Float3 IlluminationIntegrator::Li(RayState rs, Float scatter_pdf, const Uint &ma
         }
 
         $if(hit->is_miss()) {
-            SampledSpectrum d = evaluate_miss(rs, prev_surface_ng, scatter_pdf, bounces, swl) * throughput;
-            Float3 lin = spectrum()->linear_srgb(d, swl);
-            ret += lin;
-            route_spec(lin, bounces, 0.f);
+            $if(include_emission) {
+                SampledSpectrum d = evaluate_miss(rs, prev_surface_ng, scatter_pdf, bounces, swl) * throughput;
+                Float3 lin = spectrum()->linear_srgb(d, swl);
+                ret += lin;
+                route_spec(lin, bounces, 0.f);
+            };
             $super_break;
         };
 
@@ -251,7 +259,7 @@ Float3 IlluminationIntegrator::Li(RayState rs, Float scatter_pdf, const Uint &ma
         }
 
         comment("hit light");
-        $if(it.has_emission()) {
+        $if(it.has_emission() && include_emission) {
             LightSampleContext p_ref;
             p_ref.pos = rs.origin();
             p_ref.ng = prev_surface_ng;

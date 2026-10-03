@@ -48,7 +48,7 @@ private:
     uint M_light_{};
     uint M_bsdf_{};
     bool debias_{false};
-    bool pairwise_{false};
+    bool pairwise_{true};
     bool reweight_{false};
     uint max_recursion_{};
     SP<ScreenBuffer> radiance_{make_shared<ScreenBuffer>("ReSTIRDI::radiance_")};
@@ -95,9 +95,11 @@ public:
                                                 const Var<DIParam> &param,
                                                 DISampleVar *sample) noexcept {
         Bool cond = sample ? sample->age < param.max_age : true;
+        // Compare both primary-surface depths in the current camera space.
+        Float prev_depth = scene().sensor()->linear_depth(prev_surface->position());
         return vision::is_valid_neighbor(cur_surface, prev_surface,
                                          param.t_dot,
-                                         param.t_depth, param.diff_factor) &&
+                                         param.t_depth, param.diff_factor, prev_depth) &&
                cond;
     }
     [[nodiscard]] uint reservoir_base() const noexcept { return reservoirs_.index().hv(); }
@@ -133,7 +135,7 @@ public:
     }
 
     /**
-     * reference from https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf equation 7.3
+     * reference from https://intro-to-restir.cwyman.org/presentations/2023ReSTIR_Course_Notes.pdf equation 7.5
      *
      *  1 is canonical technique
      *
@@ -166,6 +168,7 @@ public:
     [[nodiscard]] HOTFIX_VIRTUAL DIReservoirVar combine_temporal(const DIReservoirVar &cur_rsv,
                                                                  const SurfaceDataVar &cur_surf,
                                                                  DIReservoirVar &other_rsv,
+                                                                 const SurfaceDataVar &other_surf,
                                                                  Float3 view_pos,
                                                                  Float3 prev_view_pos) const noexcept;
     [[nodiscard]] HOTFIX_VIRTUAL DIReservoirVar spatial_reuse(DIReservoirVar rsv,
