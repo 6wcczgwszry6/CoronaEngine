@@ -146,6 +146,8 @@ struct VisionRuntimeGeometrySyncTest {
             system.clear_vision_runtimes(); return;
         }
         if (scenario == "material" || scenario == "topology") {
+            render(*svgf, "SVGF-before-material-change");
+            svgf->set_output_denoise(false);
             pt->activate_global_context();
             vision::MaterialDesc desc;
             desc.init(vision::ParameterSet{vision::DataWrap::parse(R"({"type":"diffuse","name":"new-runtime-material","param":{"color":[0.2,0.5,0.8]}})")});
@@ -159,6 +161,7 @@ struct VisionRuntimeGeometrySyncTest {
             expect(system.sync_shared_vision_scene(*sr), "new material topology must import into independent runtime");
             expect(svgf->scene().instances()[0]->material()->hash() == material->hash(), "new material mapping");
             expect(std::abs(probe(*svgf)-1.5f)<1e-4f,"new material geometry CUDA hit");
+            svgf->set_output_denoise(true);
             render(*svgf,"new-material-SVGF");
             system.clear_vision_runtimes(); return;
         }

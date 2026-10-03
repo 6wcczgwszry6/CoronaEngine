@@ -1890,9 +1890,12 @@ void prepare_enabled_denoiser_for_runtime_switch(vision::Pipeline& pipeline) {
         return;
     }
     auto* denoiser = illum->denoiser();
-    if (denoiser == nullptr || !denoiser->enabled()) {
+    if (denoiser == nullptr || !denoiser->enabled() || denoiser->has_prepared_resources()) {
         return;
     }
+    vision::Global::SceneGpuContextScope scene_gpu_context{
+        pipeline.scene().geometry().bindless_array(),
+        pipeline.scene().geometry().gpu_resource()->device()};
     denoiser->prepare();
     denoiser->compile();
     pipeline.upload_bindless_array();
@@ -2252,6 +2255,9 @@ void validate_vision_source_node(const vision::DataWrap& node,
     const auto source_framebuffer_type =
         vision_framebuffer_type_from_project_data(project_data);
     Corona::Systems::Vision::configure_vision_scene_for_mode(project_data, mode);
+    // The editor renders per-camera contexts; compile the base renderer only
+    // if a caller actually renders it (e.g. offline capture/integration tests).
+    project_data["pipeline"]["param"]["defer_base_compile"] = true;
     const auto configured_framebuffer_type =
         vision_framebuffer_type_from_project_data(project_data);
     CFW_LOG_INFO(
@@ -2573,9 +2579,14 @@ bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
         if (!pipeline->activate_view_context(camera_handle)) return false;
         const auto* fb = pipeline->frame_buffer();
         const auto state = runtime.view_denoise_states.find(camera_handle);
+        // SVGF reads the integrator's existing visibility/radiance buffers. Its
+        // switch must not recreate the renderer or recompile PT/ReSTIR kernels.
+        // Keep the existing recreation path for SSAT's GBuffer callbacks.
         const bool recreate = !fb || fb->resolution().x != resolution.x ||
                               fb->resolution().y != resolution.y ||
-                              state == runtime.view_denoise_states.end() || state->second != denoise;
+                              state == runtime.view_denoise_states.end() ||
+                              (runtime.mode == CameraVisionRenderMode::SSAT &&
+                               state->second != denoise);
         if (recreate) {
             pipeline->commit_command();
             runtime.wait_for_interop_submission(camera_handle, "view context recreation");
@@ -2607,6 +2618,20 @@ bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
     // Output settings are shared by the pipeline, while renderers and histories
     // belong to cameras. Restore the active camera's preference on every visit.
     pipeline->set_output_denoise(denoise);
+    auto& denoise_state = runtime.view_denoise_states.at(camera_handle);
+    if (denoise_state != denoise) {
+        pipeline->commit_command();
+        runtime.wait_for_interop_submission(camera_handle, "denoise toggle");
+        if (denoise) {
+            // Allocate and compile only the denoiser on its first use. Retain
+            // these resources when disabled so subsequent switches are cheap.
+            // SVGF's compute_GBuffer callback is empty; no geometry recompile
+            // is required when registering it after the renderer was prepared.
+            prepare_enabled_denoiser_for_runtime_switch(*pipeline);
+        }
+        denoise_state = denoise;
+        pipeline->invalidate();
+    }
     if (runtime.mode != CameraVisionRenderMode::SSAT &&
         pipeline->frame_buffer()->enable_accumulation() != accumulation) {
         // Accumulation belongs to the active camera, independently of its
@@ -2815,8 +2840,26 @@ void OpticsSystem::evict_idle_vision_runtimes(uint64_t frame_index) {
             continue;
         }
         auto& runtime = it->second;
-        if (!runtime || runtime->last_used_frame == 0 ||
+        if (!runtime ||
             frame_index <= runtime->last_used_frame + kVisionRuntimeIdleEvictFrames) {
+            ++it;
+            continue;
+        }
+        // An algorithm can be inactive while its viewport remains open. Keep
+        // the current scene's compiled variants so switching back after a few
+        // seconds does not turn into another scene import and shader compile.
+        // Closed views and previous scenes still follow normal idle eviction.
+        const bool current_source = active_vision_runtime_key_ &&
+            it->first.source == active_vision_runtime_key_->source &&
+            it->first.scene_path == active_vision_runtime_key_->scene_path;
+        const bool has_open_view = current_source && std::any_of(
+            runtime->view_denoise_states.begin(), runtime->view_denoise_states.end(),
+            [](const auto& view) {
+                auto camera = SharedDataHub::instance().camera_storage().try_acquire_read(view.first);
+                return camera && camera->surface != nullptr &&
+                       camera->render_backend == CameraRenderBackend::Vision;
+            });
+        if (has_open_view) {
             ++it;
             continue;
         }

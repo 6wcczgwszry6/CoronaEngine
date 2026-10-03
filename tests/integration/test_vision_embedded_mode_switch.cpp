@@ -12,6 +12,7 @@
 #include <stdexcept>
 #include <iomanip>
 #include <sstream>
+#include <chrono>
 
 void check_camera_dolly_reprojection(vision::Pipeline& pipeline);
 void check_motion_visibility_history(vision::Pipeline& pipeline);
@@ -262,8 +263,13 @@ struct VisionEmbeddedModeSwitchTest {
     static void check_independent_denoise(OpticsSystem& system, vision::Pipeline& pipeline,
                                          const char* algorithm, bool accumulation) {
         auto prepare = [&](std::uintptr_t camera, bool enabled) {
+            const auto started = std::chrono::steady_clock::now();
             expect(system.prepare_vision_camera_view(system.active_vision_runtime(), camera,
                        16, 16, enabled, accumulation), "camera denoise state must prepare a usable view");
+            std::cout << "Denoise switch: algorithm=" << algorithm << " camera=" << camera
+                      << " enabled=" << enabled << " ms="
+                      << std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - started).count() << '\n';
             auto* integrator = dynamic_cast<vision::IlluminationIntegrator*>(
                 pipeline.renderer().integrator().get());
             expect(pipeline.renderer().integrator()->impl_type() == algorithm,
@@ -276,7 +282,10 @@ struct VisionEmbeddedModeSwitchTest {
         };
         prepare(101, false);
         render(pipeline, "camera-101-raw");
+        const auto original_framebuffer = pipeline.renderer().frame_buffer_sp();
         prepare(101, true);
+        expect(pipeline.frame_buffer() == original_framebuffer.get(),
+               "enabling SVGF must retain the camera renderer and its compiled kernels");
         expect(pipeline.frame_index() == 0, "enabling SVGF must discard incompatible history");
         render(pipeline, "camera-101-SVGF");
         const auto history = pipeline.frame_index();
@@ -286,8 +295,26 @@ struct VisionEmbeddedModeSwitchTest {
         expect(pipeline.frame_index() == history, "another camera must not reset this camera's history");
         render(pipeline, "camera-101-SVGF-return");
         prepare(101, false);
+        expect(pipeline.frame_buffer() == original_framebuffer.get(),
+               "disabling SVGF must retain the camera renderer and its compiled kernels");
         expect(pipeline.frame_index() == 0, "disabling SVGF must discard filtered history");
         render(pipeline, "camera-101-raw-return");
+        prepare(101, true);
+        expect(pipeline.frame_buffer() == original_framebuffer.get() && pipeline.frame_index() == 0,
+               "re-enabling SVGF must reuse the renderer with fresh history");
+        render(pipeline, "camera-101-SVGF-reenabled");
+        expect(system.prepare_vision_camera_view(system.active_vision_runtime(), 101,
+                   24, 16, false, accumulation), "resizing a view with cached SVGF must prepare");
+        render(pipeline, "camera-101-resized-raw");
+        expect(system.prepare_vision_camera_view(system.active_vision_runtime(), 101,
+                   24, 16, true, accumulation), "SVGF must prepare at the resized extent");
+        render(pipeline, "camera-101-resized-SVGF");
+        expect(system.prepare_vision_camera_view(system.active_vision_runtime(), 101,
+                   24, 16, false, accumulation), "cached SVGF must disable before an in-place resize");
+        pipeline.change_resolution(vision::make_uint2(32, 16));
+        expect(system.prepare_vision_camera_view(system.active_vision_runtime(), 101,
+                   32, 16, true, accumulation), "disabled SVGF resources must follow an in-place resize");
+        render(pipeline, "camera-101-SVGF-after-disabled-resize");
         pipeline.activate_view_context(0);
         pipeline.set_output_denoise(false);
     }
@@ -418,6 +445,54 @@ struct VisionEmbeddedModeSwitchTest {
         pipeline.upload_data();
         std::cout << "PASS: realtime camera translation/rotation preserves history; projection/resize resets\n";
     }
+    // Optional real-scene latency probe, using the editor's production view
+    // preparation path. Kept out of CTest because scene shader cold starts vary.
+    static void benchmark_switches(const char* scene) {
+        namespace fs = std::filesystem;
+        ocarina::RHIContext::instance().init(fs::current_path());
+        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+        OpticsSystem system;
+        auto& storage = SharedDataHub::instance().camera_storage();
+        const auto handle = storage.allocate();
+        int surface_token = 0;
+        {
+            auto camera = storage.acquire_write(handle);
+            camera->surface = &surface_token;
+            camera->render_backend = CameraRenderBackend::Vision;
+        }
+        const auto step = [&](CameraVisionRenderMode mode, bool denoise, const char* label) {
+            const auto started = std::chrono::steady_clock::now();
+            std::cout << "SWITCH_BEGIN " << label << std::endl;
+            expect(system.load_external_vision_scene(scene, mode, Vision::VisionPipelineSource::ExternalLive),
+                   "benchmark scene must load");
+            auto pipeline = vision::Global::instance().pipeline_shared();
+            const auto res = pipeline->resolution();
+            expect(system.prepare_vision_camera_view(system.active_vision_runtime(), handle,
+                       res.x, res.y, denoise, false), "benchmark view must prepare");
+            const auto prepared = std::chrono::steady_clock::now();
+            render(*pipeline, label);
+            std::cout << "SWITCH_RESULT " << label << " extent=" << res.x << 'x' << res.y
+                      << " prepare_ms=" << std::chrono::duration<double, std::milli>(prepared - started).count()
+                      << " three_frames_ms=" << std::chrono::duration<double, std::milli>(
+                             std::chrono::steady_clock::now() - prepared).count() << std::endl;
+            pipeline->activate_view_context(0);
+            system.evict_idle_vision_runtimes(10000);
+        };
+        step(CameraVisionRenderMode::PathTracing, false, "PT-first");
+        step(CameraVisionRenderMode::PathTracing, true, "PT-SVGF-first");
+        step(CameraVisionRenderMode::PathTracing, false, "PT-SVGF-off");
+        step(CameraVisionRenderMode::PathTracing, true, "PT-SVGF-reenable");
+        step(CameraVisionRenderMode::ReSTIR, false, "ReSTIR-first");
+        step(CameraVisionRenderMode::ReSTIR, true, "ReSTIR-SVGF-first");
+        step(CameraVisionRenderMode::ReSTIR, false, "ReSTIR-SVGF-off");
+        step(CameraVisionRenderMode::ReSTIR, true, "ReSTIR-SVGF-reenable");
+        step(CameraVisionRenderMode::PathTracing, true, "PT-return");
+        step(CameraVisionRenderMode::ReSTIR, true, "ReSTIR-return");
+        system.clear_vision_runtimes();
+        storage.deallocate(handle);
+    }
     // Optional visual regression capture uses the same camera adapter and active
     // view context as OpticsSystem's editor render loop. It is not a CTest job.
     static void capture_camera_motion(const char* scene, const char* destination, bool fast = false) {
@@ -543,6 +618,15 @@ struct VisionEmbeddedModeSwitchTest {
         expect(system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::PathTracing),
                "in-memory PT must initialize");
         auto pt = vision::Global::instance().pipeline_shared();
+        // Editor imports need only camera kernels. Drain and render a camera
+        // before the base renderer is used; lazy base compilation must remain
+        // safe during view creation/retirement and when rendered afterwards.
+        pt->commit_command();
+        expect(system.prepare_vision_camera_view(system.active_vision_runtime(), 101,
+                   16, 16, false, false), "camera must render before the unused base renderer");
+        render(*pt, "PT-camera-before-base");
+        pt->activate_view_context(0);
+        pt->commit_command();
         render(*pt, "PT");
         check_independent_accumulation(system, *pt, "pt");
         expect(!pt->frame_buffer()->enable_accumulation(), "realtime PT must not accumulate SVGF output");
@@ -624,8 +708,48 @@ struct VisionEmbeddedModeSwitchTest {
         expect(restir->frame_index() == 0, "all ReSTIR camera histories must reset");
         restir->activate_view_context(0);
         render(*restir, "ReSTIR-return");
+        auto& camera_storage = SharedDataHub::instance().camera_storage();
+        const auto visible_camera = camera_storage.allocate();
+        int surface_token = 0;
+        {
+            auto view = camera_storage.acquire_write(visible_camera);
+            view->surface = &surface_token;
+            view->render_backend = CameraRenderBackend::Vision;
+        }
+        expect(system.prepare_vision_camera_view(system.active_vision_runtime(), visible_camera,
+                   16, 16, false, false), "visible ReSTIR view must prepare");
+        auto cached_framebuffer = restir->renderer().frame_buffer_sp();
+        const auto restir_key = system.make_vision_pipeline_key(request.scene_key,
+            CameraVisionRenderMode::ReSTIR, Vision::VisionPipelineSource::ExternalLive);
+        restir->activate_view_context(0);
         system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
             Vision::VisionPipelineSource::ExternalLive);
+        system.evict_idle_vision_runtimes(1000);
+        expect(system.vision_runtimes_.contains(restir_key),
+               "an open viewport must retain cached ReSTIR beyond the idle eviction interval");
+        const auto switch_started = std::chrono::steady_clock::now();
+        expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::ReSTIR,
+                   Vision::VisionPipelineSource::ExternalLive) &&
+                   system.prepare_vision_camera_view(system.active_vision_runtime(), visible_camera,
+                       16, 16, false, false), "cached ReSTIR must reactivate");
+        std::cout << "Cached ReSTIR switch ms=" << std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - switch_started).count() << '\n';
+        expect(vision::Global::instance().pipeline() == restir.get() &&
+                   restir->frame_buffer() == cached_framebuffer.get() && restir->frame_index() == 0,
+               "cached mode switch must reuse compiled resources and discard stale history");
+        render(*restir, "ReSTIR-after-idle");
+        cached_framebuffer.reset();
+        restir->activate_view_context(0);
+        system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
+            Vision::VisionPipelineSource::ExternalLive);
+        {
+            auto view = camera_storage.acquire_write(visible_camera);
+            view->surface = nullptr;
+        }
+        system.evict_idle_vision_runtimes(1001);
+        expect(!system.vision_runtimes_.contains(restir_key),
+               "closing the viewport must allow unused mode resources to be reclaimed");
+        camera_storage.deallocate(visible_camera);
         restir.reset();
         const auto resource_key = system.make_vision_scene_resource_key(request.scene_key,
             Vision::VisionPipelineSource::ExternalLive);
@@ -792,7 +916,9 @@ int main(int argc, char** argv) {
     try {
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_mode_api();
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_accumulation_api();
-        if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
+        if (argc == 3 && std::string(argv[1]) == "--benchmark-switches") {
+            Corona::Systems::VisionEmbeddedModeSwitchTest::benchmark_switches(argv[2]);
+        } else if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
                           std::string(argv[1]) == "--capture-fast-camera-motion")) {
             Corona::Systems::VisionEmbeddedModeSwitchTest::capture_camera_motion(
                 argv[2], argv[3], std::string(argv[1]) == "--capture-fast-camera-motion");

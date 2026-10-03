@@ -118,6 +118,9 @@ public:
     [[nodiscard]] BufferView<SVGFDataDual> svgf_buffer_prev(uint frame_index) const noexcept;
     void prepare() noexcept override;
     void compile() noexcept override;
+    [[nodiscard]] bool has_prepared_resources() const noexcept override {
+        return svgf_data.has_registered();
+    }
     void update_resolution(uint2 resolution) noexcept override;
     [[nodiscard]] CommandBatch dispatch(vision::RealTimeDenoiseInput &input) noexcept override;
     void set_enabled(bool enabled) noexcept override;

@@ -63,7 +63,8 @@ public:
     void update_resolution(ocarina::uint2 res) noexcept override {
         direct_->update_resolution(res);
         indirect_->update_resolution(res);
-        if (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled()) {
+        if (!denoiser_runtime_disabled() && denoiser_ &&
+            (denoiser_->enabled() || denoiser_->has_prepared_resources())) {
             denoiser_->update_resolution(res);
         }
     }
@@ -101,7 +102,8 @@ public:
     void compile() noexcept override {
         direct_->compile();
         indirect_->compile();
-        if (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled()) {
+        if (!denoiser_runtime_disabled() && denoiser_ &&
+            (denoiser_->enabled() || denoiser_->has_prepared_resources())) {
             denoiser_->compile();
         }
         TSensor &camera = scene().sensor();
