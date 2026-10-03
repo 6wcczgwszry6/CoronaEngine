@@ -15,9 +15,11 @@
 #include <chrono>
 
 void check_camera_dolly_reprojection(vision::Pipeline& pipeline);
+void check_svgf_restir_motion_history(vision::Pipeline& pipeline);
 void check_motion_visibility_history(vision::Pipeline& pipeline);
 void check_substrate_sample_classification(vision::Pipeline& pipeline);
 void check_svgf_shading_guide(vision::Pipeline& pipeline);
+void check_svgf_total_albedo(vision::Pipeline& pipeline);
 void check_svgf_spatial_bypass(vision::Pipeline& pipeline);
 
 namespace Corona::Systems {
@@ -791,6 +793,7 @@ struct VisionEmbeddedModeSwitchTest {
         check_motion_visibility_history(*svgf);
         check_realtime_camera_history(*svgf);
         check_camera_dolly_reprojection(*svgf);
+        check_svgf_restir_motion_history(*svgf);
         check_svgf_spatial_bypass(*svgf);
         // Restore the PT view through the same production group helper. The
         // editor test additionally exercises automatic runtime transform upload.
@@ -876,6 +879,7 @@ struct VisionEmbeddedModeSwitchTest {
         expect(file_resource->source_revision == 1, "file mode switch must not republish source");
         render(*vision::Global::instance().pipeline(), "File-PT");
         check_substrate_sample_classification(*vision::Global::instance().pipeline());
+        check_svgf_total_albedo(*vision::Global::instance().pipeline());
         check_svgf_shading_guide(*vision::Global::instance().pipeline());
         expect(system.load_external_vision_scene((base / "file-scene.json").string(),
             CameraVisionRenderMode::ReSTIR, Vision::VisionPipelineSource::ExternalFile),

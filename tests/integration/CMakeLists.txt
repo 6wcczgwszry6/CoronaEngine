@@ -33,7 +33,8 @@ if(CORONA_BUILD_VISION)
     endforeach()
     add_executable(corona_vision_embedded_mode_switch_tests
         test_vision_embedded_mode_switch.cpp
-        test_vision_svgf_reprojection.cpp)
+        test_vision_svgf_reprojection.cpp
+        test_vision_svgf_total_albedo.cpp)
     target_include_directories(corona_vision_embedded_mode_switch_tests PRIVATE
         ${PROJECT_SOURCE_DIR}/include
         ${PROJECT_SOURCE_DIR}/src/systems/optics
@@ -43,6 +44,29 @@ if(CORONA_BUILD_VISION)
     add_test(NAME VisionEmbeddedModeSwitchTests COMMAND corona_vision_embedded_mode_switch_tests)
     set_tests_properties(VisionEmbeddedModeSwitchTests PROPERTIES
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>")
+
+    add_executable(corona_vision_restir_estimator_tests
+        test_vision_restir_estimators.cpp
+        test_vision_restir_reprojection.cpp
+        test_vision_restir_continuation.cpp
+        test_vision_restir_support.cpp)
+    target_include_directories(corona_vision_restir_estimator_tests PRIVATE
+        ${CMAKE_SOURCE_DIR}/vision/src)
+    target_link_libraries(corona_vision_restir_estimator_tests PRIVATE
+        corona::engine vision-all_libs vision-integrator-ReSTIR)
+    add_test(NAME VisionReSTIREstimatorTests COMMAND corona_vision_restir_estimator_tests)
+    set_tests_properties(VisionReSTIREstimatorTests PROPERTIES
+        WORKING_DIRECTORY "$<TARGET_FILE_DIR:vision-material-principled_bsdf>"
+        RUN_SERIAL TRUE
+        TIMEOUT 120)
+    add_test(NAME VisionReSTIRVisibilityMIS
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/vision/src/tests/test_restir_visibility_mis.py)
+    set_tests_properties(VisionReSTIRVisibilityMIS PROPERTIES TIMEOUT 30)
+    add_test(NAME VisionReSTIRPairwiseMIS
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/vision/src/tests/test_restir_pairwise_mis.py)
+    add_test(NAME VisionReSTIRGISupport
+        COMMAND ${Python_EXECUTABLE} ${CMAKE_SOURCE_DIR}/vision/src/tests/test_restir_gi_support.py)
+    set_tests_properties(VisionReSTIRPairwiseMIS VisionReSTIRGISupport PROPERTIES TIMEOUT 30)
 endif()
 
 add_executable(corona_collaborative_editor_loopback_tests
