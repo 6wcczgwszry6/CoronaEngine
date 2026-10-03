@@ -168,6 +168,9 @@ Corona::CameraVisionRenderMode parse_vision_render_mode(const std::string& mode)
         return static_cast<char>(std::tolower(ch));
     });
     std::replace(value.begin(), value.end(), '-', '_');
+    if (value == "restir" || value == "vision_restir") {
+        return Corona::CameraVisionRenderMode::ReSTIR;
+    }
     if (value == "progressive_path_tracing") {
         return Corona::CameraVisionRenderMode::ProgressivePathTracing;
     }
@@ -182,10 +185,12 @@ Corona::CameraVisionRenderMode parse_vision_render_mode(const std::string& mode)
 
 std::string vision_render_mode_to_string(Corona::CameraVisionRenderMode mode) {
     switch (mode) {
+        case Corona::CameraVisionRenderMode::ReSTIR:
+            return "restir";
         case Corona::CameraVisionRenderMode::ProgressivePathTracing:
             return "progressive_path_tracing";
         case Corona::CameraVisionRenderMode::SVGF:
-            return "svgf";
+            return "path_tracing";
         case Corona::CameraVisionRenderMode::SSAT:
             return "ssat";
         case Corona::CameraVisionRenderMode::PathTracing:
@@ -2348,6 +2353,18 @@ std::string Corona::API::Camera::get_vision_render_mode() const {
     return Corona::API::get_vision_render_mode(handle_);
 }
 
+void Corona::API::Camera::set_vision_denoise(bool enabled) {
+    Corona::API::set_vision_denoise(enabled, handle_);
+}
+
+bool Corona::API::Camera::get_vision_denoise() const {
+    return Corona::API::get_vision_denoise(handle_);
+}
+
+bool Corona::API::Camera::get_requested_vision_denoise() const {
+    return Corona::API::get_requested_vision_denoise(handle_);
+}
+
 void Corona::API::Camera::set_shadow_cascade_debug(bool enabled) {
     if (handle_ == 0) {
         CFW_LOG_WARNING("[Camera::set_shadow_cascade_debug] Invalid camera handle");
@@ -2627,6 +2644,11 @@ void set_vision_render_mode(const std::string& mode, std::uintptr_t camera_handl
     command.camera_handle = resolved_handle;
     command.fields = CameraStateUpdateField::VisionRenderMode;
     command.vision_render_mode = parse_vision_render_mode(mode);
+    if (command.vision_render_mode == CameraVisionRenderMode::SVGF) {
+        command.vision_render_mode = CameraVisionRenderMode::PathTracing;
+        command.fields = command.fields | CameraStateUpdateField::VisionDenoise;
+        command.vision_denoise = true;
+    }
     SharedDataHub::instance().enqueue_camera_state_update(command);
 }
 
@@ -2638,6 +2660,41 @@ std::string get_vision_render_mode(std::uintptr_t camera_handle) {
         }
     }
     return "path_tracing";
+}
+
+void set_vision_denoise(bool enabled, std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle == 0) {
+        CFW_LOG_WARNING("[set_vision_denoise] No camera is available");
+        return;
+    }
+
+    CameraStateUpdateCommand command{};
+    command.camera_handle = resolved_handle;
+    command.fields = CameraStateUpdateField::VisionDenoise;
+    command.vision_denoise = enabled;
+    SharedDataHub::instance().enqueue_camera_state_update(command);
+}
+
+bool get_vision_denoise(std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle != 0) {
+        if (auto camera = SharedDataHub::instance().camera_storage().acquire_read(resolved_handle)) {
+            return camera->vision_denoise;
+        }
+    }
+    return false;
+}
+
+bool get_requested_vision_denoise(std::uintptr_t camera_handle) {
+    const auto resolved_handle = resolve_camera_handle(camera_handle);
+    if (resolved_handle == 0) {
+        return false;
+    }
+    if (const auto requested = SharedDataHub::instance().requested_camera_vision_denoise(resolved_handle)) {
+        return *requested;
+    }
+    return get_vision_denoise(resolved_handle);
 }
 
 void load_vision_scene(const std::string& path) {

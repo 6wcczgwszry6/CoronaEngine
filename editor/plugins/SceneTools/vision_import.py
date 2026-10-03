@@ -14,6 +14,7 @@ from runtime.project_context import get_active_project_path
 from plugins.SceneTools.vision_document import (
     extract_vision_camera_pose as _extract_vision_camera_pose,
     infer_vision_render_mode as _infer_vision_render_mode,
+    infer_vision_denoise as _infer_vision_denoise,
     iter_vision_shapes as _iter_vision_shapes,
     resolve_vision_model_path as _resolve_vision_model_path,
     vision_document_for_embedded_storage as _vision_document_for_embedded_storage,
@@ -73,6 +74,11 @@ class _NativeVisionCamera:
     def set_vision_render_mode(self, mode: str):
         return CoronaEditorApi.scene_tools.set_vision_render_mode(
             self._scene.route, self.name, mode
+        )
+
+    def set_vision_denoise(self, enabled: bool):
+        return CoronaEditorApi.scene_tools.set_vision_denoise(
+            self._scene.route, self.name, enabled
         )
 
     def set_camera(self, position, forward, world_up, fov):
@@ -354,6 +360,8 @@ def import_vision_scene_into_current_scene(scene_name: str, path: str) -> dict:
         imported_vision_render_mode = _infer_vision_render_mode(document)
         if active_camera is not None and hasattr(active_camera, "set_vision_render_mode"):
             active_camera.set_vision_render_mode(imported_vision_render_mode)
+        if active_camera is not None and hasattr(active_camera, "set_vision_denoise"):
+            active_camera.set_vision_denoise(_infer_vision_denoise(document))
 
         scene.vision_document = _vision_document_for_embedded_storage(document, abs_path)
         scene.vision_source_path = ""

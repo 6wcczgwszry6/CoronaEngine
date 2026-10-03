@@ -152,8 +152,7 @@ void Pipeline::init() noexcept {
 }
 
 void Pipeline::sync_output_denoise() noexcept {
-    // Realtime modes explicitly enable denoising. Progressive PT must keep it
-    // disabled: enabling SVGF also turns off framebuffer accumulation.
+    // Denoising is independent of the algorithm and framebuffer accumulation.
     renderer().integrator()->set_denoise_enabled(output_desc_.denoise);
 }
 

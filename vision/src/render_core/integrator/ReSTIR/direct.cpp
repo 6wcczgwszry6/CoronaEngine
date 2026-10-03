@@ -729,6 +729,8 @@ CommandBatch ReSTIRDI::dispatch(uint frame_index) const noexcept {
     CommandBatch ret;
     const Pipeline *rp = pipeline();
     auto param = construct_param();
+    // Invalidation restarts the frame sequence without reallocating reservoirs.
+    param.temporal = param.temporal && frame_index != 0;
     ret << shader0_(frame_index, param).dispatch(rp->resolution());
     if (open_) {
         ret << shader1_(frame_index, param).dispatch(rp->resolution());

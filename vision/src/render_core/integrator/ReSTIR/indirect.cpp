@@ -360,6 +360,8 @@ CommandBatch ReSTIRGI::dispatch(uint frame_index) const noexcept {
     CommandBatch ret;
     const Pipeline *rp = pipeline();
     GIParam param = construct_param();
+    // The first frame after a mode/scene reset must not reuse old reservoirs.
+    param.temporal = param.temporal && frame_index != 0;
     ret << initial_samples_(frame_index).dispatch(rp->resolution());
     ret << temporal_pass_(param, frame_index).dispatch(rp->resolution());
     ret << spatial_shading_(param, frame_index).dispatch(rp->resolution());

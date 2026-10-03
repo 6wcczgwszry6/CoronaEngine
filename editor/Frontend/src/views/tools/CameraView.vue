@@ -40,6 +40,16 @@
           </button>
         </div>
       </div>
+      <button
+        class="cascade-toggle no-drag"
+        :class="{ active: visionDenoise }"
+        :aria-pressed="visionDenoise"
+        :disabled="backend !== 'vision' || visionRenderMode === 'ssat' || visionDenoiseBusy"
+        title="SVGF denoising"
+        @click="toggleVisionDenoise"
+      >
+        SVGF
+      </button>
       <div class="dropdown no-drag">
         <button
           class="control dropdown-trigger"
@@ -149,6 +159,9 @@ import { editorApi } from '@/api/editorApi.js';
 import { appService } from '@/services/appService.js';
 import { buildDragRegions, dragRegionsSignature } from '@/utils/cameraDragRegions.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
+import {
+  normalizeVisionRenderMode, visionDenoiseFromCamera, visionRenderModes,
+} from '@/utils/visionRenderModes.js';
 import { createViewportPickController, indexActorsByHandle } from '@/utils/viewportPick.js';
 import {
   createViewportGizmoController,
@@ -169,6 +182,8 @@ const camera = ref(null);
 const cameraName = ref('Camera');
 const backend = ref('native');
 const visionRenderMode = ref('path_tracing');
+const visionDenoise = ref(false);
+const visionDenoiseBusy = ref(false);
 const outputMode = ref('final_color');
 const shadowCascadeDebug = ref(false);
 const ssaoEnabled = ref(true);
@@ -213,13 +228,6 @@ const outputModes = [
   { value: 'shadow_mask_raw', label: 'Shadow Raw' },
   { value: 'shadow_mask', label: 'Shadow Mask' },
 ];
-const visionRenderModes = [
-  { value: 'path_tracing', label: 'Vision PT · 实时' },
-  { value: 'progressive_path_tracing', label: 'Vision PT · 渐进收敛' },
-  { value: 'svgf', label: 'Vision SVGF' },
-  { value: 'ssat', label: 'Vision SSAT' },
-];
-
 const viewportUiModeStore = createViewportUiModeStore();
 const viewportUiCalibrationStore = createViewportUiCalibrationStore();
 const viewportUiCalibrationDescriptor = {};
@@ -244,7 +252,10 @@ const loadCamera = async () => {
   visionAvailable.value = !!unwrap(visionResult)?.available;
   cameraName.value = camera.value.name;
   backend.value = camera.value.render_backend || 'native';
-  visionRenderMode.value = camera.value.vision_render_mode || 'path_tracing';
+  visionDenoise.value = visionDenoiseFromCamera(camera.value);
+  visionRenderMode.value = normalizeVisionRenderMode(camera.value.vision_render_mode);
+  camera.value.vision_render_mode = visionRenderMode.value;
+  camera.value.vision_denoise = visionDenoise.value;
   outputMode.value = backend.value === 'vision'
     ? 'final_color'
     : camera.value.output_mode || 'final_color';
@@ -294,7 +305,7 @@ const selectVisionRenderMode = async (mode) => {
   if (visionRenderMode.value === mode && backend.value === 'vision') return;
   try {
     const result = unwrap(await editorApi.sceneTools.setVisionRenderMode(sceneId, cameraId, mode));
-    visionRenderMode.value = result.mode || mode;
+    visionRenderMode.value = result.pending ? mode : result.mode || mode;
     if (camera.value) {
       camera.value.vision_render_mode = visionRenderMode.value;
     }
@@ -308,6 +319,30 @@ const selectVisionRenderMode = async (mode) => {
     }
   } catch (error) {
     errorText.value = error.message;
+  }
+};
+
+const toggleVisionDenoise = async () => {
+  if (backend.value !== 'vision' || visionRenderMode.value === 'ssat' || visionDenoiseBusy.value) {
+    return false;
+  }
+  const previous = visionDenoise.value;
+  const next = !previous;
+  visionDenoiseBusy.value = true;
+  visionDenoise.value = next;
+  errorText.value = '';
+  try {
+    const result = unwrap(await editorApi.sceneTools.setVisionDenoise(sceneId, cameraId, next));
+    visionDenoise.value = result?.pending || typeof result?.enabled !== 'boolean'
+      ? next : result.enabled;
+    if (camera.value) camera.value.vision_denoise = visionDenoise.value;
+    return true;
+  } catch (error) {
+    visionDenoise.value = previous;
+    errorText.value = error.message;
+    return false;
+  } finally {
+    visionDenoiseBusy.value = false;
   }
 };
 
@@ -1333,6 +1368,7 @@ onBeforeUnmount(() => {
   color: #fff7c2;
   background: rgba(120, 80, 12, 0.78);
 }
+.cascade-toggle:disabled { opacity: 0.45; cursor: default; }
 .window-action { width: 24px; cursor: pointer; }
 .maximize { margin-left: auto; }
 .close { color: #ffb4b4; }

@@ -288,6 +288,21 @@
           </div>
         </div>
         <button
+          class="px-2.5 py-1 rounded border transition-colors duration-200 whitespace-nowrap disabled:opacity-50 disabled:cursor-not-allowed"
+          :class="mainVisionDenoise
+            ? 'border-amber-500 text-amber-100 bg-amber-800/50'
+            : 'border-gray-600 text-gray-200 bg-[#252525] hover:bg-[#3d3d3d]'"
+          :aria-pressed="mainVisionDenoise"
+          :disabled="mainRenderBackend !== 'vision' || mainVisionRenderMode === 'ssat' || mainVisionDenoiseBusy || !currentMainCameraId()"
+          title="SVGF 降噪"
+          @click="toggleMainVisionDenoise"
+        >
+          SVGF
+        </button>
+        <span v-if="mainVisionDenoiseError" role="alert" class="text-red-300 text-xs">
+          {{ mainVisionDenoiseError }}
+        </span>
+        <button
           class="px-2.5 py-1 rounded border transition-colors duration-200 whitespace-nowrap"
           :class="previewRunning || previewBusy
             ? 'border-gray-600 text-gray-500 bg-[#252525] cursor-not-allowed'
@@ -557,6 +572,9 @@ import { computed, ref, onMounted, onUnmounted, reactive, watch, nextTick } from
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
+import {
+  normalizeVisionRenderMode, visionDenoiseFromCamera, visionRenderModes,
+} from '@/utils/visionRenderModes.js';
 import {
   Bridge,
   editorApi,
@@ -1129,6 +1147,10 @@ let tutorialPreviewObservedRunning = false;
 const visionAvailable = ref(false);
 const mainRenderBackend = ref('native');
 const mainVisionRenderMode = ref('path_tracing');
+const mainVisionDenoise = ref(false);
+const mainVisionDenoiseBusy = ref(false);
+const mainVisionDenoiseError = ref('');
+const currentMainCamera = ref(null);
 let previewPollTimer = null;
 window.__coronaEditorInputLocks = window.__coronaEditorInputLocks instanceof Set
   ? window.__coronaEditorInputLocks
@@ -1163,10 +1185,7 @@ const pluginStates = computed(() =>
 );
 const mainRenderModeOptions = [
   { value: 'native', backend: 'native', label: 'Native' },
-  { value: 'path_tracing', backend: 'vision', label: 'Vision PT · 实时' },
-  { value: 'progressive_path_tracing', backend: 'vision', label: 'Vision PT · 渐进收敛' },
-  { value: 'svgf', backend: 'vision', label: 'Vision SVGF' },
-  { value: 'ssat', backend: 'vision', label: 'Vision SSAT' },
+  ...visionRenderModes,
 ];
 const mainRenderModeLabel = computed(() => {
   if (mainRenderBackend.value !== 'vision') {
@@ -1176,8 +1195,11 @@ const mainRenderModeLabel = computed(() => {
     || 'Vision PT · 实时';
 });
 let pendingMainRenderSelection = null;
+let pendingMainDenoiseSelection = null;
 const currentMainCameraId = () =>
   cameraBindingState.value.cameraId || cameraBindingState.value.cameraName || null;
+const currentMainSceneId = () =>
+  cameraBindingState.value.sceneId || tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
 
 // Cabbage assistant: world-scoped tutorial and node-logic tasks.
 let unsubscribeNodeGraphReview = null;
@@ -1380,13 +1402,16 @@ const toggleMenu = (menu) => {
 };
 
 const selectMainRenderMode = async (mode) => {
-  const sceneId = tabs.value[activeTab.value]?.id || DEFAULT_SCENE_NAME;
+  const sceneId = currentMainSceneId();
   const cameraId = currentMainCameraId();
+  const previousBackend = mainRenderBackend.value;
+  const previousMode = mainVisionRenderMode.value;
   activeMenu.value = null;
   try {
     if (mode === 'native') {
       pendingMainRenderSelection = {
         sceneId,
+        cameraId,
         backend: 'native',
         visionMode: mainVisionRenderMode.value,
         expiresAt: Date.now() + 3000,
@@ -1402,6 +1427,7 @@ const selectMainRenderMode = async (mode) => {
 
     pendingMainRenderSelection = {
       sceneId,
+      cameraId,
       backend: 'vision',
       visionMode: mode,
       expiresAt: Date.now() + 3000,
@@ -1412,7 +1438,7 @@ const selectMainRenderMode = async (mode) => {
     const modeResult = unwrapBridgeData(
       await editorApi.sceneTools.setVisionRenderMode(sceneId, cameraId, mode),
     );
-    mainVisionRenderMode.value = modeResult?.mode || mode;
+    mainVisionRenderMode.value = modeResult?.pending ? mode : modeResult?.mode || mode;
 
     await editorApi.sceneTools.setOutputMode(sceneId, cameraId, 'final_color');
 
@@ -1428,8 +1454,48 @@ const selectMainRenderMode = async (mode) => {
     return true;
   } catch (error) {
     pendingMainRenderSelection = null;
+    mainRenderBackend.value = previousBackend;
+    mainVisionRenderMode.value = previousMode;
     logError('Failed to set main viewport render mode', error);
     return false;
+  }
+};
+
+const toggleMainVisionDenoise = async () => {
+  const sceneId = currentMainSceneId();
+  const cameraId = currentMainCameraId();
+  if (mainRenderBackend.value !== 'vision' || mainVisionRenderMode.value === 'ssat'
+    || mainVisionDenoiseBusy.value || !cameraId) return false;
+  const previous = mainVisionDenoise.value;
+  const previousSelection = pendingMainDenoiseSelection;
+  const selection = { sceneId, cameraId, enabled: !previous };
+  const isCurrent = () => currentMainSceneId() === sceneId && currentMainCameraId() === cameraId;
+  pendingMainDenoiseSelection = selection;
+  mainVisionDenoiseBusy.value = true;
+  mainVisionDenoise.value = selection.enabled;
+  mainVisionDenoiseError.value = '';
+  try {
+    const result = unwrapBridgeData(
+      await editorApi.sceneTools.setVisionDenoise(sceneId, cameraId, selection.enabled),
+    );
+    if (isCurrent()) {
+      selection.enabled = result?.pending || typeof result?.enabled !== 'boolean'
+        ? selection.enabled : result.enabled;
+      mainVisionDenoise.value = selection.enabled;
+      if (currentMainCamera.value) currentMainCamera.value.vision_denoise = selection.enabled;
+    }
+    return true;
+  } catch (error) {
+    if (isCurrent()) {
+      pendingMainDenoiseSelection = previousSelection;
+      mainVisionDenoise.value = previous;
+      if (currentMainCamera.value) currentMainCamera.value.vision_denoise = previous;
+      mainVisionDenoiseError.value = error.message;
+    }
+    logError('Failed to set main viewport SVGF denoising', error);
+    return false;
+  } finally {
+    mainVisionDenoiseBusy.value = false;
   }
 };
 
@@ -1476,6 +1542,9 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
     ? data.scene : data;
   if (!snapshot || typeof snapshot !== 'object' || Array.isArray(snapshot)) {
     resetRealtimeCameraInput();
+    currentMainCamera.value = null;
+    mainVisionDenoise.value = false;
+    pendingMainDenoiseSelection = null;
     cameraBindingState.value = {
       sceneId: sceneId ?? cameraBindingState.value.sceneId,
       cameraId: null,
@@ -1512,12 +1581,15 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
     cameraName: activeCameraName,
     cameraHandle: activeCamera?.handle ?? activeCamera?.camera_handle ?? null,
   };
+  currentMainCamera.value = activeCamera;
+  if (bindingChanged) mainVisionDenoiseError.value = '';
   lastCameraViewportSignature = '';
   scheduleCameraViewportSync();
   syncViewportUiMode();
   if (
     pendingMainRenderSelection &&
     pendingMainRenderSelection.sceneId === normalizedSceneId &&
+    pendingMainRenderSelection.cameraId === currentMainCameraId() &&
     Date.now() < pendingMainRenderSelection.expiresAt
   ) {
     mainRenderBackend.value = pendingMainRenderSelection.backend;
@@ -1525,7 +1597,20 @@ const applySceneSnapshot = (sceneId, payload, { preservePose = false } = {}) => 
   } else {
     pendingMainRenderSelection = null;
     mainRenderBackend.value = activeCamera?.render_backend || 'native';
-    mainVisionRenderMode.value = activeCamera?.vision_render_mode || 'path_tracing';
+    mainVisionRenderMode.value = normalizeVisionRenderMode(activeCamera?.vision_render_mode);
+  }
+  const snapshotDenoise = visionDenoiseFromCamera(activeCamera);
+  if (pendingMainDenoiseSelection?.sceneId === normalizedSceneId
+    && pendingMainDenoiseSelection.cameraId === currentMainCameraId()) {
+    mainVisionDenoise.value = pendingMainDenoiseSelection.enabled;
+    if (snapshotDenoise === pendingMainDenoiseSelection.enabled) pendingMainDenoiseSelection = null;
+  } else {
+    pendingMainDenoiseSelection = null;
+    mainVisionDenoise.value = snapshotDenoise;
+  }
+  if (currentMainCamera.value) {
+    currentMainCamera.value.vision_render_mode = mainVisionRenderMode.value;
+    currentMainCamera.value.vision_denoise = mainVisionDenoise.value;
   }
 
   if (

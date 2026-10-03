@@ -237,10 +237,6 @@ void SVGF::set_enabled(bool enabled) noexcept {
         resolve_history_ = 0u;
     }
     params_.switch_ = enabled;
-    if (enabled && frame_buffer().enable_accumulation()) {
-        frame_buffer().set_enable_accumulation(false);
-        frame_buffer().auto_manage_accumulation_buffer(false);
-    }
 }
 
 bool SVGF::enabled() noexcept {

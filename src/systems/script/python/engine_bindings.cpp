@@ -401,6 +401,8 @@ void BindAll(nanobind::module_& m) {
         .def("get_render_backend", &Camera::get_render_backend)
         .def("set_vision_render_mode", &Camera::set_vision_render_mode, nb::arg("mode"))
         .def("get_vision_render_mode", &Camera::get_vision_render_mode)
+        .def("set_vision_denoise", &Camera::set_vision_denoise, nb::arg("enabled"))
+        .def("get_vision_denoise", &Camera::get_vision_denoise)
         .def("set_shadow_cascade_debug", &Camera::set_shadow_cascade_debug, nb::arg("enabled"))
         .def("get_shadow_cascade_debug", &Camera::get_shadow_cascade_debug)
         .def("set_ssao_enabled", &Camera::set_ssao_enabled, nb::arg("enabled"))

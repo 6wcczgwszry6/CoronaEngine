@@ -1,4 +1,5 @@
 #include <corona/systems/optics/optics_system.h>
+#include <corona/engine/engine_runtime_api.h>
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
 #include "base/sensor/sensor.h"
@@ -23,9 +24,161 @@ struct VisionEmbeddedModeSwitchTest {
     static void expect(bool value, const char* message) {
         if (!value) throw std::runtime_error(message);
     }
+    static void check_mode_api() {
+        auto& hub = SharedDataHub::instance();
+        const auto handle = hub.camera_storage().allocate();
+        expect(!Corona::API::get_vision_denoise(handle),
+               "new camera denoise must default to disabled");
+        expect(!Corona::API::get_requested_vision_denoise(handle) &&
+                   !hub.requested_camera_vision_denoise(handle).has_value(),
+               "new cameras must have no retained denoise request");
+        Corona::API::set_vision_render_mode("ReSTIR", handle);
+        auto updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && updates[0].camera_handle == handle &&
+                   updates[0].vision_render_mode == CameraVisionRenderMode::ReSTIR &&
+                   updates[0].fields == CameraStateUpdateField::VisionRenderMode,
+               "ReSTIR API must enqueue the requested enum rather than falling back to PT");
+        {
+            auto camera = hub.camera_storage().acquire_write(handle);
+            camera->vision_render_mode = updates[0].vision_render_mode;
+        }
+        expect(Corona::API::get_vision_render_mode(handle) == "restir",
+               "camera snapshots must serialize ReSTIR for persistence and UI");
+
+        Corona::API::set_vision_denoise(true, handle);
+        expect(!Corona::API::get_vision_denoise(handle),
+               "denoise setter must queue the update instead of mutating the camera cross-thread");
+        expect(Corona::API::get_requested_vision_denoise(handle),
+               "saving immediately after a setter must observe the requested value");
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && updates[0].camera_handle == handle &&
+                   updates[0].fields == CameraStateUpdateField::VisionDenoise &&
+                   updates[0].vision_denoise,
+               "denoise setter must enqueue only its independent field");
+        expect(Corona::API::get_requested_vision_denoise(handle),
+               "saving while a drained update is in flight must retain the requested value");
+        {
+            auto camera = hub.camera_storage().acquire_write(handle);
+            camera->vision_denoise = updates[0].vision_denoise;
+        }
+        hub.acknowledge_camera_vision_denoise(handle, updates[0].sequence);
+        expect(!hub.requested_camera_vision_denoise(handle).has_value() &&
+                   Corona::API::get_requested_vision_denoise(handle),
+               "acknowledged requests must be erased and persistence must fall back to committed state");
+        expect(Corona::API::get_vision_denoise(handle) &&
+                   Corona::API::get_vision_render_mode(handle) == "restir",
+               "committing denoise must preserve the selected algorithm");
+
+        for (const auto* mode : {"path_tracing", "restir", "progressive_path_tracing", "ssat"}) {
+            Corona::API::set_vision_render_mode(mode, handle);
+            updates = hub.drain_camera_state_updates();
+            expect(updates.size() == 1 &&
+                       updates[0].fields == CameraStateUpdateField::VisionRenderMode &&
+                       Corona::API::get_vision_denoise(handle),
+                   "ordinary algorithm switches must not enqueue or reset the denoise preference");
+        }
+
+        Corona::API::set_vision_denoise(true, handle);
+        Corona::API::set_vision_render_mode("path_tracing", handle);
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && updates[0].vision_denoise &&
+                   updates[0].vision_render_mode == CameraVisionRenderMode::PathTracing &&
+                   updates[0].fields == (CameraStateUpdateField::VisionRenderMode |
+                                         CameraStateUpdateField::VisionDenoise),
+               "merging a later algorithm command must retain pending denoise");
+        hub.acknowledge_camera_vision_denoise(handle, updates[0].sequence);
+        expect(!hub.requested_camera_vision_denoise(handle).has_value(),
+               "a merged command sequence must acknowledge its earlier denoise field");
+
+        Corona::API::set_vision_render_mode("restir", handle);
+        Corona::API::set_vision_denoise(true, handle);
+        Corona::API::set_vision_denoise(false, handle);
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && !updates[0].vision_denoise &&
+                   updates[0].vision_render_mode == CameraVisionRenderMode::ReSTIR &&
+                   updates[0].fields == (CameraStateUpdateField::VisionRenderMode |
+                                         CameraStateUpdateField::VisionDenoise),
+               "latest denoise value must win without losing a pending algorithm switch");
+        {
+            auto camera = hub.camera_storage().acquire_write(handle);
+            camera->vision_denoise = updates[0].vision_denoise;
+        }
+        expect(!Corona::API::get_vision_denoise(handle),
+               "committed explicit false must remain false");
+
+        Corona::API::set_vision_render_mode("VISION-SVGF", handle);
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && updates[0].vision_denoise &&
+                   updates[0].vision_render_mode == CameraVisionRenderMode::PathTracing &&
+                   updates[0].fields == (CameraStateUpdateField::VisionRenderMode |
+                                         CameraStateUpdateField::VisionDenoise),
+               "legacy SVGF must atomically enqueue path tracing with denoise enabled");
+        Corona::API::set_vision_render_mode("svgf", handle);
+        Corona::API::set_vision_denoise(false, handle);
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && !updates[0].vision_denoise &&
+                   updates[0].vision_render_mode == CameraVisionRenderMode::PathTracing &&
+                   updates[0].fields == (CameraStateUpdateField::VisionRenderMode |
+                                         CameraStateUpdateField::VisionDenoise),
+               "explicit persisted false must override the legacy SVGF default");
+        expect(hub.requested_camera_vision_denoise(handle).has_value() &&
+                   !Corona::API::get_requested_vision_denoise(handle),
+               "an in-flight false request must remain a present false preference");
+
+        Corona::API::set_vision_denoise(true, handle);
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1, "expected one in-flight denoise request");
+        const auto in_flight = updates[0];
+        Corona::API::set_vision_denoise(false, handle);
+        {
+            auto camera = hub.camera_storage().acquire_write(handle);
+            camera->vision_denoise = in_flight.vision_denoise;
+        }
+        hub.acknowledge_camera_vision_denoise(handle, in_flight.sequence);
+        expect(Corona::API::get_vision_denoise(handle) &&
+                   hub.requested_camera_vision_denoise(handle).has_value() &&
+                   !Corona::API::get_requested_vision_denoise(handle),
+               "acknowledging an older in-flight request must not erase a newer queued false");
+        updates = hub.drain_camera_state_updates();
+        expect(updates.size() == 1 && !updates[0].vision_denoise,
+               "newer false must remain queued after the old request is acknowledged");
+        hub.acknowledge_camera_vision_denoise(handle, in_flight.sequence);
+        expect(!Corona::API::get_requested_vision_denoise(handle),
+               "a repeated old acknowledgement must not erase a newer in-flight request");
+        {
+            auto camera = hub.camera_storage().acquire_write(handle);
+            camera->vision_denoise = updates[0].vision_denoise;
+        }
+        hub.acknowledge_camera_vision_denoise(handle, updates[0].sequence);
+        expect(!hub.requested_camera_vision_denoise(handle).has_value() &&
+                   !Corona::API::get_requested_vision_denoise(handle),
+               "latest acknowledgement must remove transient state and expose committed false");
+        {
+            auto camera = hub.camera_storage().acquire_write(handle);
+            camera->vision_denoise = true;
+        }
+        expect(Corona::API::get_requested_vision_denoise(handle),
+               "acknowledged preference must not permanently shadow later committed camera changes");
+
+        Corona::API::set_vision_denoise(false, handle);
+        updates = hub.drain_camera_state_updates();
+        Corona::API::set_vision_denoise(true, handle);
+        hub.enqueue_camera_release({handle});
+        expect(!hub.requested_camera_vision_denoise(handle).has_value() &&
+                   hub.drain_camera_state_updates().empty(),
+               "camera release must clear both queued and in-flight denoise requests");
+        const auto releases = hub.drain_camera_releases();
+        expect(releases.size() == 1 && releases[0].camera_handle == handle,
+               "release cleanup must preserve the render-thread release command");
+        hub.camera_storage().deallocate(handle);
+    }
     static void render(vision::Pipeline& pipeline, const char* label, bool lit = true) {
         const auto before = pipeline.frame_index();
-        for (int i = 0; i < 3; ++i) pipeline.display(1.0 / 60.0);
+        for (int i = 0; i < 3; ++i) {
+            // Match the editor frame loop, including changed camera/buffer data.
+            pipeline.upload_data();
+            pipeline.display(1.0 / 60.0);
+        }
         expect(pipeline.frame_index() > before, "real integrator must advance frames");
         std::vector<vision::float4> pixels(pipeline.pixel_num());
         pipeline.final_picture(pipeline.output_desc(), pixels.data());
@@ -35,9 +188,41 @@ struct VisionEmbeddedModeSwitchTest {
                    "GPU output must be finite");
             sum += pixel.x + pixel.y + pixel.z;
         }
-        expect(lit ? sum > 0.f : sum == 0.f, "GPU output must match geometry visibility");
         std::cout << "GPU frames: " << label << " frame=" << pipeline.frame_index()
                   << " rgb_sum=" << sum << '\n';
+        expect(lit ? sum > 0.f : sum == 0.f, "GPU output must match geometry visibility");
+    }
+    static void check_independent_denoise(OpticsSystem& system, vision::Pipeline& pipeline,
+                                         const char* algorithm, bool accumulation) {
+        auto prepare = [&](std::uintptr_t camera, bool enabled) {
+            expect(system.prepare_vision_camera_view(system.active_vision_runtime(), camera,
+                       16, 16, enabled), "camera denoise state must prepare a usable view");
+            auto* integrator = dynamic_cast<vision::IlluminationIntegrator*>(
+                pipeline.renderer().integrator().get());
+            expect(pipeline.renderer().integrator()->impl_type() == algorithm,
+                   "SVGF toggle must preserve the selected ray tracing algorithm");
+            expect(pipeline.output_desc().denoise == enabled && integrator &&
+                       integrator->denoiser()->enabled() == enabled,
+                   "active camera must control both output and actual SVGF state");
+            expect(pipeline.frame_buffer()->enable_accumulation() == accumulation,
+                   "SVGF must preserve the render mode's accumulation policy");
+        };
+        prepare(101, false);
+        render(pipeline, "camera-101-raw");
+        prepare(101, true);
+        expect(pipeline.frame_index() == 0, "enabling SVGF must discard incompatible history");
+        render(pipeline, "camera-101-SVGF");
+        const auto history = pipeline.frame_index();
+        prepare(102, false);
+        render(pipeline, "camera-102-raw");
+        prepare(101, true);
+        expect(pipeline.frame_index() == history, "another camera must not reset this camera's history");
+        render(pipeline, "camera-101-SVGF-return");
+        prepare(101, false);
+        expect(pipeline.frame_index() == 0, "disabling SVGF must discard filtered history");
+        render(pipeline, "camera-101-raw-return");
+        pipeline.activate_view_context(0);
+        pipeline.set_output_denoise(false);
     }
     static void check_stationary_history_reset(vision::Pipeline& pipeline) {
         pipeline.activate_global_context();
@@ -47,7 +232,7 @@ struct VisionEmbeddedModeSwitchTest {
         pipeline.final_picture(pipeline.output_desc(), first.data());
         // Build stationary boundary history well beyond the interior EMA window.
         for (int i = 0; i < 320; ++i) pipeline.display(1.0 / 60.0);
-        expect(pipeline.frame_index() == 321u, "stationary SVGF must advance its sample sequence");
+        expect(pipeline.frame_index() == 321u, "stationary rendering must advance its sample sequence");
         pipeline.invalidate();
         pipeline.display(1.0 / 60.0);
         pipeline.final_picture(pipeline.output_desc(), restarted.data());
@@ -56,9 +241,9 @@ struct VisionEmbeddedModeSwitchTest {
                    std::abs(first[i].x - restarted[i].x) < 1e-6f &&
                    std::abs(first[i].y - restarted[i].y) < 1e-6f &&
                    std::abs(first[i].z - restarted[i].z) < 1e-6f,
-                   "explicit invalidation must discard long SVGF history on its first frame");
+                   "explicit invalidation must discard long rendering history on its first frame");
         }
-        std::cout << "PASS: stationary SVGF history resets after 321 frames\n";
+        std::cout << "PASS: stationary rendering history resets after 321 frames\n";
     }
     static void check_realtime_camera_history(vision::Pipeline& pipeline) {
         Corona::CameraDevice camera;
@@ -167,6 +352,36 @@ struct VisionEmbeddedModeSwitchTest {
         system.clear_vision_runtimes();
         std::cout << "PASS: captured 160 frames through the production camera adapter\n";
     }
+    static void check_engine_modes(OpticsSystem& system) {
+        Corona::CameraDevice camera;
+        camera.width = 16; camera.height = 16;
+        camera.position = {0.f, 0.f, -3.f}; camera.forward = {0.f, 0.f, 1.f};
+        camera.world_up = {0.f, 1.f, 0.f}; camera.fov = 45.f;
+        expect(system.load_engine_built_vision_scene(CameraVisionRenderMode::ReSTIR),
+               "engine-built ReSTIR must initialize");
+        auto engine_restir = vision::Global::instance().pipeline_shared();
+        Vision::sync_vision_camera(*engine_restir, camera);
+        expect(engine_restir->renderer().integrator()->impl_type() == "rt",
+               "engine-built mode must select rt");
+        // The fixture registers no engine geometry or environment. Its empty
+        // engine-built scene must remain finite and black through both modes.
+        render(*engine_restir, "Engine-ReSTIR", false);
+        system.apply_vision_render_mode(CameraVisionRenderMode::ProgressivePathTracing);
+        auto engine_pt = vision::Global::instance().pipeline_shared();
+        Vision::sync_vision_camera(*engine_pt, camera);
+        expect(engine_pt != engine_restir && engine_pt->renderer().integrator()->impl_type() == "pt" &&
+                   engine_pt->frame_buffer()->enable_accumulation(),
+               "engine-built switch must replace rt with progressive pt");
+        render(*engine_pt, "Engine-Progressive", false);
+        system.apply_vision_render_mode(CameraVisionRenderMode::ReSTIR);
+        auto engine_return = vision::Global::instance().pipeline_shared();
+        Vision::sync_vision_camera(*engine_return, camera);
+        expect(engine_return != engine_pt && engine_return->renderer().integrator()->impl_type() == "rt" &&
+                   !engine_return->frame_buffer()->enable_accumulation(),
+               "engine-built return must recreate ReSTIR history");
+        render(*engine_return, "Engine-ReSTIR-return", false);
+        engine_restir.reset(); engine_pt.reset(); engine_return.reset();
+    }
     static void run() {
         namespace fs = std::filesystem;
         const auto original_cwd = fs::current_path();
@@ -246,10 +461,41 @@ struct VisionEmbeddedModeSwitchTest {
             expect(pixel.x == 0.f && pixel.y == 0.f && pixel.z == 0.f,
                    "camera changes must clear old accumulated pixels");
         }
+        check_independent_denoise(system, *progressive, "pt", true);
         expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
             Vision::VisionPipelineSource::ExternalLive), "switch back to realtime PT");
         render(*pt, "PT-after-progressive");
         progressive.reset();
+        expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::ReSTIR,
+            Vision::VisionPipelineSource::ExternalLive), "embedded ReSTIR must initialize");
+        auto restir = vision::Global::instance().pipeline_shared();
+        expect(restir != pt && restir->renderer().integrator()->impl_type() == "rt",
+               "ReSTIR must own a real rt integrator and separate history");
+        expect(!restir->frame_buffer()->enable_accumulation(), "ReSTIR must stay realtime");
+        render(*restir, "ReSTIR");
+        check_stationary_history_reset(*restir);
+        check_independent_denoise(system, *restir, "rt", false);
+        expect(restir->create_view_context(99, vision::make_uint2(16, 16)),
+               "ReSTIR camera view context must initialize");
+        expect(restir->renderer().integrator()->impl_type() == "rt", "detached view must also use rt");
+        render(*restir, "ReSTIR-view");
+        restir->activate_view_context(0);
+        expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
+            Vision::VisionPipelineSource::ExternalLive), "return to PT after ReSTIR");
+        expect(vision::Global::instance().pipeline() == pt.get() && pt->frame_index() == 0,
+               "switching back must activate PT and discard stale history");
+        render(*pt, "PT-after-ReSTIR");
+        expect(system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::ReSTIR,
+            Vision::VisionPipelineSource::ExternalLive), "return to cached ReSTIR");
+        expect(vision::Global::instance().pipeline() == restir.get() && restir->frame_index() == 0,
+               "cached ReSTIR must discard its stale reservoirs");
+        restir->activate_view_context(99);
+        expect(restir->frame_index() == 0, "all ReSTIR camera histories must reset");
+        restir->activate_view_context(0);
+        render(*restir, "ReSTIR-return");
+        system.load_external_vision_scene(request.scene_key, CameraVisionRenderMode::PathTracing,
+            Vision::VisionPipelineSource::ExternalLive);
+        restir.reset();
         const auto resource_key = system.make_vision_scene_resource_key(request.scene_key,
             Vision::VisionPipelineSource::ExternalLive);
         auto resource = system.vision_scene_resources_.at(resource_key);
@@ -376,6 +622,30 @@ struct VisionEmbeddedModeSwitchTest {
         render(*vision::Global::instance().pipeline(), "File-PT");
         check_substrate_sample_classification(*vision::Global::instance().pipeline());
         check_svgf_shading_guide(*vision::Global::instance().pipeline());
+        expect(system.load_external_vision_scene((base / "file-scene.json").string(),
+            CameraVisionRenderMode::ReSTIR, Vision::VisionPipelineSource::ExternalFile),
+            "file source must support ReSTIR");
+        render(*vision::Global::instance().pipeline(), "File-ReSTIR");
+        check_engine_modes(system);
+        // Two distinct lights make stale temporal reservoirs observable; a
+        // single point light always reuses the same sample and hides the bug.
+        auto history_scene = vision::DataWrap::parse(original_json);
+        history_scene["scene"]["lights"] = vision::DataWrap::array({
+            {{"type", "point"}, {"param", {{"position", {0, 0, 2}}, {"color", {1, 0, 0}}}}},
+            {{"type", "point"}, {"param", {{"position", {1, 0, 2}}, {"color", {0, 1, 0}}}}}
+        });
+        history_scene["render"]["integrator"]["param"]["direct"] = {
+            {"M_light", 1}, {"M_bsdf", 0}, {"max_age", 1000},
+            {"spatial", {{"open", false}}}, {"temporal", {{"open", true}}}
+        };
+        request.scene_json = history_scene.dump();
+        expect(system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::ReSTIR),
+               "two-light ReSTIR history fixture must load");
+        auto history_pipeline = vision::Global::instance().pipeline_shared();
+        history_pipeline->set_output_denoise(false);
+        history_pipeline->upload_data();
+        check_stationary_history_reset(*history_pipeline);
+        history_pipeline.reset();
         system.clear_vision_runtimes();
         resource.reset();
         fs::current_path(original_cwd);
@@ -383,12 +653,13 @@ struct VisionEmbeddedModeSwitchTest {
         fs::remove(base / "albedo.tga");
         fs::remove(base / "triangle.obj");
         fs::remove(base);
-        std::cout << "PASS: embedded PT/SVGF runtime initialization\n";
+        std::cout << "PASS: PT/ReSTIR/SVGF mode switching and history reset\n";
     }
 };
 }
 int main(int argc, char** argv) {
     try {
+        Corona::Systems::VisionEmbeddedModeSwitchTest::check_mode_api();
         if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
                           std::string(argv[1]) == "--capture-fast-camera-motion")) {
             Corona::Systems::VisionEmbeddedModeSwitchTest::capture_camera_motion(

@@ -263,6 +263,14 @@ def _parse_camera(
     finite_float = lambda name, fallback: _finite_number(get(name, fallback), prefix + name)
     integer = lambda name, fallback: int(get(name, fallback))
     camera_id = get("id", f"{scene_route}#camera{index}")
+    vision_mode = str(get("vision_render_mode", "path_tracing")).strip().lower().replace("-", "_")
+    legacy_svgf = vision_mode in {"svgf", "vision_svgf"}
+    denoise_value = str(get("vision_denoise", "")).strip().lower()
+    vision_denoise = (
+        configparser.ConfigParser.BOOLEAN_STATES[denoise_value]
+        if denoise_value in configparser.ConfigParser.BOOLEAN_STATES
+        else legacy_svgf
+    )
     return {
         "id": camera_id,
         "name": get("name", "MainCamera" if index == 0 else f"Camera{index}"),
@@ -282,11 +290,11 @@ def _parse_camera(
         "move_speed": finite_float("move_speed", "1"),
         "output_mode": get("output_mode", "final_color"),
         "render_backend": get("render_backend", "native"),
-        "vision_render_mode": get("vision_render_mode", "path_tracing"),
+        "vision_render_mode": "path_tracing" if legacy_svgf else vision_mode,
         "ssao_enabled": str(get("ssao_enabled", "true")).lower() == "true",
         "vision_spp": get("vision_spp", ""),
         "vision_max_depth": get("vision_max_depth", ""),
-        "vision_denoise": get("vision_denoise", ""),
+        "vision_denoise": vision_denoise,
     }
 
 

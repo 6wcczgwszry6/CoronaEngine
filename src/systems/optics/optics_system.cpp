@@ -998,6 +998,10 @@ void apply_pending_camera_state_updates() {
                 camera->vision_render_mode = update.vision_render_mode;
             }
             if (Corona::has_camera_state_field(
+                    update.fields, Corona::CameraStateUpdateField::VisionDenoise)) {
+                camera->vision_denoise = update.vision_denoise;
+            }
+            if (Corona::has_camera_state_field(
                     update.fields, Corona::CameraStateUpdateField::ShadowCascadeDebug)) {
                 camera->shadow_cascade_debug = update.shadow_cascade_debug;
             }
@@ -1015,12 +1019,19 @@ void apply_pending_camera_state_updates() {
                 camera->move_speed = update.move_speed;
             }
         }
+        // Retain the accepted preference until the camera write is committed.
+        // A newer request may arrive during this batch; its sequence must survive.
+        if (Corona::has_camera_state_field(
+                update.fields, Corona::CameraStateUpdateField::VisionDenoise)) {
+            hub.acknowledge_camera_vision_denoise(update.camera_handle, update.sequence);
+        }
     }
 }
 
 void apply_pending_camera_releases() {
     auto& hub = Corona::SharedDataHub::instance();
     for (const auto& release : hub.drain_camera_releases()) {
+        hub.clear_camera_state_updates(release.camera_handle);
         if (release.actor_pick_handle != 0) {
             hub.actor_pick_storage().deallocate(release.actor_pick_handle);
         }
@@ -1837,6 +1848,19 @@ void bind_pipeline_scene_resource_early(
     const std::shared_ptr<Corona::Systems::Vision::VisionSceneResource>& scene_resource = {})
     -> ocarina::SP<vision::Pipeline> {
     auto project_desc = make_default_vision_project_desc();
+    project_desc.renderer_desc.integrator_desc.sub_type =
+        mode == Corona::CameraVisionRenderMode::ReSTIR ? "rt" : "pt";
+    if (mode == Corona::CameraVisionRenderMode::ReSTIR) {
+        auto data = vision::DataWrap::object();
+        Corona::Systems::Vision::configure_vision_scene_for_mode(data, mode);
+        project_desc.renderer_desc.integrator_desc.init(
+            vision::ParameterSet{data["render"]["integrator"]});
+    }
+    if (mode != Corona::CameraVisionRenderMode::SSAT) {
+        project_desc.pipeline_desc.frame_buffer_desc.init(vision::ParameterSet{
+            vision::DataWrap{{"type", "normal"},
+                             {"param", {{"accumulation", mode == Corona::CameraVisionRenderMode::ProgressivePathTracing}}}}});
+    }
     project_desc.output_desc.denoise =
         Corona::Systems::Vision::vision_render_mode_uses_denoise(mode);
     auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
@@ -2353,6 +2377,7 @@ struct OpticsSystem::VisionPipelineRuntime {
     std::unordered_map<std::uintptr_t, Horizon::HardwareBuffer> readback_buffers;
     std::unordered_map<std::uintptr_t, std::vector<ocarina::float4>> readback_pixels;
     std::unordered_set<std::uintptr_t> retained_contexts;
+    std::unordered_map<std::uintptr_t, bool> view_denoise_states;
     std::unordered_map<std::uintptr_t, Horizon::SubmitReceipt> interop_submissions;
     Horizon::HardwareExecutor* interop_executor{nullptr};
 
@@ -2456,6 +2481,7 @@ struct OpticsSystem::VisionPipelineRuntime {
         readback_buffers.clear();
         readback_pixels.clear();
         retained_contexts.clear();
+        view_denoise_states.clear();
     }
 
     void bind_shared_scene_gpu_resource() {
@@ -2527,6 +2553,60 @@ struct OpticsSystem::VisionPipelineRuntime {
         bind_shared_scene_gpu_resource();
     }
 };
+
+bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
+                                            std::uintptr_t camera_handle,
+                                            uint32_t width, uint32_t height,
+                                            bool denoise) {
+    auto& pipeline = runtime.pipeline;
+    if (!pipeline || camera_handle == 0) return false;
+    const auto resolution = ocarina::make_uint2(std::max(width, 1u), std::max(height, 1u));
+    if (pipeline->has_view_context(camera_handle)) {
+        if (!pipeline->activate_view_context(camera_handle)) return false;
+        const auto* fb = pipeline->frame_buffer();
+        const auto state = runtime.view_denoise_states.find(camera_handle);
+        const bool recreate = !fb || fb->resolution().x != resolution.x ||
+                              fb->resolution().y != resolution.y ||
+                              state == runtime.view_denoise_states.end() || state->second != denoise;
+        if (recreate) {
+            pipeline->commit_command();
+            runtime.wait_for_interop_submission(camera_handle, "view context recreation");
+            runtime.bridges.erase(camera_handle);
+            runtime.zero_copy_disabled.erase(camera_handle);
+            runtime.readback_buffers.erase(camera_handle);
+            runtime.readback_pixels.erase(camera_handle);
+            runtime.retained_contexts.erase(camera_handle);
+            runtime.view_denoise_states.erase(camera_handle);
+            pipeline->remove_view_context(camera_handle);
+        }
+    }
+    if (!pipeline->has_view_context(camera_handle)) {
+        // Renderer preparation must see the desired state so it allocates SVGF
+        // buffers and registers the GBuffer callback before compiling kernels.
+        pipeline->activate_view_context(0u);
+        pipeline->set_output_denoise(denoise);
+        const bool created = pipeline->create_view_context(camera_handle, resolution);
+        pipeline->activate_view_context(0u);
+        pipeline->set_output_denoise(Vision::vision_render_mode_uses_denoise(runtime.mode));
+        if (!created) {
+            CFW_LOG_ERROR("OpticsSystem: unable to allocate Vision view context for camera {}",
+                          camera_handle);
+            return false;
+        }
+        runtime.view_denoise_states[camera_handle] = denoise;
+    }
+    if (!pipeline->activate_view_context(camera_handle)) return false;
+    // Output settings are shared by the pipeline, while renderers and histories
+    // belong to cameras. Restore the active camera's preference on every visit.
+    pipeline->set_output_denoise(denoise);
+    const bool accumulate = runtime.mode == CameraVisionRenderMode::ProgressivePathTracing;
+    if (runtime.mode != CameraVisionRenderMode::SSAT &&
+        pipeline->frame_buffer()->enable_accumulation() != accumulate) {
+        pipeline->frame_buffer()->set_enable_accumulation(accumulate);
+        pipeline->frame_buffer()->auto_manage_accumulation_buffer(accumulate);
+    }
+    return true;
+}
 
 struct VisibleVisionCamera {
     std::uintptr_t camera_handle{0};
@@ -6778,6 +6858,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     runtime.retained_contexts.insert(camera_handle);
                 } else {
                     pipeline->remove_view_context(camera_handle);
+                    runtime.view_denoise_states.erase(camera_handle);
                 }
             }
             for (auto it = runtime.readback_buffers.begin();
@@ -6814,6 +6895,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     runtime.retained_contexts.insert(camera_handle);
                 } else {
                     pipeline->remove_view_context(camera_handle);
+                    runtime.view_denoise_states.erase(camera_handle);
                 }
             }
             for (auto it = runtime.retained_contexts.begin();
@@ -6823,6 +6905,7 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
                     continue;
                 }
                 pipeline->remove_view_context(*it);
+                runtime.view_denoise_states.erase(*it);
                 it = runtime.retained_contexts.erase(it);
             }
             pipeline->activate_view_context(0u);
@@ -6843,39 +6926,10 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
             runtime.retained_contexts.erase(cam_handle);
             process_vision_actor_pick(cam_handle, camera, scene, frame_index);
             try {
-                const auto resolution =
-                    ocarina::make_uint2(std::max(camera.width, 1u),
-                                       std::max(camera.height, 1u));
-                if (pipeline->has_view_context(cam_handle)) {
-                    if (!pipeline->activate_view_context(cam_handle)) {
-                        return;
-                    }
-                    const auto* existing_fb = pipeline->frame_buffer();
-                    bool recreate_context = existing_fb == nullptr;
-                    if (existing_fb != nullptr) {
-                        const auto existing_res = existing_fb->resolution();
-                        recreate_context = existing_res.x != resolution.x ||
-                                           existing_res.y != resolution.y;
-                    }
-                    if (recreate_context) {
-                        pipeline->commit_command();
-                        runtime.wait_for_interop_submission(cam_handle, "view context recreation");
-                        runtime.bridges.erase(cam_handle);
-                        runtime.zero_copy_disabled.erase(cam_handle);
-                        runtime.readback_buffers.erase(cam_handle);
-                        runtime.readback_pixels.erase(cam_handle);
-                        runtime.retained_contexts.erase(cam_handle);
-                        pipeline->remove_view_context(cam_handle);
-                    }
-                }
-                if (!pipeline->has_view_context(cam_handle) &&
-                    !pipeline->create_view_context(cam_handle, resolution)) {
-                    CFW_LOG_ERROR(
-                        "OpticsSystem: unable to allocate Vision view context for camera {}",
-                        cam_handle);
-                    return;
-                }
-                if (!pipeline->activate_view_context(cam_handle)) {
+                const bool denoise = camera.vision_denoise ||
+                    Vision::vision_render_mode_uses_denoise(runtime.mode);
+                if (!prepare_vision_camera_view(runtime, cam_handle,
+                                               camera.width, camera.height, denoise)) {
                     return;
                 }
 
@@ -7288,6 +7342,11 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         return;
     }
 
+    (void)load_engine_built_vision_scene(requested_mode);
+}
+
+bool OpticsSystem::load_engine_built_vision_scene(CameraVisionRenderMode requested_mode) {
+    auto previous_pipeline = vision::Global::instance().pipeline_shared();
     try {
         const auto key = make_vision_pipeline_key(
             "", requested_mode, VisionPipelineSource::EngineBuilt);
@@ -7297,7 +7356,8 @@ void OpticsSystem::apply_pending_vision_scene_load() {
         auto pipeline = create_vision_pipeline(requested_mode, scene_resource);
         if (!pipeline) {
             CFW_LOG_ERROR("OpticsSystem: failed to recreate engine-built Vision pipeline");
-            return;
+            if (previous_pipeline) previous_pipeline->activate_global_context();
+            return false;
         }
         bind_pipeline_scene_gpu_resource(*pipeline,
                                          *scene_resource,
@@ -7344,20 +7404,26 @@ void OpticsSystem::apply_pending_vision_scene_load() {
                                VisionPipelineSource::EngineBuilt,
                                "",
                                requested_mode);
+        runtime.pipeline->activate_global_context();
         current_vision_render_mode_ = requested_mode;
         vision_applied_signature_ = compute_vision_scene_signature();
         vision_pending_signature_ = vision_applied_signature_;
         vision_stable_frames_ = 0;
         vision_rebuild_retries_ = 0;
-        if (requested_mode != CameraVisionRenderMode::PathTracing) {
+        if (requested_mode == CameraVisionRenderMode::SVGF ||
+            requested_mode == CameraVisionRenderMode::SSAT) {
             CFW_LOG_WARNING(
                 "OpticsSystem: engine-built Vision scene can only toggle denoise in "
                 "Phase 2; requested mode '{}' does not change framebuffer or denoiser type",
                 std::string(Vision::vision_render_mode_name(requested_mode)));
         }
         CFW_LOG_INFO("OpticsSystem: restored engine-built Vision scene");
+        log_vision_pipeline_diagnostics(*runtime.pipeline, "engine-built mode switch");
+        return true;
     } catch (const std::exception& e) {
+        if (previous_pipeline) previous_pipeline->activate_global_context();
         CFW_LOG_ERROR("OpticsSystem: restoring engine-built Vision scene failed: {}", e.what());
+        return false;
     }
 }
 
@@ -7393,11 +7459,17 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
     };
 
     if (mode == current_vision_render_mode_) {
-        pipeline->set_output_denoise(Vision::vision_render_mode_uses_denoise(mode));
         return;
     }
 
     if (runtime.scene_path.empty()) {
+        // A different integrator needs a new renderer descriptor as well as new
+        // base/view contexts. Rekeying the old runtime only changes its label.
+        if ((mode == CameraVisionRenderMode::ReSTIR) !=
+            (current_vision_render_mode_ == CameraVisionRenderMode::ReSTIR)) {
+            (void)load_engine_built_vision_scene(mode);
+            return;
+        }
         const bool was_denoise_enabled =
             Vision::vision_render_mode_uses_denoise(current_vision_render_mode_);
         const bool denoise_enabled = Vision::vision_render_mode_uses_denoise(mode);
@@ -7406,9 +7478,10 @@ void OpticsSystem::apply_vision_render_mode(CameraVisionRenderMode mode) {
         if (denoise_enabled && !was_denoise_enabled) {
             prepare_enabled_denoiser_for_runtime_switch(*pipeline);
         }
-        if (mode == CameraVisionRenderMode::ProgressivePathTracing) {
-            pipeline->frame_buffer()->set_enable_accumulation(true);
-            pipeline->frame_buffer()->auto_manage_accumulation_buffer(true);
+        if (mode != CameraVisionRenderMode::SSAT) {
+            const bool accumulate = mode == CameraVisionRenderMode::ProgressivePathTracing;
+            pipeline->frame_buffer()->set_enable_accumulation(accumulate);
+            pipeline->frame_buffer()->auto_manage_accumulation_buffer(accumulate);
         }
         pipeline->invalidate();
         runtime.mode = mode;
@@ -7457,6 +7530,13 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path,
         return false;
     }
 
+    runtime->pipeline->activate_global_context();
+    if (active_vision_runtime_key_ && *active_vision_runtime_key_ != key &&
+        (mode == CameraVisionRenderMode::ReSTIR ||
+         current_vision_render_mode_ == CameraVisionRenderMode::ReSTIR)) {
+        runtime->pipeline->invalidate_all_view_contexts();
+        runtime->pipeline->invalidate();
+    }
     active_vision_runtime_key_ = key;
     current_vision_render_mode_ = mode;
     CFW_LOG_INFO("OpticsSystem: active Vision runtime key ({})",

@@ -190,16 +190,22 @@ public:
     template<typename T>
     [[nodiscard]] CommandBatch reset_buffer(BufferView<T> buffer, T elm = T{},
                                            string desc = "clear_buffer") const noexcept {
-        static Kernel kernel = [&](BufferVar<T> buffer_var, Var<T> value) {
+        static Kernel kernel = [](BufferVar<T> buffer_var, Var<T> value) {
             buffer_var.write(dispatch_id(), value);
         };
         using shader_t = decltype(device().compile(kernel, desc));
-        static shader_t *shader = [&] {
-            UP<shader_t> uptr = make_unique<shader_t>(device().compile(kernel, desc));
-            auto ret = static_cast<shader_t *>(uptr.get());
-            shaders_.push_back(std::move(uptr));
-            return ret;
-        }();
+        // A compiled shader belongs to this pipeline/device. A static raw
+        // pointer survives its owning pipeline and dangles after mode retirement.
+        shader_t *shader = nullptr;
+        for (const auto &candidate : shaders_) {
+            shader = dynamic_cast<shader_t *>(candidate.get());
+            if (shader) break;
+        }
+        if (!shader) {
+            auto owned_shader = make_unique<shader_t>(device().compile(kernel, desc));
+            shader = owned_shader.get();
+            shaders_.push_back(std::move(owned_shader));
+        }
         CommandBatch ret;
         ret << (*shader)(buffer, elm).dispatch(buffer.size());
         return ret;

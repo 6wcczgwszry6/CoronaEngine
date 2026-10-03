@@ -10,6 +10,34 @@ from runtime.archive.parser import parse_archive
 
 
 class ArchiveParserTests(unittest.TestCase):
+    def test_vision_denoise_is_an_independent_boolean_and_migrates_legacy_svgf(self):
+        cases = [
+            ("path_tracing", None, "path_tracing", False),
+            ("restir", "true", "restir", True),
+            ("restir", "false", "restir", False),
+            ("svgf", None, "path_tracing", True),
+            ("VISION-SVGF", None, "path_tracing", True),
+            ("svgf", "false", "path_tracing", False),
+            ("svgf", "0", "path_tracing", False),
+            ("path_tracing", "on", "path_tracing", True),
+        ]
+        with tempfile.TemporaryDirectory() as temp_dir:
+            scene = Path(temp_dir) / "scene.ini"
+            for mode, denoise, expected_mode, expected_enabled in cases:
+                with self.subTest(mode=mode, denoise=denoise):
+                    content = (
+                        "[format]\ntype = corona_scene_folder\nversion = 1\n"
+                        "[scene]\nname = Denoise preferences\n"
+                        "[camera]\ncount = 1\n"
+                        f"camera0.vision_render_mode = {mode}\n"
+                    )
+                    if denoise is not None:
+                        content += f"camera0.vision_denoise = {denoise}\n"
+                    scene.write_text(content, encoding="utf-8")
+                    camera = parse_archive(str(scene))["scene"]["cameras"][0]
+                    self.assertEqual(camera["vision_render_mode"], expected_mode)
+                    self.assertIs(camera["vision_denoise"], expected_enabled)
+
     def test_blank_active_camera_uses_first_camera_but_unknown_id_is_rejected(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)

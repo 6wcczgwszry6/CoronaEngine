@@ -143,6 +143,9 @@ class OpticsSystem : public Kernel::SystemBase {
 
     VisionPipelineRuntime& get_or_create_runtime(const VisionPipelineKey& key);
     VisionPipelineRuntime& active_vision_runtime();
+    bool prepare_vision_camera_view(VisionPipelineRuntime& runtime,
+                                   std::uintptr_t camera_handle,
+                                   uint32_t width, uint32_t height, bool denoise);
     VisionPipelineKey make_vision_pipeline_key(std::string scene_path,
                                                Corona::CameraVisionRenderMode mode,
                                                VisionPipelineSource source) const;
@@ -178,6 +181,7 @@ class OpticsSystem : public Kernel::SystemBase {
                                               Corona::CameraVisionRenderMode mode,
                                               bool force_reload_scene_resource = false);
     void apply_vision_render_mode(Corona::CameraVisionRenderMode mode);
+    bool load_engine_built_vision_scene(Corona::CameraVisionRenderMode mode);
 
     /// 计算当前 SharedDataHub 场景的轻量签名，用于检测动态变化
     /// （几何拓扑 / transform / 材质参数 / materialColor / visible）。
