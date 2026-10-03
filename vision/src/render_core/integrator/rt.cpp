@@ -10,6 +10,7 @@
 #include "ReSTIR/direct.h"
 #include "ReSTIR/indirect.h"
 #include <cstdlib>
+#include <fstream>
 
 namespace vision {
 namespace {
@@ -165,9 +166,26 @@ public:
         submit(frame_buffer().compute_GBuffer(frame_index_), &cur_stage_profile_.gbuffer_ms);
         submit(direct_->dispatch(frame_index_), &cur_stage_profile_.path_tracing_ms);
         submit(indirect_->dispatch(frame_index_), &cur_stage_profile_.path_tracing_ms);
+        auto debug_readback = [&](const char *stage) {
+            const char *frame = std::getenv("VISION_EVAL_DEBUG_FRAME");
+            const char *directory = std::getenv("VISION_EVAL_DEBUG_DIR");
+            if (!frame || !directory || frame_index_ != std::strtoul(frame, nullptr, 10)) return;
+            fs::create_directories(directory);
+            vector<float4> direct(rp->pixel_num()), indirect(rp->pixel_num());
+            stream << direct_->radiance()->view().download(direct.data())
+                << indirect_->radiance()->view().download(indirect.data()) << synchronize() << commit();
+            auto write = [&](const char *channel, const auto &pixels) {
+                std::ofstream out(fs::path(directory) / (std::string(stage) + channel + ".f32"), std::ios::binary);
+                out.write(reinterpret_cast<const char *>(pixels.data()), pixels.size() * sizeof(float4));
+                if (!out) throw std::runtime_error("ReSTIR diagnostic write failed");
+            };
+            write("_direct", direct); write("_indirect", indirect);
+        };
+        debug_readback("raw");
         if (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled()) {
             auto dn_input = denoise_input();
             submit(denoiser_->dispatch(dn_input), &cur_stage_profile_.spatial_angular_ms);
+            debug_readback("filtered");
             submit(combine_(frame_index_, direct_->factor(),
                             indirect_->factor())
                        .dispatch(pipeline()->resolution()),
