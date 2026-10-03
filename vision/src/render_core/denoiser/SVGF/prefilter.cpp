@@ -174,27 +174,29 @@ auto compute_spatial_weight = [](Float history) -> Float {
                     
                     $if(history > Cfg::Prefilter::kFireflyHistoryThreshold &&
                         temporal_var_direct > Cfg::Variance::kMinVarianceConsistent) {
-                        Float k = lerp(Cfg::Firefly::kSigmaMultiplierMax, 
-                                      Cfg::Firefly::kSigmaMultiplierMin, 
-                                      saturate(history / Cfg::Temporal::kMaxHistoryStatic));
+                        Float k = lerp(saturate(history / Cfg::Temporal::kMaxHistoryStatic),
+                                      Cfg::Firefly::kSigmaMultiplierMax,
+                                      Cfg::Firefly::kSigmaMultiplierMin);
                         temporal_thresh_direct = max(svgf_data->first_moment_direct(), RadTypeVar (0.01f)) +
                             k * max(sqrt(temporal_var_direct), Cfg::Firefly::kMinSigma);
                     };
                     $if(history_indirect > Cfg::Prefilter::kFireflyHistoryThreshold &&
                         temporal_var_indirect > Cfg::Variance::kMinVarianceConsistent) {
-                        Float k = lerp(Cfg::Firefly::kSigmaMultiplierMax,
-                                      Cfg::Firefly::kSigmaMultiplierMin,
-                                      saturate(history_indirect / Cfg::Temporal::kMaxHistoryStatic));
+                        Float k = lerp(saturate(history_indirect / Cfg::Temporal::kMaxHistoryStatic),
+                                      Cfg::Firefly::kSigmaMultiplierMax,
+                                      Cfg::Firefly::kSigmaMultiplierMin);
                         temporal_thresh_indirect = max(svgf_data->first_moment_indirect(), RadTypeVar (0.01f)) +
                             k * 0.8f * max(sqrt(temporal_var_indirect), Cfg::Firefly::kMinSigma);
                     };
                     
-                    Float combined_thresh_direct = max(lerp(temporal_thresh_direct, spatial_thresh_direct,
+                    Float combined_thresh_direct = max(lerp(
                         ocarina::select(isolation_ratio_direct > Cfg::Firefly::kSpatialIsolationThreshold,
-                            Cfg::Firefly::kSpatialWeightIsolated, Cfg::Firefly::kSpatialWeightNormal)), 0.1f);
-                    Float combined_thresh_indirect = max(lerp(temporal_thresh_indirect, spatial_thresh_indirect,
+                            Cfg::Firefly::kSpatialWeightIsolated, Cfg::Firefly::kSpatialWeightNormal),
+                        temporal_thresh_direct, spatial_thresh_direct), 0.1f);
+                    Float combined_thresh_indirect = max(lerp(
                         ocarina::select(isolation_ratio_indirect > Cfg::Firefly::kSpatialIsolationThreshold,
-                            Cfg::Firefly::kSpatialWeightIsolated, Cfg::Firefly::kSpatialWeightNormal)), 0.1f);
+                            Cfg::Firefly::kSpatialWeightIsolated, Cfg::Firefly::kSpatialWeightNormal),
+                        temporal_thresh_indirect, spatial_thresh_indirect), 0.1f);
                     
                     $if(low_history_direct && isolation_ratio_direct > Cfg::Firefly::kSpatialIsolationThreshold) {
                         Float scale = soft_clamp_asinh(center_lum_direct, combined_thresh_direct, 
@@ -225,8 +227,8 @@ auto compute_spatial_weight = [](Float history) -> Float {
                     Float factor = saturate((age - Cfg::VarianceBlend::kSoftTransitionStart) /
                         (Cfg::VarianceBlend::kSoftTransitionEnd - Cfg::VarianceBlend::kSoftTransitionStart));
                     factor = factor * factor * (3.f - 2.f * factor);
-                    Float max_allowed = lerp(Cfg::VarianceBlend::kMinSpatialWeight,
-                                             Cfg::VarianceBlend::kMaxSpatialWeight, factor);
+                    Float max_allowed = lerp(factor, Cfg::VarianceBlend::kMinSpatialWeight,
+                                             Cfg::VarianceBlend::kMaxSpatialWeight);
                     return min(compute_spatial_weight(age), max_allowed);
                 };
                 Float spatial_weight = channel_spatial_weight(history);
@@ -238,8 +240,11 @@ auto compute_spatial_weight = [](Float history) -> Float {
                 Float enhanced_spatial_var_direct = max(spatial_variance_direct, lum_floor_direct);
                 Float enhanced_spatial_var_indirect = max(spatial_variance_indirect, lum_floor_indirect);
                 
-                Float blended_var_direct = lerp(temporal_var_direct, enhanced_spatial_var_direct, spatial_weight);
-                Float blended_var_indirect = lerp(temporal_var_indirect, enhanced_spatial_var_indirect, spatial_weight_indirect);
+                // Ocarina uses lerp(t, a, b). With mature history t=0, retain
+                // temporal variance even when it exceeds one. Swapping t/a
+                // extrapolates to a negative value and marks noisy pixels clean.
+                Float blended_var_direct = lerp(spatial_weight, temporal_var_direct, enhanced_spatial_var_direct);
+                Float blended_var_indirect = lerp(spatial_weight_indirect, temporal_var_indirect, enhanced_spatial_var_indirect);
                 
                 output_variance_direct = max(blended_var_direct, Cfg::Variance::kMinVarianceConsistent);
                 output_variance_indirect = max(blended_var_indirect, Cfg::Variance::kMinVarianceConsistent);

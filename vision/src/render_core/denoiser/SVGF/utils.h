@@ -252,7 +252,12 @@ struct PixelStateUtils {
                 SampledWavelengths swl{sp->dimension()};
                 scene.materials().dispatch(it.material_id(), [&](const Material *material) {
                     MaterialEvaluator bsdf = material->create_evaluator(it, swl);
-                    SampledSpectrum albedo_spec = bsdf.albedo(it.wo);
+                    // Match the specular guide's reflectance convention. A
+                    // negative incidence cosine can create Fresnel poles in
+                    // substrate's total albedo and amplify filtered lighting.
+                    Float3 guide_wo = ocarina::select(
+                        dot(bsdf.shading_frame().normal(), it.wo) < 0.f, -it.wo, it.wo);
+                    SampledSpectrum albedo_spec = bsdf.albedo(guide_wo);
                     albedo = sp->linear_srgb(albedo_spec, swl);
                 });
             };

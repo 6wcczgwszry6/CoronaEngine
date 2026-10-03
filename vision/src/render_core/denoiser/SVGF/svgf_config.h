@@ -111,6 +111,9 @@ struct Epsilon {
         static constexpr uint kStepSizes[4] = {1, 2, 4, 8};
 
         static constexpr uint kLargeStepThreshold = 4;
+        // Correct temporal variance is much wider than the former accidental
+        // floor. Keep mixed ReSTIR lighting responsive to real reflections.
+        static constexpr float kReSTIRLPhiMultiplier = 0.25f;
         static constexpr float kLargeStepLPhiMultiplier = 1.4f;
         static constexpr float kLargeStepNPhiMultiplier = 0.85f;
 
