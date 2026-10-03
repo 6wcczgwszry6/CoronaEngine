@@ -75,6 +75,13 @@ public:
     }
 
     VS_MAKE_PLUGIN_NAME_FUNC
+    [[nodiscard]] bool jitter_primary_samples() const noexcept override {
+        // A raw frame is displayed directly, so shared film jitter otherwise
+        // moves every silhouette even with a stationary camera. Keep stochastic
+        // lighting/lens sampling and retain film jitter for reconstructed output.
+        return frame_buffer().enable_accumulation() ||
+               (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled());
+    }
     void prepare() noexcept override {
         IlluminationIntegrator::prepare();
         direct_->prepare();

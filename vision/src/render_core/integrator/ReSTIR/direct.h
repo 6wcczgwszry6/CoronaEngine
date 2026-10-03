@@ -8,6 +8,7 @@
 
 namespace vision {
 struct DIParam {
+    uint camera_jitter{1u};
     uint M_light{};
     uint M_bsdf{};
     uint max_age{};
@@ -29,7 +30,7 @@ struct DIParam {
 };
 }// namespace vision
 
-OC_PARAM_STRUCT(vision, DIParam, M_light, M_bsdf, max_age, diff_factor, spatial, N,
+OC_PARAM_STRUCT(vision, DIParam, camera_jitter, M_light, M_bsdf, max_age, diff_factor, spatial, N,
                 s_dot, s_depth, s_radius, temporal, history_limit,
                 t_dot, t_depth, t_radius){};
 

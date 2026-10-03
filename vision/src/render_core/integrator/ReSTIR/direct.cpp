@@ -420,8 +420,8 @@ DIReservoirVar ReSTIRDI::temporal_reuse(DIReservoirVar rsv, const SurfaceDataVar
                                         const Float2 &motion_vec,
                                         const SensorSample &ss,
                                         const Var<DIParam> &param) const noexcept {
-    Float2 prev_p_film = ss.p_film - motion_vec;
-    Uint2 prev_p = ocarina::clamp(make_uint2(prev_p_film), make_uint2(0), dispatch_dim().xy() - 1u);
+    Float2 prev_p_film = previous_reservoir_coord(ss.p_film, motion_vec, previous_film_offset(param.camera_jitter));
+    Int2 prev_p = reservoir_pixel(prev_p_film);
     Float limit = rsv.C * param.history_limit;
     Int2 res = make_int2(dispatch_dim().xy());
     TSensor &camera = scene().sensor();
@@ -442,8 +442,8 @@ DIReservoirVar ReSTIRDI::temporal_reuse(DIReservoirVar rsv, const SurfaceDataVar
     };
 
     view_pos = cur_view_pos(cur_surf.is_replaced);
-    $if(in_screen(make_int2(prev_p_film), res) && param.temporal) {
-        auto data = get_prev_data(prev_p, prev_view_pos);
+    $if(in_screen(prev_p, res) && param.temporal) {
+        auto data = get_prev_data(make_uint2(prev_p), prev_view_pos);
         auto prev_surf = data.first;
         auto prev_rsv = data.second;
 
@@ -453,9 +453,9 @@ DIReservoirVar ReSTIRDI::temporal_reuse(DIReservoirVar rsv, const SurfaceDataVar
         }
         $else {
             $for(i, temporal_.N) {
-                Uint2 p =  make_uint2(square_to_disk(sampler()->next_2d()) * param.t_radius + prev_p_film);
-                Uint2 p_clamped = ocarina::clamp(make_uint2(p), make_uint2(0), dispatch_dim().xy() - 1u);
-                auto data = get_prev_data(p_clamped, prev_view_pos);
+                Int2 p = reservoir_pixel(square_to_disk(sampler()->next_2d()) * param.t_radius + prev_p_film);
+                $if(!in_screen(p, res)) { $continue; };
+                auto data = get_prev_data(make_uint2(p), prev_view_pos);
                 auto another_surf = data.first;
                 auto another_rsv = data.second;
                 $if(is_temporal_valid(cur_surf, another_surf, param,
@@ -564,10 +564,17 @@ void ReSTIRDI::compile_shader0() noexcept {
         Uint2 pixel = dispatch_idx().xy();
         camera->load_data();
         sampler()->load_data();
-        sampler()->set_seed(pixel, frame_index, 0);
         initial(sampler(), frame_index, spectrum);
-        SensorSample ss = sampler()->sensor_sample(pixel, camera->filter());
-        RayState rs = camera->generate_ray(ss);
+        // Match the GBuffer's frame-wide film jitter. Lighting remains
+        // independently seeded per pixel after reconstructing the film sample.
+        sampler()->set_seed(make_uint2(0u), frame_index, 0);
+        SensorSample ss = sampler()->sensor_sample(pixel, camera->filter(), param.camera_jitter != 0u);
+        sampler()->set_seed(pixel, frame_index, Dimension::ReSTIR_RIS);
+        // The GBuffer owns the camera sample (including lens/custom rays).
+        // A second per-pixel ray can hit another surface at a silhouette, making
+        // SVGF filter radiance with an unrelated normal, albedo and history.
+        RayDataVar ray_data = frame_buffer().rays().read(dispatch_id());
+        RayState rs = ray_data->to_ray_state();
         TriangleHitVar hit;
         Interaction it{false};
         SurfaceExtendVar surf_ext;
@@ -579,10 +586,7 @@ void ReSTIRDI::compile_shader0() noexcept {
         };
 
         DIReservoirVar rsv = RIS(hit->is_hit(), it, param, surf_ext.throughput, nullptr);
-        Float2 motion_vec = FrameBuffer::compute_motion_vec(scene().sensor(), ss.p_film,
-                                                            rs.ray->at(surf_ext.t_max), hit->is_hit());
-
-        frame_buffer().motion_vectors().write(dispatch_id(), motion_vec);
+        Float2 motion_vec = frame_buffer().motion_vectors().read(dispatch_id());
 
         rsv = temporal_reuse(rsv, cur_surf, motion_vec, ss, param);
         passthrough_reservoirs().write(dispatch_id(), rsv);
@@ -663,11 +667,10 @@ void ReSTIRDI::compile_shader1() noexcept {
         initial(sampler(), frame_index, spectrum);
         Uint2 pixel = dispatch_idx().xy();
         camera->load_data();
-        sampler()->set_seed(pixel, frame_index, 0);
         const SampledWavelengths &swl = sampled_wavelengths();
-        SensorSample ss = sampler()->sensor_sample(pixel, camera->filter());
-        RayState rs = camera->generate_ray(ss);
-        sampler()->set_seed(pixel, frame_index, 1);
+        RayDataVar ray_data = frame_buffer().rays().read(dispatch_id());
+        RayState rs = ray_data->to_ray_state();
+        sampler()->set_seed(pixel, frame_index, Dimension::ReSTIR_combine);
         SurfaceDataVar cur_surf = cur_surfaces().read(dispatch_id());
         DIReservoirVar temporal_rsv = passthrough_reservoirs().read(dispatch_id());
         DIReservoirVar st_rsv = spatial_reuse(temporal_rsv, cur_surf, make_int2(pixel), param);
@@ -716,6 +719,7 @@ void ReSTIRDI::update_resolution(ocarina::uint2 res) noexcept {
 
 DIParam ReSTIRDI::construct_param() const noexcept {
     DIParam param;
+    param.camera_jitter = integrator()->jitter_primary_samples();
     param.M_light = M_light_;
     param.M_bsdf = M_bsdf_;
     param.max_age = max_age_;
@@ -740,7 +744,8 @@ CommandBatch ReSTIRDI::dispatch(uint frame_index) const noexcept {
     const Pipeline *rp = pipeline();
     auto param = construct_param();
     // Invalidation restarts the frame sequence without reallocating reservoirs.
-    param.temporal = param.temporal && frame_index != 0;
+    bool history_valid = history_.begin_frame(frame_index, param.camera_jitter);
+    param.temporal = param.temporal && history_valid;
     ret << shader0_(frame_index, param).dispatch(rp->resolution());
     if (open_) {
         ret << shader1_(frame_index, param).dispatch(rp->resolution());

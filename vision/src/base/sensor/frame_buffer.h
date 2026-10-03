@@ -102,13 +102,14 @@ OC_STRUCT(vision, RayData, org_ior,dir_medium) {
 namespace vision {
 struct GBufferParam {
     uint frame_index{};
+    uint camera_jitter{1u};
     BufferDesc<TriangleHit> visibility_buffer;
     BufferDesc<float2> motion_vectors;
     BufferDesc<RayData> rays;
 };
 }// namespace vision
 
-OC_PARAM_STRUCT(vision, GBufferParam, frame_index, visibility_buffer, motion_vectors, rays){};
+OC_PARAM_STRUCT(vision, GBufferParam, frame_index, camera_jitter, visibility_buffer, motion_vectors, rays){};
 
 namespace vision {
 

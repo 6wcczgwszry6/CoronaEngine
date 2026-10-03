@@ -10,6 +10,7 @@
 
 namespace vision {
 struct GIParam {
+    uint camera_jitter{1u};
     uint max_age{};
     float diff_factor{};
 
@@ -29,7 +30,7 @@ struct GIParam {
 };
 }// namespace vision
 
-OC_PARAM_STRUCT(vision, GIParam, max_age, diff_factor, spatial, N,
+OC_PARAM_STRUCT(vision, GIParam, camera_jitter, max_age, diff_factor, spatial, N,
                 s_dot, s_depth, s_radius, temporal, history_limit,
                 t_dot, t_depth, t_radius){};
 

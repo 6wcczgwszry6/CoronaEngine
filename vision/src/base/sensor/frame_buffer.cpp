@@ -186,7 +186,7 @@ void FrameBuffer::compile_compute_geom() noexcept {
         sampler->set_seed(make_uint2(0, 0), frame_index, 0);
         camera->load_data();
 
-        SensorSample ss = sampler->sensor_sample(pixel, camera->filter());
+        SensorSample ss = sampler->sensor_sample(pixel, camera->filter(), param.camera_jitter != 0u);
 
         sampler->set_seed(pixel, frame_index, 0);
 
@@ -260,6 +260,7 @@ CommandBatch FrameBuffer::compute_GBuffer(uint frame_index) const noexcept {
     auto vbuffer = cur_visibility_buffer_view(frame_index).descriptor();
 
     param.frame_index = frame_index;
+    param.camera_jitter = renderer().integrator()->jitter_primary_samples();
     param.visibility_buffer = vbuffer;
     param.motion_vectors = motion_vectors().descriptor();
     param.rays = rays().descriptor();
