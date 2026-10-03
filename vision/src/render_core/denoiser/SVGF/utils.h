@@ -6,11 +6,27 @@
 #include "base/mgr/scene.h"
 #include "base/scattering/interaction.h"
 #include "base/scattering/material.h"
+#include "base/sampler.h"
 #include "base/color/spectrum.h"
 #include "svgf_config.h"
 #include "base/using.h"
 
 namespace vision::svgf {
+// Normal GBuffer rays use a shared frame-wide film sample. Point-sampled
+// illumination/visibility histories live on that jittered grid, whereas the
+// final coverage history lives on the pixel-centre grid.
+[[nodiscard]] inline Float4 frame_filter_offsets(Pipeline *pipeline, Uint frame) {
+    auto &camera = pipeline->scene().sensor();
+    auto &sampler = pipeline->renderer().sampler();
+    camera->load_data();
+    sampler->load_data();
+    sampler->set_seed(make_uint2(0u), frame, 0u);
+    Float2 current = camera->filter()->sample(sampler->next_2d()).p;
+    sampler->set_seed(make_uint2(0u), max(frame, 1u) - 1u, 0u);
+    Float2 previous = camera->filter()->sample(sampler->next_2d()).p;
+    return make_float4(current, previous);
+}
+
 template<typename T>
 inline void init_buffer_zero(Device &dev, Buffer<T> &buffer, uint num, const string &desc = "") {
     buffer = dev.create_buffer<T>(num, desc);

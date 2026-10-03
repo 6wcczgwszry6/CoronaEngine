@@ -12,6 +12,7 @@ void VarianceEstimator::prepare() noexcept {}
 void VarianceEstimator::compile() noexcept {
 Pipeline *pipeline_ref = pipeline();
 Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
+    Float4 film_offsets = frame_filter_offsets(pipeline_ref, param.frame_index);
     Int2 screen_size = make_int2(dispatch_dim().xy());
     Uint index = dispatch_id();
         
@@ -42,7 +43,7 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         Float2 cur_pos_float = make_float2(dispatch_idx().xy()) + 0.5f;
         Float2 prev_pos_float = cur_pos_float - motion_vec;
         
-        Float2 prev_texel = prev_pos_float - 0.5f;
+        Float2 prev_texel = prev_pos_float - 0.5f + film_offsets.xy() - film_offsets.zw();
         Float2 floor_pos = floor(prev_texel);
         Float2 frac_pos = prev_texel - floor_pos;
         
@@ -76,7 +77,13 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
                     Bool tap_is_emissive = PixelStateUtils::is_emissive(pipeline_ref, tap_hit);
                     
                     Float depth_diff = abs(expected_prev_depth - tap_depth) / max(expected_prev_depth, 0.1f);
-                    Float normal_sim = pow(max(dot(cur_it.ng, tap_it.ng), 0.f), Cfg::Temporal::kNormalExp);
+                    // A subpixel curve may land on a different facet next frame.
+                    // ReSTIR has sparse mixed-light samples: rejecting normals
+                    // just six degrees apart repeatedly resets them to black.
+                    Float normal_exponent = ocarina::select(param.channel_kind ==
+                        uint(RealTimeDenoiseInput::ChannelKind::DirectIndirect),
+                        Cfg::Temporal::kReSTIRNormalExp, Cfg::Temporal::kNormalExp);
+                    Float normal_sim = pow(max(dot(cur_it.ng, tap_it.ng), 0.f), normal_exponent);
                     Bool same_instance = cur_hit.inst_id == tap_hit.inst_id;
                     Bool emission_match = (cur_it.has_emission() == tap_is_emissive) &&
                         (!cur_it.has_emission() || cur_it.light_id() == tap_it.light_id());
@@ -122,10 +129,10 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         check_tap_consistency(base_pixel + make_int2(0, 1), w01);
         check_tap_consistency(base_pixel + make_int2(1, 1), w11);
 
-        // Jitter can change the covered surface at a thin edge even with a fixed
-        // camera. If all bilinear taps miss it, recover nearby history belonging
-        // to the same surface instead of cold-starting the filter every frame.
-        // A real disocclusion with no matching geometry still rejects history.
+        // Jitter and camera motion can move a thin surface outside the bilinear
+        // footprint. Recover nearby history on the same instance and plane
+        // instead of cold-starting every frame. Limit the borrowed history's age
+        // below, and reject large jumps or disocclusions with no matching surface.
         Bool fallback_history = false;
         $if(param.frame_index > 0u && total_weight <= 0.01f &&
             motion_length < Cfg::Temporal::kFallbackMotionThreshold) {
@@ -191,7 +198,9 @@ Kernel variance_kernel = [&, pipeline_ref](Var<VarianceEstimatorParam> param) {
         Float3 current_view = current_to_eye / max(length(current_to_eye), 1e-6f);
         Float3 previous_view = previous_to_eye / max(length(previous_to_eye), 1e-6f);
         Float view_motion = length(current_view - previous_view) * param.pixels_per_radian;
-        Float response_motion = ocarina::select(diffuse_specular, view_motion, motion_length);
+        // ReSTIR's mixed direct/indirect channels are also invariant to pure
+        // rotation at a fixed eye. Only parallax changes their outgoing view.
+        Float response_motion = view_motion;
 
         Float max_history_for_motion = max(
             Cfg::Temporal::kMaxHistoryStatic - 

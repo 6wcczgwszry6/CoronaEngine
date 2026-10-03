@@ -40,13 +40,14 @@ struct Epsilon {
         static constexpr float kDepthThreshold = 0.03f;    // tighter disocclusion reject (was 0.05)
         static constexpr float kAlbedoThreshold = 0.15f;
         static constexpr float kNormalExp = 128.f;
+        static constexpr float kReSTIRNormalExp = 8.f;
         static constexpr float kNormalThreshold = 0.5f;
         static constexpr float kMaxHistoryStatic = 128.f;
         static constexpr float kMaxHistoryFast = 4.f;      // fast-motion alpha_min 1/4 (was 8)
         static constexpr float kMotionScaleDivisor = 16.f;
         static constexpr float kMotionAlphaScale = 0.5f;   // motion can reach alpha 0.5 (was 0.15)
         static constexpr float kMotionAlphaDivisor = 8.f;
-        static constexpr float kFallbackMotionThreshold = 0.01f;
+        static constexpr float kFallbackMotionThreshold = 32.f;
         static constexpr float kFallbackPlaneThreshold = 0.005f;
         static constexpr float kFallbackMaxHistory = 16.f;
     };
@@ -61,6 +62,9 @@ struct Epsilon {
         static constexpr uint kInteriorHistory = 32u;
         static constexpr float kNormalThreshold = 0.99f;
         static constexpr float kPlaneThreshold = 0.005f;
+        static constexpr float kMovingAlpha = 0.25f;
+        static constexpr float kMotionRejectPixels = 32.f;
+        static constexpr float kMinReprojectionSupport = 0.1f;
     };
 
     struct Ghosting {

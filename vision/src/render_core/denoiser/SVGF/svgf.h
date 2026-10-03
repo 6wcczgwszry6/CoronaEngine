@@ -17,8 +17,16 @@ struct ResolveParam {
     BufferDesc<RadType4> indirect;
     BufferDesc<float4> history_direct;
     BufferDesc<float4> history_indirect;
+    BufferDesc<float4> output_direct;
+    BufferDesc<float4> output_indirect;
     BufferDesc<TriangleHit> visibility;
+    BufferDesc<TriangleHit> prev_visibility;
+    BufferDesc<float2> motion_vectors;
     array_float3 camera_pos;
+    array_float3 prev_camera_pos;
+    uint history_valid{0u};
+    uint channel_kind{0u};
+    uint frame_index{0u};
     float alpha{1.f};
     float interior_alpha{1.f};
 };
@@ -26,7 +34,9 @@ struct ResolveParam {
 }// namespace vision::svgf
 
 OC_PARAM_STRUCT(vision::svgf, ResolveParam, direct, indirect,
-                history_direct, history_indirect, visibility, camera_pos, alpha, interior_alpha){};
+                history_direct, history_indirect, output_direct, output_indirect,
+                visibility, prev_visibility, motion_vectors, camera_pos, prev_camera_pos,
+                history_valid, channel_kind, frame_index, alpha, interior_alpha){};
 
 namespace vision::svgf {
 class SVGF : public Denoiser, public GBufferCallback, public enable_shared_from_this<SVGF> {
@@ -45,10 +55,13 @@ private:
     HotfixSlot<SP<Modulator>> modulator_{};
     HotfixSlot<SP<VarianceEstimator>> variance_estimator_{};
     HotfixSlot<SP<Prefilter>> prefilter_{};
-    // Same-pixel reads/writes only: these buffers need no ping-pong copy.
+    // Reprojected coverage reads require separate previous/current storage.
     RegistrableBuffer<float4> resolve_direct_;
     RegistrableBuffer<float4> resolve_indirect_;
+    RegistrableBuffer<float4> resolve_direct2_;
+    RegistrableBuffer<float4> resolve_indirect2_;
     Shader<void(ResolveParam)> resolve_shader_;
+    Shader<void(ResolveParam)> publish_resolve_shader_;
     float4x4 resolve_camera_{};
     float resolve_fov_{};
     uint resolve_frame_{InvalidUI32};
@@ -85,6 +98,8 @@ public:
           svgf_data2(pipeline()->bindless_array()),
           resolve_direct_(pipeline()->bindless_array()),
           resolve_indirect_(pipeline()->bindless_array()),
+          resolve_direct2_(pipeline()->bindless_array()),
+          resolve_indirect2_(pipeline()->bindless_array()),
           params_(desc) {}
 
     void initialize_(const vision::NodeDesc &node_desc) noexcept override;
@@ -92,7 +107,8 @@ public:
 
     VS_HOTFIX_MAKE_RESTORE(Denoiser, svgf_data, svgf_data2,
                            atrous_, modulator_, variance_estimator_, prefilter_, params_,
-                           resolve_direct_, resolve_indirect_, resolve_shader_, resolve_camera_,
+                           resolve_direct_, resolve_indirect_, resolve_direct2_, resolve_indirect2_,
+                           resolve_shader_, publish_resolve_shader_, resolve_camera_,
                            resolve_fov_, resolve_frame_, resolve_history_)
     VS_MAKE_PLUGIN_NAME_FUNC
 
