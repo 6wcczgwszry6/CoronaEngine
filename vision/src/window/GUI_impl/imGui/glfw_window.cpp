@@ -133,10 +133,9 @@ void GLWindow::init(const char *name, ocarina::uint2 initial_size, bool resizabl
         if (width * height > 0) {
             self->texture_->update(res);
         }
-        // Defer the resize callback to the next frame head so that
-        // glfwSetWindowMonitor (full-screen toggle) doesn't trigger a GPU
-        // resource rebuild while glfwPollEvents() is still on the call stack.
-        self->pending_resize_ = res;
+        if (auto &&cb = self->window_size_callback_) {
+            cb(res);
+        }
     });
     glfwSetKeyCallback(handle_, [](GLFWwindow *window, int key, int scancode, int action, int mods) noexcept {
         auto self = static_cast<GLWindow *>(glfwGetWindowUserPointer(window));
@@ -200,23 +199,18 @@ bool GLWindow::should_close() const noexcept {
 
 void GLWindow::full_screen() noexcept {
     auto now = std::chrono::steady_clock::now();
-    if (now - lastF11Toggle <= std::chrono::milliseconds(100)) { return; }
-    lastF11Toggle = now;
-
-    if (isFullscreen) {
-        // Restore window decorations and previous windowed geometry.
-        glfwSetWindowAttrib(handle_, GLFW_DECORATED, GLFW_TRUE);
-        glfwSetWindowMonitor(handle_, nullptr, windowedX, windowedY, windowedWidth, windowedHeight, 0);
-    } else {
-        // Save windowed state, strip decorations, then resize to cover the
-        // full monitor — borderless windowed, same as a browser F11.
-        glfwGetWindowPos(handle_, &windowedX, &windowedY);
-        glfwGetWindowSize(handle_, &windowedWidth, &windowedHeight);
-        const GLFWvidmode *mode = glfwGetVideoMode(monitor_);
-        glfwSetWindowAttrib(handle_, GLFW_DECORATED, GLFW_FALSE);
-        glfwSetWindowMonitor(handle_, nullptr, 0, 0, mode->width, mode->height, 0);
+    if (now - lastF11Toggle > std::chrono::milliseconds(100)) {
+        lastF11Toggle = now;
+        if (isFullscreen) {
+            glfwSetWindowMonitor(handle_, nullptr, windowedX, windowedY, windowedWidth, windowedHeight, 0);
+        } else {
+            const GLFWvidmode *mode = glfwGetVideoMode(monitor_);
+            glfwGetWindowPos(handle_, &windowedX, &windowedY);
+            glfwGetWindowSize(handle_, &windowedWidth, &windowedHeight);
+            glfwSetWindowMonitor(handle_, monitor_, 0, 0, mode->width, mode->height, mode->refreshRate);
+        }
+        isFullscreen = !isFullscreen;
     }
-    isFullscreen = !isFullscreen;
 }
 
 void GLWindow::swap_monitor() noexcept {
@@ -269,13 +263,6 @@ void GLWindow::_begin_frame() noexcept {
     if (!should_close()) {
         glfwMakeContextCurrent(handle_);
         glfwPollEvents();
-        if (!ocarina::is_zero(pending_resize_)) {
-            ocarina::uint2 res = pending_resize_;
-            pending_resize_ = ocarina::make_uint2(0u);
-            if (window_size_callback_) {
-                window_size_callback_(res);
-            }
-        }
         if (has_active_ui_backend()) {
             ImGui_ImplOpenGL3_NewFrame();
             ImGui_ImplGlfw_NewFrame();
