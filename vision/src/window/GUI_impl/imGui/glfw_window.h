@@ -22,6 +22,7 @@ private:
     int windowedX{}, windowedY{}, windowedWidth{}, windowedHeight{};
     std::chrono::steady_clock::time_point lastF11Toggle;
     mutable ocarina::unique_ptr<GLTexture> texture_;
+    ocarina::uint2 pending_resize_{0u, 0u};
 
 private:
     void _begin_frame() noexcept override;
