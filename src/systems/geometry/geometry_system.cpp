@@ -363,7 +363,8 @@ void GeometrySystem::update() {
                 world_aabb_from_local_bounds(*transform_read, mechanics_dev.min_xyz, mechanics_dev.max_xyz, aabb);
                 octree_entries.push_back({actor_handle,aabb});
                 added_actors.insert(actor_handle);
-                break;
+                // B1：不 break，让同一 actor 的所有 mechanics profile 都插入八叉树，
+                // 否则多 profile 物体只有第一个被宽相检测覆盖。
             }
         }
         // 批量初始化 Actor 加载状态（单次加锁替代逐 Actor 加锁）
