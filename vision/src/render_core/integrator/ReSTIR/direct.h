@@ -5,6 +5,7 @@
 #pragma once
 
 #include "common.h"
+#include "base/mgr/switch_profile.h"
 
 namespace vision {
 struct DIParam {
@@ -79,8 +80,8 @@ public:
     [[nodiscard]] float factor() const noexcept { return static_cast<float>(open()); }
     void prepare() noexcept;
     void compile() noexcept {
-        compile_shader0();
-        compile_shader1();
+        switch_profile::measure("DI.initial_temporal.compile", "compile", [&] { compile_shader0(); });
+        switch_profile::measure("DI.spatial.compile", "compile", [&] { compile_shader1(); });
     }
     bool render_UI(Widgets *widgets) noexcept override;
     void render_sub_UI(Widgets *widgets) noexcept override;

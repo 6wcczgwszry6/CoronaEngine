@@ -97,6 +97,7 @@ GISampleVar ReSTIRGI::init_sample(const Interaction &it, const SensorSample &ss,
 }
 
 void ReSTIRGI::compile_initial_samples() noexcept {
+    switch_profile::Scope kernel_profile{"Kernel::Kernel.GI_initial", "dsl"};
     TSpectrum &spectrum = pipeline()->spectrum();
     TSensor &camera = scene().sensor();
     Kernel kernel = [&](Uint frame_index) {
@@ -118,6 +119,7 @@ void ReSTIRGI::compile_initial_samples() noexcept {
         GISampleVar sample = init_sample(it, ss, hit_bsdf);
         samples_.write(dispatch_id(), sample);
     };
+    kernel_profile.finish();
     initial_samples_ = device().compile(kernel, "ReSTIR indirect initial samples");
 }
 
@@ -267,6 +269,7 @@ GIReservoirVar ReSTIRGI::temporal_reuse(GIReservoirVar rsv, const SurfaceDataVar
 }
 
 void ReSTIRGI::compile_temporal_reuse() noexcept {
+    switch_profile::Scope kernel_profile{"Kernel::Kernel.GI_temporal", "dsl"};
     TSpectrum &spectrum = pipeline()->spectrum();
     TSensor &camera = scene().sensor();
     //todo remedy init samples and reservoir
@@ -298,6 +301,7 @@ void ReSTIRGI::compile_temporal_reuse() noexcept {
         rsv = temporal_reuse(rsv, surf, motion_vec, ss, param);
         passthrough_reservoirs().write(dispatch_id(), rsv);
     };
+    kernel_profile.finish();
     temporal_pass_ = device().compile(kernel, "ReSTIR indirect temporal reuse");
 }
 
@@ -404,6 +408,7 @@ Float3 ReSTIRGI::shading(GIReservoirVar rsv,
 }
 
 void ReSTIRGI::compile_spatial_shading() noexcept {
+    switch_profile::Scope kernel_profile{"Kernel::Kernel.GI_spatial", "dsl"};
     TSensor &camera = scene().sensor();
     TLightSampler &light_sampler = renderer().light_sampler();
     TSpectrum &spectrum = pipeline()->spectrum();
@@ -423,6 +428,7 @@ void ReSTIRGI::compile_spatial_shading() noexcept {
         radiance_->write(dispatch_id(), make_float4(L, 1.f));
         cur_reservoirs().write(dispatch_id(), rsv);
     };
+    kernel_profile.finish();
     spatial_shading_ = device().compile(kernel, "ReSTIR indirect spatial reuse and shading");
 }
 

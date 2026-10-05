@@ -19,6 +19,7 @@
 #include "base/using.h"
 #include "image_pool.h"
 #include <cstdint>
+#include <functional>
 
 namespace vision {
 
@@ -95,6 +96,7 @@ private:
     PolymorphicGUI<TSensor> sensors_{};
     uint cur_sensor_index_{0};
     TSensor *sensor_override_{nullptr};
+    std::function<void(Scene &)> cached_shape_initializer_;
     friend class Pipeline;
 
 public:
@@ -111,6 +113,11 @@ public:
     }
     [[nodiscard]] bool is_initialized() const noexcept { return data_->initialized_; }
     void init(const SceneDesc &scene_desc);
+    // One-shot restoration after local materials/media exist, before Pipeline
+    // consumes world bounds. The callback must create independent instances.
+    void set_cached_shape_initializer(std::function<void(Scene &)> initializer) {
+        cached_shape_initializer_ = std::move(initializer);
+    }
     void set_min_radius(float min_radius) noexcept { data_->min_radius_ = min_radius; }
     void prepare() noexcept;
     void update_runtime_object(const vision::IObjectConstructor *constructor) noexcept override;

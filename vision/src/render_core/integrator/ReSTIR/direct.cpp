@@ -555,6 +555,7 @@ SurfaceDataVar ReSTIRDI::compute_hit(RayState rs, TriangleHitVar &hit, Interacti
 }
 
 void ReSTIRDI::compile_shader0() noexcept {
+    switch_profile::Scope kernel_profile{"Kernel::Kernel.DI_initial_temporal", "dsl"};
     Pipeline *rp = pipeline();
     const Geometry &geometry = rp->geometry();
     TSensor &camera = scene().sensor();
@@ -591,6 +592,7 @@ void ReSTIRDI::compile_shader0() noexcept {
         rsv = temporal_reuse(rsv, cur_surf, motion_vec, ss, param);
         passthrough_reservoirs().write(dispatch_id(), rsv);
     };
+    kernel_profile.finish();
     shader0_ = device().compile(kernel, "ReSTIR direct initial candidates and temporal reuse");
 }
 
@@ -659,6 +661,7 @@ Float3 ReSTIRDI::shading(vision::DIReservoirVar rsv, const SurfaceDataVar &surf)
 }
 
 void ReSTIRDI::compile_shader1() noexcept {
+    switch_profile::Scope kernel_profile{"Kernel::Kernel.DI_spatial", "dsl"};
     TSensor &camera = scene().sensor();
     TLightSampler &light_sampler = renderer().light_sampler();
     TSpectrum &spectrum = pipeline()->spectrum();
@@ -691,6 +694,7 @@ void ReSTIRDI::compile_shader1() noexcept {
         radiance_->write(dispatch_id(), make_float4(L, 1.f));
         cur_reservoirs().write(dispatch_id(), st_rsv);
     };
+    kernel_profile.finish();
     shader1_ = device().compile(kernel, "ReSTIR direct spatial reuse and shading");
 }
 

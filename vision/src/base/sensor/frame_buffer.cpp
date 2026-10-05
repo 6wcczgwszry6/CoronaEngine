@@ -4,6 +4,7 @@
 
 #include "frame_buffer.h"
 #include "base/mgr/pipeline.h"
+#include "base/mgr/switch_profile.h"
 
 namespace vision {
 using namespace ocarina;
@@ -126,6 +127,7 @@ void FrameBuffer::init_screen_buffer(const SP<ScreenBuffer> &buffer) noexcept {
 }
 
 void FrameBuffer::prepare_screen_buffer(const SP<vision::ScreenBuffer> &buffer) noexcept {
+    switch_profile::Scope profile{"FrameBuffer::prepare_screen_buffer", "buffers"};
     init_screen_buffer(buffer);
     register_(buffer);
 }
@@ -138,7 +140,9 @@ void FrameBuffer::compile_accumulation() noexcept {
         val = lerp(make_float4(a), accum_prev, val);
         output.write(dispatch_id(), val);
     };
-    accumulate_ = device().compile(kernel, "RGBFilm-accumulation");
+    accumulate_ = switch_profile::measure("RGBFilm-accumulation.compile", "compile", [&] {
+        return device().compile(kernel, "RGBFilm-accumulation");
+    });
 }
 
 void FrameBuffer::update_device_data() noexcept {
@@ -157,7 +161,9 @@ void FrameBuffer::compile_tone_mapping() noexcept {
         val.w = 1.f;
         output.write(val, dispatch_idx().xy());
     };
-    tone_mapping_ = device().compile(kernel_tex, "RGBFilm-tone_mapping-tex");
+    tone_mapping_ = switch_profile::measure("RGBFilm-tone_mapping-tex.compile", "compile", [&] {
+        return device().compile(kernel_tex, "RGBFilm-tone_mapping-tex");
+    });
 }
 
 void FrameBuffer::compile_gamma() noexcept {
@@ -167,7 +173,9 @@ void FrameBuffer::compile_gamma() noexcept {
         val.w = 1.f;
         output.write(val, dispatch_idx().xy());
     };
-    gamma_correct_ = device().compile(kernel_tex, "FrameBuffer-gamma_correction-tex");
+    gamma_correct_ = switch_profile::measure("FrameBuffer-gamma_correction-tex.compile", "compile", [&] {
+        return device().compile(kernel_tex, "FrameBuffer-gamma_correction-tex");
+    });
 }
 
 void FrameBuffer::compile_compute_geom() noexcept {

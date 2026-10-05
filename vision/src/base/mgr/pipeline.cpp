@@ -3,6 +3,7 @@
 //
 
 #include "pipeline.h"
+#include "switch_profile.h"
 #include "interactive_runtime_switches.h"
 #include "base/sensor/photosensory.h"
 #include "base/color/spectrum.h"
@@ -49,6 +50,7 @@ void Pipeline::activate_global_context() noexcept {
 }
 
 bool Pipeline::create_view_context(uint64_t view_id, uint2 resolution) noexcept {
+    switch_profile::Scope profile{"view.create_context", "view"};
     activate_global_context();
     if (view_id == 0u || view_contexts_.contains(view_id)) {
         return view_id != 0u;

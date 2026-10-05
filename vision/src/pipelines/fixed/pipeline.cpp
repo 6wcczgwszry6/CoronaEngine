@@ -3,6 +3,7 @@
 //
 
 #include "base/mgr/pipeline.h"
+#include "base/mgr/switch_profile.h"
 
 namespace vision {
 
@@ -16,12 +17,13 @@ public:
         : Pipeline(desc), defer_base_compile_(desc["defer_base_compile"].as_bool(false)) {}
     VS_MAKE_PLUGIN_NAME_FUNC
     void prepare() noexcept override {
-        Pipeline::prepare();
-        scene().prepare();
+        switch_profile::Scope profile{"pipeline.prepare", "resources"};
+        switch_profile::measure("framebuffer.prepare", "buffers", [&] { Pipeline::prepare(); });
+        switch_profile::measure("scene.prepare", "scene", [&] { scene().prepare(); });
         renderer_.prepare(scene());
-        image_pool().prepare(stream());
-        prepare_geometry();
-        upload_bindless_array();
+        switch_profile::measure("images.prepare", "images", [&] { image_pool().prepare(stream()); });
+        switch_profile::measure("geometry.prepare", "geometry", [&] { prepare_geometry(); });
+        switch_profile::measure("bindless.upload", "upload", [&] { upload_bindless_array(); });
         if (!defer_base_compile_) {
             compile();
         }
@@ -39,6 +41,7 @@ public:
     }
 
     void compile() noexcept override {
+        switch_profile::Scope profile{"pipeline.compile", "compile"};
         // Geometry synchronization can request a rebuild before any camera has
         // rendered. Keep an unused base renderer deferred on that path too.
         if (active_renderer_ == &renderer_ && defer_base_compile_) {
@@ -48,8 +51,8 @@ public:
         Global::SceneGpuContextScope scene_gpu_context{
             scene().geometry().bindless_array(),
             scene().geometry().gpu_resource()->device()};
-        Pipeline::compile();
-        integrator()->compile();
+        switch_profile::measure("display.compile", "compile", [&] { Pipeline::compile(); });
+        switch_profile::measure("integrator.compile", "compile", [&] { integrator()->compile(); });
         if (active_renderer_ == &renderer_) {
             base_compiled_ = true;
         }

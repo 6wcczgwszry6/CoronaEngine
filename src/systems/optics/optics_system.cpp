@@ -63,6 +63,7 @@
 #include "base/import/project_desc.h"
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
+#include "base/mgr/switch_profile.h"
 #include "base/mgr/scene.h"
 #include "base/sensor/frame_buffer.h"
 #include "base/sensor/light_field_types.h"
@@ -71,6 +72,7 @@
 #include "vision/vision_geometry_adapter.h"
 #include "vision/vision_external_live_aabb.h"
 #include "vision/vision_geometry_snapshot.h"
+#include "vision/vision_scene_import_cache.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_light_adapter.h"
 #include "vision/vision_render_mode_config.h"
@@ -2221,8 +2223,11 @@ void validate_vision_source_node(const vision::DataWrap& node,
                                                     scene_resource,
                                                 Corona::Systems::Vision::VisionPipelineSource source)
     -> ocarina::SP<vision::Pipeline> {
+    vision::switch_profile::Scope profile{"scene.import", "scene"};
+    const auto cached_import = scene_resource ? scene_resource->import_cache : nullptr;
     if (!project_data.is_object() || !project_data.contains("scene") ||
-        !project_data["scene"].is_object() || !std::filesystem::is_directory(base_dir)) {
+        !project_data["scene"].is_object() ||
+        (!cached_import && !std::filesystem::is_directory(base_dir))) {
         throw std::invalid_argument("Vision source requires a scene object and an existing base directory");
     }
     for (const auto* block : {"render", "pipeline", "output"}) {
@@ -2248,10 +2253,15 @@ void validate_vision_source_node(const vision::DataWrap& node,
             throw std::invalid_argument("Invalid Vision mediums descriptor");
         }
     }
-    validate_vision_source_node(scene_data, base_dir);
-    for (const auto* block : {"render", "pipeline"}) {
-        if (project_data.contains(block)) validate_vision_source_node(project_data[block], base_dir);
+    if (!cached_import) {
+        validate_vision_source_node(scene_data, base_dir);
+        for (const auto* block : {"render", "pipeline"}) {
+            if (project_data.contains(block)) validate_vision_source_node(project_data[block], base_dir);
+        }
     }
+    auto import_cache = cached_import ? cached_import :
+        std::make_shared<Corona::Systems::Vision::VisionSceneImportCache>();
+    if (!cached_import) import_cache->project_data = project_data;
     const auto source_framebuffer_type =
         vision_framebuffer_type_from_project_data(project_data);
     Corona::Systems::Vision::configure_vision_scene_for_mode(project_data, mode);
@@ -2272,6 +2282,14 @@ void validate_vision_source_node(const vision::DataWrap& node,
     vision::ProjectDesc project_desc;
     project_desc.scene_path = base_dir;
     project_desc.init(project_data);
+    if (cached_import) {
+        // Standalone area lights generate quad groups during Scene::init. The
+        // snapshot already contains those groups and their emission descriptors;
+        // staging restores them with an explicit instance ID instead.
+        std::erase_if(project_desc.scene_desc.light_descs, [](const auto& desc) {
+            return ocarina::to_lower(desc.sub_type) == "area";
+        });
+    }
 
     auto pipeline = vision::Node::create_shared<vision::Pipeline>(project_desc.pipeline_desc);
     if (!pipeline) {
@@ -2280,10 +2298,31 @@ void validate_vision_source_node(const vision::DataWrap& node,
         return {};
     }
     bind_pipeline_scene_resource_early(*pipeline, scene_resource);
-    pipeline->init_project(project_desc);
+    pipeline->image_pool().set_source_cache(import_cache->images);
+    if (cached_import) {
+        const auto snapshot = scene_resource->geometry_snapshot
+            ? scene_resource->geometry_snapshot : cached_import->geometry;
+        if (!snapshot) throw std::runtime_error("Cached Vision scene has no geometry assets");
+        const auto polymorphic_mode = project_desc.renderer_desc.render_setting.polymorphic_mode;
+        pipeline->scene().set_cached_shape_initializer([snapshot, polymorphic_mode](vision::Scene& scene) {
+            // Snapshot medium IDs use the prepared registry mode and order.
+            scene.materials().set_mode(polymorphic_mode);
+            scene.mediums().set_mode(polymorphic_mode);
+            scene.tidy_up();
+            auto staged = Corona::Systems::Vision::stage_geometry_snapshot(*snapshot, scene);
+            for (auto& material : staged.new_materials) scene.add_material(std::move(material));
+            for (auto& light : staged.new_lights) scene.add_light(std::move(light));
+            for (const auto& group : staged.groups) scene.add_shape(group);
+        });
+    }
+    vision::switch_profile::measure("scene.init_project", "scene", [&] {
+        pipeline->init_project(project_desc);
+    });
     if (scene_resource) {
-        bind_pipeline_scene_gpu_resource(
-            *pipeline, *scene_resource, source, mode, scene_label);
+        vision::switch_profile::measure("scene.bind_gpu_resource", "geometry", [&] {
+            bind_pipeline_scene_gpu_resource(
+                *pipeline, *scene_resource, source, mode, scene_label);
+        });
     }
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
     pipeline->init();
@@ -2292,6 +2331,11 @@ void validate_vision_source_node(const vision::DataWrap& node,
     // prepare() does not create FrameBuffer::view_texture_; the render path tone
     // maps into it and we later read it back, so create it explicitly here.
     pipeline->frame_buffer()->prepare_view_texture();
+    if (!cached_import && scene_resource) {
+        import_cache->geometry = Corona::Systems::Vision::capture_geometry_snapshot(
+            *scene_resource, pipeline->scene());
+        scene_resource->import_cache = std::move(import_cache);
+    }
     CFW_LOG_INFO(
         "OpticsSystem: Vision framebuffer realized (scene={}, configured={}, lightfield={})",
         scene_label,
@@ -2784,7 +2828,12 @@ OpticsSystem::VisionPipelineRuntime* OpticsSystem::load_vision_runtime_source(
             candidate->key = resource_key;
             candidate->display_source_path = key.scene_path;
         }
-        auto pipeline = source.kind == Vision::VisionSceneSourceKind::Embedded
+        const bool reused_scene_assets = candidate->import_cache != nullptr;
+        auto pipeline = reused_scene_assets
+            ? import_vision_scene_from_data(candidate->import_cache->project_data,
+                  std::filesystem::u8path(source.base_dir), key.scene_path, key.mode,
+                  candidate, key.source)
+            : source.kind == Vision::VisionSceneSourceKind::Embedded
             ? import_vision_scene_from_data(vision::DataWrap::parse(source.scene_json),
                   std::filesystem::u8path(source.base_dir), key.scene_path, key.mode,
                   candidate, key.source)
@@ -2813,6 +2862,14 @@ OpticsSystem::VisionPipelineRuntime* OpticsSystem::load_vision_runtime_source(
         if (key.source == VisionPipelineSource::ExternalLive) {
             if (!resource->geometry_snapshot) {
                 runtime.publish_geometry();
+                resource->import_cache->geometry = resource->geometry_snapshot;
+                runtime.seed_geometry_cache();
+            }
+            else if (reused_scene_assets) {
+                // The latest publication was restored before prepare(), so do
+                // not stage and build the same geometry a second time.
+                runtime.applied_geometry_version = resource->geometry_version;
+                runtime.scene_gpu_transform_version = resource->logical_transform_version;
                 runtime.seed_geometry_cache();
             }
             else if (!sync_shared_vision_scene(runtime)) throw std::runtime_error("geometry snapshot import failed");

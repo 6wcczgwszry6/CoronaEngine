@@ -5,6 +5,7 @@
 #include "base/integral/integrator.h"
 #include "base/integral/radiance_cache.h"
 #include "base/mgr/pipeline.h"
+#include "base/mgr/switch_profile.h"
 #include "math/warp.h"
 #include "base/color/spectrum.h"
 #include "ReSTIR/direct.h"
@@ -84,13 +85,13 @@ public:
                (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled());
     }
     void prepare() noexcept override {
-        IlluminationIntegrator::prepare();
-        direct_->prepare();
-        indirect_->prepare();
+        switch_profile::measure("IlluminationIntegrator::prepare", "buffers", [&] { IlluminationIntegrator::prepare(); });
+        switch_profile::measure("ReSTIRDI::prepare", "buffers", [&] { direct_->prepare(); });
+        switch_profile::measure("ReSTIRGI::prepare", "buffers", [&] { indirect_->prepare(); });
         if (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled()) {
             denoiser_->prepare();
         }
-        cache_->prepare();
+        switch_profile::measure("RadianceCache::prepare", "buffers", [&] { cache_->prepare(); });
         Pipeline *rp = pipeline();
 
         frame_buffer().prepare_screen_buffer(specular_buffer_);
@@ -108,8 +109,8 @@ public:
     }
 
     void compile() noexcept override {
-        direct_->compile();
-        indirect_->compile();
+        switch_profile::measure("ReSTIR.DI.compile", "compile", [&] { direct_->compile(); });
+        switch_profile::measure("ReSTIR.GI.compile", "compile", [&] { indirect_->compile(); });
         if (!denoiser_runtime_disabled() && denoiser_ &&
             (denoiser_->enabled() || denoiser_->has_prepared_resources())) {
             denoiser_->compile();
@@ -122,7 +123,9 @@ public:
             Float3 L = direct + indirect;
             frame_buffer().add_sample(dispatch_idx().xy(), L, frame_index);
         };
-        combine_ = device().compile(kernel, "combine");
+        combine_ = switch_profile::measure("combine.compile", "compile", [&] {
+            return device().compile(kernel, "combine");
+        });
     }
 
     RealTimeDenoiseInput denoise_input() const noexcept {

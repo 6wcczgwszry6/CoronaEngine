@@ -2,6 +2,7 @@
 #include <corona/engine/engine_runtime_api.h>
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
+#include "base/mgr/switch_profile.h"
 #include "base/sensor/sensor.h"
 #include "vision/vision_camera_adapter.h"
 #include "vision/vision_external_live_aabb.h"
@@ -495,6 +496,54 @@ struct VisionEmbeddedModeSwitchTest {
         system.clear_vision_runtimes();
         storage.deallocate(handle);
     }
+    // Explicit profiling mode: scene unchanged, same runtime/view path as editor.
+    static void profile_switches(const char* scene, bool denoise) {
+        namespace profile = vision::switch_profile;
+        ocarina::DynamicModule::clear_search_path();
+        ocarina::RHIContext::instance().init(std::filesystem::current_path());
+        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+        OpticsSystem system;
+        auto& storage = SharedDataHub::instance().camera_storage();
+        const auto handle = storage.allocate();
+        int surface_token = 0;
+        {
+            auto camera = storage.acquire_write(handle);
+            camera->surface = &surface_token;
+            camera->render_backend = CameraRenderBackend::Vision;
+        }
+        const auto step = [&](CameraVisionRenderMode mode, const char* label) {
+            profile::Scope switching{label, "switch"};
+            ocarina::SP<vision::Pipeline> pipeline;
+            {
+                profile::Scope preparation{"switch.prepare", "prepare"};
+                profile::measure("runtime.load_scene", "scene", [&] {
+                    expect(system.load_external_vision_scene(scene, mode, Vision::VisionPipelineSource::ExternalLive),
+                           "profile scene must load");
+                });
+                pipeline = vision::Global::instance().pipeline_shared();
+                const auto res = pipeline->resolution();
+                std::cout << "PROFILE_EXTENT " << res.x << 'x' << res.y << std::endl;
+                profile::measure("view.prepare", "view", [&] {
+                    expect(system.prepare_vision_camera_view(system.active_vision_runtime(), handle,
+                               res.x, res.y, denoise, false), "profile view must prepare");
+                });
+            }
+            profile::measure("first_frame.complete", "first_frame", [&] {
+                pipeline->upload_data();
+                pipeline->display(1.0 / 60.0);
+                pipeline->stream() << ocarina::synchronize() << ocarina::commit();
+            });
+            // Keep per-mode runtime/view contexts for the in-process reuse probe.
+        };
+        step(CameraVisionRenderMode::PathTracing, "PT.initial");
+        step(CameraVisionRenderMode::ReSTIR, "PT_to_ReSTIR");
+        step(CameraVisionRenderMode::PathTracing, "ReSTIR_to_PT");
+        step(CameraVisionRenderMode::ReSTIR, "PT_to_ReSTIR.repeat");
+        system.clear_vision_runtimes();
+        storage.deallocate(handle);
+    }
     // Optional visual regression capture uses the same camera adapter and active
     // view context as OpticsSystem's editor render loop. It is not a CTest job.
     static void capture_camera_motion(const char* scene, const char* destination, bool fast = false) {
@@ -587,6 +636,121 @@ struct VisionEmbeddedModeSwitchTest {
                "engine-built return must recreate ReSTIR history");
         render(*engine_return, "Engine-ReSTIR-return", false);
         engine_restir.reset(); engine_pt.reset(); engine_return.reset();
+    }
+    static void check_scene_asset_reuse() {
+        namespace fs = std::filesystem;
+        const auto runtime_dir = fs::current_path();
+        ocarina::DynamicModule::clear_search_path();
+        ocarina::RHIContext::instance().init(runtime_dir);
+        static auto device = ocarina::RHIContext::instance().create_device("cuda");
+        device.init_rtx();
+        vision::Global::instance().set_device(&device);
+        for (bool embedded : {true, false}) {
+            const auto base = runtime_dir / (embedded ? "scene-reuse-embedded-assets" : "scene-reuse-file-assets");
+            fs::create_directories(base);
+            const auto scene_file = base / "scene.json";
+            const unsigned char white_tga[] = {0,0,2,0,0,0,0,0,0,0,0,0,1,0,1,0,24,0,255,255,255};
+            const std::string json = R"({
+              "scene": {
+                "camera":{"type":"thin_lens","param":{"transform":{"type":"look_at","param":{"position":[0,0,3],"target_pos":[0,0,0],"up":[0,1,0]}}}},
+                "materials":[{"type":"diffuse","name":"mat","param":{"color":{"channels":"xyz","node":{"type":"image","param":{"fn":"albedo.tga"}}}}}],
+                "shapes":[{"type":"model","param":{"fn":"triangle.obj","material":"mat","emission":{"type":"area","param":{}}}}],
+                "lights":[{"type":"point","param":{"position":[0,0,2]}},{"type":"AREA","param":{"width":0.5,"height":0.5,"two_sided":true}}]
+              },
+              "render":{"sampler":{"type":"independent","param":{"spp":1}},"integrator":{"type":"pt","param":{"max_depth":2}},"light_sampler":{"type":"uniform"}},
+              "pipeline":{"type":"fixed","param":{"frame_buffer":{"type":"normal","param":{"resolution":[16,16]}}}},
+              "output":{"spp":1,"denoise":false}
+            })";
+            auto write_assets = [&](bool changed) {
+                std::ofstream(base / "triangle.obj") << (changed
+                    ? "v -2 -1 0\nv 2 -1 0\nv 0 1 0\nf 1 2 3\n"
+                    : "v -1 -1 0\nv 1 -1 0\nv 0 1 0\nf 1 2 3\n");
+                auto pixels = std::vector<unsigned char>(std::begin(white_tga), std::end(white_tga));
+                if (changed) { pixels[18] = 0; pixels[20] = 0; }
+                std::ofstream(base / "albedo.tga", std::ios::binary).write(
+                    reinterpret_cast<const char*>(pixels.data()), pixels.size());
+                std::ofstream(scene_file) << json;
+            };
+            auto remove_assets = [&] {
+                fs::remove(base / "triangle.obj");
+                fs::remove(base / "albedo.tga");
+                fs::remove(scene_file);
+            };
+            write_assets(false);
+            OpticsSystem system;
+            const auto source = embedded ? Vision::VisionPipelineSource::ExternalLive
+                                         : Vision::VisionPipelineSource::ExternalFile;
+            OpticsSystem::VisionSceneLoadRequest request;
+            request.scene_key = scene_file.string();
+            request.base_dir = base.string();
+            request.external_live = true;
+            request.scene_json = json;
+            expect(embedded ? system.load_external_vision_scene_from_json(request, CameraVisionRenderMode::PathTracing)
+                            : system.load_external_vision_scene(scene_file.string(), CameraVisionRenderMode::PathTracing, source),
+                   "initial scene asset import");
+            auto pt = vision::Global::instance().pipeline_shared();
+            pt->commit_command();
+            const auto resource_key = system.make_vision_scene_resource_key(scene_file.string(), source);
+            auto resource = system.vision_scene_resources_.at(resource_key);
+            remove_assets();
+            expect(system.load_external_vision_scene(scene_file.string(), CameraVisionRenderMode::ReSTIR, source),
+                   "first PT to ReSTIR must reuse scene assets without reopening scene, model or texture files");
+            auto restir = vision::Global::instance().pipeline_shared();
+            expect(restir != pt && restir->shared_scene_data() != pt->shared_scene_data() &&
+                       restir->geometry().gpu_resource() != pt->geometry().gpu_resource() &&
+                       restir->frame_buffer() != pt->frame_buffer(), "reused assets must preserve runtime isolation");
+            expect(restir->scene().groups().size() == pt->scene().groups().size() &&
+                       restir->scene().instances().size() == pt->scene().instances().size() &&
+                       restir->scene().light_manager().lights().all_instance_num() == pt->scene().light_manager().lights().all_instance_num(),
+                   "standalone area lights must not duplicate geometry or lights during scene restoration");
+            expect(restir->image_pool().size() == pt->image_pool().size() &&
+                       restir->scene().instances().back()->material()->hash() == pt->scene().instances().back()->material()->hash(),
+                   "cached geometry and textured material must match the source");
+            for (size_t i = 0; i < restir->scene().instances().size(); ++i) {
+                const auto& instance = restir->scene().instances()[i];
+                expect(instance->has_emission() && instance->emission()->instance() == instance.get(),
+                       "cached area light must bind to the new runtime instance");
+                expect(Vision::aabb_matrix_values(instance->o2w()) ==
+                           Vision::aabb_matrix_values(pt->scene().instances()[i]->o2w()),
+                       "cached shape order and transforms must match the source");
+            }
+            render(*restir, "asset-reuse-ReSTIR");
+            render(*pt, "asset-reuse-original-PT");
+            expect(resource->source_revision == 1, "mode switch must not republish source");
+            expect(!system.load_external_vision_scene(scene_file.string(), CameraVisionRenderMode::PathTracing, source, true),
+                   "explicit reload must still reject missing source assets");
+            expect(resource->source_revision == 1, "failed reload must preserve the cached source");
+            write_assets(true);
+            expect(system.load_external_vision_scene(scene_file.string(), CameraVisionRenderMode::PathTracing, source, true),
+                   "explicit reload must replace cached scene assets");
+            auto reloaded = vision::Global::instance().pipeline_shared();
+            expect(resource->source_revision == 2 && reloaded->scene().groups().back()->aabb.upper.x == 2.f,
+                   "force reload must observe changed model vertices");
+            pt.reset(); restir.reset();
+            std::weak_ptr<vision::GeometryGpuResource> gpu = reloaded->geometry().gpu_resource();
+            reloaded.reset();
+            system.activate_single_vision_runtime_key(system.make_vision_pipeline_key("",
+                CameraVisionRenderMode::PathTracing, Vision::VisionPipelineSource::EngineBuilt));
+            expect(gpu.expired(), "CPU asset cache must not retain retired GPU geometry");
+            remove_assets();
+            expect(system.load_external_vision_scene(scene_file.string(), CameraVisionRenderMode::ProgressivePathTracing, source),
+                   "runtime recreation must reuse CPU assets after GPU retirement");
+            reloaded = vision::Global::instance().pipeline_shared();
+            expect(reloaded->scene().groups().back()->aabb.upper.x == 2.f, "recreated runtime must use refreshed assets");
+            const auto texture_desc = reloaded->scene().instances().back()->material()->source_desc()
+                .slot("color", ocarina::make_float3(0.5f), vision::Albedo).node;
+            expect(reloaded->image_pool().is_contain(texture_desc.hash()),
+                   "refreshed material texture must already exist in the recreated runtime");
+            const auto average = reloaded->image_pool().obtain_texture(texture_desc,
+                reloaded->geometry().bindless_array(), reloaded->device()).host_tex().average<4>();
+            expect(average.x == 0.f && average.y == 1.f && average.z == 0.f,
+                   "retained CPU image must contain the new green pixels and decoded average after force reload");
+            render(*reloaded, "asset-reuse-after-retirement");
+            reloaded.reset();
+            system.clear_vision_runtimes();
+            fs::remove(base);
+        }
+        std::cout << "PASS: scene assets reused across algorithms, reload and GPU retirement\n";
     }
     static void run() {
         namespace fs = std::filesystem;
@@ -920,7 +1084,13 @@ int main(int argc, char** argv) {
     try {
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_mode_api();
         Corona::Systems::VisionEmbeddedModeSwitchTest::check_accumulation_api();
-        if (argc == 3 && std::string(argv[1]) == "--benchmark-switches") {
+        if (argc == 2 && std::string(argv[1]) == "--scene-asset-reuse") {
+            Corona::Systems::VisionEmbeddedModeSwitchTest::check_scene_asset_reuse();
+        } else if ((argc == 3 || (argc == 4 && std::string(argv[3]) == "--denoise")) &&
+            std::string(argv[1]) == "--profile-switches") {
+            Corona::Systems::VisionEmbeddedModeSwitchTest::profile_switches(
+                argv[2], argc == 4);
+        } else if (argc == 3 && std::string(argv[1]) == "--benchmark-switches") {
             Corona::Systems::VisionEmbeddedModeSwitchTest::benchmark_switches(argv[2]);
         } else if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
                           std::string(argv[1]) == "--capture-fast-camera-motion")) {
