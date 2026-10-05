@@ -87,9 +87,14 @@ unset(_CORONA_CEF_TESTS_PATH_DIRS)
 unset(_CORONA_CEF_TESTS_ENVIRONMENT)
 unset(_tbb_runtime_dir)
 
+add_executable(corona_cef_popup_overlay_tests
+    test_cef_popup_overlay.cpp
+    ${PROJECT_SOURCE_DIR}/src/systems/ui/cef/popup_overlay.cpp
 )
+target_include_directories(corona_cef_popup_overlay_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/src/systems/ui
 )
+add_test(NAME CefPopupOverlayTests COMMAND corona_cef_popup_overlay_tests)
 
 add_executable(corona_ui_surface_lifecycle_tests
     test_ui_surface_lifecycle.cpp

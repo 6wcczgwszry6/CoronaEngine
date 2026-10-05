@@ -8,6 +8,8 @@
 
 #include "cef/cef_app.h"
 #include "cef/cef_osr_mode.h"
+#include "cef/browser_manager.h"
+#include "cef/cef_client.h"
 
 namespace {
 
@@ -135,6 +137,40 @@ void test_process_per_site_toggle() {
             "process-per-site must come back after clearing the env var");
 }
 
+void test_popup_wiring() {
+    CefRefPtr<Corona::Systems::UI::OffscreenRenderHandler> handler =
+        new Corona::Systems::UI::OffscreenRenderHandler();
+    Corona::Systems::UI::BrowserTab tab;
+    handler->SetTab(&tab);
+
+    handler->OnPopupShow(nullptr, true);
+    handler->OnPopupSize(nullptr, CefRect(10, 20, 4, 3));
+    require(tab.popup.visible(), "popup visibility must be recorded from OnPopupShow");
+    require(tab.popup.x() == 10 && tab.popup.y() == 20,
+            "popup origin must be recorded from OnPopupSize");
+
+    tab.buffer_dirty = false;
+    std::vector<std::uint8_t> popup_bgra(4u * 3u * 4u, 0x22);
+    handler->OnPaint(nullptr, PET_POPUP, {}, popup_bgra.data(), 4, 3);
+    require(!tab.popup.empty(), "popup pixels must be cached from PET_POPUP paint");
+    require(tab.popup.width() == 4 && tab.popup.height() == 3,
+            "popup pixel dimensions must be recorded");
+    require(tab.buffer_dirty, "popup paint must request a texture re-upload");
+
+    tab.buffer_dirty = false;
+    std::vector<std::uint8_t> view_bgra(8u * 8u * 4u, 0x33);
+    handler->OnPaint(nullptr, PET_VIEW, {}, view_bgra.data(), 8, 8);
+    require(tab.pixel_buffer.size() == 8u * 8u * 4u, "view pixels must still be captured");
+    require(tab.buffer_dirty, "view paint must request a texture re-upload");
+
+    tab.buffer_dirty = false;
+    handler->OnPopupShow(nullptr, false);
+    require(!tab.popup.visible(), "popup must be hidden after OnPopupShow(false)");
+    require(tab.buffer_dirty, "hiding the popup must request a re-upload to erase it");
+
+    handler->SetTab(nullptr);
+}
+
 void test_browser_process_dispatch(int argc, char* argv[]) {
     const auto exit_code =
         Corona::Systems::UI::execute_cef_subprocess_if_needed(argc, argv);
@@ -177,6 +213,7 @@ void test_windowless_frame_rate_resolution() {
 
 int main(int argc, char* argv[]) {
     test_browser_process_dispatch(argc, argv);
+    test_popup_wiring();
     test_message_router_config();
     test_process_per_site_toggle();
     test_app_contract();
