@@ -215,6 +215,8 @@ void BrowserManager::remove_tab(int tab_id) {
     if (!tabs_.contains(tab_id)) return;
 
     BrowserTab* tab = tabs_[tab_id].get();
+    CFW_LOG_INFO("[CEF/Tab] remove_tab id={} camera_view={} floating={} open={}", tab_id,
+                 tab->camera_view, tab->floating, tab->open);
     if (tab->camera_view) {
         CameraViewportManager::instance().unregister_view(
             tab_id, tab->preserve_camera_open_on_close);
