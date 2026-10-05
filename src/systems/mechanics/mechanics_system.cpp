@@ -260,20 +260,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         return;  // 无物体则整帧跳过
     }
 
-    // S3：蒙皮 Dynamic 体由动画驱动网格，不由物理积分器驱动根变换。
-    // 在 Phase 1 结束后、Phase 2 之前收集蒙皮 handle 集合，供 Phase 2 和 Phase 6 跳过用。
-    std::unordered_set<std::uintptr_t> skinned_dynamic_handles;
-    {
-        for (std::uintptr_t h : mechanics_handles) {
-            if (frame_params[h].body_type != BodyType::Dynamic) continue;
-            auto m_acc = mechanics_storage.try_acquire_read(h);
-            if (!m_acc) continue;
-            auto g_acc = geometry_storage.try_acquire_read(m_acc->geometry_handle);
-            if (g_acc && g_acc->is_skinned)
-                skinned_dynamic_handles.insert(h);
-        }
-    }
-
     impl_->global_simulation_time += fixed_dt;
 
     // --- 阶段 2：半隐式前推速度（仅非休眠体）：先阻尼旧速度，再叠加重力加速度 ---
@@ -282,7 +268,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             return;
         }
         if (frame_params[h].body_type != BodyType::Dynamic) continue;  // Static/Kinematic 不受重力
-        if (skinned_dynamic_handles.count(h)) continue;  // S3：蒙皮体由动画驱动，跳过重力积分
         if (impl_->body(h).sleeping) continue;    // 休眠体本阶段不改速度
 
         float damping = frame_params[h].damping;   // 线性阻尼乘子（以 60Hz 为基准的每步保留系数）
@@ -779,10 +764,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 const float mass_b = frame_params[hb].mass;
                 const bool sleep_a = impl_->body(ha).sleeping;
                 const bool sleep_b = impl_->body(hb).sleeping;
-                const bool fixed_a = frame_params[ha].body_type != BodyType::Dynamic
-                                     || skinned_dynamic_handles.count(ha);
-                const bool fixed_b = frame_params[hb].body_type != BodyType::Dynamic
-                                     || skinned_dynamic_handles.count(hb);
+                const bool fixed_a = frame_params[ha].body_type != BodyType::Dynamic;
+                const bool fixed_b = frame_params[hb].body_type != BodyType::Dynamic;
                 const float inv_ma = (sleep_a || fixed_a) ? 0.f : 1.0f / mass_a;
                 const float inv_mb = (sleep_b || fixed_b) ? 0.f : 1.0f / mass_b;
                 // 写回 rec 供 E1 后处理读取
@@ -1349,9 +1332,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         // Static/Kinematic 不被积分器移动（由外部脚本/动画驱动）
         if (frame_params[h].body_type != BodyType::Dynamic)
             continue;
-        // S3：蒙皮 Dynamic 体由动画驱动网格，物理不移动其根变换
-        if (skinned_dynamic_handles.count(h))
-            continue;
 
         // 阻塞写锁：位置积分每帧都要写回，_nowait 拿不到锁会跳过本帧导致物体卡顿/抖动。
         // 用阻塞版等锁（不漏帧），槽位失效时返回无效句柄而非抛异常。
@@ -1527,16 +1507,9 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         }
         if (impl_->body(h).sleeping) continue;
 
-        // E4：Kinematic/蒙皮物体永不进入休眠（由动画驱动，速度恒为零，不应进入休眠状态）
+        // E4：Dynamic 体允许休眠；Static/Kinematic 不参与速度积分，不需要休眠机制。
         const bool is_dynamic = (frame_params.count(h) && frame_params.at(h).body_type == BodyType::Dynamic);
-        // 通过 handle_to_index（O(1)）查 is_skinned，不做 O(n) 线性搜索
-        bool is_skinned_body = false;
-        {
-            auto idx_it = handle_to_index.find(h);
-            if (idx_it != handle_to_index.end())
-                is_skinned_body = mechanics_data[idx_it->second].is_skinned;
-        }
-        const bool can_sleep = is_dynamic && !is_skinned_body;
+        const bool can_sleep = is_dynamic;
 
         if (can_sleep) {
             const auto& v = impl_->body(h).velocity;
