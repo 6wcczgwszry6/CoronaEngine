@@ -3,6 +3,7 @@
 //
 
 #include "integrator.h"
+#include "base/mgr/switch_profile.h"
 #include "base/mgr/pipeline.h"
 #include "math/warp.h"
 #include "base/color/spectrum.h"
@@ -66,6 +67,7 @@ IlluminationIntegrator::IlluminationIntegrator(const vision::IntegratorDesc &des
       denoiser_(Node::create_shared<Denoiser>(desc.denoiser_desc)) {}
 
 void IlluminationIntegrator::prepare() noexcept {
+    switch_profile::Scope profile{"IlluminationIntegrator::prepare", "buffers"};
     encode_data();
     datas().reset_device_buffer_immediately(device(), "IlluminationIntegrator::encoded_data");
     datas().register_self();

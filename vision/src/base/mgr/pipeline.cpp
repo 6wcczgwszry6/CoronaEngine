@@ -159,6 +159,7 @@ void Pipeline::sync_output_denoise() noexcept {
 }
 
 void Pipeline::prepare() noexcept {
+    switch_profile::Scope profile{"framebuffer.prepare", "buffers"};
     activate_global_context();
     if (!scene_view_.geometry().has_gpu_resource()) {
         scene_view_.geometry().init(device());
@@ -253,6 +254,7 @@ void Pipeline::change_resolution(uint2 res) noexcept {
 }
 
 void Pipeline::prepare_geometry(bool geometry_changed) noexcept {
+    switch_profile::Scope profile{"geometry.prepare", "geometry"};
     activate_global_context();
     scene_view_.update_geometry_instances();
     scene_view_.geometry().reset_device_buffer();
@@ -333,6 +335,7 @@ void Pipeline::clear_geometry() noexcept {
 }
 
 void Pipeline::upload_bindless_array() noexcept {
+    switch_profile::Scope profile{"bindless.upload", "upload"};
     activate_global_context();
     stream_ << bindless_array_.update_slotSOA() << synchronize() << commit();
     stream_ << bindless_array_.upload_handles() << synchronize() << commit();

@@ -29,8 +29,11 @@ void Renderer::init(const RendererDesc &renderer_desc, Scene &scene) {
 
 void Renderer::prepare(Scene &scene) noexcept {
     switch_profile::Scope profile{"renderer.prepare", "resources"};
-    switch_profile::measure("sampler.prepare", "resources", [&] { sampler_->prepare(); });
-    switch_profile::measure("integrator.prepare", "buffers", [&] { integrator_->prepare(); });
+    {
+        switch_profile::Scope sampler_profile{"sampler.prepare", "resources"};
+        sampler_->prepare();
+    }
+    integrator_->prepare();
     prepare_lights(scene);
     spectrum()->set_scene_has_dispersive_materials(scene.material_registry().has_dispersive());
     spectrum()->prepare();

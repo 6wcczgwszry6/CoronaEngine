@@ -2131,6 +2131,7 @@ void bind_pipeline_scene_gpu_resource(
     Corona::Systems::Vision::VisionPipelineSource source,
     Corona::CameraVisionRenderMode mode,
     const std::string& scene_path) {
+    vision::switch_profile::Scope profile{"scene.bind_gpu_resource", "geometry"};
     if (!scene_resource.has_logical_scene()) {
         scene_resource.set_logical_scene(pipeline.shared_scene_data());
     }
@@ -2315,14 +2316,10 @@ void validate_vision_source_node(const vision::DataWrap& node,
             for (const auto& group : staged.groups) scene.add_shape(group);
         });
     }
-    vision::switch_profile::measure("scene.init_project", "scene", [&] {
-        pipeline->init_project(project_desc);
-    });
+    pipeline->init_project(project_desc);
     if (scene_resource) {
-        vision::switch_profile::measure("scene.bind_gpu_resource", "geometry", [&] {
-            bind_pipeline_scene_gpu_resource(
-                *pipeline, *scene_resource, source, mode, scene_label);
-        });
+        bind_pipeline_scene_gpu_resource(
+            *pipeline, *scene_resource, source, mode, scene_label);
     }
     pipeline->init_postprocessor(project_desc.renderer_desc.denoiser_desc);
     pipeline->init();
@@ -2616,6 +2613,7 @@ bool OpticsSystem::prepare_vision_camera_view(VisionPipelineRuntime& runtime,
                                             std::uintptr_t camera_handle,
                                             uint32_t width, uint32_t height,
                                             bool denoise, bool accumulation) {
+    vision::switch_profile::Scope profile{"view.prepare", "view"};
     auto& pipeline = runtime.pipeline;
     if (!pipeline || camera_handle == 0) return false;
     const auto resolution = ocarina::make_uint2(std::max(width, 1u), std::max(height, 1u));
@@ -7630,6 +7628,7 @@ bool OpticsSystem::load_external_vision_scene(const std::string& scene_path,
                                               CameraVisionRenderMode mode,
                                               std::optional<VisionPipelineSource> source_override,
                                               bool force_reload_scene_resource) {
+    vision::switch_profile::Scope profile{"runtime.load_scene", "scene"};
     if (force_reload_scene_resource) {
         SharedDataHub::instance().refresh_external_vision_binding_paths();
     }

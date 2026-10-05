@@ -518,23 +518,20 @@ struct VisionEmbeddedModeSwitchTest {
             ocarina::SP<vision::Pipeline> pipeline;
             {
                 profile::Scope preparation{"switch.prepare", "prepare"};
-                profile::measure("runtime.load_scene", "scene", [&] {
-                    expect(system.load_external_vision_scene(scene, mode, Vision::VisionPipelineSource::ExternalLive),
-                           "profile scene must load");
-                });
+                expect(system.load_external_vision_scene(scene, mode, Vision::VisionPipelineSource::ExternalLive),
+                       "profile scene must load");
                 pipeline = vision::Global::instance().pipeline_shared();
                 const auto res = pipeline->resolution();
                 std::cout << "PROFILE_EXTENT " << res.x << 'x' << res.y << std::endl;
-                profile::measure("view.prepare", "view", [&] {
-                    expect(system.prepare_vision_camera_view(system.active_vision_runtime(), handle,
-                               res.x, res.y, denoise, false), "profile view must prepare");
-                });
+                expect(system.prepare_vision_camera_view(system.active_vision_runtime(), handle,
+                           res.x, res.y, denoise, false), "profile view must prepare");
             }
-            profile::measure("first_frame.complete", "first_frame", [&] {
+            {
+                profile::Scope first_frame{"first_frame.complete", "first_frame"};
                 pipeline->upload_data();
                 pipeline->display(1.0 / 60.0);
                 pipeline->stream() << ocarina::synchronize() << ocarina::commit();
-            });
+            }
             // Keep per-mode runtime/view contexts for the in-process reuse probe.
         };
         step(CameraVisionRenderMode::PathTracing, "PT.initial");

@@ -59,6 +59,7 @@ public:
     }
 
     void prepare() noexcept override {
+        switch_profile::Scope profile{"integrator.prepare", "buffers"};
         IlluminationIntegrator::prepare();
 //        inspector_->prepare();
         if (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled()) {
@@ -79,6 +80,7 @@ public:
     }
 
     void compile() noexcept override {
+        switch_profile::Scope profile{"integrator.compile", "compile"};
         ILightFieldFrameBuffer *lf_fb = dynamic_cast<ILightFieldFrameBuffer *>(&frame_buffer());
         bool denoiser_enabled = !denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled();
         bool compatible_lightfield_denoiser = denoiser_ && denoiser_->supports_lightfield();

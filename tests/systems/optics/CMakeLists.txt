@@ -1,4 +1,13 @@
 if(CORONA_BUILD_VISION)
+    add_executable(corona_switch_profile_scope_tests test_switch_profile_scope.cpp)
+    target_include_directories(corona_switch_profile_scope_tests PRIVATE ${CMAKE_SOURCE_DIR}/vision/src)
+    target_link_libraries(corona_switch_profile_scope_tests PRIVATE ocarina-include)
+    add_test(NAME VisionSwitchProfileScopeTests
+        COMMAND ${Python_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/tests/check_switch_profile_scope.py
+                $<TARGET_FILE:corona_switch_profile_scope_tests>
+                ${CMAKE_CURRENT_BINARY_DIR}/switch-profile-scope)
+    set_tests_properties(VisionSwitchProfileScopeTests PROPERTIES TIMEOUT 30)
+
     add_executable(corona_vision_model_normalization_tests
         test_vision_model_normalization.cpp
         ${CMAKE_SOURCE_DIR}/vision/src/render_core/shape/model_normalization.cpp

@@ -75,6 +75,7 @@ RegistrableTexture3D &ImagePool::obtain_texture(const ShaderNodeDesc &desc,
 }
 
 void ImagePool::prepare(Stream &stream) noexcept {
+    switch_profile::Scope profile{"images.prepare", "images"};
     for (auto &iter : textures_) {
         stream << iter.second.upload();
     }

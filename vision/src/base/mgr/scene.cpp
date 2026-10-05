@@ -135,6 +135,7 @@ void Scene::init(const SceneDesc &scene_desc) {
 }
 
 void Scene::prepare() noexcept {
+    switch_profile::Scope profile{"scene.prepare", "scene"};
     std::optional<Global::SceneGpuContextScope> scene_gpu_context;
     if (geometry().has_gpu_resource()) {
         scene_gpu_context.emplace(geometry().bindless_array(),

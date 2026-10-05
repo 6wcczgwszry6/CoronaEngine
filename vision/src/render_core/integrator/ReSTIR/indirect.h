@@ -85,9 +85,10 @@ public:
                                                                const GISampleVar &sample) const noexcept;
     HOTFIX_VIRTUAL void compile_spatial_shading() noexcept;
     void compile() noexcept {
-        switch_profile::measure("GI.initial.compile", "compile", [&] { compile_initial_samples(); });
-        switch_profile::measure("GI.temporal.compile", "compile", [&] { compile_temporal_reuse(); });
-        switch_profile::measure("GI.spatial_shading.compile", "compile", [&] { compile_spatial_shading(); });
+        switch_profile::Scope profile{"ReSTIR.GI.compile", "compile"};
+        compile_initial_samples();
+        compile_temporal_reuse();
+        compile_spatial_shading();
     }
     void update_resolution(ocarina::uint2 res) noexcept override;
     [[nodiscard]] HOTFIX_VIRTUAL Float Jacobian_det(Float3 cur_pos, Float3 neighbor_pos, Var<SurfacePoint> sample_point) const noexcept;

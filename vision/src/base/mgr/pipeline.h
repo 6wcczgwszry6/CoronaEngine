@@ -14,6 +14,7 @@
 #include "pipeline_ui.h"
 #include "UI/GUI.h"
 #include "base/using.h"
+#include "switch_profile.h"
 
 namespace vision {
 class Window;
@@ -117,6 +118,7 @@ public:
     /// virtual function start
     void update_runtime_object(const vision::IObjectConstructor *constructor) noexcept override;
     virtual void init_project(const ProjectDesc &project_desc) {
+        switch_profile::Scope profile{"scene.init_project", "scene"};
         activate_global_context();
         output_desc_ = project_desc.output_desc;
         renderer_desc_ = project_desc.renderer_desc;
@@ -145,6 +147,7 @@ public:
     void upload_scene_bindless_array() noexcept;
     virtual void prepare_render_graph() noexcept {}
     virtual void compile() noexcept {
+        switch_profile::Scope profile{"display.compile", "compile"};
         activate_global_context();
         frame_buffer()->compile();
     }

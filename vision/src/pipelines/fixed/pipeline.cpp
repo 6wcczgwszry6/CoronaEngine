@@ -18,12 +18,12 @@ public:
     VS_MAKE_PLUGIN_NAME_FUNC
     void prepare() noexcept override {
         switch_profile::Scope profile{"pipeline.prepare", "resources"};
-        switch_profile::measure("framebuffer.prepare", "buffers", [&] { Pipeline::prepare(); });
-        switch_profile::measure("scene.prepare", "scene", [&] { scene().prepare(); });
+        Pipeline::prepare();
+        scene().prepare();
         renderer_.prepare(scene());
-        switch_profile::measure("images.prepare", "images", [&] { image_pool().prepare(stream()); });
-        switch_profile::measure("geometry.prepare", "geometry", [&] { prepare_geometry(); });
-        switch_profile::measure("bindless.upload", "upload", [&] { upload_bindless_array(); });
+        image_pool().prepare(stream());
+        prepare_geometry();
+        upload_bindless_array();
         if (!defer_base_compile_) {
             compile();
         }
@@ -51,8 +51,8 @@ public:
         Global::SceneGpuContextScope scene_gpu_context{
             scene().geometry().bindless_array(),
             scene().geometry().gpu_resource()->device()};
-        switch_profile::measure("display.compile", "compile", [&] { Pipeline::compile(); });
-        switch_profile::measure("integrator.compile", "compile", [&] { integrator()->compile(); });
+        Pipeline::compile();
+        integrator()->compile();
         if (active_renderer_ == &renderer_) {
             base_compiled_ = true;
         }
