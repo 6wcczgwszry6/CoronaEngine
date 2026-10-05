@@ -1381,123 +1381,143 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             sync_euler_from_orientation_quat(body.orientation_quat, tx_w->euler_rotation);            // 写回 XYZ 欧拉（约定与引擎一致）
         }
 
-        // 复用 Phase 3 已计算的世界 AABB min.y，避免重新计算完整 world AABB
-        // 积分后 position 偏移量与 Phase 3 的预测一致，因此可直接复用
-        float object_bottom_y = data.min_world.y;
-        // 若有位置校正，补偿底面高度（仅在 Y 轴未锁时考虑校正）
-        if (corr_it != position_correction.end() && !(lin_lock & kLockAxisY)) {
-            object_bottom_y += corr_it->second.y;
-        }
+    }
 
-        // Phantom 物体不参与地板碰撞
-        bool collision_enabled = true;
-        auto frame_it = frame_params.find(h);
-        if (frame_it != frame_params.end()) {
-            collision_enabled = frame_it->second.body_type != BodyType::Phantom;
-        }
+    // --- 阶段 6b：统一地板碰撞 ---
+    // 规则：
+    //   - Phantom / Static：完全跳过（Static 仅参与物体间碰撞）。
+    //   - Dynamic / Kinematic（含带骨骼/不带骨骼）：产生位移 + 速度响应。
+    //   - 带骨骼物体额外入队 IK target 更新。
+    // 底面取法：
+    //   - 带骨骼：遍历 skinned_collision_cache 世界空间顶点取最低 Y（精确姿态）。
+    //   - 不带骨骼：复用 Phase 3 预测 AABB min_world.y（与积分量一致）。
+    // Kinematic 无速度积分，但写位移（把骨骼/Kinematic 体推出地板）。
+    for (std::size_t i = 0; i < mechanics_data.size(); ++i) {
+        if (impl_->shutdown_requested.load(std::memory_order_acquire)) return;
+        const auto& data = mechanics_data[i];
+        std::uintptr_t h = data.handle;
 
-        // 水平 floor_y：穿插时整体上抬，并做法向/切向「处方」（非完整接触流形）
-        // 轴锁定：地板碰撞的各轴修正仅在对应轴未锁时执行
-        if (collision_enabled && object_bottom_y < floor_y + floor_eps) {
-            // 消穿修正仅在 Y 轴未锁时执行
-            if (!(lin_lock & kLockAxisY)) {
-                tx_w->position.y += (floor_y + floor_eps) - object_bottom_y;
+        const auto fp_it = frame_params.find(h);
+        if (fp_it == frame_params.end()) continue;
+        const BodyType btype = fp_it->second.body_type;
+
+        // Phantom / Static 完全跳过地板
+        if (btype == BodyType::Phantom || btype == BodyType::Static) continue;
+
+        // Dynamic 休眠体：先检查是否因地板降低而需唤醒，再跳过
+        if (btype == BodyType::Dynamic && impl_->body(h).sleeping) {
+            if (data.min_world.y > floor_y + floor_eps) {
+                impl_->body(h).sleeping = false;
+                impl_->body(h).sleep_timer = 0.0f;
+            } else {
+                continue;
             }
+        }
 
-            // 法向速度反弹仅在 Y 轴未锁时处理
-            if (!(lin_lock & kLockAxisY)) {
-                float y_vel = impl_->body(h).velocity.y;  // 向上为正
-                if (y_vel < -low_vel_threshold) {
-                    impl_->body(h).velocity.y = -y_vel * floor_restitution;  // 下行且够快则反弹
-                    impl_->body(h).sleep_timer = 0.0f;                       // 显著弹跳才打断休眠计时
-                } else {
-                    if (std::abs(impl_->body(h).velocity.y) < zero_vel_threshold) {
-                        impl_->body(h).velocity.y = 0.0f;  // 粘地：贴住时竖直速度清零
-                    } else {
-                        impl_->body(h).velocity.y *= 0.15f;  // 弱弹簧感衰减残余弹跳
-                    }
+        // 确定底面高度
+        float object_bottom_y = data.min_world.y;  // 默认：非蒙皮用 AABB
+
+        if (data.is_skinned) {
+            // 蒙皮：遍历碰撞网格世界顶点取最低 Y（已为世界空间）
+            auto sc_it = impl_->skinned_collision_cache.find(data.geom_handle);
+            if (sc_it != impl_->skinned_collision_cache.end() && !sc_it->second.vertices.empty()) {
+                // skinned_collision_cache 中存储的是模型空间顶点，需经变换矩阵投影到世界 Y
+                auto tx_r = transform_storage.try_acquire_read(data.transform_handle);
+                if (!tx_r) continue;
+                const ktm::fmat4x4 wm = tx_r->compute_matrix();
+                float lowest = std::numeric_limits<float>::max();
+                for (const auto& lv : sc_it->second.vertices) {
+                    const float wy = wm[0][1]*lv.x + wm[1][1]*lv.y + wm[2][1]*lv.z + wm[3][1];
+                    if (wy < lowest) lowest = wy;
                 }
+                object_bottom_y = lowest;
             }
+        } else {
+            // Dynamic 非蒙皮：补偿 Phase 5 位置校正量
+            auto corr_it2 = position_correction.find(h);
+            if (corr_it2 != position_correction.end() && !(impl_->body(h).linear_lock & kLockAxisY))
+                object_bottom_y += corr_it2->second.y;
+        }
 
-            // 地板摩擦力仅在对应轴未锁时应用
-            if (!(lin_lock & kLockAxisX)) impl_->body(h).velocity.x *= 0.8f;
-            if (!(lin_lock & kLockAxisZ)) impl_->body(h).velocity.z *= 0.8f;
+        if (object_bottom_y >= floor_y + floor_eps) continue;  // 不接触地板
 
-            // 滚阻仅在对应轴未锁时应用
-            uint8_t ang_lock = impl_->body(h).angular_lock;
+        // 取写锁写回位移（Kinematic 也写）
+        auto tx_w = transform_storage.try_acquire_write(data.transform_handle);
+        if (!tx_w) continue;
+
+        const uint8_t lin_lock = impl_->body(h).linear_lock;
+
+        // 消穿：把物体推到 floor_y + floor_eps
+        if (!(lin_lock & kLockAxisY))
+            tx_w->position.y += (floor_y + floor_eps) - object_bottom_y;
+
+        // 速度响应（Kinematic 也存速度以便摩擦衰减生效；但 Kinematic 本帧速度实际为 0）
+        if (!(lin_lock & kLockAxisY)) {
+            float y_vel = impl_->body(h).velocity.y;
+            if (y_vel < -low_vel_threshold) {
+                impl_->body(h).velocity.y = -y_vel * floor_restitution;
+                impl_->body(h).sleep_timer = 0.0f;
+            } else {
+                impl_->body(h).velocity.y =
+                    (std::abs(y_vel) < zero_vel_threshold) ? 0.0f : y_vel * 0.15f;
+            }
+        }
+
+        // 水平摩擦 + 滚阻
+        if (!(lin_lock & kLockAxisX)) impl_->body(h).velocity.x *= 0.8f;
+        if (!(lin_lock & kLockAxisZ)) impl_->body(h).velocity.z *= 0.8f;
+        {
+            const uint8_t ang_lock = impl_->body(h).angular_lock;
             if (!(ang_lock & kLockAxisX)) impl_->body(h).angular_velocity.x *= 0.7f;
             if (!(ang_lock & kLockAxisY)) impl_->body(h).angular_velocity.y *= 0.7f;
             if (!(ang_lock & kLockAxisZ)) impl_->body(h).angular_velocity.z *= 0.7f;
-            // 静接触不打断休眠计时，让休眠检测正常累积
         }
-    }
 
-    // --- 阶段 4.5：Kinematic/蒙皮物体地板接触 ---
-    // Dynamic 物体已在上方积分循环里处理地板碰撞。
-    // Kinematic/蒙皮物体由动画驱动，跳过了积分器，需要在这里单独处理地板：
-    //   - 从 skinned_collision_cache 取碰撞顶点，找到所有低于 floor_y + floor_eps 的顶点
-    //   - 不修改速度（Kinematic 无速度）；只触发 IK/回调
-    //   - 用于让角色脚部 IK 感知地板，防止穿地板视觉
-    for (const auto& data : mechanics_data) {
-        if (impl_->shutdown_requested.load(std::memory_order_acquire)) return;
-        std::uintptr_t h = data.handle;
-        if (!data.is_skinned) continue;
-        // Bug 5 修复：用 find 而非 operator[]，避免向 frame_params 插入默认条目
-        auto fp_it = frame_params.find(h);
-        if (fp_it == frame_params.end()) continue;
-        if (fp_it->second.body_type == BodyType::Phantom) continue;
-        if (fp_it->second.body_type == BodyType::Dynamic) continue;
+        // 蒙皮额外：IK target 入队（最低顶点所在骨骼）
+        if (data.is_skinned) {
+            auto sc_it = impl_->skinned_collision_cache.find(data.geom_handle);
+            if (sc_it != impl_->skinned_collision_cache.end() && !sc_it->second.triangles.empty()) {
+                const auto& sc = sc_it->second;
+                const ktm::fmat4x4 wm = tx_w->compute_matrix();
 
-        // 从蒙皮碰撞缓存取模型空间顶点 + 变换到世界空间，找最低顶点
-        auto sc_it = impl_->skinned_collision_cache.find(data.geom_handle);
-        if (sc_it == impl_->skinned_collision_cache.end() || sc_it->second.vertices.empty()) continue;
-        const auto& sc = sc_it->second;
+                // 找最低世界 Y 顶点
+                float lowest_vy = std::numeric_limits<float>::max();
+                int   lowest_vi = -1;
+                for (std::size_t vi = 0; vi < sc.vertices.size(); ++vi) {
+                    const auto& lv = sc.vertices[vi];
+                    const float wy = wm[0][1]*lv.x + wm[1][1]*lv.y + wm[2][1]*lv.z + wm[3][1];
+                    if (wy < lowest_vy) { lowest_vy = wy; lowest_vi = static_cast<int>(vi); }
+                }
+                if (lowest_vi >= 0 && data.geom_handle != 0) {
+                    const auto& lv = sc.vertices[static_cast<std::size_t>(lowest_vi)];
+                    const ktm::fvec3 contact_world = make_fvec3(
+                        wm[0][0]*lv.x + wm[1][0]*lv.y + wm[2][0]*lv.z + wm[3][0],
+                        floor_y,
+                        wm[0][2]*lv.x + wm[1][2]*lv.y + wm[2][2]*lv.z + wm[3][2]);
 
-        // 取当前世界变换（只读，不写位置）
-        auto tx_r = transform_storage.try_acquire_read(data.transform_handle);
-        if (!tx_r) continue;
-        const ktm::fmat4x4 world_mat = tx_r->compute_matrix();
-
-        // 找世界空间中低于地板的顶点
-        float lowest_vy = std::numeric_limits<float>::max();
-        int   lowest_vi = -1;
-        for (std::size_t vi = 0; vi < sc.vertices.size(); ++vi) {
-            const auto& lv = sc.vertices[vi];
-            const float wy = world_mat[0][1]*lv.x + world_mat[1][1]*lv.y + world_mat[2][1]*lv.z + world_mat[3][1];
-            if (wy < lowest_vy) { lowest_vy = wy; lowest_vi = static_cast<int>(vi); }
-        }
-        if (lowest_vi < 0 || lowest_vy >= floor_y + floor_eps) continue;
-
-        // 最低顶点低于地板：生成地板接触，触发 IK 更新
-        // 接触点 = 世界空间最低顶点投影到 floor_y
-        const auto& lv = sc.vertices[lowest_vi];
-        const ktm::fvec3 contact_world = make_fvec3(
-            world_mat[0][0]*lv.x + world_mat[1][0]*lv.y + world_mat[2][0]*lv.z + world_mat[3][0],
-            floor_y,  // 投影到地板
-            world_mat[0][2]*lv.x + world_mat[1][2]*lv.y + world_mat[2][2]*lv.z + world_mat[3][2]);
-
-        // 查找对应的 geom_handle 用于 IK 更新入队
-        // 取最近三角形对应的骨骼（用 triangle_bone_ids 中与 lowest_vi 最近的三角形）
-        int best_bone = -1;
-        if (!sc.triangle_bone_ids.empty()) {
-            float best_d2 = std::numeric_limits<float>::max();
-            for (std::size_t ti = 0; ti < sc.triangles.size(); ++ti) {
-                for (int c = 0; c < 3; ++c) {
-                    const std::uint32_t vi = resolve_vertex(sc, static_cast<std::uint32_t>(ti), c);
-                    if (vi >= sc.vertices.size()) continue;
-                    const auto& v = sc.vertices[vi];
-                    const float dx = v.x - lv.x, dy = v.y - lv.y, dz = v.z - lv.z;
-                    float d2 = dx*dx + dy*dy + dz*dz;
-                    if (d2 < best_d2 && ti < sc.triangle_bone_ids.size()) {
-                        best_d2 = d2;
-                        best_bone = sc.triangle_bone_ids[ti];
+                    // 找最近三角形的主导骨骼
+                    int best_bone = -1;
+                    if (!sc.triangle_bone_ids.empty()) {
+                        float best_d2 = std::numeric_limits<float>::max();
+                        for (std::size_t ti = 0; ti < sc.triangles.size(); ++ti) {
+                            for (int c = 0; c < 3; ++c) {
+                                const std::uint32_t vi2 = resolve_vertex(sc, static_cast<std::uint32_t>(ti), c);
+                                if (vi2 >= sc.vertices.size()) continue;
+                                const auto& v = sc.vertices[vi2];
+                                const float dx = v.x - lv.x, dy = v.y - lv.y, dz = v.z - lv.z;
+                                const float d2 = dx*dx + dy*dy + dz*dz;
+                                if (d2 < best_d2 && ti < sc.triangle_bone_ids.size()) {
+                                    best_d2 = d2;
+                                    best_bone = sc.triangle_bone_ids[ti];
+                                }
+                            }
+                        }
                     }
+                    if (best_bone >= 0)
+                        impl_->deferred_ik_target_updates.push_back(
+                            {data.geom_handle, data.transform_handle, best_bone, contact_world});
                 }
             }
-        }
-        if (best_bone >= 0 && data.geom_handle != 0) {
-            impl_->deferred_ik_target_updates.push_back(
-                {data.geom_handle, data.transform_handle, best_bone, contact_world});
         }
     }
 
