@@ -9,6 +9,7 @@
 
 #include "cef_client.h"
 #include "cef_bridge_helpers.h"
+#include "cef_osr_mode.h"
 #include "horizon/core/logging.h"
 #include "corona/systems/ui/camera_viewport_manager.h"
 
@@ -167,8 +168,13 @@ int BrowserManager::create_tab(const std::string& url, const std::string& path,
         window_info.SetAsWindowless(GetDesktopWindow());
     }
 
+    if (cef_osr_mode() == CefOsrMode::SharedTexture) {
+        window_info.shared_texture_enabled = 1;
+        CFW_LOG_NOTICE("create_tab: id={}, shared texture OSR enabled (CORONA_CEF_ACCELERATED_OSR=1)", id);
+    }
+
     CefBrowserSettings browser_settings;
-    browser_settings.windowless_frame_rate = 60;
+    browser_settings.windowless_frame_rate = resolve_windowless_frame_rate();
     browser_settings.background_color = CefColorSetARGB(0, 0, 0, 0);
     browser_settings.javascript = STATE_ENABLED;
     browser_settings.local_storage = STATE_ENABLED;
