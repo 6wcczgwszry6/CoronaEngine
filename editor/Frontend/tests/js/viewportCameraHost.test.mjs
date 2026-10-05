@@ -5,6 +5,7 @@ import { ref, reactive } from 'vue';
 import { babelParse, compileScript, parse } from 'vue/compiler-sfc';
 import { cameraMovementKey, createViewportCameraController } from '../../src/utils/viewportCameraController.js';
 import { createStoryCameraController } from '../../src/utils/viewportStoryCamera.js';
+import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera } from '../../src/utils/visionRenderModes.js';
 
 const source = fs.readFileSync(new URL('../../src/views/layout/MainPage.vue', import.meta.url), 'utf8');
 const { descriptor } = parse(source);
@@ -21,6 +22,9 @@ const names = new Set([
   'viewportCursorShape', 'handleMainViewportBlur', 'handleMainViewportVisibility',
   'onMouseDown', 'onMouseMove', 'onMouseUp', 'sendCameraUpdateFast', 'handleCameraMove',
   'coerceNumber', 'setCameraSpeedFromPanel', 'isVector3', 'sceneGridEnabledFromSnapshot', 'applySceneSnapshot',
+  'currentMainCamera', 'currentMainCameraId', 'mainVisionDenoise', 'mainVisionDenoiseError',
+  'pendingMainDenoiseSelection',
+  'mainVisionAccumulation', 'mainVisionAccumulationError', 'pendingMainAccumulationSelection',
 ]);
 const hostSource = declarations.filter(node => node.type === 'VariableDeclaration'
   && node.declarations.some(declaration => names.has(declaration.id.name)))
@@ -29,7 +33,7 @@ const makeHost = new Function('deps', `
   const { ref, reactive, cameraMovementKey, createViewportCameraController, window, document,
     editorApi, cabbageContextService, viewCurrent, viewportGizmoController,
     refreshSceneCameraBinding, syncSceneCameraBinding, broadcastViewportControlsState,
-    getEditorControlsState } = deps;
+    getEditorControlsState, normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera } = deps;
   const DEFAULT_SCENE_NAME = 'scene.ini';
   const tabs = ref([{id: DEFAULT_SCENE_NAME}]), activeTab = ref(0);
   const getViewportRenderRect = () => ({ left: 0, top: 0, width: 800, height: 600 });
@@ -56,7 +60,7 @@ function mountCreative(t, { native = true } = {}) {
   };
   let refreshes = 0;
   const page = makeHost({
-    ref, reactive, cameraMovementKey,
+    ref, reactive, cameraMovementKey, normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera,
     createViewportCameraController: options => createViewportCameraController({ ...options, ...clock }),
     window, document, viewCurrent: () => current,
     editorApi: { scratch: Object.fromEntries(['sendKeyEvent', 'sendKeyUpEvent', 'sendMouseEvent']
