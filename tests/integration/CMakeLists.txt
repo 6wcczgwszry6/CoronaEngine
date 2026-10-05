@@ -1,3 +1,19 @@
+add_executable(corona_engine_startup_config_tests
+    test_engine_startup_config.cpp
+    ${PROJECT_SOURCE_DIR}/examples/engine/startup_config.cpp)
+target_include_directories(corona_engine_startup_config_tests PRIVATE
+    ${PROJECT_SOURCE_DIR}/examples/engine ${PROJECT_SOURCE_DIR}/include)
+target_link_libraries(corona_engine_startup_config_tests PRIVATE nlohmann_json::nlohmann_json)
+add_test(NAME EngineStartupConfigTests
+    COMMAND corona_engine_startup_config_tests ${CMAKE_CURRENT_BINARY_DIR}/startup-config-fixture)
+add_test(NAME EngineStartupConfigDeploymentTests
+    COMMAND ${CMAKE_COMMAND}
+        "-DREPO_ROOT=${PROJECT_SOURCE_DIR}"
+        "-DTEST_DIRECTORY=${CMAKE_CURRENT_BINARY_DIR}/startup-config-deployment"
+        -P ${CMAKE_CURRENT_SOURCE_DIR}/test_startup_config_deploy.cmake)
+set_tests_properties(EngineStartupConfigTests EngineStartupConfigDeploymentTests
+    PROPERTIES TIMEOUT 20)
+
 add_executable(corona_ui_surface_removal_race_tests
     test_ui_surface_removal_race.cpp
     ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
