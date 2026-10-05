@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
   "url": "https://github.com/CoronaEngine/Horizon.git",
-  "ref": "codex/scene-switch-profile",
-  "commit": "e3edffc6d2803c33821e6d43f5badc062dd718cd"
+  "ref": "main",
+  "commit": "67d2223ea02a408f71d7cc3abbc2b142c78414fc"
 }
