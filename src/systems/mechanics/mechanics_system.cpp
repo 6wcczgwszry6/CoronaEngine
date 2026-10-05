@@ -1451,26 +1451,96 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         if (!(lin_lock & kLockAxisY))
             tx_w->position.y += (floor_y + floor_eps) - object_bottom_y;
 
-        // 速度响应（Kinematic 也存速度以便摩擦衰减生效；但 Kinematic 本帧速度实际为 0）
-        if (!(lin_lock & kLockAxisY)) {
-            float y_vel = impl_->body(h).velocity.y;
-            if (y_vel < -low_vel_threshold) {
-                impl_->body(h).velocity.y = -y_vel * floor_restitution;
-                impl_->body(h).sleep_timer = 0.0f;
-            } else {
-                impl_->body(h).velocity.y =
-                    (std::abs(y_vel) < zero_vel_threshold) ? 0.0f : y_vel * 0.15f;
-            }
-        }
-
-        // 水平摩擦 + 滚阻
-        if (!(lin_lock & kLockAxisX)) impl_->body(h).velocity.x *= 0.8f;
-        if (!(lin_lock & kLockAxisZ)) impl_->body(h).velocity.z *= 0.8f;
+        // 速度响应：完整冲量力学（含角速度耦合和接触点速度，蒙皮/非蒙皮通用）
         {
-            const uint8_t ang_lock = impl_->body(h).angular_lock;
-            if (!(ang_lock & kLockAxisX)) impl_->body(h).angular_velocity.x *= 0.7f;
-            if (!(ang_lock & kLockAxisY)) impl_->body(h).angular_velocity.y *= 0.7f;
-            if (!(ang_lock & kLockAxisZ)) impl_->body(h).angular_velocity.z *= 0.7f;
+            const float floor_mass = frame_params[h].mass;
+            const float inv_mass_floor = (floor_mass > 0.001f) ? 1.0f / floor_mass : 0.0f;
+            auto& b = impl_->body(h);
+
+            // 接触点 XZ 偏移：蒙皮物体用最低顶点实际世界 XZ（已持有 tx_w 写锁，直接用）；
+            // 非蒙皮用 AABB，底面中心与质心 XZ 重合，偏移始终为 0
+            float r_cx = 0.0f, r_cz = 0.0f;
+            if (data.is_skinned) {
+                auto sc_it2 = impl_->skinned_collision_cache.find(data.geom_handle);
+                if (sc_it2 != impl_->skinned_collision_cache.end() && !sc_it2->second.vertices.empty()) {
+                    const ktm::fmat4x4 wm2 = tx_w->compute_matrix();
+                    float lowest_y2 = std::numeric_limits<float>::max();
+                    for (const auto& lv2 : sc_it2->second.vertices) {
+                        const float wy2 = wm2[0][1]*lv2.x + wm2[1][1]*lv2.y + wm2[2][1]*lv2.z + wm2[3][1];
+                        if (wy2 < lowest_y2) {
+                            lowest_y2 = wy2;
+                            r_cx = wm2[0][0]*lv2.x + wm2[1][0]*lv2.y + wm2[2][0]*lv2.z + wm2[3][0] - data.center_world.x;
+                            r_cz = wm2[0][2]*lv2.x + wm2[1][2]*lv2.y + wm2[2][2]*lv2.z + wm2[3][2] - data.center_world.z;
+                        }
+                    }
+                }
+            }
+            // 接触点 r：质心到底部接触点的向量（接触点在 floor_y + floor_eps 处）
+            const ktm::fvec3 r_c = make_fvec3(
+                r_cx,
+                (floor_y + floor_eps) - data.center_world.y,
+                r_cz);
+
+            // 接触点实际速度 = 线速度 + ω × r（含旋转贡献，这是 XZ 不动 bug 的根因）
+            const ktm::fvec3 v_cp = velocity_at_point_world(b.velocity, b.angular_velocity, r_c);
+
+            // 提升作用域：弹跳时实际法向冲量远大于 m·g·dt，切向 Coulomb 上限应基于实测值
+            float jn_applied = 0.0f;
+
+            // --- 法向冲量（Y 轴），含转动惯量 ---
+            if (!(lin_lock & kLockAxisY)) {
+                const ktm::fvec3 floor_n = make_fvec3(0.0f, 1.0f, 0.0f);
+                const ktm::fvec3 rxn = ktm::cross(r_c, floor_n);
+                const float ang_n = ktm::dot(
+                    rxn, world_inertia_inv_apply(data.rot_body_to_world, data.inertia_inv_body, rxn));
+                const float denom_n = inv_mass_floor + ang_n + 1e-8f;
+                const float v_n = v_cp.y;
+
+                if (v_n < -low_vel_threshold) {
+                    const float jn = -(1.0f + floor_restitution) * v_n / denom_n;
+                    jn_applied = jn;
+                    b.velocity.y += jn * inv_mass_floor;
+                    const ktm::fvec3 dw_n = world_inertia_inv_apply(
+                        data.rot_body_to_world, data.inertia_inv_body,
+                        ktm::cross(r_c, make_fvec3(0.0f, jn, 0.0f)));
+                    if (!(b.angular_lock & kLockAxisX)) b.angular_velocity.x += dw_n.x;
+                    if (!(b.angular_lock & kLockAxisY)) b.angular_velocity.y += dw_n.y;
+                    if (!(b.angular_lock & kLockAxisZ)) b.angular_velocity.z += dw_n.z;
+                    b.sleep_timer = 0.0f;
+                } else {
+                    b.velocity.y = (std::abs(v_n) < zero_vel_threshold) ? 0.0f : v_n * 0.15f;
+                }
+            }
+
+            // --- 切向摩擦冲量（XZ），基于接触点切向速度（含 ω × r 贡献） ---
+            const float vt_x = v_cp.x;
+            const float vt_z = v_cp.z;
+            const float vt_len = std::sqrt(vt_x * vt_x + vt_z * vt_z);
+            if (vt_len > 1e-6f) {
+                const ktm::fvec3 tdir = make_fvec3(vt_x / vt_len, 0.0f, vt_z / vt_len);
+                const ktm::fvec3 rxt = ktm::cross(r_c, tdir);
+                const float ang_t = ktm::dot(
+                    rxt, world_inertia_inv_apply(data.rot_body_to_world, data.inertia_inv_body, rxt));
+                const float denom_t = inv_mass_floor + ang_t + 1e-8f;
+
+                const float jt_free = -vt_len / denom_t;
+                const float eff_friction = (vt_len < 0.02f) ? static_friction_coeff : friction_coeff;
+                // Coulomb 上限：弹跳时用实测法向冲量（高于 m·g·dt）；稳态接触 jn_applied=0 时 fallback
+                const float jt_cap = eff_friction * std::max(jn_applied,
+                                         floor_mass * std::abs(gravity.y) * fixed_dt);
+                const float jt = std::max(-jt_cap, std::min(jt_cap, jt_free));
+
+                if (!(lin_lock & kLockAxisX)) b.velocity.x += tdir.x * jt * inv_mass_floor;
+                if (!(lin_lock & kLockAxisZ)) b.velocity.z += tdir.z * jt * inv_mass_floor;
+
+                // 摩擦冲量同时产生角动量变化（Δω = I⁻¹ · (r × J_t)）
+                const ktm::fvec3 dw_t = world_inertia_inv_apply(
+                    data.rot_body_to_world, data.inertia_inv_body,
+                    ktm::cross(r_c, make_fvec3(tdir.x * jt, 0.0f, tdir.z * jt)));
+                if (!(b.angular_lock & kLockAxisX)) b.angular_velocity.x += dw_t.x;
+                if (!(b.angular_lock & kLockAxisY)) b.angular_velocity.y += dw_t.y;
+                if (!(b.angular_lock & kLockAxisZ)) b.angular_velocity.z += dw_t.z;
+            }
         }
 
         // 蒙皮额外：IK target 入队（最低顶点所在骨骼）
