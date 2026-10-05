@@ -24,6 +24,8 @@
 
 #include <corona/events/acoustics_system_events.h>
 #include <corona/kernel/core/kernel_context.h>
+#include <corona/resource/resource_manager.h>
+#include <corona/resource/types/scene.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/network/network_system.h>
 #include <corona/systems/script/camera_follow_controller.h>
@@ -3501,6 +3503,11 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
     } else if (auto physics_enabled = actor_data_bool(actor_data, {"physics_enabled"})) {
         if (actor.mechanics)
             actor.mechanics->set_body_type(*physics_enabled ? "dynamic" : "static");
+    } else if (actor.mechanics && actor.actor_type != "ui_image" && actor.actor_type != "audio") {
+        // 新导入的物体默认为"幽灵"：不参与碰撞、不受力，避免刚导入就掉落或互相弹开。
+        // 需要物理时在物体栏手动切换为动态/运动学/静态。
+        // ui_image 与 audio 已在 add_native_actor_to_scene 内设为 phantom。
+        actor.mechanics->set_body_type("phantom");
     }
     sync_native_actor_to_embedded_vision_document(*scene, actor, true);
     persist_native_scene_actors(*scene);
@@ -9545,6 +9552,132 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             nlohmann::json payload;
             payload["ok"] = true;
             return native_success(payload);
+        }},
+        // ---- 骨骼 IK 测试 API（编辑器专用）----
+        {"get_actor_skeleton_leaves", [](const NativeRequest& request, const NativeContext&) {
+            try {
+                auto* scene = scene_for_request_route(request);
+                const auto actor_name = arg_string(request.args, 1);
+                auto* actor = find_native_actor(*scene, actor_name);
+                if (!actor) {
+                    return native_failure("actor not found: " + actor_name, 2);
+                }
+                if (!actor->geometry) {
+                    return native_failure("actor has no geometry (type=" + actor->actor_type + "): " + actor_name, 2);
+                }
+
+                // 直接从 Geometry 公开接口拿 model_id，无需经过 SharedDataHub 间接路径。
+                const std::uint64_t model_id = actor->geometry->get_model_id();
+                if (model_id == 0) {
+                    // 模型尚未导入完成（PendingImport 阶段）。
+                    // 返回明确错误而非静默，方便 Vue 侧展示提示。
+                    return native_failure(
+                        "model_id=0 for actor '" + actor_name +
+                        "' (model not yet imported, gpu_state=" +
+                        actor->geometry->get_gpu_build_state() + ")",
+                        2);
+                }
+
+                auto& rm = Corona::Resource::ResourceManager::get_instance();
+                auto scene_read = rm.acquire_read<Corona::Resource::Scene>(model_id);
+                if (!scene_read.valid()) {
+                    return native_failure(
+                        "ResourceManager cannot acquire Scene for model_id=" +
+                        std::to_string(model_id) + " actor='" + actor_name + "'",
+                        2);
+                }
+
+                const auto& sdata = scene_read->data;
+                if (!sdata.skeleton.has_value()) {
+                    // 非蒙皮模型：这是正常情况，返回 is_skinned=false。
+                    return native_success({{"is_skinned", false}, {"leaves", nlohmann::json::array()}});
+                }
+
+                nlohmann::json leaves = nlohmann::json::array();
+                const auto& skel = *sdata.skeleton;
+                for (const auto& node : skel.nodes) {
+                    if (node.children.empty()) {
+                        leaves.push_back(node.name);
+                    }
+                }
+                return native_success({
+                    {"is_skinned", true},
+                    {"leaves", leaves},
+                    {"node_count", static_cast<int>(skel.nodes.size())},
+                    {"bone_count", skel.bone_count},
+                });
+            } catch (const std::exception& e) {
+                return native_failure(std::string("get_actor_skeleton_leaves exception: ") + e.what(), 2);
+            }
+        }},
+        {"set_actor_ik_chains", [](const NativeRequest& request, const NativeContext&) {
+            try {
+                auto* scene = scene_for_request_route(request);
+                const auto actor_name = arg_string(request.args, 1);
+                const auto& chains_json =
+                    request.args.is_array() && request.args.size() > 2 &&
+                            request.args[2].is_array()
+                        ? request.args[2]
+                        : nlohmann::json::array();
+
+                auto* actor = find_native_actor(*scene, actor_name);
+                if (!actor || !actor->engine_actor) {
+                    return native_failure("actor not found: " + actor_name, 2);
+                }
+                const auto actor_handle = actor->engine_actor->get_handle();
+                const auto geom_handles =
+                    Corona::SharedDataHub::instance().resolve_actor_geometry_handles(actor_handle);
+
+                for (auto geom_handle : geom_handles) {
+                    auto geom_write = Corona::SharedDataHub::instance()
+                                          .geometry_storage()
+                                          .try_acquire_write(geom_handle);
+                    if (!geom_write || !geom_write->is_skinned) continue;
+
+                    std::vector<Corona::Resource::IkChain> new_chains;
+                    new_chains.reserve(chains_json.size());
+                    for (const auto& cj : chains_json) {
+                        const auto bone_name = cj.value("bone_name", std::string{});
+                        auto it = geom_write->bone_name_to_node_idx.find(bone_name);
+                        if (it == geom_write->bone_name_to_node_idx.end()) continue;
+
+                        Corona::Resource::IkChain ch;
+                        ch.end_node       = it->second;
+                        ch.chain_length   = cj.value("chain_length", 2);
+                        ch.weight         = static_cast<float>(cj.value("weight", 1.0));
+                        ch.max_iterations = cj.value("max_iterations", 10);
+                        ch.tolerance      = static_cast<float>(cj.value("tolerance", 1e-3));
+                        ch.damping        = static_cast<float>(cj.value("damping", 1.0));
+                        ch.enabled        = cj.value("enabled", false);
+                        ch.contact_driven = false;
+
+                        const auto mode_str = cj.value("mode", std::string{"contact"});
+                        if (mode_str == "foot_plant") {
+                            ch.mode = Corona::Resource::IkChain::Mode::FootPlant;
+                            ch.contact_normal_offset = 0.0f;
+                        } else if (mode_str == "look_at") {
+                            ch.mode = Corona::Resource::IkChain::Mode::LookAt;
+                        } else if (mode_str == "weapon_aim") {
+                            ch.mode = Corona::Resource::IkChain::Mode::WeaponAim;
+                        } else {
+                            ch.mode = Corona::Resource::IkChain::Mode::Contact;
+                        }
+
+                        if (cj.contains("target") && cj["target"].is_array() &&
+                            cj["target"].size() >= 3) {
+                            ch.target[0] = static_cast<float>(cj["target"][0].get<double>());
+                            ch.target[1] = static_cast<float>(cj["target"][1].get<double>());
+                            ch.target[2] = static_cast<float>(cj["target"][2].get<double>());
+                        }
+                        new_chains.push_back(std::move(ch));
+                    }
+                    geom_write->ik_chains = std::move(new_chains);
+                    break;  // 单骨架
+                }
+                return native_success({{"ok", true}});
+            } catch (const std::exception& e) {
+                return native_failure(e.what(), 2);
+            }
         }},
         {"update_camera_view", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = scene_for_request_route(request);

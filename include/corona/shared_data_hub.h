@@ -136,6 +136,17 @@ struct GeometryDevice {
     // 蒙皮之前对 enabled 的链跑 solve_ccd，产出的 local override 注入下一次 compute_pose，
     // 叠加在动画姿态之上。非蒙皮 / 无 IK 需求时为空，零开销。
     std::vector<Resource::IkChain> ik_chains;
+
+    // 骨骼名 → SkeletonData::nodes 下标缓存。
+    // 首次 update_skinned_geometry 写锁期间从 Scene::skeleton.nodes 一次性建立；
+    // register_foot_plant_chain 等外部 API 用它把 bone_name 转 node_idx，
+    // 避免每次调用都持 ResourceManager 锁遍历 Scene。非蒙皮几何此 map 永远为空。
+    std::unordered_map<std::string, int> bone_name_to_node_idx;
+
+    // 叶子骨骼名列表（BoneNode::children 为空的节点）。构建 bone_name_to_node_idx
+    // 时同步填充。编辑器 IK 测试 UI 用 get_actor_skeleton_leaves 读取此缓存，
+    // 无需持 ResourceManager 锁。非蒙皮几何此容器为空。
+    std::vector<std::string> leaf_bone_names;
 };
 
 // 物体参与物理模拟的方式。

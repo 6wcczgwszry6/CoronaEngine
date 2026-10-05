@@ -283,6 +283,12 @@ constexpr std::array<EditorApiParamSpec, 2> kSceneActorParams = {{
     param("actor_name", EditorApiValueType::String),
 }};
 
+constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSetIkChainsParams = {{
+    param("scene_name", EditorApiValueType::String),
+    param("actor_name", EditorApiValueType::String),
+    param("chains", EditorApiValueType::Array),
+}};
+
 constexpr std::array<EditorApiParamSpec, 3> kSceneToolsSelectModelFileParams = {{
     param("scene_name", EditorApiValueType::String),
     param("actor_name", EditorApiValueType::String),
@@ -639,6 +645,8 @@ constexpr auto kEditorApiMethods = std::to_array<EditorApiMethodSpec>({
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_vision_accumulation, kSceneToolsSetCameraBoolParams, "sceneTools.setVisionAccumulation", "scene_tools.set_vision_accumulation", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, stop_audio, kResourceIdParam, "sceneTools.stopAudio", "scene_tools.stop_audio", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, sun_direction, kSceneToolsSunDirectionParams, "sceneTools.sunDirection", "scene_tools.sun_direction", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_actor_skeleton_leaves, kSceneActorParams, "sceneTools.getActorSkeletonLeaves", "scene_tools.get_actor_skeleton_leaves", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_actor_ik_chains, kSceneToolsSetIkChainsParams, "sceneTools.setActorIkChains", "scene_tools.set_actor_ik_chains", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, update_camera_view, kSceneToolsUpdateCameraViewParams, "sceneTools.updateCameraView", "scene_tools.update_camera_view", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, capture_viewport, kViewportCaptureParams, "viewport.capture", "viewport.capture", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED_CALLERS(SceneTools, set_camera_pose, kViewportSetCameraPoseParams, "viewport.setCameraPose", "viewport.set_camera_pose", EditorApiValueType::Object, cef_and_script_runtime_callers()),

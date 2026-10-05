@@ -865,6 +865,11 @@ struct MechanicsSystem::Impl {
     // 阶段 2：TriangleOctree 缓存（键：model_id，绑定姿态建一次）
     std::unordered_map<std::uint64_t, MechanicsInternal::TriangleOctree> triangle_octree_cache;
 
+    // FootPlant IK 地面 probe：静态物体世界空间顶点缓存（键：model_id）。
+    // 与 triangle_octree_cache 同步建立和清理。update_physics 在首次建 octree 时填充，
+    // 静态体不移动，只建一次。update_skinned_geometry 的地面 probe 直接消费。
+    std::unordered_map<std::uint64_t, std::vector<ktm::fvec3>> static_world_verts_cache;
+
     // 阶段 4：蒙皮物体 TriangleOctree（键：geom_handle，拓扑固定，每子步 refit）
     std::unordered_map<std::uintptr_t, MechanicsInternal::TriangleOctree> skinned_octree_cache;
 

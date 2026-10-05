@@ -752,6 +752,10 @@ const editorApiStatic = {
       call_manifest_editor_api('sceneTools.actorPlayAudio', [actorName, loop]),
     actorStopAudio: (actorName) =>
       call_manifest_editor_api('sceneTools.actorStopAudio', [actorName]),
+    getActorSkeletonLeaves: (sceneName, actorName) =>
+      call_manifest_editor_api('sceneTools.getActorSkeletonLeaves', [sceneName, actorName]),
+    setActorIkChains: (sceneName, actorName, chains) =>
+      call_manifest_editor_api('sceneTools.setActorIkChains', [sceneName, actorName, chains]),
   },
   main: {
     getMenuData: () => call_manifest_editor_api('main.getMenuData', []),
