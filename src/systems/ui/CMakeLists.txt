@@ -32,6 +32,9 @@ set(UI_SYSTEM_SOURCES
     cef/cef_renderer_bridge.cpp
     cef/cef_runtime.cpp
     cef/cef_py_bind.cpp
+    cef/cef_osr_mode.cpp
+    cef/cef_shared_texture_probe.cpp
+    cef/popup_overlay.cpp
 
     sdl/sdl_utils.cpp
     sdl/sdl_window_manager.cpp
@@ -46,6 +49,9 @@ set(UI_SYSTEM_SOURCES
     cef/cef_client.h
     cef/cef_editor_native_api_registry.h
     cef/cef_editor_native_api_test_support.h
+    cef/cef_osr_mode.h
+    cef/cef_shared_texture_probe.h
+    cef/popup_overlay.h
     editor_api/cef_editor_api.h
     cef/scene_folder.h
     cef/vision_actor_material_bridge.h
@@ -82,6 +88,8 @@ corona_add_system(ui
         version
         winmm
         bcrypt
+        d3d11
+        dxgi
         Python::Python
         nanobind-static
         corona::resource::manager

@@ -43,13 +43,14 @@ add_test(NAME SceneFolderTests COMMAND corona_scene_folder_tests)
 
 add_executable(corona_cef_app_tests
     test_cef_app.cpp
+    ${PROJECT_SOURCE_DIR}/src/shared_data_hub.cpp
 )
 target_include_directories(corona_cef_app_tests
     PRIVATE ${PROJECT_SOURCE_DIR}/include
             ${PROJECT_SOURCE_DIR}/src/systems/ui
 )
 target_link_libraries(corona_cef_app_tests
-    PRIVATE corona_ui_system
+    PRIVATE corona_ui_system corona::resource::manager
 )
 if(COMMAND helicon_install_runtime_deps)
     helicon_install_runtime_deps(corona_cef_app_tests)
@@ -64,6 +65,36 @@ add_custom_command(TARGET corona_cef_app_tests POST_BUILD
     VERBATIM
 )
 add_test(NAME CefAppTests COMMAND corona_cef_app_tests)
+get_filename_component(_CORONA_CEF_TESTS_PYTHON_DIR "${Python_EXECUTABLE}" DIRECTORY)
+set(_CORONA_CEF_TESTS_PATH_DIRS "${_CORONA_CEF_TESTS_PYTHON_DIR}")
+foreach(_tbb_runtime IN LISTS CORONA_TBB_REDIS_DLLS)
+    get_filename_component(_tbb_runtime_dir "${_tbb_runtime}" DIRECTORY)
+    list(APPEND _CORONA_CEF_TESTS_PATH_DIRS "${_tbb_runtime_dir}")
+endforeach()
+list(REMOVE_DUPLICATES _CORONA_CEF_TESTS_PATH_DIRS)
+set(_CORONA_CEF_TESTS_ENVIRONMENT)
+foreach(_runtime_dir IN LISTS _CORONA_CEF_TESTS_PATH_DIRS)
+    list(APPEND _CORONA_CEF_TESTS_ENVIRONMENT
+         "PATH=path_list_prepend:${_runtime_dir}")
+endforeach()
+set_tests_properties(CefAppTests PROPERTIES
+    RUN_SERIAL TRUE
+    TIMEOUT 60
+    ENVIRONMENT_MODIFICATION "${_CORONA_CEF_TESTS_ENVIRONMENT}"
+)
+unset(_CORONA_CEF_TESTS_PYTHON_DIR)
+unset(_CORONA_CEF_TESTS_PATH_DIRS)
+unset(_CORONA_CEF_TESTS_ENVIRONMENT)
+unset(_tbb_runtime_dir)
+
+add_executable(corona_cef_popup_overlay_tests
+    test_cef_popup_overlay.cpp
+    ${PROJECT_SOURCE_DIR}/src/systems/ui/cef/popup_overlay.cpp
+)
+target_include_directories(corona_cef_popup_overlay_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/src/systems/ui
+)
+add_test(NAME CefPopupOverlayTests COMMAND corona_cef_popup_overlay_tests)
 
 add_executable(corona_ui_surface_lifecycle_tests
     test_ui_surface_lifecycle.cpp

@@ -2249,6 +2249,13 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
             std::string panel_id = command.value("panelId", "");
             nlohmann::json result;
             result["panel_id"] = panel_id;
+            {
+                const int requester_tab = find_tab_id_for_browser(browser);
+                CFW_LOG_INFO("[CEF/Tab] closeThisTab requested by tab={} url={} panel_id={}",
+                             requester_tab,
+                             frame ? frame->GetURL().ToString() : std::string("<no-frame>"),
+                             panel_id);
+            }
             send_dock_callback(frame, request_id, nullptr, result);
 
             nlohmann::json payload;
@@ -2272,6 +2279,8 @@ bool handle_dock_command(CefRefPtr<CefBrowser> browser,
         if (cmd == "closePanelTab") {
             int tab_id = command.value("tabId", -1);
             std::string panel_id = command.value("panelId", "");
+            CFW_LOG_INFO("[CEF/Tab] closePanelTab requested by tab={} target={} panel_id={}",
+                         find_tab_id_for_browser(browser), tab_id, panel_id);
             if (tab_id >= 0) {
                 bm.enqueue_main_thread_task([tab_id] {
                     if (auto* tab = BrowserManager::instance().get_tab(tab_id)) {
