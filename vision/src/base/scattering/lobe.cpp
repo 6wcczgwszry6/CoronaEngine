@@ -262,8 +262,8 @@ void DielectricLobe::prepare() noexcept {
 }
 
 Uint DielectricLobe::select_lut(const vision::SampledSpectrum &eta) noexcept {
-    Uint idx = MaterialLut::instance().get_index(lut_name).hv();
-    Uint inv_idx = MaterialLut::instance().get_index(lut_inv_name).hv();
+    Uint idx = MaterialLut::instance().get_index(lut_name).as_parameter();
+    Uint inv_idx = MaterialLut::instance().get_index(lut_inv_name).as_parameter();
     Uint index = ocarina::select(eta[0] > 1, idx, inv_idx);
     return index;
 }
