@@ -126,7 +126,7 @@ public:
                                                  param.t_dot, param.t_depth,
                                                  param.diff_factor, prev_depth);
     }
-    [[nodiscard]] uint reservoir_base() const noexcept { return reservoirs_.index().hv(); }
+    [[nodiscard]] Uint reservoir_base() const noexcept { return reservoirs_.index_var(); }
     [[nodiscard]] auto prev_reservoirs() const noexcept {
         return pipeline()->bindless_array().buffer_var<GIReservoir>((frame_index() & 1) + reservoir_base());
     }

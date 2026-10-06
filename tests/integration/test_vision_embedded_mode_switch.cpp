@@ -497,7 +497,7 @@ struct VisionEmbeddedModeSwitchTest {
         storage.deallocate(handle);
     }
     // Explicit profiling mode: scene unchanged, same runtime/view path as editor.
-    static void profile_switches(const char* scene, bool denoise) {
+    static void profile_switches(const char* scene, bool denoise, unsigned binding_padding = 0) {
         namespace profile = vision::switch_profile;
         ocarina::DynamicModule::clear_search_path();
         ocarina::RHIContext::instance().init(std::filesystem::current_path());
@@ -513,6 +513,8 @@ struct VisionEmbeddedModeSwitchTest {
             camera->surface = &surface_token;
             camera->render_backend = CameraRenderBackend::Vision;
         }
+        std::vector<ocarina::Buffer<unsigned>> padding_buffers;
+        std::vector<const vision::Pipeline*> padded_pipelines;
         const auto step = [&](CameraVisionRenderMode mode, const char* label) {
             profile::Scope switching{label, "switch"};
             ocarina::SP<vision::Pipeline> pipeline;
@@ -521,10 +523,22 @@ struct VisionEmbeddedModeSwitchTest {
                 expect(system.load_external_vision_scene(scene, mode, Vision::VisionPipelineSource::ExternalLive),
                        "profile scene must load");
                 pipeline = vision::Global::instance().pipeline_shared();
+                if (binding_padding != 0 &&
+                    std::find(padded_pipelines.begin(), padded_pipelines.end(), pipeline.get()) == padded_pipelines.end()) {
+                    for (unsigned i = 0; i < binding_padding; ++i) {
+                        padding_buffers.push_back(device.create_buffer<unsigned>(1, "cache regression padding"));
+                        (void)pipeline->bindless_array().emplace(padding_buffers.back());
+                    }
+                    padded_pipelines.push_back(pipeline.get());
+                    std::cout << "BINDING_PADDING " << label << " slots=" << binding_padding << std::endl;
+                }
                 const auto res = pipeline->resolution();
                 std::cout << "PROFILE_EXTENT " << res.x << 'x' << res.y << std::endl;
                 expect(system.prepare_vision_camera_view(system.active_vision_runtime(), handle,
                            res.x, res.y, denoise, false), "profile view must prepare");
+                std::cout << "BINDING_SLOTS " << label
+                          << " visibility=" << pipeline->frame_buffer()->visibility_buffer_base()
+                          << " surfaces=" << pipeline->frame_buffer()->surfaces_base() << std::endl;
             }
             {
                 profile::Scope first_frame{"first_frame.complete", "first_frame"};
@@ -1087,6 +1101,11 @@ int main(int argc, char** argv) {
             std::string(argv[1]) == "--profile-switches") {
             Corona::Systems::VisionEmbeddedModeSwitchTest::profile_switches(
                 argv[2], argc == 4);
+        } else if (argc == 4 && std::string(argv[1]) == "--profile-bindings") {
+            const auto padding = std::stoul(argv[3]);
+            if (padding > 256) throw std::invalid_argument("binding padding must be in [0, 256]");
+            Corona::Systems::VisionEmbeddedModeSwitchTest::profile_switches(
+                argv[2], false, static_cast<unsigned>(padding));
         } else if (argc == 3 && std::string(argv[1]) == "--benchmark-switches") {
             Corona::Systems::VisionEmbeddedModeSwitchTest::benchmark_switches(argv[2]);
         } else if (argc == 4 && (std::string(argv[1]) == "--capture-camera-motion" ||
