@@ -2,6 +2,7 @@
 
 #include <corona/spatial/octree.h>
 #include <corona/systems/geometry/actor_cache.h>
+#include <corona/systems/geometry/geometry_mesh_builder.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/resource/types/scene.h>
 #include "shadow_lod_state.h"
@@ -195,6 +196,9 @@ struct GeometrySystem::Impl {
         ktm::fvec3 local_aabb_max{0.0f, 0.0f, 0.0f};
 
         bool lod_spatially_evicted = false;  // 被空间淘汰强制 LOD0
+        // 共享实例 asset：GPU 里面只保留计算/渲染需要的 LOD，
+        // 不需要的 LOD 全部卸载。
+        bool keep_all_levels = false;
     };
 
     mutable std::shared_mutex          lod_cache_mutex;
@@ -398,7 +402,7 @@ struct GeometrySystem::Impl {
     struct PendingGeometryBuild {
         std::uint64_t model_id = 0;
         std::uint64_t epoch = 0;
-        std::future<std::vector<MeshDevice>> future;
+        std::future<SceneGpuMeshData> future;
     };
     std::unordered_map<Payload, PendingGeometryBuild> pending_geometry_builds;
     tbb::task_group geometry_build_tasks;

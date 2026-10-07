@@ -1345,6 +1345,7 @@ void GeometrySystem::release_actor_gpu_resources(std::uintptr_t actor) {
             // 注意：model_resource_handle 保留不删，以便 reload 时能找到模型资源条目
             if (auto geom_write = hub.geometry_storage().try_acquire_write(geom_handle)) {
                 geom_write->mesh_handles.clear();
+                geom_write->mesh_instances.clear();
             }  // geom_write 析构时自动释放写锁
 
             // ---- 第 5.4 步：日志 ----
@@ -1474,7 +1475,8 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
             // 与 Python API 层 Geometry 构造函数共用同一份实现。
             // 占位纹理由 builder 模块持有（进程级单例），无需在此创建。
             // ================================================================
-            std::vector<MeshDevice> mesh_devices = build_mesh_devices_from_scene(scene);
+            SceneGpuMeshData gpu_data = build_gpu_mesh_data_from_scene(scene);
+            auto& mesh_devices = gpu_data.mesh_devices;
 
             // ================================================================
             // 阶段 C：写回 GeometryDevice
@@ -1493,7 +1495,8 @@ void GeometrySystem::rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint
 
             // ---- 将新 mesh_handles 写入 GeometryDevice ----
             if (auto geom_write = hub.geometry_storage().try_acquire_write(geom_handle)) {
-                geom_write->mesh_handles = std::move(mesh_devices);  // move 语义，避免拷贝
+                geom_write->mesh_handles = std::move(gpu_data.mesh_devices);
+                geom_write->mesh_instances = std::move(gpu_data.mesh_instances);
             }  // geom_write 析构，释放写锁
 
             // ---- 日志：记录重建完成 ----
@@ -2342,6 +2345,98 @@ GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers(
     return out;
 }
 
+GeometrySystem::RenderMeshBuffers GeometrySystem::select_render_buffers_for_instance(
+    std::uintptr_t geometry_handle,
+    uint32_t mesh_index,
+    const ktm::fvec3& camera_pos,
+    float camera_fov_deg,
+    const ktm::fmat4x4& actor_transform,
+    const ktm::fmat4x4& instance_transform,
+    const RenderMeshBuffers& fallback) const {
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    auto it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
+    if (it == impl_->lod_cache.end() || it->second.levels.size() <= 1) {
+        return fallback;
+    }
+    const auto& entry = it->second;
+    const auto& levels = entry.levels;
+
+    const auto multiply = [](const ktm::fmat4x4& lhs, const ktm::fmat4x4& rhs) {
+        ktm::fmat4x4 out{};
+        for (int col = 0; col < 4; ++col) {
+            for (int row = 0; row < 4; ++row) {
+                out[col][row] =
+                    lhs[0][row] * rhs[col][0] +
+                    lhs[1][row] * rhs[col][1] +
+                    lhs[2][row] * rhs[col][2] +
+                    lhs[3][row] * rhs[col][3];
+            }
+        }
+        return out;
+    };
+    const ktm::fmat4x4 world = multiply(actor_transform, instance_transform);
+
+    auto transform_point = [&](float x, float y, float z) {
+        ktm::fvec3 out;
+        out[0] = world[0][0] * x + world[1][0] * y + world[2][0] * z + world[3][0];
+        out[1] = world[0][1] * x + world[1][1] * y + world[2][1] * z + world[3][1];
+        out[2] = world[0][2] * x + world[1][2] * y + world[2][2] * z + world[3][2];
+        return out;
+    };
+
+    const float xs[2] = {entry.local_aabb_min[0], entry.local_aabb_max[0]};
+    const float ys[2] = {entry.local_aabb_min[1], entry.local_aabb_max[1]};
+    const float zs[2] = {entry.local_aabb_min[2], entry.local_aabb_max[2]};
+    ktm::fvec3 world_min = transform_point(xs[0], ys[0], zs[0]);
+    ktm::fvec3 world_max = world_min;
+    for (float x : xs) {
+        for (float y : ys) {
+            for (float z : zs) {
+                const ktm::fvec3 p = transform_point(x, y, z);
+                for (int axis = 0; axis < 3; ++axis) {
+                    world_min[axis] = std::min(world_min[axis], p[axis]);
+                    world_max[axis] = std::max(world_max[axis], p[axis]);
+                }
+            }
+        }
+    }
+
+    const auto column_length = [&](int col) {
+        return std::sqrt(world[col][0] * world[col][0] +
+                         world[col][1] * world[col][1] +
+                         world[col][2] * world[col][2]);
+    };
+    const float instance_scale = std::max({column_length(0), column_length(1), column_length(2)});
+    const float epsilon = compute_angular_epsilon(1.5f, camera_fov_deg, 1080.0f);
+    const float distance = distance_point_to_aabb(camera_pos, world_min, world_max);
+    const float allowed = epsilon * std::max(distance, 0.0f);
+
+    int selected = 0;
+    for (int level = static_cast<int>(levels.size()) - 1; level >= 1; --level) {
+        const float world_error = levels[static_cast<std::size_t>(level)].geometric_error * instance_scale;
+        if (world_error <= allowed) {
+            selected = level;
+            break;
+        }
+    }
+
+    for (int level = selected; level >= 0; --level) {
+        const auto& candidate = levels[static_cast<std::size_t>(level)];
+        if (!candidate.ready || !candidate.vertex_buffer || !candidate.index_buffer) {
+            continue;
+        }
+        return RenderMeshBuffers{
+            candidate.vertex_buffer,
+            candidate.index_buffer,
+            candidate.vertex_storage ? candidate.vertex_storage : fallback.vertex_storage,
+            candidate.index_storage ? candidate.index_storage : fallback.index_storage,
+            candidate.vertex_count,
+            candidate.index_count,
+            candidate.max_index};
+    }
+    return fallback;
+}
+
 GeometrySystem::RenderMeshBuffers GeometrySystem::select_shadow_render_buffers(
     std::uintptr_t geometry_handle, uint32_t mesh_index,
     float world_units_per_texel, float max_abs_scale,
@@ -2733,13 +2828,14 @@ void GeometrySystem::process_pending_geometry_builds() {
         if (task_it == impl_->pending_geometry_builds.end()) continue;
         auto task = std::move(task_it->second);
         impl_->pending_geometry_builds.erase(task_it);
-        std::vector<MeshDevice> mesh_devices;
+        SceneGpuMeshData gpu_data;
         try {
-            mesh_devices = task.future.get();
+            gpu_data = task.future.get();
         } catch (...) {
-            mesh_devices.clear();
+            gpu_data.mesh_devices.clear();
+            gpu_data.mesh_instances.clear();
         }
-        if (mesh_devices.empty()) {
+        if (gpu_data.mesh_devices.empty()) {
             ++impl_->diag_geometry_upload_discarded;
             CFW_LOG_WARNING("[GeometryUpload] build failed geometry={} model={}", handle, task.model_id);
             continue;
@@ -2752,10 +2848,12 @@ void GeometrySystem::process_pending_geometry_builds() {
                     current_model = model->model_id;
                 }
                 if (current_model == task.model_id) {
-                    geom_write->mesh_handles = std::move(mesh_devices);
+                    geom_write->mesh_handles = std::move(gpu_data.mesh_devices);
+                    geom_write->mesh_instances = std::move(gpu_data.mesh_instances);
                     geom_write->gpu_build_state = GeometryDevice::GpuBuildState::Ready;
-                    CFW_LOG_NOTICE("[GeometryUpload] published geometry={} meshes={} model={}",
-                                   handle, geom_write->mesh_handles.size(), task.model_id);
+                    CFW_LOG_NOTICE("[GeometryUpload] published geometry={} meshes={} instances={} model={}",
+                                   handle, geom_write->mesh_handles.size(),
+                                   geom_write->mesh_instances.size(), task.model_id);
                     ++impl_->diag_geometry_upload_published;
                 } else {
                     ++impl_->diag_geometry_upload_discarded;
@@ -2832,18 +2930,19 @@ void GeometrySystem::process_pending_geometry_builds() {
         if (impl_->pending_geometry_builds.find(item.geom_handle) != impl_->pending_geometry_builds.end()) continue;
 
         const auto epoch = impl_->next_geometry_build_epoch++;
-        auto promise = std::make_shared<std::promise<std::vector<MeshDevice>>>();
+        auto promise = std::make_shared<std::promise<SceneGpuMeshData>>();
         impl_->pending_geometry_builds.emplace(
             item.geom_handle,
             Impl::PendingGeometryBuild{item.model_id, epoch, promise->get_future()});
         impl_->geometry_build_tasks.run(
             [model_id = item.model_id, promise, &resource_manager]() {
-                std::vector<MeshDevice> result;
+                SceneGpuMeshData result;
                 try {
                     auto scene = resource_manager.acquire_read<Resource::Scene>(model_id);
-                    if (scene.valid()) result = build_mesh_devices_from_scene(*scene);
+                    if (scene.valid()) result = build_gpu_mesh_data_from_scene(*scene);
                 } catch (...) {
-                    result.clear();
+                    result.mesh_devices.clear();
+                    result.mesh_instances.clear();
                 }
                 promise->set_value(std::move(result));
             });
@@ -2876,6 +2975,12 @@ void GeometrySystem::upload_lod_from_scene_data() {
             model_id = model_res->model_id;
         }
         if (model_id == 0) continue;
+
+        std::unordered_set<std::uint32_t> shared_mesh_indices;
+        shared_mesh_indices.reserve(geom_dev.mesh_instances.size());
+        for (const auto& instance : geom_dev.mesh_instances) {
+            shared_mesh_indices.insert(instance.mesh_index);
+        }
 
         for (uint32_t mesh_idx = 0; mesh_idx < static_cast<uint32_t>(geom_dev.mesh_handles.size()); ++mesh_idx) {
             uint64_t lod_key = Impl::make_lod_key(geom_handle, mesh_idx);
@@ -2949,6 +3054,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
             Impl::LODCacheEntry entry;
             entry.model_id = model_id;
             entry.residency_epoch = impl_->next_residency_epoch++;  // 身份版本（方案 C ABA 守卫）
+            entry.keep_all_levels = shared_mesh_indices.contains(mesh_idx);
 
             // per-mesh 局部 AABB（屏幕空间误差选级用）：缓存本 mesh 自身的局部包围盒，
             // 而非整场景 AABB——旧逻辑用 scene.get_scene_aabb()（所有 mesh 合并）会让大场景里的
@@ -3007,6 +3113,38 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.index_count      = static_cast<std::uint32_t>(lod_data.indices.size());
                 lod_buf.max_index        = lod_buf.vertex_count > 0 ? lod_buf.vertex_count - 1u : 0u;
                 lod_buf.source_lod_index = static_cast<std::uint32_t>(lod_idx);
+
+                // 共享实例需要同一 asset 的多个 LOD 同时可用于不同实例距离，
+                // 因此这里对这种 asset 预构建全部 LOD；总量通常远小于重复实例数据。
+                if (shared_mesh_indices.contains(mesh_idx)) {
+                    lod_buf.vertex_buffer = make_geometry_buffer(
+                        lod_data.vertices,
+                        Horizon::BufferUsage_TransferDst | Horizon::BufferUsage_Vertex,
+                        "geometry.shared_lod_vertex");
+                    lod_buf.index_buffer = make_geometry_buffer(
+                        lod_data.indices,
+                        Horizon::BufferUsage_TransferDst | Horizon::BufferUsage_Index,
+                        "geometry.shared_lod_index");
+                    lod_buf.vertex_storage = make_geometry_buffer(
+                        lod_data.vertices,
+                        Horizon::BufferUsage_TransferSrc | Horizon::BufferUsage_TransferDst |
+                            Horizon::BufferUsage_Storage,
+                        "geometry.shared_lod_vertex_storage");
+                    lod_buf.index_storage = make_geometry_buffer(
+                        lod_data.indices,
+                        Horizon::BufferUsage_TransferSrc | Horizon::BufferUsage_TransferDst |
+                            Horizon::BufferUsage_Storage,
+                        "geometry.shared_lod_index_storage");
+                    lod_buf.ready = static_cast<bool>(lod_buf.vertex_buffer) &&
+                                    static_cast<bool>(lod_buf.index_buffer);
+                    if (lod_buf.ready) {
+                        const std::size_t gpu_bytes =
+                            2u * lod_data.vertices.size() * sizeof(Resource::Vertex) +
+                            2u * lod_data.indices.size() * sizeof(std::uint16_t);
+                        lod_buf.mesh_mem = Corona::Memory::GpuMemToken(
+                            Corona::Memory::ResKind::Mesh, gpu_bytes);
+                    }
+                }
                 entry.levels.push_back(std::move(lod_buf));
             }
 
@@ -3158,6 +3296,7 @@ void GeometrySystem::reconcile_lod_residency() {
                 std::shared_lock lock(impl_->lod_cache_mutex);
                 auto cit = impl_->lod_cache.find(lod_key);
                 if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) continue;
+                if (cit->second.keep_all_levels) continue;
                 level_count = cit->second.levels.size();
                 lod_spatially_evicted = cit->second.lod_spatially_evicted;
                 local_min = make_fvec3(cit->second.local_aabb_min[0],
@@ -4194,12 +4333,23 @@ build_mesh_slots(const GeometrySystem*        gs,
                  float                        bounding_radius,
                  bool                         use_shadow_lod = false,
                  float                        shadow_texel = 0.0f,
-                 float                        shadow_scale = 1.0f) {
+                 float                        shadow_scale = 1.0f,
+                 const ktm::fmat4x4*          actor_transform = nullptr) {
     std::vector<GeometrySystem::MeshSlot> result;
-    result.reserve(geom.mesh_handles.size());
+    const bool has_instances = !geom.mesh_instances.empty();
+    const std::size_t slot_count = has_instances
+        ? geom.mesh_instances.size()
+        : geom.mesh_handles.size();
+    result.reserve(slot_count);
 
-    for (uint32_t i = 0; i < static_cast<uint32_t>(geom.mesh_handles.size()); ++i) {
-        const auto& m = geom.mesh_handles[i];
+    for (std::size_t instance_index = 0; instance_index < slot_count; ++instance_index) {
+        const uint32_t mesh_index = has_instances
+            ? geom.mesh_instances[instance_index].mesh_index
+            : static_cast<uint32_t>(instance_index);
+        if (mesh_index >= geom.mesh_handles.size()) {
+            continue;
+        }
+        const auto& m = geom.mesh_handles[mesh_index];
 
         // LOD 路由：构建 fallback，然后经 GeometrySystem 解析当前常驻级
         GeometrySystem::RenderMeshBuffers fallback{
@@ -4207,18 +4357,30 @@ build_mesh_slots(const GeometrySystem*        gs,
             m.vertexStorageBuffer, m.indexStorageBuffer,
             m.vertex_count, m.index_count, m.max_index};
 
-        GeometrySystem::RenderMeshBuffers geo = use_shadow_lod
-            ? gs->select_shadow_render_buffers(geometry_handle, i, shadow_texel,
-                                                shadow_scale, fallback)
-            : use_camera
-            ? gs->select_render_buffers(
-                  geometry_handle, i,
-                  camera_pos, camera_fov_deg, world_center, bounding_radius,
-                  fallback)
-            : gs->resident_render_buffers(geometry_handle, i, fallback);
+        GeometrySystem::RenderMeshBuffers geo = fallback;
+        if (use_shadow_lod) {
+            geo = gs->select_shadow_render_buffers(
+                geometry_handle, mesh_index, shadow_texel, shadow_scale, fallback);
+        } else if (use_camera) {
+            geo = (has_instances && actor_transform != nullptr)
+                ? gs->select_render_buffers_for_instance(
+                      geometry_handle, mesh_index, camera_pos, camera_fov_deg,
+                      *actor_transform, geom.mesh_instances[instance_index].transform,
+                      fallback)
+                : gs->select_render_buffers(
+                      geometry_handle, mesh_index, camera_pos, camera_fov_deg,
+                      world_center, bounding_radius, fallback);
+        } else {
+            geo = gs->resident_render_buffers(geometry_handle, mesh_index, fallback);
+        }
 
         GeometrySystem::MeshSlot slot;
-        slot.mesh_index     = i;
+        slot.mesh_index     = mesh_index;
+        slot.instance_index = static_cast<uint32_t>(instance_index);
+        if (has_instances) {
+            slot.object_id = geom.mesh_instances[instance_index].object_id;
+            slot.instance_transform = geom.mesh_instances[instance_index].transform;
+        }
         slot.geo            = geo;
         slot.texture        = m.textureBuffer;        // 引用计数值拷贝
         slot.material_color = m.materialColor;
@@ -4229,7 +4391,7 @@ build_mesh_slots(const GeometrySystem*        gs,
         slot.valid          = render_mesh_buffers_valid(slot.geo) &&
                               static_cast<bool>(slot.texture);
         if (!slot.valid) {
-            log_invalid_mesh_slot_once(geometry_handle, i, slot.geo, slot.texture);
+            log_invalid_mesh_slot_once(geometry_handle, mesh_index, slot.geo, slot.texture);
         }
         result.push_back(std::move(slot));
     }
@@ -4256,14 +4418,16 @@ GeometrySystem::query_mesh_slots(std::uintptr_t    geometry_handle,
                                  const ktm::fvec3& camera_pos,
                                  float             camera_fov_deg,
                                  const ktm::fvec3& world_center,
-                                 float             bounding_radius) const {
+                                 float             bounding_radius,
+                                 const ktm::fmat4x4* actor_transform) const {
     auto& geom_storage = SharedDataHub::instance().geometry_storage();
     auto geom = geom_storage.try_acquire_read(geometry_handle);
     if (!geom || geom->mesh_handles.empty()) return {};
 
     return build_mesh_slots(this, geometry_handle, *geom,
                             true, camera_pos, camera_fov_deg,
-                            world_center, bounding_radius);
+                            world_center, bounding_radius,
+                            false, 0.0f, 1.0f, actor_transform);
 }
 
 void GeometrySystem::request_shadow_lod(std::uintptr_t geometry_handle,
@@ -4407,14 +4571,34 @@ GeometrySystem::query_shadow_mesh_slots_batch(
                 }
             }
 
-            ShadowMeshSlot slot;
-            slot.mesh_index = mesh_index;
-            slot.geo = std::move(selected);
-            slot.vertex_count = slot.geo.vertex_count;
-            slot.index_count = slot.geo.index_count;
-            slot.max_index = slot.geo.max_index;
-            slot.valid = render_mesh_buffers_valid(slot.geo);
-            result[cascade].push_back(std::move(slot));
+            auto append_shadow_slot = [&](uint32_t instance_index,
+                                          const MeshInstanceDevice* instance) {
+                ShadowMeshSlot slot;
+                slot.mesh_index = mesh_index;
+                slot.instance_index = instance_index;
+                if (instance != nullptr) {
+                    slot.object_id = instance->object_id;
+                    slot.instance_transform = instance->transform;
+                }
+                slot.geo = selected;
+                slot.vertex_count = slot.geo.vertex_count;
+                slot.index_count = slot.geo.index_count;
+                slot.max_index = slot.geo.max_index;
+                slot.valid = render_mesh_buffers_valid(slot.geo);
+                result[cascade].push_back(std::move(slot));
+            };
+
+            if (geom->mesh_instances.empty()) {
+                append_shadow_slot(0, nullptr);
+            } else {
+                for (uint32_t instance_index = 0;
+                     instance_index < static_cast<uint32_t>(geom->mesh_instances.size());
+                     ++instance_index) {
+                    const auto& instance = geom->mesh_instances[instance_index];
+                    if (instance.mesh_index != mesh_index) continue;
+                    append_shadow_slot(instance_index, &instance);
+                }
+            }
         }
     }
     return result;
