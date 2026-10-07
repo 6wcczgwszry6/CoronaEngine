@@ -3992,17 +3992,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 if (!ms.valid ||
                                     !vertex_valid || !index_valid ||
                                     vertex_descriptor == 0u || index_descriptor == 0u) {
-                                    // [TEMP DIAG] 网格被守卫拒掉的那条路，同样是静默的。
-                                    {
-                                        static std::atomic<int> diag_n{0};
-                                        if (diag_n.fetch_add(1) < 20) {
-                                            std::fprintf(stderr,
-                                                "[TEMPDIAG SKIP] mesh=%u valid=%d vtx=%d idx=%d vtx_desc=%u idx_desc=%u\n",
-                                                ms.mesh_index, ms.valid ? 1 : 0, vertex_valid ? 1 : 0,
-                                                index_valid ? 1 : 0, vertex_descriptor, index_descriptor);
-                                            std::fflush(stderr);
-                                        }
-                                    }
                                     log_invalid_optics_mesh_once(
                                         actor_handle,
                                         optics.geometry_handle,
@@ -4110,19 +4099,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                 pending.max_index = ms.max_index;
                                 pending_visibility_draws.push_back(std::move(pending));
                                 ++recorded_draws;
-                                // [TEMP DIAG] 定位三角网格不可见：确认 draw 真的被录进去了，
-                                // 并打印 clip 矩阵首/末行判断 modelMatrix 是否为零/退化。
-                                {
-                                    static std::atomic<int> diag_n{0};
-                                    if (diag_n.fetch_add(1) < 20) {
-                                        std::fprintf(stderr,
-                                            "[TEMPDIAG rec] mesh=%u idx=%u vtx=%u tex=%u clip_r0=(%.3f,%.3f,%.3f,%.3f) clip_r3=(%.3f,%.3f,%.3f,%.3f)\n",
-                                            ms.mesh_index, ms.index_count, ms.vertex_count, texture_descriptor,
-                                            clip_matrix[0][0], clip_matrix[0][1], clip_matrix[0][2], clip_matrix[0][3],
-                                            clip_matrix[3][0], clip_matrix[3][1], clip_matrix[3][2], clip_matrix[3][3]);
-                                        std::fflush(stderr);
-                                    }
-                                }
                             }
 
                             if (!pending_visibility_draws.empty()) {
@@ -4419,20 +4395,6 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                          sceneBatch);
                     } else {
                         sceneBatch.clear();
-                    }
-                    // [TEMP DIAG] 收集阶段产出：instances/materials 为 0 说明根本没走到录制；
-                    // 非 0 但屏幕空白说明问题在 raster/compute 下游。走 stderr，和
-                    // Horizon 侧的探针汇到同一个流里，方便对齐顺序。
-                    {
-                        static std::atomic<int> diag_n{0};
-                        if (diag_n.fetch_add(1) < 20) {
-                            std::fprintf(stderr,
-                                         "[TEMPDIAG collect] instances=%zu materials=%zu skip=%d gbuffer=%ux%u\n",
-                                         sceneBatch.instances.size(), sceneBatch.materials.size(),
-                                         diag.skip_scene_visibility ? 1 : 0,
-                                         hardware_->gbufferSize.x, hardware_->gbufferSize.y);
-                            std::fflush(stderr);
-                        }
                     }
                     const auto scene_instance_capacity = grow_table_capacity(
                         kInitialInstanceTableCapacity,
