@@ -435,17 +435,23 @@ struct SurfaceContactKernel {
                 preference = M::dot(normal, center_delta);
                 $IF((best_tri >= Float(0.0f)) && (depth >= Float(0.0f) - threshold)) { hit = 1.0f; }
                 $IF(reverse != Uint(0u)) { normal = M::mul(normal, Float(-1.0f)); }
+                Float priority, weight;
+                priority = 1.0f; weight = hit;
+                $IF(feature == Uint(6u)) {
+                    priority = 2.0f;
+                    weight = hit * M::length(M::cross(M::sub(a[1], a[0]), M::sub(a[2], a[0]))) * Float(0.5f);
+                }
                 Uint o;
                 o = lane * Uint(record_size);
                 output.values[o] = depth;
                 output.values[o + Uint(1u)] = normal.x; output.values[o + Uint(2u)] = normal.y; output.values[o + Uint(3u)] = normal.z;
-                output.values[o + Uint(4u)] = point.x; output.values[o + Uint(5u)] = point.y; output.values[o + Uint(6u)] = point.z;
-                output.values[o + Uint(7u)] = hit;
+                output.values[o + Uint(4u)] = point.x * weight; output.values[o + Uint(5u)] = point.y * weight; output.values[o + Uint(6u)] = point.z * weight;
+                output.values[o + Uint(7u)] = weight;
                 Float ta, tb;
                 ta = Float(tri); tb = best_tri;
                 $IF(reverse != Uint(0u)) { ta = best_tri; tb = Float(tri); }
                 output.values[o + Uint(8u)] = ta; output.values[o + Uint(9u)] = tb;
-                output.values[o + Uint(10u)] = preference; output.values[o + Uint(11u)] = 0.0f;
+                output.values[o + Uint(10u)] = preference; output.values[o + Uint(11u)] = priority;
             }
         }, ktm::uvec3(threads, 1, 1));
     }
@@ -652,13 +658,19 @@ struct ReduceKernel {
                             // Average only one coherent contact patch. Points
                             // with another normal/depth cannot share its impulse.
                             $IF((s[7] > Float(0.0f)) && (r[7] > Float(0.0f)) &&
+                                (s[11] == r[11]) &&
                                 (abs(s[0] - r[0]) < Float(1e-5f)) &&
                                 (s[1] * r[1] + s[2] * r[2] + s[3] * r[3] > Float(0.999f))) {
                                 for (int i = 4; i < 8; ++i) r[i] = r[i] + s[i];
                             } $ELSE {
-                                $IF((s[7] > Float(0.0f)) && ((r[7] == Float(0.0f)) || (s[0] > r[0]) || ((s[0] == r[0]) &&
-                                    ((s[10] > r[10]) || ((s[10] == r[10]) && ((s[8] < r[8]) || ((s[8] == r[8]) && (s[9] < r[9])))))))) {
-                                    for (int i = 0; i < 11; ++i) r[i] = s[i];
+                                // Equal-depth face interiors take precedence
+                                // over duplicated edge/vertex samples and the
+                                // intersection witness. Their area-weighted
+                                // centroid avoids artificial torque on flat supports.
+                                $IF((s[7] > Float(0.0f)) && ((r[7] == Float(0.0f)) || (s[0] > r[0] + Float(1e-5f)) ||
+                                    ((abs(s[0] - r[0]) < Float(1e-5f)) && ((s[11] > r[11]) || ((s[11] == r[11]) &&
+                                    ((s[10] > r[10]) || ((s[10] == r[10]) && ((s[8] < r[8]) || ((s[8] == r[8]) && (s[9] < r[9])))))))))) {
+                                    for (int i = 0; i < record_size; ++i) r[i] = s[i];
                                 }
                             }
                         } else if (kind == Reduction::Vertex) {
