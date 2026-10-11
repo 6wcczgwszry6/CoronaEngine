@@ -4,9 +4,13 @@
 
 #include <algorithm>
 #include <chrono>
+#include <charconv>
+#include <cstdlib>
 #include <memory>
+#include <string_view>
 
 #include "mechanics_internal.h"
+#include "gpu_performance.h"
 
 namespace Corona::Systems {
 
@@ -17,6 +21,39 @@ constexpr float kDefaultFixedDt = 1.0f / 60.0f;
 constexpr float kMinFixedDt = 1.0f / 120.0f;
 constexpr float kMaxFixedDt = 1.0f / 30.0f;
 constexpr int kMaxCatchUpSteps = 4;
+
+std::uint64_t performance_report_interval() {
+    static const auto interval = [] {
+        std::uint64_t value = 120;
+        if (const char* setting = std::getenv("CORONA_MECHANICS_GPU_PROFILE_INTERVAL")) {
+            const std::string_view text(setting);
+            std::uint64_t parsed{};
+            const auto result = std::from_chars(text.data(), text.data() + text.size(), parsed);
+            if (result.ec == std::errc{} && result.ptr == text.data() + text.size() && parsed >= 1 && parsed <= 1000000)
+                value = parsed;
+        }
+        return value;
+    }();
+    return interval;
+}
+
+// Construct before the frame timer: all nested timings must close before
+// snapshot/reset, including first-frame and shutdown early returns.
+struct PerformanceReport {
+    ~PerformanceReport() noexcept {
+        if (!GpuPerformance::enabled()) return;
+        try {
+            static thread_local std::uint64_t updates{};
+            if (++updates < performance_report_interval()) return;
+            CFW_LOG_INFO("Mechanics GPU profile ({} updates; host times, recorded transfer bytes):\n{}",
+                         updates, GpuPerformance::format(GpuPerformance::snapshot()));
+            GpuPerformance::reset();
+            updates = 0;
+        } catch (...) {
+            // Optional diagnostics must not interrupt the simulation.
+        }
+    }
+};
 
 float resolve_fixed_dt() {
     auto& hub = SharedDataHub::instance();
@@ -59,7 +96,7 @@ bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
                 });
     }
 
-    CFW_LOG_INFO("MechanicsSystem initialized");
+    CFW_LOG_INFO("MechanicsSystem initialized (Vulkan/Helicon GPU skinning, triangle collision and resident rigid-body solver)");
     return true;
 }
 
@@ -67,6 +104,8 @@ void MechanicsSystem::update() {
     if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
         return;
     }
+    PerformanceReport performance_report;
+    GpuPerformance::Scope frame_performance{"mechanics.frame"};
 
     // 用高精度计时器测量真实 dt
     auto now = std::chrono::steady_clock::now();
@@ -86,7 +125,7 @@ void MechanicsSystem::update() {
     const float max_frame_time = 0.1f;
     actual_dt = std::min(actual_dt, max_frame_time);
 
-    // ---- 骨骼动画 CPU 蒙皮（Phase 1：移至物理步进之前）----
+    // ---- 骨骼动画蒙皮（Vulkan EDSL，物理步进前完成）----
     // 先蒙皮生成本帧正确 AABB 和蒙皮顶点，物理帧随后消费同帧数据，
     // 消除之前 update_physics 使用上一帧 AABB 的一帧延迟。
     // 蒙皮模型即使未开物理（simulation_enabled=false）也照常播放。

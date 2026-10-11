@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
   "url": "https://github.com/CoronaEngine/Horizon.git",
-  "ref": "main",
-  "commit": "2607a3b380e526fb3c319168493119d9b93285d3"
+  "ref": "codex/mechanics-gpu-primitives",
+  "commit": "23cd4f4ea94c0644b3c090e65514981c285d0ee4"
 }

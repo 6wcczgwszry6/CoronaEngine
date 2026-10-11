@@ -51,9 +51,9 @@ struct CpuMeshData {
         return false;
     }
 
-    // ---- 蒙皮几何（P3）：顶点改用 GeometryDevice 每帧 CPU 蒙皮的输出 ----
-    // skinned_cpu_vertices 是 GeometrySystem::update_skinned_geometry 每帧写入的
-    // 单一数据源（per-mesh 原始字节，布局严格等同 Resource::Vertex 数组）。
+    // ---- 蒙皮几何：读取 GeometryDevice 每帧 GPU 蒙皮的 LOD0 回读 ----
+    // skinned_cpu_vertices 由 MechanicsSystem::update_skinned_geometry 写入，
+    // 为 per-mesh 原始字节，布局严格等同 Resource::Vertex 数组。
     // 蒙皮只改顶点位置/法线、不改拓扑，故索引仍来自 Scene。
     // 若该 mesh 有蒙皮字节且数量与绑定顶点一致 → reinterpret 直接用；
     // 否则回退到 Scene 的绑定姿态顶点（静态网格 / 蒙皮数据尚未就绪）。

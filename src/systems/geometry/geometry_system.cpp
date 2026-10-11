@@ -308,11 +308,10 @@ void GeometrySystem::update() {
     //
     // 必须在 upload 之后（缓存条目已建）、skin 之前（蒙皮需写本帧新建级）。
 
-    // ---- 骨骼动画 CPU 蒙皮 ----
-    // 已迁移到 MechanicsSystem::update_skinned_geometry()（物理线程帧尾执行）。
-    // Geometry 仅负责创建/驻留 GPU 缓冲；蒙皮计算 + write_bytes 由 Mechanics 通过
-    // get_skinning_targets() 借出句柄完成。蒙皮结果仍写回 GeometryDevice
-    // （skinned_cpu_vertices / skinned_aabb），供 Vision / 物理消费。
+    // ---- 骨骼动画 GPU 蒙皮 ----
+    // MechanicsSystem::update_skinned_geometry() 在物理步进前执行。
+    // Geometry 创建/驻留渲染缓冲，Mechanics 借出句柄提交 GPU 蒙皮与拷贝。
+    // LOD0 回读和 AABB 写回 GeometryDevice，供 Vision / CPU 物理消费。
 
     for (std::uintptr_t scene_handle : scene_handles) {
         const auto scene_begin = std::chrono::steady_clock::now();
@@ -454,15 +453,6 @@ void GeometrySystem::update() {
             std::lock_guard stats_lock(scene_state.stats_mutex);
             scene_state.stats.last_rebuild_ms = rebuild_ms;
         }
-        // 发布粗筛碰撞候选对：SceneSystem 仅负责空间划分，不依赖物理系统
-        {
-            auto pairs = query_pairs(scene_handle);
-            if (impl_->ctx && impl_->ctx->event_bus()) {
-                impl_->ctx->event_bus()->publish(
-                    Events::BroadphasePairsEvent{scene_handle, std::move(pairs)});
-            }
-        }
-
         std::vector<std::pair<ktm::fvec3,Math::Frustum>> cameras;
         std::unordered_set<Impl::Payload> visible_actors;
         double visible_query_ms_total = 0.0;
@@ -2638,7 +2628,7 @@ const LODMeshBuffers* GeometrySystem::resolve_lod_buffers(
 std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>
 GeometrySystem::get_skinning_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const {
     // 单次 shared_lock 拷出该 mesh 所有 LOD 级别的 (vertex, vertex_storage) 句柄对。
-    // 句柄为引用计数拷贝，拷出后保活底层 buffer，供 MechanicsSystem 锁外 write_bytes。
+    // 句柄为引用计数拷贝，拷出后保活底层 buffer，供调用方锁外使用。
     std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>> out;
     std::shared_lock lock(impl_->lod_cache_mutex);
     auto it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
@@ -2646,6 +2636,20 @@ GeometrySystem::get_skinning_targets(std::uintptr_t geometry_handle, uint32_t me
     out.reserve(it->second.levels.size());
     for (auto& lvl : it->second.levels) {
         out.emplace_back(lvl.vertex_buffer, lvl.vertex_storage);
+    }
+    return out;
+}
+
+std::vector<GeometrySystem::SkinningLodTarget>
+GeometrySystem::get_skinning_lod_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const {
+    std::vector<SkinningLodTarget> out;
+    std::shared_lock lock(impl_->lod_cache_mutex);
+    const auto it = impl_->lod_cache.find(Impl::make_lod_key(geometry_handle, mesh_index));
+    if (it == impl_->lod_cache.end() || it->second.levels.size() <= 1) return out;
+    out.reserve(it->second.levels.size() - 1);
+    for (std::size_t index = 1; index < it->second.levels.size(); ++index) {
+        const auto& level = it->second.levels[index];
+        out.push_back({level.source_lod_index, level.vertex_buffer, level.vertex_storage});
     }
     return out;
 }

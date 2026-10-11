@@ -39,9 +39,9 @@ struct Vertex {
 /// 每顶点骨骼影响上限（与着色/教程一致）
 constexpr int MAX_BONE_INFLUENCE = 4;
 
-/// 单顶点的骨骼权重（仅 CPU 端，不上传 GPU）。
-/// 与 MeshData::vertices 等长并行存储；CPU 蒙皮时读取，
-/// 蒙皮输出仍是标准 32 字节 Vertex，故 GPU 布局不变。
+/// 单顶点的骨骼权重，与 MeshData::vertices 等长并行存储。
+/// GPU 蒙皮将其打包为骨骼索引和权重缓冲，输入缓存失效时重新上传。
+/// 蒙皮输出仍是标准 32 字节 Vertex，渲染顶点布局不变。
 struct BoneWeights {
     std::array<std::int32_t, MAX_BONE_INFLUENCE> ids{-1, -1, -1, -1};
     std::array<float, MAX_BONE_INFLUENCE> weights{0.0f, 0.0f, 0.0f, 0.0f};
@@ -383,7 +383,7 @@ class Scene : public IResource {
     /// 计算整个场景所有 mesh 合并后的 AABB 包围盒
     [[nodiscard]] AABB get_scene_aabb() const;
 
-    /// 是否为蒙皮场景（已导入骨架数据）。运行时据此决定是否走 CPU 蒙皮路径。
+    /// 是否为蒙皮场景（已导入骨架数据）。运行时据此调度 GPU 蒙皮。
     [[nodiscard]] bool is_skinned() const { return data.skeleton.has_value(); }
 };
 

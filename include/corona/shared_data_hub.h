@@ -125,16 +125,16 @@ struct GeometryDevice {
     // is_skinned：对应 Scene 带骨架（model_id 解析的 Scene::data.skeleton 有值）。
     //   GeometrySystem 在 mesh 构建/上传时探测并置位；非蒙皮几何此字段恒 false，零开销。
     // anim_time：当前播放时间（tick）。每帧由 advance_anim_time 推进并 fmod 自动循环。
-    // skinned_cpu_vertices：每帧 CPU 蒙皮的输出，每个 mesh 一份原始字节，
+    // skinned_cpu_vertices：仅活跃 Vision 相机请求 GPU 蒙皮 LOD0 回读，每个 mesh 一份原始字节，
     //   布局严格等同 Resource::Vertex 数组（pos[3]+normal[3]+uv[2]，32B）。
-    //   这是「单一数据源」：Native 每帧 write_bytes 到 GPU 缓冲；P3 Vision / P4 物理
-    //   后续直接 reinterpret 读取，无需各自重新蒙皮。非蒙皮几何此容器为空。
+    //   Vision 读取该副本；碰撞和光栅顶点缓冲直接使用 GPU 结果，
+    //   不依赖该回读副本重新上传。光栅模式及非蒙皮几何此容器为空。
     bool is_skinned{false};
     float anim_time{0.0f};
     std::vector<std::vector<std::byte>> skinned_cpu_vertices;
 
-    // 蒙皮动态 local AABB（P4）：每帧由 update_skinned_geometry 在蒙皮循环中
-    // 顺手累积所有 mesh 蒙皮顶点的包围盒（模型空间，已含首帧归一化）。
+    // 蒙皮动态 local AABB：每帧合并 GPU 蒙皮包围盒；混合静态子网格时根据完整
+    // 碰撞网格补全包围盒（模型空间，已含首帧归一化）。
     // 物理系统每帧读取它覆盖静态 min_xyz/max_xyz，使碰撞 AABB 跟随当前动画姿态。
     // skinned_aabb_valid=false 表示尚未蒙皮过（首帧前），物理回退静态 AABB。
     bool skinned_aabb_valid{false};
