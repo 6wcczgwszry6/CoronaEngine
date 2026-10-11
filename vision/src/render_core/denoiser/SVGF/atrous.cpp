@@ -12,12 +12,21 @@ using Cfg = SVGFConfig;
 
 void AtrousFilter::prepare() noexcept {
     uint num = pipeline()->pixel_num();
+    init_buffer_zero(device(), temp_buffer_direct_, num, "AtrousFilter::temp_buffer_direct");
+    init_buffer_zero(device(), temp_buffer_indirect_, num, "AtrousFilter::temp_buffer_indirect");
+}
+
+void AtrousFilter::prepare_guides(uint num) noexcept {
+    if (guide_position_.size() == num) { return; }
+    if (num == 0u) {
+        guide_position_ = {}; guide_normal_ = {};
+        guide_identity_ = {}; guide_surface_ = {};
+        return;
+    }
     init_buffer_zero(device(), guide_position_, num, "AtrousFilter::guide_position");
     init_buffer_zero(device(), guide_normal_, num, "AtrousFilter::guide_normal");
     init_buffer_zero(device(), guide_identity_, num, "AtrousFilter::guide_identity");
     init_buffer_zero(device(), guide_surface_, num, "AtrousFilter::guide_surface");
-    init_buffer_zero(device(), temp_buffer_direct_, num, "AtrousFilter::temp_buffer_direct");
-    init_buffer_zero(device(), temp_buffer_indirect_, num, "AtrousFilter::temp_buffer_indirect");
 }
 
 void AtrousFilter::compile() noexcept {
@@ -31,6 +40,17 @@ Pipeline *pipeline_ref = pipeline();
 // and querying scene geometry at every tap in every wavelet iteration.
 Kernel prepare_guide = [pipeline_ref](Var<CombinedAtrousParam> param) {
     Uint idx = dispatch_id();
+    // Test the sparse layer mask before gathering the strided path attributes.
+    // Keep this nested: single-surface producers have no plane descriptor.
+    $if(param.layered != 0u) {
+        $if(param.stable_planes.read(idx).valid == 0u) {
+            param.guide_position.write(idx, make_float4(0.f, 0.f, 0.f, 1.f));
+            param.guide_normal.write(idx, make_float4(0.f));
+            param.guide_identity.write(idx, make_uint4(0u));
+            param.guide_surface.write(idx, make_uint4(0u, InvalidUI32, InvalidUI32, 1u));
+            $return();
+        };
+    };
     StableGeometryGuide guide(param, idx, param.visibility_buffer.read(idx));
     Bool sky = PixelStateUtils::is_sky(guide.hit);
     Float3 position = make_float3(0.f), normal = make_float3(0.f);
@@ -335,10 +355,6 @@ CommandBatch AtrousFilter::dispatch_combined(vision::RealTimeDenoiseInput &input
 
 void AtrousFilter::update_resolution(uint2 resolution) noexcept {
     uint num = resolution.x * resolution.y;
-    init_buffer_zero(device(), guide_position_, num, "AtrousFilter::guide_position");
-    init_buffer_zero(device(), guide_normal_, num, "AtrousFilter::guide_normal");
-    init_buffer_zero(device(), guide_identity_, num, "AtrousFilter::guide_identity");
-    init_buffer_zero(device(), guide_surface_, num, "AtrousFilter::guide_surface");
     init_buffer_zero(device(), temp_buffer_direct_, num, "AtrousFilter::temp_buffer_direct");
     init_buffer_zero(device(), temp_buffer_indirect_, num, "AtrousFilter::temp_buffer_indirect");
 }

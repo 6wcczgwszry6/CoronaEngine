@@ -20,7 +20,7 @@ public:
         switch_profile::Scope profile{"pipeline.prepare", "resources"};
         Pipeline::prepare();
         scene().prepare();
-        renderer_.prepare(scene());
+        renderer_.prepare(scene(), !defer_base_compile_);
         image_pool().prepare(stream());
         prepare_geometry();
         upload_bindless_array();
@@ -38,6 +38,21 @@ public:
     void init_postprocessor(const DenoiserDesc &desc) override {
 //        postprocessor_.set_denoiser(Node::create_shared<Denoiser>(desc));
         postprocessor_.set_tone_mapper(renderer_.frame_buffer()->tone_mapper());
+    }
+
+    void change_resolution(uint2 res) noexcept override {
+        if (active_renderer_ != &renderer_ || !defer_base_compile_) {
+            Pipeline::change_resolution(res);
+            return;
+        }
+        // An unused base integrator has no reservoir bindless slots to resize.
+        // Its first render will prepare those resources at the latest resolution.
+        activate_global_context();
+        if (all(res == resolution())) { return; }
+        frame_buffer()->update_resolution(res);
+        scene_view_.sensor()->update_resolution(res);
+        upload_scene_bindless_array();
+        upload_bindless_array();
     }
 
     void compile() noexcept override {
@@ -63,6 +78,10 @@ public:
         // unused set of scene-specialized kernels on every algorithm import.
         // Standalone/base rendering remains supported on its first actual use.
         if (active_renderer_ == &renderer_ && !base_compiled_) {
+            if (defer_base_compile_) {
+                integrator()->prepare();
+                upload_bindless_array();
+            }
             defer_base_compile_ = false;
             compile();
         }

@@ -768,10 +768,12 @@ void ReSTIRDI::compile_shader1() noexcept {
         RayState rs = ray_data->to_ray_state();
         sampler()->set_seed(pixel, frame_index, Dimension::ReSTIR_combine);
         SurfaceDataVar cur_surf = cur_surfaces().read(dispatch_id());
-        $if(param.stable_planes != 0u && frame_buffer().stable_dominant().read(dispatch_id()) == InvalidUI32) {
-            radiance_->write(dispatch_id(), make_float4(0.f));
-            cur_reservoirs().write(dispatch_id(), DIReservoirVar{});
-            $return();
+        $if(param.stable_planes != 0u) {
+            $if(frame_buffer().stable_dominant().read(dispatch_id()) == InvalidUI32) {
+                radiance_->write(dispatch_id(), make_float4(0.f));
+                cur_reservoirs().write(dispatch_id(), DIReservoirVar{});
+                $return();
+            };
         };
         DIReservoirVar temporal_rsv = passthrough_reservoirs().read(dispatch_id());
         DIReservoirVar st_rsv = spatial_reuse(temporal_rsv, cur_surf, make_int2(pixel), param);

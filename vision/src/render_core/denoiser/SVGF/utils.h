@@ -31,7 +31,16 @@ template<typename Param>
 [[nodiscard]] inline SurfaceDataVar load_stable_surface(const Param &param, Uint index, bool previous = false) {
     SurfaceDataVar surface;
     $if(param.layered != 0u) {
-        surface = previous ? param.prev_stable_planes.read(index).surface : param.stable_planes.read(index).surface;
+        if (previous) {
+            auto old = param.prev_stable_planes.read(index);
+            surface.hit = old.surface.hit;
+            surface.virtual_position = old.surface.virtual_position;
+            surface.virtual_geometric_normal = old.surface.virtual_geometric_normal;
+            surface.depth_position = old.depth_position;
+            surface.approximate = old.surface.approximate;
+            surface.stable_branch = old.surface.stable_branch;
+            surface.is_replaced = true;
+        } else { surface = param.stable_planes.read(index).surface; }
     } $else {
         surface = previous ? param.prev_stable_surfaces.read(index) : param.stable_surfaces.read(index);
     };
@@ -62,13 +71,16 @@ struct StableGeometryGuide {
             approximate = surface.approximate != 0u;
             depth_position = surface.depth_position;
             $if(param.layered != 0u) {
-                auto plane = previous ? param.prev_stable_planes.read(index) : param.stable_planes.read(index);
-                layered = true;
-                valid = plane.valid != 0u && plane.surface.hit->is_hit() && plane.surface.hit.inst_id != InvalidUI32;
-                sequence = plane.branch_sequence; identity = plane.instance_hash;
-                depth = plane.depth; material = plane.material_id;
-                depth_position = plane.depth_position;
-                replaced = true;
+                auto read_identity = [&](const auto &plane) {
+                    layered = true;
+                    valid = plane.valid != 0u && plane.surface.hit->is_hit() && plane.surface.hit.inst_id != InvalidUI32;
+                    sequence = plane.branch_sequence; identity = plane.instance_hash;
+                    depth = plane.depth; material = plane.material_id;
+                    depth_position = plane.depth_position;
+                    replaced = true;
+                };
+                if (previous) read_identity(param.prev_stable_planes.read(index));
+                else read_identity(param.stable_planes.read(index));
             };
             $if(replaced) {
                 hit = surface.hit;
@@ -156,25 +168,28 @@ struct CoverageGeometryGuide : StableGeometryGuide {
         motion = stable_motion(param, index);
         $if(param.composed_coverage != 0u) {
             Uint count = dispatch_dim().x * dispatch_dim().y;
-            for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
-                auto plane = previous ? param.prev_coverage_planes.read(layer * count + index)
-                                      : param.coverage_planes.read(layer * count + index);
-                ambiguous |= plane.valid != 0u && (Bool(layer > 0u) || plane.surface.approximate != 0u ||
-                    plane.surface.hit->is_miss() || plane.surface.hit.inst_id == InvalidUI32);
-            }
-            // Reservoir exports can be empty for deterministic emitters. The
-            // complete coverage guide belongs to the path, not its eligibility.
-            hit = primary; branch = 0u; replaced = false; approximate = false; valid = true;
-            auto plane = previous ? param.prev_coverage_planes.read(index) : param.coverage_planes.read(index);
-            $if(!ambiguous && plane.valid != 0u) {
-                hit = plane.surface.hit;
-                branch = plane.surface.stable_branch;
-                position = plane.surface.virtual_position;
-                normal = plane.surface.virtual_geometric_normal;
-                depth_position = plane.depth_position;
-                replaced = true;
-                motion = plane.motion;
+            auto read_coverage = [&](const auto &planes) {
+                for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
+                    auto plane = planes.read(layer * count + index);
+                    ambiguous |= plane.valid != 0u && (Bool(layer > 0u) || plane.surface.approximate != 0u ||
+                        plane.surface.hit->is_miss() || plane.surface.hit.inst_id == InvalidUI32);
+                }
+                // Coverage belongs to the path, including deterministic emitters
+                // that have no eligible reservoir endpoint.
+                hit = primary; branch = 0u; replaced = false; approximate = false; valid = true;
+                auto plane = planes.read(index);
+                $if(!ambiguous && plane.valid != 0u) {
+                    hit = plane.surface.hit;
+                    branch = plane.surface.stable_branch;
+                    position = plane.surface.virtual_position;
+                    normal = plane.surface.virtual_geometric_normal;
+                    depth_position = plane.depth_position;
+                    replaced = true;
+                    motion = plane.motion;
+                };
             };
+            if (previous) read_coverage(param.prev_coverage_planes);
+            else read_coverage(param.coverage_planes);
         };
     }
 };

@@ -47,13 +47,13 @@ struct RealTimeDenoiseInput {
     uint layer_index{0u};
     uint layer_count{1u};
     BufferView<StablePlaneData> stable_planes;
-    BufferView<StablePlaneData> prev_stable_planes;
+    BufferView<StablePlaneHistory> prev_stable_planes;
 
     // Complete DirectIndirect pixel signal, after layer illumination filtering.
     // Coverage includes deterministic emission/sky and all complementary paths.
     bool composed_coverage{false};
     BufferView<StablePlaneData> coverage_planes;
-    BufferView<StablePlaneData> prev_coverage_planes;
+    BufferView<StablePlaneHistory> prev_coverage_planes;
 
     /// Camera positions for depth calculation from visibility buffer
     array_float3 camera_pos{};
@@ -143,6 +143,7 @@ public:
 
     /// Runtime override hook for headless evaluation and experiments.
     virtual void set_enabled(bool enabled) noexcept {}
+    virtual void set_stable_planes_enabled(bool enabled) noexcept {}
     
     [[nodiscard]] Backend backend() const noexcept { return backend_; }
 

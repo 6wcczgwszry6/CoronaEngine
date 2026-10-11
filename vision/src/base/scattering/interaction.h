@@ -71,6 +71,26 @@ OC_STRUCT(vision, SurfaceExtend, throughput, view_pos, t_max, final_direction, p
 
 namespace vision {
 inline constexpr uint StablePlaneCount = 3u;
+// Only immutable geometry/identity is needed when reprojecting the next frame.
+// Keep full precision; transport state and material evaluation stay current-only.
+struct StablePlaneHistorySurface {
+    TriangleHit hit{};
+    float3 virtual_position{};
+    float3 virtual_geometric_normal{};
+    uint approximate{};
+    uint stable_branch{};
+};
+struct StablePlaneHistory {
+    StablePlaneHistorySurface surface{};
+    float2 motion{};
+    float3 depth_position{};
+    uint branch_sequence{1u};
+    uint instance_hash{};
+    uint depth{};
+    uint material_id{InvalidUI32};
+    uint valid{};
+};
+static_assert(sizeof(StablePlaneHistory) <= 128u);
 struct StablePlaneData {
     SurfaceData surface{};
     SurfaceExtend extension{};
@@ -84,8 +104,25 @@ struct StablePlaneData {
     uint reservoir_eligible{};
 };
 }// namespace vision
+OC_STRUCT(vision, StablePlaneHistorySurface, hit, virtual_position, virtual_geometric_normal,
+          approximate, stable_branch) {};
+OC_STRUCT(vision, StablePlaneHistory, surface, motion, depth_position,
+          branch_sequence, instance_hash, depth, material_id, valid) {};
 OC_STRUCT(vision, StablePlaneData, surface, extension, motion, depth_position,
-          branch_sequence, instance_hash, depth, material_id, valid, reservoir_eligible) {};
+          branch_sequence, instance_hash, depth, material_id, valid, reservoir_eligible) {
+    [[nodiscard]] Var<vision::StablePlaneHistory> history() const noexcept {
+        Var<vision::StablePlaneHistory> ret;
+        ret.surface.hit = surface.hit;
+        ret.surface.virtual_position = surface.virtual_position;
+        ret.surface.virtual_geometric_normal = surface.virtual_geometric_normal;
+        ret.surface.approximate = surface.approximate;
+        ret.surface.stable_branch = surface.stable_branch;
+        ret.motion = motion; ret.depth_position = depth_position;
+        ret.branch_sequence = branch_sequence; ret.instance_hash = instance_hash;
+        ret.depth = depth; ret.material_id = material_id; ret.valid = valid;
+        return ret;
+    }
+};
 
 namespace vision {
 struct HitBSDF {

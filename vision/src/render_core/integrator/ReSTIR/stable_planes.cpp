@@ -72,11 +72,23 @@ void scatter_path(BuildPath &path, const Interaction &it, const StableLobe &lobe
 
 void StablePlanes::prepare() noexcept {
     auto &fb = frame_buffer();
-    fb.prepare_stable_planes(); fb.prepare_stable_direct(); fb.prepare_stable_indirect();
-    fb.prepare_stable_radiance(); fb.prepare_stable_dominant();
+    fb.manage_stable_plane_buffers(integrator()->stable_planes_enabled());
 }
 
 void StablePlanes::compile() noexcept {
+    Kernel save_history = [](BufferVar<StablePlaneData> current, BufferVar<StablePlaneHistory> previous,
+                             BufferVar<uint> history_words) {
+        Uint idx = dispatch_id();
+        $if(current.read(idx).valid != 0u) {
+            previous.write(idx, current.read(idx)->history());
+        } $else {
+            // Invalid records are never consumed. Clearing the validity word
+            // avoids gathering/writing all attributes of mostly empty layers.
+            history_words.write(idx * uint(sizeof(StablePlaneHistory) / sizeof(uint)) +
+                uint(offsetof(StablePlaneHistory, valid) / sizeof(uint)), 0u);
+        };
+    };
+    save_history_ = device().compile(save_history, "StablePlanes-SaveHistory");
     auto &fb = frame_buffer();
     auto &camera = scene().sensor();
     auto &sampler = renderer().sampler();
@@ -349,13 +361,17 @@ void StablePlanes::compile() noexcept {
     fill_ = device().compile(fill_kernel, "Stable planes residual fill");
 }
 
-CommandBatch StablePlanes::build(uint frame, bool jitter) const noexcept {
+CommandBatch StablePlanes::build(uint frame, bool jitter, bool retain_history) const noexcept {
     auto planes = frame_buffer().cur_stable_planes_view(frame);
     uint2 resolution = pipeline()->resolution();
     uint pixels = resolution.x * resolution.y;
     BufferView<uint4> children{planes.handle() + pixels * sizeof(StablePlaneData),
         (StablePlaneCount - 1u) * pixels * sizeof(StablePlaneData) / sizeof(uint4)};
     CommandBatch ret;
+    if (retain_history && frame > 0u) {
+        auto history = frame_buffer().prev_stable_planes_view(frame);
+        ret << save_history_(planes, history, history.view_as<uint>()).dispatch(planes.size());
+    }
     ret << clear_children_(children).dispatch(children.size());
     ret << build_(frame, uint(jitter)).dispatch(resolution);
     return ret;

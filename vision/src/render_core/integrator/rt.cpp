@@ -35,6 +35,7 @@ private:
     SP<ReSTIRDI> direct_;
     SP<ReSTIRGI> indirect_;
     SP<StablePlanes> stable_planes_;
+    mutable bool stable_resources_dirty_{};
     SP<ScreenBuffer> specular_buffer_{make_shared<ScreenBuffer>("RealTimeIntegrator::specular_buffer_")};
     Shader<void(uint, float, float, uint)> combine_;
     Shader<void()> merge_dominant_;
@@ -61,7 +62,7 @@ public:
 
     void restore(vision::RuntimeObject *old_obj) noexcept override {
         IlluminationIntegrator::restore(old_obj);
-        VS_HOTFIX_MOVE_ATTRS(direct_, indirect_, stable_planes_, specular_buffer_,
+        VS_HOTFIX_MOVE_ATTRS(direct_, indirect_, stable_planes_, stable_resources_dirty_, specular_buffer_,
                              combine_, merge_dominant_, compose_layers_, path_tracing_, denoiser_)
         direct_->set_integrator(shared_from_this());
         indirect_->set_integrator(shared_from_this());
@@ -109,6 +110,7 @@ public:
         frame_buffer().prepare_visibility_buffer();
         frame_buffer().prepare_motion_vectors();
         stable_planes_->prepare();
+        stable_resources_dirty_ = false;
     }
 
     [[nodiscard]] bool stable_planes_enabled() const noexcept override {
@@ -118,9 +120,10 @@ public:
     void set_stable_planes_enabled(bool enabled) noexcept override {
         if (stable_planes_enabled() == enabled) { return; }
         direct_->set_stable_planes_enabled(enabled);
-        // All producers and consumers switch together. Restart reservoirs,
-        // SVGF and frame accumulation so primary and virtual guides never mix.
-        pipeline()->invalidate();
+        stable_resources_dirty_ = true;
+        // This setter may target an inactive camera. Defer GPU resources until
+        // render activates this integrator's own framebuffer/bindless context.
+        Integrator::invalidation();
     }
 
     void render_sub_UI(Widgets *widgets) noexcept override {
@@ -226,6 +229,14 @@ public:
     void render() const noexcept override {
         const Pipeline *rp = pipeline();
         Stream &stream = rp->stream();
+        if (stable_resources_dirty_) {
+            stream << synchronize() << commit();
+            frame_buffer().manage_stable_plane_buffers(stable_planes_enabled());
+            pipeline()->upload_bindless_array();
+            if (denoiser_) { denoiser_->set_stable_planes_enabled(stable_planes_enabled()); }
+            stable_resources_dirty_ = false;
+            pipeline()->invalidate();
+        }
         cur_stage_profile_ = {};
         cur_stage_profile_.enabled = stage_profile_runtime_enabled();
         auto submit = [&](auto &&command, double *stage_ms) {
@@ -243,7 +254,8 @@ public:
 
         submit(frame_buffer().compute_GBuffer(frame_index_), &cur_stage_profile_.gbuffer_ms);
         if (stable_planes_enabled()) {
-            submit(stable_planes_->build(frame_index_, jitter_primary_samples()), &cur_stage_profile_.stable_build_ms);
+            const bool retain_history = !denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled();
+            submit(stable_planes_->build(frame_index_, jitter_primary_samples(), retain_history), &cur_stage_profile_.stable_build_ms);
             submit(stable_planes_->fill(frame_index_), &cur_stage_profile_.stable_fill_ms);
         }
         submit(direct_->dispatch(frame_index_), &cur_stage_profile_.restir_di_ms);

@@ -370,6 +370,7 @@ void check_stable_plane(vision::Pipeline& pipeline, bool tinted_mirror) {
     // generation and SVGF history must switch on the very next frame.
     auto& integrator = pipeline.renderer().integrator();
     for (bool enabled : {false, true, false, true}) {
+        pipeline.reset_status();
         integrator->set_stable_planes_enabled(enabled);
         fail(integrator->stable_planes_enabled() == enabled && pipeline.frame_index() == 0u,
              "stable plane toggle must reset the active renderer history");
@@ -384,6 +385,18 @@ void check_stable_plane(vision::Pipeline& pipeline, bool tinted_mirror) {
              "runtime toggle must select virtual endpoint or primary mirror guides");
         fail(float(history[center].moments_direct.z) <= 1.f,
              "stable plane toggle must not inherit previous SVGF history");
+        if (!enabled) {
+            fail(pipeline.frame_buffer()->stable_planes_size() <= StablePlaneCount,
+                 "disabled stable planes must release full-resolution path storage");
+            fail(denoiser->svgf_buffer_cur(0u, 1u).size() == 0u &&
+                 denoiser->atrous()->guide_position().size() == 0u,
+                 "disabled stable planes must release child history and spatial guides");
+        } else {
+            auto previous = pipeline.frame_buffer()->prev_stable_planes_view(0u);
+            fail(previous.size() == pipeline.pixel_num() * StablePlaneCount &&
+                 previous.size_in_byte() <= previous.size() * 128u,
+                 "stable-plane history must retain only compact full-precision guides");
+        }
         const auto frame_before_noop = pipeline.frame_index();
         integrator->set_stable_planes_enabled(enabled);
         fail(pipeline.frame_index() == frame_before_noop,
@@ -432,7 +445,8 @@ void check_stable_emitter_coverage(vision::Pipeline& pipeline) {
     };
     auto shader = pipeline.device().compile(kernel, "mirror_emitter_composed_guide");
     std::vector<float4> values(n);
-    std::vector<StablePlaneData> current(n * StablePlaneCount), previous(current.size());
+    std::vector<StablePlaneData> current(n * StablePlaneCount);
+    std::vector<StablePlaneHistory> previous(current.size());
     std::vector<SurfaceData> exported(n);
     std::vector<uint> dominant(n);
     bool guides_ok = true;
@@ -470,7 +484,7 @@ void check_stable_emitter_coverage(vision::Pipeline& pipeline) {
     // differ only in legacy reservoir exports and primary motion; their complete
     // pixel history must agree and must differ from cold current reconstruction.
     auto planes = pipeline.device().create_buffer<StablePlaneData>(current.size(), "emitter_coverage_planes");
-    auto old_planes = pipeline.device().create_buffer<StablePlaneData>(previous.size(), "emitter_coverage_old_planes");
+    auto old_planes = pipeline.device().create_buffer<StablePlaneHistory>(previous.size(), "emitter_coverage_old_planes");
     auto surfaces = pipeline.device().create_buffer<SurfaceData>(n, "emitter_coverage_export");
     auto old_surfaces = pipeline.device().create_buffer<SurfaceData>(n, "emitter_coverage_old_export");
     auto motions = pipeline.device().create_buffer<float2>(n, "emitter_coverage_primary_motion");
@@ -481,7 +495,12 @@ void check_stable_emitter_coverage(vision::Pipeline& pipeline) {
     std::vector<RadType4> signal(n), black(n, RadType4{0,0,0,1}), actual(n), reference(n), cold(n);
     for (uint i = 0u; i < n; ++i) {
         current[i].branch_sequence = previous[i].branch_sequence = 5u + (i & 1u);
-        virtual_surfaces[i] = current[i].surface; old_virtual_surfaces[i] = previous[i].surface;
+        virtual_surfaces[i] = current[i].surface;
+        auto &old = old_virtual_surfaces[i]; const auto &h = previous[i];
+        old.hit = h.surface.hit; old.virtual_position = h.surface.virtual_position;
+        old.virtual_geometric_normal = h.surface.virtual_geometric_normal;
+        old.depth_position = h.depth_position; old.approximate = h.surface.approximate;
+        old.stable_branch = h.surface.stable_branch; old.is_replaced = true;
         virtual_motion[i] = current[i].motion;
     }
     const uint frame = pipeline.frame_index() - 1u;

@@ -130,15 +130,16 @@ void check_glass_depth_guides(vision::Pipeline &pipeline) {
     dp.t_depth = gp.t_depth = 0.1f;
     dp.t_dot = gp.t_dot = 0.8f;
     dp.diff_factor = gp.diff_factor = 0.3f;
-    Kernel kernel = [&](BufferVar<StablePlaneData> current, BufferVar<StablePlaneData> previous,
+    Kernel kernel = [&](BufferVar<StablePlaneData> current, BufferVar<SurfaceData> previous,
                         BufferVar<float4> output, Var<DIParam> di, Var<GIParam> gi) {
         camera->load_data();
-        auto c = current.read(136u), p = previous.read(136u);
+        auto c = current.read(136u);
+        auto p = previous.read(136u);
         Float expected = camera->linear_depth(c.depth_position);
         Bool depth = c.surface.approximate != 0u && abs(expected - c.surface->depth()) < 1e-5f &&
             length(c.surface.depth_position - c.depth_position) < 1e-6f;
-        Bool di_valid = ReSTIRDI::is_temporal_valid(c.surface, p.surface, di, nullptr);
-        Bool gi_valid = ReSTIRGI::is_temporal_valid(c.surface, p.surface, gi, nullptr);
+        Bool di_valid = ReSTIRDI::is_temporal_valid(c.surface, p, di, nullptr);
+        Bool gi_valid = ReSTIRGI::is_temporal_valid(c.surface, p, gi, nullptr);
         Float2 expected_motion = camera->raster_coord(c.surface.virtual_position).xy() -
             camera->prev_raster_coord(c.surface.virtual_position).xy();
         Bool motion = length(c.motion - expected_motion) < 1e-5f &&
@@ -153,7 +154,7 @@ void check_glass_depth_guides(vision::Pipeline &pipeline) {
         pipeline.upload_data(); pipeline.display(1.0 / 60.0);
         uint frame = pipeline.frame_index() - 1u;
         float4 value;
-        pipeline.stream() << shader(fb.cur_stable_planes_view(frame, 1u), fb.prev_stable_planes_view(frame, 1u), result, dp, gp).dispatch(1u)
+        pipeline.stream() << shader(fb.cur_stable_planes_view(frame, 1u), fb.prev_surfaces_view(frame), result, dp, gp).dispatch(1u)
             << result.download(&value) << synchronize() << commit();
         if (value.x != 1.f || value.y != 1.f || value.z != 1.f || value.w != 1.f)
             throw std::runtime_error("glass static and translated history must use path-depth position consistently in DI and GI");

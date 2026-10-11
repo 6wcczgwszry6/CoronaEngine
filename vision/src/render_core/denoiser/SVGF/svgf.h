@@ -26,11 +26,11 @@ struct ResolveParam {
 
     uint composed_coverage{0u};
     BufferDesc<StablePlaneData> coverage_planes;
-    BufferDesc<StablePlaneData> prev_coverage_planes;
+    BufferDesc<StablePlaneHistory> prev_coverage_planes;
     uint use_stable_planes{0u};
     uint layered{0u};
     BufferDesc<StablePlaneData> stable_planes;
-    BufferDesc<StablePlaneData> prev_stable_planes;
+    BufferDesc<StablePlaneHistory> prev_stable_planes;
     BufferDesc<SurfaceData> stable_surfaces;
     BufferDesc<SurfaceData> prev_stable_surfaces;
     BufferDesc<RadType4> direct;
@@ -97,6 +97,7 @@ private:
     Shader<void(VarianceEstimatorParam)> clear_invalid_shader_;
 
     void prepare_resolve(uint pixel_num);
+    void prepare_stable_resources(uint pixel_num, bool layered, bool guided);
     void compile_resolve();
     [[nodiscard]] CommandBatch resolve(RealTimeDenoiseInput &input);
 
@@ -174,6 +175,7 @@ public:
     void update_resolution(uint2 resolution) noexcept override;
     [[nodiscard]] CommandBatch dispatch(vision::RealTimeDenoiseInput &input) noexcept override;
     void set_enabled(bool enabled) noexcept override;
+    void set_stable_planes_enabled(bool enabled) noexcept override;
     [[nodiscard]] bool enabled() noexcept override;
 };
 

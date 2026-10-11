@@ -9,6 +9,21 @@
 #include <vector>
 #include <cstdlib>
 
+static std::vector<vision::StablePlaneHistory> compact_history(const std::vector<vision::StablePlaneData> &planes) {
+    std::vector<vision::StablePlaneHistory> ret(planes.size());
+    for (size_t i = 0; i < planes.size(); ++i) {
+        const auto &p = planes[i]; auto &h = ret[i];
+        h.surface.hit = p.surface.hit;
+        h.surface.virtual_position = p.surface.virtual_position;
+        h.surface.virtual_geometric_normal = p.surface.virtual_geometric_normal;
+        h.surface.approximate = p.surface.approximate; h.surface.stable_branch = p.surface.stable_branch;
+        h.motion = p.motion; h.depth_position = p.depth_position;
+        h.branch_sequence = p.branch_sequence; h.instance_hash = p.instance_hash;
+        h.depth = p.depth; h.material_id = p.material_id; h.valid = p.valid;
+    }
+    return ret;
+}
+
 // Illumination storage and validation are independent per layer. Coverage then
 // integrates the complete footprint, including complementary endpoints.
 template<typename Input, typename Filter>
@@ -38,7 +53,7 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
         const uint center = n / 2u + pipeline.resolution().x / 2u;
         auto visibility = pipeline.frame_buffer()->cur_visibility_buffer_view(pipeline.frame_index() - 1u);
         auto current = pipeline.device().create_buffer<StablePlaneData>(n, "layered_test_current");
-        auto previous = pipeline.device().create_buffer<StablePlaneData>(n, "layered_test_previous");
+        auto previous = pipeline.device().create_buffer<StablePlaneHistory>(n, "layered_test_previous");
         auto direct = pipeline.device().create_buffer<RadType4>(n, "layered_test_direct");
         auto indirect = pipeline.device().create_buffer<RadType4>(n, "layered_test_indirect");
         Kernel make_guides = [&](BufferVar<TriangleHit> visible, BufferVar<StablePlaneData> out) {
@@ -77,7 +92,8 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
         auto run = [&](uint frame, uint layer, RadType4 color) {
             input.frame_index = frame; input.layer_index = layer;
             std::fill(samples.begin(), samples.end(), color);
-            pipeline.stream() << current.upload(guides.data()) << previous.upload(baseline.data())
+            auto old_guides = compact_history(baseline);
+            pipeline.stream() << current.upload(guides.data()) << previous.upload(old_guides.data())
                 << direct.upload(samples.data()) << indirect.upload(samples.data())
                 << denoiser.dispatch(input) << direct.download(output.data())
                 << denoiser.svgf_buffer_cur(frame, layer).download(history.data()) << synchronize() << commit();
@@ -114,7 +130,7 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
         Env::set("VISION_SVGF_SKIP_VARIANCE", "1");
         Env::set("VISION_SVGF_SKIP_RESOLVE", "0");
         auto all_current = pipeline.device().create_buffer<StablePlaneData>(n * StablePlaneCount, "coverage_all_current");
-        auto all_previous = pipeline.device().create_buffer<StablePlaneData>(n * StablePlaneCount, "coverage_all_previous");
+        auto all_previous = pipeline.device().create_buffer<StablePlaneHistory>(n * StablePlaneCount, "coverage_all_previous");
         auto primary = pipeline.device().create_buffer<TriangleHit>(n, "coverage_primary");
         std::vector<TriangleHit> primary_hits(n, baseline[center].surface.hit);
         const auto primary_hit = baseline[center].surface.hit;
@@ -150,8 +166,10 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
                 const bool right = (i % input.resolution.x) >= input.resolution.x / 2u;
                 samples[i] = colors[(right ^ (frame != 0u)) ? 2u : 0u];
             }
-            pipeline.stream() << current.upload(guides.data()) << previous.upload(baseline.data())
-                << all_current.upload(all_planes.data()) << all_previous.upload(last_planes.data())
+            auto old_guides = compact_history(baseline);
+            auto old_planes = compact_history(last_planes);
+            pipeline.stream() << current.upload(guides.data()) << previous.upload(old_guides.data())
+                << all_current.upload(all_planes.data()) << all_previous.upload(old_planes.data())
                 << primary.upload(primary_hits.data()) << direct.upload(samples.data()) << indirect.upload(samples.data())
                 << denoiser.dispatch(input) << direct.download(output.data()) << synchronize() << commit();
             last_planes = all_planes;
@@ -249,7 +267,8 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
             samples[center] = colors[0];
             if (separated) for (uint i = 0u; i < n; ++i) if (i != center) guides[i].branch_sequence ^= 1u;
             input.frame_index = 0u; input.layer_index = 1u;
-            pipeline.stream() << current.upload(guides.data()) << previous.upload(baseline.data())
+            auto old_guides = compact_history(baseline);
+            pipeline.stream() << current.upload(guides.data()) << previous.upload(old_guides.data())
                 << direct.upload(samples.data()) << indirect.upload(samples.data())
                 << denoiser.dispatch(input) << direct.download(output.data()) << synchronize() << commit();
             if (separated ? (std::abs(float(output[center].x) - 1.f) > 1e-5f || float(output[center].y) != 0.f)

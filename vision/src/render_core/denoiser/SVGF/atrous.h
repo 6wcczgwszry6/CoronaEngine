@@ -19,7 +19,7 @@ struct CombinedAtrousParam {
     uint use_stable_planes{0u};
     uint layered{0u};
     BufferDesc<StablePlaneData> stable_planes;
-    BufferDesc<StablePlaneData> prev_stable_planes;
+    BufferDesc<StablePlaneHistory> prev_stable_planes;
     BufferDesc<SurfaceData> stable_surfaces;
     BufferDesc<SurfaceData> prev_stable_surfaces;
     BufferDesc<RadType4> direct_src;
@@ -88,6 +88,7 @@ public:
     }
     [[nodiscard]] CommandBatch dispatch_guide(RealTimeDenoiseInput &input) noexcept;
     void prepare() noexcept;
+    void prepare_guides(uint pixel_num) noexcept;
     void compile() noexcept;
     
     void compile_combined() noexcept;

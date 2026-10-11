@@ -81,25 +81,42 @@ void SVGF::prepare_buffers() {
 }
 
 void SVGF::prepare_resolve(uint pixel_num) {
-    init_buffer_zero(device(), edge_flags_, pixel_num, "SVGF::edge_flags");
-    init_buffer_zero(device(), coverage_position_, pixel_num, "SVGF::coverage_position");
-    init_buffer_zero(device(), coverage_normal_, pixel_num, "SVGF::coverage_normal");
-    init_buffer_zero(device(), coverage_depth_, pixel_num, "SVGF::coverage_depth");
-    init_buffer_zero(device(), coverage_meta_, pixel_num, "SVGF::coverage_meta");
+    init_buffer_zero(device(), resolve_direct_[0], pixel_num, "SVGF::resolve_direct");
+    init_buffer_zero(device(), resolve_indirect_[0], pixel_num, "SVGF::resolve_indirect");
+    init_buffer_zero(device(), resolve_direct2_[0], pixel_num, "SVGF::resolve_direct2");
+    init_buffer_zero(device(), resolve_indirect2_[0], pixel_num, "SVGF::resolve_indirect2");
+    layer_state_ = {};
+}
 
-    for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
-        if (layer == 0u) {
-            init_buffer_zero(device(), resolve_direct_[layer], pixel_num, "SVGF::resolve_direct");
-            init_buffer_zero(device(), resolve_indirect_[layer], pixel_num, "SVGF::resolve_indirect");
-            init_buffer_zero(device(), resolve_direct2_[layer], pixel_num, "SVGF::resolve_direct2");
-            init_buffer_zero(device(), resolve_indirect2_[layer], pixel_num, "SVGF::resolve_indirect2");
-        }
-        if (layer > 0u) {
-            init_buffer_zero(device(), layer_data_[layer - 1u], pixel_num, "SVGF::layer_data");
-            init_buffer_zero(device(), layer_data2_[layer - 1u], pixel_num, "SVGF::layer_data2");
-        }
+void SVGF::prepare_stable_resources(uint pixel_num, bool layered, bool guided) {
+    uint layer_pixels = layered ? pixel_num : 0u;
+    uint guide_pixels = guided ? pixel_num : 0u;
+    if (layer_data_[0].size() == layer_pixels && coverage_position_.size() == guide_pixels &&
+        atrous_->guide_position().size() == guide_pixels) { return; }
+    // Callers may already have queued work using the old descriptors.
+    pipeline()->stream() << synchronize() << commit();
+    auto resize = [&]<typename T>(Buffer<T> &buffer, uint size, const char *name) {
+        if (buffer.size() == size) { return; }
+        if (size == 0u) { buffer = {}; }
+        else { init_buffer_zero(device(), buffer, size, name); }
+    };
+    resize(edge_flags_, guide_pixels, "SVGF::edge_flags");
+    resize(coverage_position_, guide_pixels, "SVGF::coverage_position");
+    resize(coverage_normal_, guide_pixels, "SVGF::coverage_normal");
+    resize(coverage_depth_, guide_pixels, "SVGF::coverage_depth");
+    resize(coverage_meta_, guide_pixels, "SVGF::coverage_meta");
+    atrous_->prepare_guides(guide_pixels);
+    for (uint layer = 0u; layer < StablePlaneCount - 1u; ++layer) {
+        resize(layer_data_[layer], layer_pixels, "SVGF::layer_data");
+        resize(layer_data2_[layer], layer_pixels, "SVGF::layer_data2");
     }
     layer_state_ = {};
+}
+
+void SVGF::set_stable_planes_enabled(bool enabled) noexcept {
+    if (has_prepared_resources()) {
+        prepare_stable_resources(pipeline()->pixel_num(), enabled, enabled);
+    }
 }
 
 void SVGF::compile_resolve() {
@@ -517,6 +534,7 @@ void SVGF::prepare() noexcept {
     modulator_->prepare();
     variance_estimator_->prepare();
     prefilter_->prepare();
+    set_stable_planes_enabled(pipeline()->renderer().integrator()->stable_planes_enabled());
 }
 
 void SVGF::compile() noexcept {
@@ -530,6 +548,8 @@ void SVGF::compile() noexcept {
 CommandBatch SVGF::dispatch(vision::RealTimeDenoiseInput &input) noexcept {
     CommandBatch ret;
     if (params_.switch_) {
+        prepare_stable_resources(input.resolution.x * input.resolution.y,
+            input.layer_count > 1u || input.composed_coverage, input.use_stable_planes || input.composed_coverage);
         if (input.composed_coverage) {
             if (!env_flag("VISION_SVGF_SKIP_RESOLVE")) ret << resolve(input);
             else layer_state_[0].history = 0u;
@@ -611,6 +631,7 @@ void SVGF::update_resolution(uint2 resolution) noexcept {
     atrous_->update_resolution(resolution);
     variance_estimator_->update_resolution(resolution);
     prepare_resolve(pixel_num);
+    set_stable_planes_enabled(pipeline()->renderer().integrator()->stable_planes_enabled());
 }
 
 }// namespace vision::svgf

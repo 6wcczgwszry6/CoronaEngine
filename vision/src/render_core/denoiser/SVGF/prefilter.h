@@ -16,7 +16,7 @@ struct PrefilterParam {
     uint use_stable_planes{0u};
     uint layered{0u};
     BufferDesc<StablePlaneData> stable_planes;
-    BufferDesc<StablePlaneData> prev_stable_planes;
+    BufferDesc<StablePlaneHistory> prev_stable_planes;
     BufferDesc<SurfaceData> stable_surfaces;
     BufferDesc<SurfaceData> prev_stable_surfaces;
     BufferDesc<RadType4> radiance_direct;
