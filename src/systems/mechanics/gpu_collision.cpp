@@ -1051,6 +1051,26 @@ void GpuCollisionPipeline::set_mesh(std::uint64_t key, std::uint64_t revision,
     impl_->meshes[key] = std::move(m);
 }
 bool GpuCollisionPipeline::contains(std::uint64_t key) const { return impl_->meshes.contains(key); }
+bool GpuCollisionPipeline::contains(std::uint64_t key, std::uint64_t revision) const {
+    const auto it = impl_->meshes.find(key);
+    return it != impl_->meshes.end() && it->second->revision == revision;
+}
+void GpuCollisionPipeline::prepare_instances(std::span<const Instance> instances) {
+    GpuPerformance::Scope performance{"collision.prepare"};
+    GpuPerformance::record_work_items(instances.size());
+    impl_->usable();
+    if (instances.empty()) return;
+    for (const auto& instance : instances) {
+        impl_->mesh(instance.key);
+        for (float value : instance.transform)
+            if (!std::isfinite(value)) throw std::invalid_argument("Invalid GPU collision transform");
+    }
+    Impl::Recording recording{*impl_};
+    auto stream = impl_->executor.stream();
+    for (const auto& instance : instances) impl_->prepare(stream, instance, true);
+    impl_->finish(stream);
+    impl_->in_flight_uploads.clear();
+}
 void GpuCollisionPipeline::update_vertices(std::uint64_t key, std::span<const VertexSource> sources, float pose_dt) {
     const VertexUpdate update{key, sources, pose_dt};
     update_vertices(std::span(&update, 1));

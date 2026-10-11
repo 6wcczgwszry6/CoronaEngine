@@ -1031,6 +1031,7 @@ struct MechanicsSystem::Impl {
     // Declared after slots so workers join before those slots are destroyed.
     std::vector<std::jthread> gpu_preparation_workers;
     void start_gpu_preparation();
+    std::size_t collision_preparation_cursor{};
     using GpuMeshIdentity = std::tuple<std::uintptr_t, std::uint64_t, std::size_t, std::size_t>;
     std::map<GpuMeshIdentity, std::uint64_t> gpu_skinning_keys;
     std::uint64_t next_gpu_skinning_key = 1;
@@ -1083,6 +1084,7 @@ struct MechanicsSystem::Impl {
     void clear_runtime_state() {
         for (auto& worker : gpu_preparation_workers) worker.request_stop();
         gpu_preparation_workers.clear();
+        collision_preparation_cursor = 0;
         gpu_submission_batch.reset();
         gpu_floor_sleep.reset();
         gpu_contact_solver.reset();

@@ -1377,38 +1377,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     }
 
 
-    // Bug-8：triangle_octree_cache 按 model_id 缓存，没有随物体消失的清理机制
-    // 收集本帧出现的所有 model_id，清理不再使用的静态 octree（防 model 卸载后内存泄漏）
-    {
-        std::unordered_set<std::uint64_t> alive_model_ids;
-        for (const auto& data : mechanics_data) {
-            if (data.model_id != 0) alive_model_ids.insert(data.model_id);
-        }
-        // Animation and Foot supports can remain active outside the simulated
-        // scene. Keep their immutable bind data instead of reparsing it each tick.
-        for (const auto& [geometry, model] : impl_->skinned_collision_model_ids)
-            if (model != 0) alive_model_ids.insert(model);
-        for (const auto& [geometry, support] : impl_->foot_ground_cache)
-            if (support.model_id != 0) alive_model_ids.insert(support.model_id);
-        for (auto it = impl_->triangle_octree_cache.begin(); it != impl_->triangle_octree_cache.end();) {
-            if (!alive_model_ids.count(it->first)) it = impl_->triangle_octree_cache.erase(it);
-            else ++it;
-        }
-        // collision_mesh_cache 和 static_triangle_index_cache 同样按 model_id 缓存，一并清理
-        for (auto it = impl_->collision_mesh_cache.begin(); it != impl_->collision_mesh_cache.end();) {
-            if (!alive_model_ids.count(it->first)) it = impl_->collision_mesh_cache.erase(it);
-            else ++it;
-        }
-        for (auto it = impl_->static_triangle_index_cache.begin(); it != impl_->static_triangle_index_cache.end();) {
-            if (!alive_model_ids.count(it->first)) it = impl_->static_triangle_index_cache.erase(it);
-            else ++it;
-        }
-        for (auto it = impl_->static_triangle_bone_cache.begin(); it != impl_->static_triangle_bone_cache.end();) {
-            if (!alive_model_ids.count(it->first)) it = impl_->static_triangle_bone_cache.erase(it);
-            else ++it;
-        }
-    }
-
     // E2 warm_start_cache stale 清理：移除本帧不再有接触的 pair
     {
         for (auto it = impl_->warm_start_cache.begin(); it != impl_->warm_start_cache.end();) {
@@ -1901,16 +1869,78 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         }
     }
 
-    // Collision geometry follows live geometry even when simulation is paused.
-    if (impl_->gpu_collision) {
-        std::vector<std::uint64_t> collision_keys;
-        for (auto key : geom_handles) {
+    // Prepare one new resident mesh per animation update, including Phantom and
+    // paused scenes. Never wait for background compilation just to do optional
+    // preparation. Active physics still waits for every required pipeline.
+    GpuPerformance::Scope preparation{"animation.collision_prepare"};
+    std::unordered_set<std::uint64_t> live_models;
+    std::vector<std::uint64_t> collision_keys;
+    bool prepared_mesh = false;
+    const auto start = impl_->collision_preparation_cursor % std::max<std::size_t>(geom_handles.size(), 1);
+    for (std::size_t offset = 0; offset < geom_handles.size(); ++offset) {
+        const auto index = (start + offset) % geom_handles.size();
+        const auto key = geom_handles[index];
+        std::uintptr_t resource_handle{}, transform_handle{};
+        {
             auto geometry = geom_storage.try_acquire_read(key);
-            if (geometry && geometry->gpu_build_state == GeometryDevice::GpuBuildState::Ready &&
-                !geometry->mesh_handles.empty()) collision_keys.push_back(key);
+            if (!geometry || geometry->gpu_build_state != GeometryDevice::GpuBuildState::Ready ||
+                geometry->mesh_handles.empty()) continue;
+            resource_handle = geometry->model_resource_handle;
+            transform_handle = geometry->transform_handle;
         }
-        impl_->gpu_collision->retain(collision_keys);
+        std::uint64_t model_id{};
+        if (auto resource = hub.model_resource_storage().try_acquire_read(resource_handle))
+            model_id = resource->model_id;
+        if (!model_id) continue;
+        live_models.insert(model_id);
+        // A replaced model must not retain a previous model's GPU geometry.
+        if (impl_->gpu_collision && impl_->gpu_collision->contains(key, model_id)) {
+            collision_keys.push_back(key);
+            continue;
+        }
+        if (prepared_mesh || !impl_->gpu_collision.ready()) continue;
+        ModelTransform transform;
+        {
+            auto current = hub.model_transform_storage().try_acquire_read(transform_handle);
+            if (!current) continue;
+            transform = *current;
+        }
+        // Count a topology build against this frame's budget even if it yields
+        // no triangles. Reuse the scene read lock already held by animation.
+        auto mesh = impl_->collision_mesh_cache.find(model_id);
+        if (mesh == impl_->collision_mesh_cache.end()) {
+            prepared_mesh = true;
+            impl_->collision_preparation_cursor = index + 1;
+            const auto scene = frame_scenes.find(model_id);
+            if (scene != frame_scenes.end())
+                ensure_collision_mesh(model_id, *scene->second, impl_->collision_mesh_cache,
+                                      &impl_->static_triangle_index_cache, &impl_->static_triangle_bone_cache);
+            else
+                ensure_collision_mesh(model_id, impl_->collision_mesh_cache,
+                                      &impl_->static_triangle_index_cache, &impl_->static_triangle_bone_cache);
+            mesh = impl_->collision_mesh_cache.find(model_id);
+        }
+        // Animated geometry must come from the completed skinning batch above;
+        // never substitute bind-pose vertices for missing deformation data.
+        if (mesh == impl_->collision_mesh_cache.end() || mesh->second.requires_skinning ||
+            mesh->second.triangles.empty()) continue;
+        prepared_mesh = true;
+        impl_->collision_preparation_cursor = index + 1;
+        auto& tree = impl_->triangle_octree_cache[model_id];
+        if (tree.empty()) tree.build(mesh->second.vertices, mesh->second);
+        impl_->gpu_collision.ensure();
+        impl_->gpu_collision->set_mesh(key, model_id, mesh->second, tree);
+        const GpuCollisionPipeline::Instance instance{key, gpu_matrix(transform.compute_matrix())};
+        impl_->gpu_collision->prepare_instances(std::span(&instance, 1));
+        collision_keys.push_back(key);
     }
+    if (impl_->gpu_collision) impl_->gpu_collision->retain(collision_keys);
+    // Keep immutable topology for all resident models, including Phantom bodies
+    // alongside an active simulation. Cleanup must also run while fully paused.
+    std::erase_if(impl_->triangle_octree_cache, [&](const auto& item) { return !live_models.contains(item.first); });
+    std::erase_if(impl_->collision_mesh_cache, [&](const auto& item) { return !live_models.contains(item.first); });
+    std::erase_if(impl_->static_triangle_index_cache, [&](const auto& item) { return !live_models.contains(item.first); });
+    std::erase_if(impl_->static_triangle_bone_cache, [&](const auto& item) { return !live_models.contains(item.first); });
     // Cleanup also runs while physics is paused; residency is an animation concern.
     if (impl_->gpu_skinning) {
         impl_->gpu_skinning->retain(active_gpu_keys);

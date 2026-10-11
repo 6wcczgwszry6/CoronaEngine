@@ -89,6 +89,10 @@ class GpuCollisionPipeline {
     // frame. Foot IK then sees one consistent previous pose for every support.
     void snapshot_ground(std::span<const std::uint64_t> keys);
     [[nodiscard]] bool contains(std::uint64_t key) const;
+    [[nodiscard]] bool contains(std::uint64_t key, std::uint64_t revision) const;
+    // Upload and refit resident geometry before its first query, without any
+    // contact generation or readback. The caller supplies current transforms.
+    void prepare_instances(std::span<const Instance> instances);
     [[nodiscard]] std::vector<Contact> contacts(std::span<const Pair> pairs);
     [[nodiscard]] std::vector<VertexResult> sample_vertices(std::span<const VertexQuery> queries);
     [[nodiscard]] std::vector<GroundResult> ground(std::span<const GroundQuery> queries);
