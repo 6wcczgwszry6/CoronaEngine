@@ -11,7 +11,7 @@
 
 namespace vision::svgf {
 
-struct CombinedAtrousParam {
+struct CombinedPoissonParam {
     BufferDesc<float4> guide_position;
     BufferDesc<float4> guide_normal;
     BufferDesc<uint4> guide_identity;
@@ -42,17 +42,17 @@ struct CombinedAtrousParam {
 
 }// namespace vision::svgf
 
-OC_PARAM_STRUCT(vision::svgf, CombinedAtrousParam, guide_position, guide_normal, guide_identity, guide_surface, use_stable_planes, layered, stable_planes, prev_stable_planes, stable_surfaces, prev_stable_surfaces, direct_src, direct_dst, indirect_src, indirect_dst,
+OC_PARAM_STRUCT(vision::svgf, CombinedPoissonParam, guide_position, guide_normal, guide_identity, guide_surface, use_stable_planes, layered, stable_planes, prev_stable_planes, stable_surfaces, prev_stable_surfaces, direct_src, direct_dst, indirect_src, indirect_dst,
 visibility_buffer, svgf_buffer, camera_pos, l_phi, n_phi, z_phi, step_size, iteration, frame_index, write_history, channel_kind, use_shading_normal){};
 
 namespace vision::svgf {
 class SVGF;
 
-class AtrousFilter : public Toolkit, public RuntimeObject {
+class PoissonFilter : public Toolkit, public RuntimeObject {
 private:
     SVGF *svgf_{nullptr};
 
-    using combined_signature = void(CombinedAtrousParam);
+    using combined_signature = void(CombinedPoissonParam);
     Shader<combined_signature> combined_shader_;
     Shader<combined_signature> guide_shader_, legacy_combined_shader_;
     // One layer at a time; reused by all four filter iterations. Full precision.
@@ -63,7 +63,7 @@ private:
     Buffer<RadType4> temp_buffer_indirect_;
 
 public:
-    explicit AtrousFilter(SVGF *svgf)
+    explicit PoissonFilter(SVGF *svgf)
         : svgf_(svgf) {}
     VS_HOTFIX_MAKE_RESTORE(RuntimeObject, svgf_, combined_shader_, guide_shader_, legacy_combined_shader_,
                            guide_position_, guide_normal_, guide_identity_, guide_surface_,

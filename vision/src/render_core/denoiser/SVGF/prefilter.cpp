@@ -140,7 +140,7 @@ auto compute_spatial_weight = [](Float history) -> Float {
                             
                             Float w_total_direct = w * w_lum_direct;
                             Float w_total_indirect = w * w_lum_indirect;
-                            // Match the a-trous specular boundary rule during
+                            // Match the Poisson specular boundary rule during
                             // low-history reconstruction as well. Direct/indirect
                             // producers keep their original cross-surface weights.
                             w_total_indirect *= ocarina::select(
@@ -262,7 +262,7 @@ auto compute_spatial_weight = [](Float history) -> Float {
 
                 // Disocclusion variance boost (canonical SVGF). Freshly disoccluded / low-history
                 // pixels have an unreliable, too-small temporal variance, so the variance-guided
-                // a-trous weight (phi_l = l_phi*sqrt(var)+min_phi) refuses to blend them and noise
+                // Poisson weight (phi_l = l_phi*sqrt(var)+min_phi) refuses to blend them and noise
                 // / fireflies survive. For low history, raise the variance floor (and boost it) so
                 // the spatial filter is allowed to smooth aggressively until temporal history is
                 // rebuilt. apply_min_variance degrades to max(var, kMinVarianceConsistent) when the
@@ -291,7 +291,7 @@ auto compute_spatial_weight = [](Float history) -> Float {
 CommandBatch Prefilter::dispatch(RealTimeDenoiseInput &input, bool use_shading_normal) noexcept {
     PrefilterParam param;
     bind_stable_planes(param, input);
-    svgf_->atrous()->bind_guides(param);
+    svgf_->poisson()->bind_guides(param);
     param.use_shading_normal = use_shading_normal;
     param.radiance_direct = input.direct.descriptor();
     param.radiance_indirect = input.indirect.descriptor();

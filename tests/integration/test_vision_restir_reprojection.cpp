@@ -389,7 +389,7 @@ void check_stable_plane(vision::Pipeline& pipeline, bool tinted_mirror) {
             fail(pipeline.frame_buffer()->stable_planes_size() <= StablePlaneCount,
                  "disabled stable planes must release full-resolution path storage");
             fail(denoiser->svgf_buffer_cur(0u, 1u).size() == 0u &&
-                 denoiser->atrous()->guide_position().size() == 0u,
+                 denoiser->poisson()->guide_position().size() == 0u,
                  "disabled stable planes must release child history and spatial guides");
         } else {
             auto previous = pipeline.frame_buffer()->prev_stable_planes_view(0u);

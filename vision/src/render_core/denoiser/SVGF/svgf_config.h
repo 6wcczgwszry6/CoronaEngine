@@ -22,8 +22,8 @@ struct Epsilon {
         static constexpr float kEpsilon = Epsilon::kGeometry;
         static constexpr float kPrefilterNormalPower = 32.f;
         static constexpr float kPrefilterDepthScale = 0.1f;
-        static constexpr float kAtrousNormalPowerDefault = 128.f;
-        static constexpr float kAtrousDepthScaleDefault = 0.1f;
+        static constexpr float kPoissonNormalPowerDefault = 128.f;
+        static constexpr float kPoissonDepthScaleDefault = 0.1f;
     };
 
     struct Modulator {
@@ -105,8 +105,7 @@ struct Epsilon {
         static constexpr float kMaxBlendWeight = 0.95f;
     };
 
-    struct Atrous {
-        static constexpr float kBSpline1D[3] = {0.375f, 0.25f, 0.0625f};
+    struct Poisson {
         static constexpr float kMinPhi = 0.05f;
         static constexpr float kMinVariance = 0.001f;   // Half-safe (was 0.00005f)
 
@@ -124,7 +123,7 @@ struct Epsilon {
         // Disabled: it was added to mask noise in the OLD racy/single-buffered history by
         // compounding the spatial filter into history every frame. With the double-buffered
         // race-free history (P0-A) that compounding now just over-blurs and trails (each
-        // frame re-filters an already-filtered history). The per-frame 4-iteration a-trous
+        // frame re-filters an already-filtered history). The four Poisson spatial passes
         // still denoises the display output; we simply no longer feed it back. kFeedbackSpecular
         // controls whether the SPECULAR channel is fed back too (kept false; view-dependent).
         static constexpr bool kFeedbackEnabled = false;
@@ -132,23 +131,27 @@ struct Epsilon {
     };
 
     struct PoissonDisk {
-        static constexpr uint kSampleCount = 12;
-        static constexpr float kGoldenAngle = 2.39996323f;
-        static constexpr float kSamplesX[12] = {
-            0.0f,
-            -0.5f, 0.5f, -0.5f, 0.5f,
-            -0.85f, 0.0f, 0.85f, 0.0f,
-            -0.65f, 0.65f, -0.65f};
-        static constexpr float kSamplesY[12] = {
-            0.0f,
-            -0.5f, -0.5f, 0.5f, 0.5f,
-            0.0f, -0.85f, 0.0f, 0.85f,
-            -0.65f, -0.65f, 0.65f};
-        static constexpr float kWeights[12] = {
-            1.0f,
-            0.7f, 0.7f, 0.7f, 0.7f,
-            0.4f, 0.4f, 0.4f, 0.4f,
-            0.25f, 0.25f, 0.25f};
+        // Fixed rejection-sampled disk (minimum spacing 0.34), in opposite pairs
+        // to preserve linear ramps. The centre is accumulated separately.
+        // Radius 2.5 keeps all rounded taps distinct at steps 1, 2, 4 and 8.
+        static constexpr uint kSampleCount = 16;
+        static constexpr float kRadius = 2.5f;
+        static constexpr float kSamplesX[kSampleCount] = {
+            0.503429f, -0.503429f, 0.294078f, -0.294078f,
+            -0.478489f, 0.478489f, 0.894812f, -0.894812f,
+            0.718108f, -0.718108f, 0.711476f, -0.711476f,
+            -0.164448f, 0.164448f, -0.350371f, 0.350371f};
+        static constexpr float kSamplesY[kSampleCount] = {
+            -0.323228f, 0.323228f, 0.545218f, -0.545218f,
+            0.844327f, -0.844327f, -0.241444f, 0.241444f,
+            0.539078f, -0.539078f, 0.126226f, -0.126226f,
+            0.682003f, -0.682003f, -0.909104f, 0.909104f};
+        // Gaussian radial weights exp(-3 * dot(sample, sample)); centre weight 1.
+        static constexpr float kWeights[kSampleCount] = {
+            0.341724f, 0.341724f, 0.316247f, 0.316247f,
+            0.059278f, 0.059278f, 0.076006f, 0.076006f,
+            0.089024f, 0.089024f, 0.208797f, 0.208797f,
+            0.228433f, 0.228433f, 0.057978f, 0.057978f};
     };
 
     struct Prefilter {

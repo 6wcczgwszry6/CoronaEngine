@@ -47,7 +47,7 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
             Env(const char* n, const char* v) : name(n), old(std::getenv(n) ? std::getenv(n) : "") { set(n, v); }
             ~Env() { set(name, old.c_str()); }
         } domain{"VISION_SVGF_RADIANCE_DOMAIN", "1"}, prefilter{"VISION_SVGF_SKIP_PREFILTER", "1"},
-          atrous{"VISION_SVGF_SKIP_ATROUS", "1"}, resolve{"VISION_SVGF_SKIP_RESOLVE", "1"},
+          poisson{"VISION_SVGF_SKIP_POISSON", "1"}, resolve{"VISION_SVGF_SKIP_RESOLVE", "1"},
           variance{"VISION_SVGF_SKIP_VARIANCE", "0"};
         const uint n = pipeline.pixel_num();
         const uint center = n / 2u + pipeline.resolution().x / 2u;
@@ -259,7 +259,7 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
             throw std::runtime_error("layer motion must override primary surface motion");
         guides = baseline;
         Env::set("VISION_SVGF_SKIP_PREFILTER", "0");
-        Env::set("VISION_SVGF_SKIP_ATROUS", "0");
+        Env::set("VISION_SVGF_SKIP_POISSON", "0");
         Env::set("VISION_SVGF_SKIP_RESOLVE", "1");
         for (bool separated : {true, false}) {
             guides = baseline;
@@ -276,7 +276,7 @@ void layered_history_regression(vision::Pipeline& pipeline, Filter& denoiser) {
                 throw std::runtime_error("spatial and coverage taps must filter matching paths while excluding neighboring branch colors");
         }
         Env::set("VISION_SVGF_SKIP_PREFILTER", "1");
-        Env::set("VISION_SVGF_SKIP_ATROUS", "1");
+        Env::set("VISION_SVGF_SKIP_POISSON", "1");
         Env::set("VISION_SVGF_SKIP_RESOLVE", "1");
         guides = baseline;
         run(0u, 1u, colors[1]); run(1u, 1u, colors[1]);
@@ -354,7 +354,7 @@ void check_svgf_spatial_bypass(vision::Pipeline& pipeline) {
             previous(std::getenv(key) ? std::getenv(key) : ""), present(std::getenv(key) != nullptr) { set(key, value); }
         ~EnvRestore() { set(name, present ? previous.c_str() : nullptr); }
     } domain{"VISION_SVGF_RADIANCE_DOMAIN", "1"}, temporal{"VISION_SVGF_SKIP_VARIANCE", "1"},
-      prefilter{"VISION_SVGF_SKIP_PREFILTER", "1"}, atrous{"VISION_SVGF_SKIP_ATROUS", "0"},
+      prefilter{"VISION_SVGF_SKIP_PREFILTER", "1"}, poisson{"VISION_SVGF_SKIP_POISSON", "0"},
       resolve{"VISION_SVGF_SKIP_RESOLVE", "1"};
     const uint count = pipeline.pixel_num();
     std::vector<RadType4> samples(count);
@@ -386,7 +386,7 @@ void check_svgf_spatial_bypass(vision::Pipeline& pipeline) {
     // newly exposed surfaces, off-screen history and invalidation use only the
     // current spatial coverage estimate.
     EnvRestore resolve_enabled{"VISION_SVGF_SKIP_RESOLVE", "0"},
-        atrous_disabled{"VISION_SVGF_SKIP_ATROUS", "1"};
+        poisson_disabled{"VISION_SVGF_SKIP_POISSON", "1"};
     std::vector<TriangleHit> geometry(count);
     pipeline.stream() << input.visibility.download(geometry.data()) << synchronize() << commit();
     const uint edge_pixel = 8u * 16u + 8u;
@@ -521,8 +521,8 @@ void check_svgf_spatial_bypass(vision::Pipeline& pipeline) {
         throw std::runtime_error("subpixel coverage must include neighbouring surfaces and preserve complementary edge energy");
 
     // A noise-free, low-contrast lighting edge on one plane should survive the
-    // wide wavelet passes. Fixed radiance floors at every step flatten it.
-    EnvRestore filter_enabled{"VISION_SVGF_SKIP_ATROUS", "0"},
+    // wide Poisson passes. Fixed radiance floors at every step flatten it.
+    EnvRestore filter_enabled{"VISION_SVGF_SKIP_POISSON", "0"},
         resolve_disabled{"VISION_SVGF_SKIP_RESOLVE", "1"};
     for (auto& hit : geometry) hit = receiver_hit;
     for (uint i = 0; i < count; ++i) {
@@ -540,11 +540,11 @@ void check_svgf_spatial_bypass(vision::Pipeline& pipeline) {
         throw std::runtime_error("wide ReSTIR SVGF passes must preserve at least half of a stable shadow edge's contrast");
     std::cout << "PASS: wide ReSTIR filtering preserves low-variance lighting detail\n";
 
-    // A mature but noisy history must pass its measured variance to a-trous.
+    // A mature but noisy history must pass its measured variance to Poisson.
     // Using variance as lerp's first argument extrapolates for variance > 1,
     // turns it negative and silently replaces it with the minimum floor.
     EnvRestore prefilter_enabled{"VISION_SVGF_SKIP_PREFILTER", "0"},
-        atrous_off{"VISION_SVGF_SKIP_ATROUS", "1"};
+        poisson_off{"VISION_SVGF_SKIP_POISSON", "1"};
     std::vector<svgf::SVGFDataDual> noisy_history(count);
     for (auto& h : noisy_history) {
         h.illumi_direct = RadType4{1.f, 1.f, 1.f, 6.f};
@@ -567,7 +567,7 @@ void check_svgf_spatial_bypass(vision::Pipeline& pipeline) {
     // The Gaussian variance prefilter widens the edge-stopping guide only.
     // Rejected sky taps cannot add uncertainty to the filtered surface signal.
     EnvRestore prefilter_off{"VISION_SVGF_SKIP_PREFILTER", "1"},
-        atrous_on{"VISION_SVGF_SKIP_ATROUS", "0"};
+        poisson_on{"VISION_SVGF_SKIP_POISSON", "0"};
     for (auto& hit : geometry) hit.inst_id = InvalidUI32;
     geometry[edge_pixel] = receiver_hit;
     for (auto& sample : samples) sample = RadType4{0.f, 0.f, 0.f, 100.f};
@@ -579,7 +579,7 @@ void check_svgf_spatial_bypass(vision::Pipeline& pipeline) {
     std::cout << "Isolated surface propagated variance=" << isolated_variance << '\n';
     if (!std::isfinite(isolated_variance) || std::abs(isolated_variance - 0.25f) > 1e-4f ||
         std::abs(float(samples[edge_pixel].x) - 1.f) > 1e-5f)
-        throw std::runtime_error("a-trous must not propagate Gaussian guide variance across rejected geometry boundaries");
+        throw std::runtime_error("Poisson must not propagate Gaussian guide variance across rejected geometry boundaries");
     std::cout << "PASS: rejected neighbours cannot contaminate propagated variance\n";
 }
 

@@ -33,7 +33,7 @@ struct CachedCoverageGuide {
     [[nodiscard]] Float3 depth_point(const Float3 &) const { return depth_position; }
 };
 
-// One compact plane at a time. Its storage aliases the finished a-trous
+// One compact plane at a time. Its storage aliases the finished Poisson
 // scratch, and only the per-pixel OR of all layer edges survives this pass.
 [[nodiscard]] Bool cached_coverage_plane_edge(const Var<ResolveParam> &param, Uint center, Uint neighbor) {
     auto a = param.edge_identity.read(center), b = param.edge_identity.read(neighbor);
@@ -92,7 +92,7 @@ void SVGF::prepare_stable_resources(uint pixel_num, bool layered, bool guided) {
     uint layer_pixels = layered ? pixel_num : 0u;
     uint guide_pixels = guided ? pixel_num : 0u;
     if (layer_data_[0].size() == layer_pixels && coverage_position_.size() == guide_pixels &&
-        atrous_->guide_position().size() == guide_pixels) { return; }
+        poisson_->guide_position().size() == guide_pixels) { return; }
     // Callers may already have queued work using the old descriptors.
     pipeline()->stream() << synchronize() << commit();
     auto resize = [&]<typename T>(Buffer<T> &buffer, uint size, const char *name) {
@@ -105,7 +105,7 @@ void SVGF::prepare_stable_resources(uint pixel_num, bool layered, bool guided) {
     resize(coverage_normal_, guide_pixels, "SVGF::coverage_normal");
     resize(coverage_depth_, guide_pixels, "SVGF::coverage_depth");
     resize(coverage_meta_, guide_pixels, "SVGF::coverage_meta");
-    atrous_->prepare_guides(guide_pixels);
+    poisson_->prepare_guides(guide_pixels);
     for (uint layer = 0u; layer < StablePlaneCount - 1u; ++layer) {
         resize(layer_data_[layer], layer_pixels, "SVGF::layer_data");
         resize(layer_data2_[layer], layer_pixels, "SVGF::layer_data2");
@@ -443,18 +443,18 @@ CommandBatch SVGF::resolve(RealTimeDenoiseInput &input) {
     param.prev_guide_normal = coverage_normal_.descriptor();
     param.prev_guide_depth = coverage_depth_.descriptor();
     param.prev_guide_meta = coverage_meta_.descriptor();
-    param.edge_position = atrous_->guide_position().descriptor();
-    param.edge_normal = atrous_->guide_normal().descriptor();
-    param.edge_identity = atrous_->guide_identity().descriptor();
-    param.edge_surface = atrous_->guide_surface().descriptor();
+    param.edge_position = poisson_->guide_position().descriptor();
+    param.edge_normal = poisson_->guide_normal().descriptor();
+    param.edge_identity = poisson_->guide_identity().descriptor();
+    param.edge_surface = poisson_->guide_surface().descriptor();
 
     bind_stable_planes(param, input);
     // The compact edge pass finishes before these same images become the
     // current coverage guide. Float4 and uint4 have identical storage extents.
-    param.guide_position = atrous_->guide_position().descriptor();
-    param.guide_normal = atrous_->guide_normal().descriptor();
-    param.guide_meta = atrous_->guide_identity().descriptor();
-    auto scratch_surface = atrous_->guide_surface();
+    param.guide_position = poisson_->guide_position().descriptor();
+    param.guide_normal = poisson_->guide_normal().descriptor();
+    param.guide_meta = poisson_->guide_identity().descriptor();
+    auto scratch_surface = poisson_->guide_surface();
     param.guide_depth = BufferView<float4>{scratch_surface.handle(), scratch_surface.size()}.descriptor();
     param.edge_flags = edge_flags_.descriptor();
     param.composed_coverage = input.composed_coverage;
@@ -501,7 +501,7 @@ void SVGF::compute_GBuffer(const vision::RayState &rs, const vision::Interaction
 }
 
 void SVGF::initialize_(const vision::NodeDesc &node_desc) noexcept {
-    atrous_ = make_shared<AtrousFilter>(this);
+    poisson_ = make_shared<PoissonFilter>(this);
     modulator_ = make_shared<Modulator>(this);
     variance_estimator_ = make_shared<VarianceEstimator>(this);
     prefilter_ = make_shared<Prefilter>(this);
@@ -530,7 +530,7 @@ bool SVGF::history_valid(const RealTimeDenoiseInput &input) const noexcept {
 void SVGF::prepare() noexcept {
     prepare_buffers();
     frame_buffer().register_callback(shared_from_this());
-    atrous_->prepare();
+    poisson_->prepare();
     modulator_->prepare();
     variance_estimator_->prepare();
     prefilter_->prepare();
@@ -538,7 +538,7 @@ void SVGF::prepare() noexcept {
 }
 
 void SVGF::compile() noexcept {
-    atrous_->compile();
+    poisson_->compile();
     modulator_->compile();
     variance_estimator_->compile();
     prefilter_->compile();
@@ -566,7 +566,7 @@ CommandBatch SVGF::dispatch(vision::RealTimeDenoiseInput &input) noexcept {
         const bool radiance_domain = env_flag("VISION_SVGF_RADIANCE_DOMAIN");
         const bool skip_variance = env_flag("VISION_SVGF_SKIP_VARIANCE");
         const bool skip_prefilter = env_flag("VISION_SVGF_SKIP_PREFILTER") || !params_.spatial_filter_;
-        const bool skip_atrous = env_flag("VISION_SVGF_SKIP_ATROUS") || !params_.spatial_filter_;
+        const bool skip_poisson = env_flag("VISION_SVGF_SKIP_POISSON") || !params_.spatial_filter_;
 
         if (!radiance_domain) {
             ret << modulator_->demodulate(input);
@@ -574,8 +574,8 @@ CommandBatch SVGF::dispatch(vision::RealTimeDenoiseInput &input) noexcept {
         if (!skip_variance) {
             ret << variance_estimator_->dispatch_variance(input);
         }
-        if (input.use_stable_planes && (!skip_prefilter || !skip_atrous)) {
-            ret << atrous_->dispatch_guide(input);
+        if (input.use_stable_planes && (!skip_prefilter || !skip_poisson)) {
+            ret << poisson_->dispatch_guide(input);
         }
         if (!skip_prefilter) {
             // The temporal bypass does not produce current shading guides.
@@ -583,9 +583,9 @@ CommandBatch SVGF::dispatch(vision::RealTimeDenoiseInput &input) noexcept {
             ret << prefilter_->dispatch(input, !skip_variance);
         }
         
-        if (!skip_atrous) {
-            for (uint i = 0; i < Cfg::Atrous::kIterationCount; ++i) {
-                ret << atrous_->dispatch_combined(input, Cfg::Atrous::kStepSizes[i], i, !skip_variance);
+        if (!skip_poisson) {
+            for (uint i = 0; i < Cfg::Poisson::kIterationCount; ++i) {
+                ret << poisson_->dispatch_combined(input, Cfg::Poisson::kStepSizes[i], i, !skip_variance);
             }
         }
         if (!radiance_domain) {
@@ -628,7 +628,7 @@ void SVGF::update_resolution(uint2 resolution) noexcept {
     svgf_data.register_self(0, pixel_num);
     init_buffer_zero(device(), svgf_data2.super(), pixel_num, "SVGF::svgf_data2");
     svgf_data2.register_self(0, pixel_num);
-    atrous_->update_resolution(resolution);
+    poisson_->update_resolution(resolution);
     variance_estimator_->update_resolution(resolution);
     prepare_resolve(pixel_num);
     set_stable_planes_enabled(pipeline()->renderer().integrator()->stable_planes_enabled());

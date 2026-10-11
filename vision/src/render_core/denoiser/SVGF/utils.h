@@ -404,8 +404,8 @@ struct LuminanceWeightUtils {
     [[nodiscard]] static Float compute_phi_l(
         Float l_phi,
         Float variance,
-        Float min_variance = Cfg::Atrous::kMinVariance,
-        Float min_phi = Cfg::Atrous::kMinPhi) noexcept {
+        Float min_variance = Cfg::Poisson::kMinVariance,
+        Float min_phi = Cfg::Poisson::kMinPhi) noexcept {
         return l_phi * sqrt(max(variance, min_variance)) + min_phi;
     }
 };
