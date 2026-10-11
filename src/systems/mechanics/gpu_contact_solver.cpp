@@ -102,6 +102,21 @@ Vec inertia_apply(Floats& bodies, const Uint& base, const Vec& world) {
     return result;
 }
 
+Vec project_axes(const Vec& v, const Uint& bits, unsigned shift) {
+    Vec result;
+    for (unsigned i = 0; i < 3; ++i) {
+        result[i] = v[i];
+        $IF((bits & Uint(1u << (shift + i))) != Uint(0u)) { result[i] = 0.0f; }
+    }
+    return result;
+}
+
+Vec constrained_inertia(Floats& bodies, const Uint& base, const Vec& v, const Uint& bits) {
+    // P I^-1 P is symmetric and respects world-axis angular locks both in the
+    // effective mass and in the velocity update.
+    return project_axes(inertia_apply(bodies, base, project_axes(v, bits, 5)), bits, 5);
+}
+
 struct GatherKernel {
     Floats source, velocities;
     UInts indices;
@@ -134,13 +149,11 @@ struct SolveKernel {
                        const Float& inv_a, const Float& inv_b, const Uint& bits_a, const Uint& bits_b,
                        const Uint& ba, const Uint& bb, const Vec& ra, const Vec& rb) {
         for (std::uint32_t axis = 0; axis < 3; ++axis) {
-            va[axis] = va[axis] + impulse[axis] * inv_a;
-            vb[axis] = vb[axis] - impulse[axis] * inv_b;
+            $IF((bits_a & Uint(1u << (axis + 2u))) == Uint(0u)) { va[axis] = va[axis] + impulse[axis] * inv_a; }
+            $IF((bits_b & Uint(1u << (axis + 2u))) == Uint(0u)) { vb[axis] = vb[axis] - impulse[axis] * inv_b; }
         }
-        // Preserve the existing solver: angular application checks sleeping,
-        // not dynamic. Fixed bodies ordinarily carry zero inverse inertia.
-        $IF((bits_a & Uint(2u)) == Uint(0u)) { add_in_place(wa, inertia_apply(bodies, ba, cross3(ra, impulse))); }
-        $IF((bits_b & Uint(2u)) == Uint(0u)) { add_in_place(wb, inertia_apply(bodies, bb, cross3(rb, neg(impulse)))); }
+        $IF((bits_a & Uint(3u)) == Uint(1u)) { add_in_place(wa, constrained_inertia(bodies, ba, cross3(ra, impulse), bits_a)); }
+        $IF((bits_b & Uint(3u)) == Uint(1u)) { add_in_place(wb, constrained_inertia(bodies, bb, cross3(rb, neg(impulse)), bits_b)); }
     }
     void clamp_pair(Vec& va, Vec& vb, Vec& wa, Vec& wb, const Uint& bits_a, const Uint& bits_b) {
         $IF((bits_a & Uint(2u)) == Uint(0u)) { clamp_speed(va, max_linear); clamp_speed(wa, max_angular); }
@@ -169,6 +182,8 @@ struct SolveKernel {
             auto wa = load3(velocities, a * Uint(6u) + Uint(3u));
             auto vb = load3(velocities, b * Uint(6u));
             auto wb = load3(velocities, b * Uint(6u) + Uint(3u));
+            va = project_axes(va, bits_a, 2); vb = project_axes(vb, bits_b, 2);
+            wa = project_axes(wa, bits_a, 5); wb = project_axes(wb, bits_b, 5);
             Float accumulated, accumulated_t, initial;
             accumulated = results.values[out + Uint(3u)];
             accumulated_t = results.values[out + Uint(4u)];
@@ -197,9 +212,10 @@ struct SolveKernel {
                 auto rbn = cross3(rb, n);
                 Float angular_a, angular_b, denominator;
                 angular_a = 0.0f; angular_b = 0.0f;
-                $IF((bits_a & Uint(3u)) == Uint(1u)) { angular_a = dot3(ran, inertia_apply(bodies, ba, ran)); }
-                $IF((bits_b & Uint(3u)) == Uint(1u)) { angular_b = dot3(rbn, inertia_apply(bodies, bb, rbn)); }
-                denominator = inv_a + inv_b + angular_a + angular_b + Float(1e-8f);
+                $IF((bits_a & Uint(3u)) == Uint(1u)) { angular_a = dot3(ran, constrained_inertia(bodies, ba, ran, bits_a)); }
+                $IF((bits_b & Uint(3u)) == Uint(1u)) { angular_b = dot3(rbn, constrained_inertia(bodies, bb, rbn, bits_b)); }
+                denominator = inv_a * dot3(n, project_axes(n, bits_a, 2)) +
+                              inv_b * dot3(n, project_axes(n, bits_b, 2)) + angular_a + angular_b;
                 $IF(denominator > Float(1e-12f)) {
                     Float target, raw, next, impulse;
                     target = 0.0f;
@@ -237,9 +253,10 @@ struct SolveKernel {
                         auto rbt = cross3(rb, direction);
                         Float tangent_a, tangent_b, tangent_denominator;
                         tangent_a = 0.0f; tangent_b = 0.0f;
-                        $IF((bits_a & Uint(2u)) == Uint(0u)) { tangent_a = dot3(rat, inertia_apply(bodies, ba, rat)); }
-                        $IF((bits_b & Uint(2u)) == Uint(0u)) { tangent_b = dot3(rbt, inertia_apply(bodies, bb, rbt)); }
-                        tangent_denominator = inv_a + inv_b + tangent_a + tangent_b + Float(1e-8f);
+                        $IF((bits_a & Uint(3u)) == Uint(1u)) { tangent_a = dot3(rat, constrained_inertia(bodies, ba, rat, bits_a)); }
+                        $IF((bits_b & Uint(3u)) == Uint(1u)) { tangent_b = dot3(rbt, constrained_inertia(bodies, bb, rbt, bits_b)); }
+                        tangent_denominator = inv_a * dot3(direction, project_axes(direction, bits_a, 2)) +
+                                              inv_b * dot3(direction, project_axes(direction, bits_b, 2)) + tangent_a + tangent_b;
                         $IF(tangent_denominator > Float(1e-12f)) {
                             Float slip, free_impulse, coefficient, cap, next_t, impulse_t;
                             slip = dot3(rel, direction);
@@ -509,7 +526,8 @@ struct GpuContactSolverPipeline::Impl {
         const auto island_count = static_cast<std::uint32_t>(islands.offsets.size() - 1u);
         std::vector<std::uint32_t> uint_upload;
         uint_upload.reserve(input_bodies.size() + input_contacts.size() * 3u + islands.offsets.size() + 2u + indices.size());
-        for (const auto& body : input_bodies) uint_upload.push_back(std::uint32_t(body.dynamic) | (std::uint32_t(body.sleeping) << 1u));
+        for (const auto& body : input_bodies) uint_upload.push_back(std::uint32_t(body.dynamic) | (std::uint32_t(body.sleeping) << 1u) |
+            (std::uint32_t(body.linear_lock & 7u) << 2u) | (std::uint32_t(body.angular_lock & 7u) << 5u));
         const auto endpoints_offset = uint_upload.size();
         for (const auto& contact : input_contacts) { uint_upload.push_back(contact.a); uint_upload.push_back(contact.b); }
         const auto order_offset = uint_upload.size();

@@ -727,6 +727,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 input.restitution = params.restitution;
                 input.dynamic = params.body_type == BodyType::Dynamic;
                 input.sleeping = body.sleeping;
+                input.linear_lock = body.linear_lock;
+                input.angular_lock = body.angular_lock;
                 solver_bodies.push_back(input);
                 solver_source_indices.push_back(body_state_indices.at(data.handle));
             }
@@ -797,15 +799,23 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             // 钳制穿透深度以防止大穿透时的位置校正过大（如物体生成在碰撞体内部）
             const float pen_clamped = std::min(pen, max_position_correction / k_positional_percent);
             if (pen_clamped > 0.f) {
-                const float inv_sum = inv_ma + inv_mb;  // 按逆质量比例分摊平移
+                const auto unlocked_normal = [&](std::uintptr_t h) {
+                    auto n = normal;
+                    for (int axis = 0; axis < 3; ++axis)
+                        if (impl_->body(h).linear_lock & (1u << axis)) n[axis] = 0;
+                    return n;
+                };
+                const auto na = unlocked_normal(ha), nb = unlocked_normal(hb);
+                const float inv_sum = inv_ma * ktm::dot(normal, na) + inv_mb * ktm::dot(normal, nb);
                 if (inv_sum > eps) {
                     const float corr_scale = k_positional_percent * pen_clamped / inv_sum;
                     const auto record_corr = [&](std::uintptr_t handle, float inv_eff, float sign) {
                         if (inv_eff <= eps) return;
                         auto& corr = position_correction[handle];  // 默认初始化为 {0,0,0}
-                        corr.x += sign * normal.x * corr_scale * inv_eff;
-                        corr.y += sign * normal.y * corr_scale * inv_eff;
-                        corr.z += sign * normal.z * corr_scale * inv_eff;
+                        const auto n = unlocked_normal(handle);
+                        corr.x += sign * n.x * corr_scale * inv_eff;
+                        corr.y += sign * n.y * corr_scale * inv_eff;
+                        corr.z += sign * n.z * corr_scale * inv_eff;
                     };
                     record_corr(ha, inv_ma, -1.f);
                     record_corr(hb, inv_mb, +1.f);
@@ -1049,8 +1059,11 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                              body.orientation_quat.k, body.orientation_quat.r};
         input.linear_lock = body.linear_lock;
         input.angular_lock = body.angular_lock;
-        if (const auto corr = position_correction.find(h); corr != position_correction.end())
-            input.correction = {corr->second.x, corr->second.y, corr->second.z};
+        if (const auto corr = position_correction.find(h); corr != position_correction.end()) {
+            const float length = std::sqrt(ktm::dot(corr->second, corr->second));
+            const float scale = length > max_position_correction ? max_position_correction / length : 1.0f;
+            input.correction = {corr->second.x * scale, corr->second.y * scale, corr->second.z * scale};
+        }
         final_pose_inputs.push_back(input);
         final_pose_targets.push_back(i);
         final_velocity_locks.push_back(apply_velocity_locks);

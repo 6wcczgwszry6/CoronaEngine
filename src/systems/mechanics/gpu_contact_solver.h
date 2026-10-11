@@ -22,6 +22,7 @@ class GpuContactSolverPipeline {
         std::array<float, 9> rotation{1, 0, 0, 0, 1, 0, 0, 0, 1};
         float mass{1.0f}, restitution{0.6f};
         bool dynamic{true}, sleeping{};
+        std::uint8_t linear_lock{}, angular_lock{};
     };
     struct Contact {
         std::uint32_t a{}, b{};
