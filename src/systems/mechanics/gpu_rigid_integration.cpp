@@ -1,5 +1,6 @@
 #include "gpu_rigid_integration.h"
 #include "gpu_performance.h"
+#include "gpu_compute_pipeline.h"
 
 #include <horizon.h>
 #include <Codegen/BuiltinVariate.h>
@@ -66,7 +67,7 @@ struct VelocityKernel {
         rot_factor.as_push_constant();
         max_linear.as_push_constant();
         max_angular.as_push_constant();
-        pipeline = H::ComputePipeline<>([&, resident] {
+        pipeline = make_compute_pipeline([&, resident] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {
@@ -135,7 +136,7 @@ struct PoseKernel {
     explicit PoseKernel(bool resident = false, bool scatter = false, bool pose_only = false) {
         count.as_push_constant();
         dt.as_push_constant();
-        pipeline = H::ComputePipeline<>([&, resident, scatter, pose_only] {
+        pipeline = make_compute_pipeline([&, resident, scatter, pose_only] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {

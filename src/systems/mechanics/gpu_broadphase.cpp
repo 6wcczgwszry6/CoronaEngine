@@ -1,5 +1,6 @@
 #include "gpu_broadphase.h"
 #include "gpu_performance.h"
+#include "gpu_compute_pipeline.h"
 
 #include <horizon.h>
 #include <Codegen/BuiltinVariate.h>
@@ -62,7 +63,7 @@ struct SortKernel {
         axis.as_push_constant();
         level.as_push_constant();
         stride.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {
@@ -112,7 +113,7 @@ struct SweepKernel {
             page_begin.as_push_constant();
             page_end.as_push_constant();
         }
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {
@@ -190,7 +191,7 @@ struct ScanKernel {
     ScanKernel() {
         count.as_push_constant();
         stride.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {

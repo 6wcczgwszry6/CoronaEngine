@@ -1,5 +1,6 @@
 #include "gpu_contact_solver.h"
 #include "gpu_performance.h"
+#include "gpu_compute_pipeline.h"
 
 #include <horizon.h>
 #include <Codegen/BuiltinVariate.h>
@@ -124,7 +125,7 @@ struct GatherKernel {
     H::ComputePipeline<> pipeline;
     GatherKernel() {
         count.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint body;
             body = dispatchThreadID()->x;
             $IF(body < count) {
@@ -294,7 +295,7 @@ struct SolveKernel {
         max_linear.as_push_constant(); max_angular.as_push_constant(); max_impulse.as_push_constant();
         friction.as_push_constant(); static_friction.as_push_constant();
         inverse_dt.as_push_constant(); restitution_threshold.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint island;
             island = dispatchThreadID()->x;
             $IF((island < islands) && (control.values[Uint(0u)] != Uint(0u))) {
@@ -324,7 +325,7 @@ struct ReduceKernel {
     H::ComputePipeline<> pipeline;
     ReduceKernel() {
         count.as_push_constant(); final_level.as_push_constant(); threshold_squared.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint lane, begin;
             lane = dispatchThreadID()->x; begin = lane * Uint(reduction_width);
             $IF((begin < count) && (control.values[Uint(0u)] != Uint(0u))) {

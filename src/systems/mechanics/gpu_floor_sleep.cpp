@@ -1,5 +1,6 @@
 #include "gpu_floor_sleep.h"
 #include "gpu_performance.h"
+#include "gpu_compute_pipeline.h"
 
 #include <horizon.h>
 #include <Codegen/BuiltinVariate.h>
@@ -84,7 +85,7 @@ struct FloorKernel {
         floor_y.as_push_constant(); floor_eps.as_push_constant(); restitution.as_push_constant();
         gravity_y.as_push_constant(); dt.as_push_constant(); low_velocity.as_push_constant();
         zero_velocity.as_push_constant(); friction.as_push_constant(); static_friction.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {
@@ -181,7 +182,7 @@ struct CommitKernel {
     H::ComputePipeline<> pipeline;
     CommitKernel() {
         count.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {
@@ -207,7 +208,7 @@ struct SleepKernel {
         count.as_push_constant(); dt.as_push_constant();
         velocity_threshold.as_push_constant(); time_threshold.as_push_constant();
         if (resident) timer_limit.as_push_constant();
-        pipeline = H::ComputePipeline<>([&, resident] {
+        pipeline = make_compute_pipeline([&, resident] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {
@@ -267,7 +268,7 @@ struct RemapKernel {
     H::ComputePipeline<> pipeline;
     RemapKernel() {
         count.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint i;
             i = dispatchThreadID()->x;
             $IF(i < count) {

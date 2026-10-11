@@ -1,5 +1,6 @@
 #include "gpu_skinning.h"
 #include "gpu_performance.h"
+#include "gpu_compute_pipeline.h"
 
 #include <Codegen/BuiltinVariate.h>
 #include <Codegen/ControlFlows.h>
@@ -144,7 +145,7 @@ struct SkinKernel {
                 bounds[bb + Uint(4u)] = oy; bounds[bb + Uint(5u)] = oz;
             }
         };
-        pipeline = H::ComputePipeline<>(shader, ktm::uvec3(kThreads, 1, 1));
+        pipeline = make_compute_pipeline(shader, ktm::uvec3(kThreads, 1, 1));
     }
 
     void bind(const H::HardwareBuffer& vertices, const H::HardwareBuffer& ids,
@@ -202,7 +203,7 @@ struct BoundsKernel {
                 }
             }
         };
-        pipeline = H::ComputePipeline<>(shader, ktm::uvec3(kThreads, 1, 1));
+        pipeline = make_compute_pipeline(shader, ktm::uvec3(kThreads, 1, 1));
     }
 
     void bind(const H::HardwareBuffer& input, const H::HardwareBuffer& output,

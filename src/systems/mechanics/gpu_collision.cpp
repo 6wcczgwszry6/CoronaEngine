@@ -1,5 +1,6 @@
 #include "gpu_collision.h"
 #include "gpu_performance.h"
+#include "gpu_compute_pipeline.h"
 
 #include <Codegen/BuiltinVariate.h>
 #include <Codegen/ControlFlows.h>
@@ -129,7 +130,7 @@ struct TransformKernel {
         count.as_push_constant();
         base.as_push_constant();
         stride.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint v;
             v = dispatchThreadID()->x;
             $IF(v < count) {
@@ -156,7 +157,7 @@ struct RefitKernel {
     RefitKernel() {
         offset.as_push_constant();
         count.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint lane;
             lane = dispatchThreadID()->x;
             $IF(lane < count) {
@@ -243,7 +244,7 @@ struct ContactKernel {
         first.as_push_constant();
         node_count.as_push_constant();
         threshold.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint lane, ta;
             lane = dispatchThreadID()->x;
             ta = first + lane;
@@ -345,7 +346,7 @@ struct SurfaceContactKernel {
         count.as_push_constant(); node_count.as_push_constant(); first.as_push_constant();
         closed.as_push_constant(); reverse.as_push_constant(); threshold.as_push_constant(); winding.as_push_constant();
         source_closed.as_push_constant(); source_winding.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint lane;
             lane = dispatchThreadID()->x;
             $IF(lane < count) {
@@ -472,7 +473,7 @@ struct VertexKernel {
         py.as_push_constant();
         pz.as_push_constant();
         inverse_dt.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             Uint v;
             v = dispatchThreadID()->x;
             $IF(v < count) {
@@ -518,7 +519,7 @@ struct GroundKernel {
         py.as_push_constant();
         pz.as_push_constant();
         drop.as_push_constant();
-        pipeline = H::ComputePipeline<>([&] {
+        pipeline = make_compute_pipeline([&] {
             // Walkers take disjoint strides through each leaf, so even a large
             // unsplittable leaf is processed in parallel without a candidate
             // cap. All lanes take the same bounds-dependent DFS branches.
@@ -643,7 +644,7 @@ struct ReduceKernel {
     H::ComputePipeline<> pipeline;
     explicit ReduceKernel(Reduction kind) {
         count.as_push_constant();
-        pipeline = H::ComputePipeline<>([&, kind] {
+        pipeline = make_compute_pipeline([&, kind] {
             Uint lane, first;
             lane = dispatchThreadID()->x;
             first = lane * Uint(fan);
