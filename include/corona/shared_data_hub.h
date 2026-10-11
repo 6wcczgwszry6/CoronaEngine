@@ -8,6 +8,7 @@
 #include <ktm/ktm.h>
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <mutex>
 #include <unordered_map>
@@ -141,20 +142,19 @@ struct GeometryDevice {
     ktm::fvec3 skinned_aabb_max{0.0f, 0.0f, 0.0f};
 
     // ---- IK（CCD）----
-    // 该蒙皮实例上的 IK 链集合。update_skinned_geometry 每帧在 compute_pose 之后、
-    // 蒙皮之前对 enabled 的链跑 solve_ccd，产出的 local override 注入下一次 compute_pose，
-    // 叠加在动画姿态之上。非蒙皮 / 无 IK 需求时为空，零开销。
+    // 每帧采样动画 local，更新自动目标，然后按顺序求解启用的链。
+    // 最终 local 只做一次 FK 和蒙皮；配置与自动驱动的 runtime 独立保存。
     std::vector<Resource::IkChain> ik_chains;
+    // Increment on configuration replacement; mechanics discards stale snapshot results.
+    std::uint64_t ik_chains_revision{0};
 
     // 骨骼名 → SkeletonData::nodes 下标缓存。
-    // 首次 update_skinned_geometry 写锁期间从 Scene::skeleton.nodes 一次性建立；
-    // register_foot_plant_chain 等外部 API 用它把 bone_name 转 node_idx，
-    // 避免每次调用都持 ResourceManager 锁遍历 Scene。非蒙皮几何此 map 永远为空。
+    // 首次求值及模型替换时重建，用于解析持久化链的骨骼名称。
     std::unordered_map<std::string, int> bone_name_to_node_idx;
+    std::uint64_t skeleton_cache_model_id{0};
 
     // 叶子骨骼名列表（BoneNode::children 为空的节点）。构建 bone_name_to_node_idx
-    // 时同步填充。编辑器 IK 测试 UI 用 get_actor_skeleton_leaves 读取此缓存，
-    // 无需持 ResourceManager 锁。非蒙皮几何此容器为空。
+    // 时同步填充。编辑器也可直接通过资源骨架查询，不依赖首帧动画。
     std::vector<std::string> leaf_bone_names;
 };
 
@@ -300,6 +300,15 @@ enum class CameraVisionRenderMode : uint8_t {
     ReSTIR,
 };
 
+// Runtime telemetry only; never serialized into scene settings.
+struct CameraFrameTiming {
+    double render_ms{};
+    // Wall-clock cadence between completed frames of this camera, including waits.
+    double frame_ms{};
+    CameraVisionRenderMode mode{CameraVisionRenderMode::PathTracing};
+    std::chrono::steady_clock::time_point recorded_at{};
+};
+
 struct CameraDevice {
     void* surface{};
     bool follows_default_surface{true};
@@ -318,6 +327,7 @@ struct CameraDevice {
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
     bool vision_denoise{false};
     bool vision_accumulation{false};
+    bool vision_stable_planes{true};
     bool shadow_cascade_debug{false};
     bool ssao_enabled{true};
     bool view_open{false};
@@ -427,6 +437,7 @@ enum class CameraStateUpdateField : std::uint32_t {
     SsaoEnabled = 1u << 7,
     VisionDenoise = 1u << 8,
     VisionAccumulation = 1u << 9,
+    VisionStablePlanes = 1u << 10,
 };
 
 constexpr CameraStateUpdateField operator|(CameraStateUpdateField lhs,
@@ -452,6 +463,7 @@ struct CameraStateUpdateCommand {
     CameraVisionRenderMode vision_render_mode{CameraVisionRenderMode::PathTracing};
     bool vision_denoise{false};
     bool vision_accumulation{false};
+    bool vision_stable_planes{true};
     bool shadow_cascade_debug{false};
     bool ssao_enabled{true};
     bool view_open{false};
@@ -682,6 +694,12 @@ class SharedDataHub {
     ImageStorage& image_storage();
     const ImageStorage& image_storage() const;
 
+    void publish_camera_frame_timing(std::uintptr_t camera_handle, double render_ms,
+                                     CameraVisionRenderMode mode,
+                                     std::chrono::steady_clock::time_point completed_at =
+                                         std::chrono::steady_clock::now());
+    [[nodiscard]] std::optional<CameraFrameTiming> camera_frame_timing(
+        std::uintptr_t camera_handle) const;
     void enqueue_camera_move(CameraMoveCommand command);
     std::vector<CameraMoveCommand> drain_camera_moves();
     void enqueue_camera_viewport_update(CameraViewportUpdateCommand command);
@@ -695,6 +713,10 @@ class SharedDataHub {
     [[nodiscard]] std::optional<bool> requested_camera_vision_accumulation(
         std::uintptr_t camera_handle) const;
     void acknowledge_camera_vision_accumulation(std::uintptr_t camera_handle,
+                                               std::uint64_t applied_sequence);
+    [[nodiscard]] std::optional<bool> requested_camera_vision_stable_planes(
+        std::uintptr_t camera_handle) const;
+    void acknowledge_camera_vision_stable_planes(std::uintptr_t camera_handle,
                                                std::uint64_t applied_sequence);
     void clear_camera_state_updates(std::uintptr_t camera_handle);
     void enqueue_camera_release(CameraReleaseCommand command);
@@ -729,6 +751,8 @@ class SharedDataHub {
     std::unordered_map<std::uintptr_t, ExternalVisionBindingDevice> external_vision_bindings_;
     EnvironmentStorage environment_storage_;
     CameraStorage camera_storage_;
+    mutable std::mutex camera_timing_mutex_;
+    std::unordered_map<std::uintptr_t, CameraFrameTiming> camera_timings_;
     ActorPickStorage actor_pick_storage_;
     mutable std::mutex actor_pick_queue_mutex_;
     std::vector<ActorPickRequestCommand> pending_actor_pick_requests_;
@@ -754,6 +778,8 @@ class SharedDataHub {
         requested_camera_vision_denoise_;
     std::unordered_map<std::uintptr_t, RequestedCameraBool>
         requested_camera_vision_accumulation_;
+    std::unordered_map<std::uintptr_t, RequestedCameraBool>
+        requested_camera_vision_stable_planes_;
     std::uint64_t camera_state_update_sequence_{0};
     std::mutex camera_release_mutex_;
     std::vector<CameraReleaseCommand> pending_camera_releases_;
