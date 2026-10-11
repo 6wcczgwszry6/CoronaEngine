@@ -315,6 +315,12 @@ struct BodyFrameParams {
     std::uintptr_t actor = 0;
 };
 
+struct CachedContactImpulse {
+    ktm::fvec3 normal{}, point{};
+    float normal_impulse{};
+    int triangle_a{-1}, triangle_b{-1};
+};
+
 // ============================================================================
 // 碰撞网格（基于 LOD0 的三角形碰撞检测）
 // ============================================================================
@@ -997,11 +1003,10 @@ struct MechanicsSystem::Impl {
     std::unordered_map<std::uintptr_t, MechanicsInternal::TriangleOctree> skinned_octree_cache;
 
 
-    // E2：跨子步累积冲量缓存（warm start 用）
-    // 键：{min(ha,hb), max(ha,hb)} → {accumulated_j, accumulated_jt}
+    // Reuse an impulse only while the contact feature/normal/point still match.
     // std::map 用 std::pair 的默认 operator< 排序，无需自定义 hasher，避免跨命名空间的模板参数解析问题
     std::map<std::pair<std::uintptr_t, std::uintptr_t>,
-             std::pair<float, float>> warm_start_cache;
+             MechanicsInternal::CachedContactImpulse> warm_start_cache;
 
 
     // 按 model_id 缓存的静态三角索引和骨骼映射（同一模型所有实例共享，只在首次导入时算一次）

@@ -79,6 +79,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     const float max_angular_speed = 30.0f;                               // 角速度上限 rad/s
     const float max_impulse_per_contact = 500.0f;                        // 单次接触最大冲量 N·s
     const float max_position_correction = 0.5f;                          // 单帧最大位置修正距离 m
+    const float positional_slop = 0.0005f;
 
     // 本帧临时表：质量/阻尼/恢复系数/碰撞开关
     std::unordered_map<std::uintptr_t, BodyFrameParams> frame_params;
@@ -425,6 +426,13 @@ void MechanicsSystem::update_physics(float fixed_dt) {
 
     // 临时校正表：记录 Phase 5 迭代后处理（每子步一次）的位置校正量，在 Phase 6 积分后统一应用
     std::unordered_map<std::uintptr_t, ktm::fvec3> position_correction;
+    std::unordered_set<std::uintptr_t> supported_bodies;
+    struct PenetrationConstraint {
+        std::size_t a, b;
+        ktm::fvec3 normal;
+        float depth;
+    };
+    std::vector<PenetrationConstraint> penetration_constraints;
     GpuRigidVelocityView solved_velocities;
 
     // Only keys successfully registered for this step's model may be queried.
@@ -521,7 +529,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
 
         // 5.4 对候选对做法向/切向冲量（半隐式 GS：多轮依次解每对约束近似同时满足）
         constexpr float eps = 1e-8f;                   // 分母稳定项，非物理
-        constexpr float k_positional_slop = 0.004f;    // Baumgarte 式校正：小穿透只靠冲量，不修位姿
         constexpr float k_positional_percent = 0.35f;  // 迭代结束后按穿透拆分平移（每子步一次），且只推一部分，防过冲
         constexpr int k_impulse_iterations = 8;        // 轮数↑ 堆叠更稳；提升到8以改善坡面接触收敛
         constexpr float k_early_exit_vel_eps = 0.002f; // 本轮最大速度修正低于此值则提前退出
@@ -539,25 +546,12 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             float inv_mb = 0.f;
             // E2：累积冲量（跨迭代轮次，本子步内累加，warm start 用）
             float accumulated_j  = 0.f;  // 法向累积冲量（≥ 0，不允许负值即拉力）
-            float accumulated_jt = 0.f;  // 切向累积冲量绝对值（不超过 μ * accumulated_j）
             // 反弹：迭代前记录的初始法向接近速度（v_n_initial > 0 表示接近）
             float v_n_initial = 0.f;
             ktm::fvec3 surface_a{}, surface_b{};
+            int triangle_a{-1}, triangle_b{-1};
         };
         std::vector<PairContactRecord> pair_records(collision_pairs.size());
-
-        // E2 Bug-3 修复：从跨子步缓存预加载上一子步的 accumulated_j（warm start 数据）
-        for (std::size_t pair_idx = 0; pair_idx < collision_pairs.size(); ++pair_idx) {
-            const auto& pair = collision_pairs[pair_idx];
-            const auto sorted = (pair.first < pair.second)
-                ? std::make_pair(pair.first, pair.second)
-                : std::make_pair(pair.second, pair.first);
-            auto ws_it = impl_->warm_start_cache.find(sorted);
-            if (ws_it != impl_->warm_start_cache.end()) {
-                pair_records[pair_idx].accumulated_j  = ws_it->second.first;
-                pair_records[pair_idx].accumulated_jt = ws_it->second.second;
-            }
-        }
 
         // GPU triangle narrow phase runs once for the whole broad-phase batch.
         // Only compact contacts and sampled surface velocities return to the solver.
@@ -599,6 +593,33 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 rec.normal = make_fvec3(hit.normal[0], hit.normal[1], hit.normal[2]);
                 rec.penetration = hit.penetration;
                 rec.contact_pt = make_fvec3(hit.point[0], hit.point[1], hit.point[2]);
+                rec.triangle_a = hit.triangle_a; rec.triangle_b = hit.triangle_b;
+                const auto cached = impl_->warm_start_cache.find(collision_pairs[query_pairs[qi]]);
+                if (cached != impl_->warm_start_cache.end()) {
+                    const auto& old = cached->second;
+                    const auto delta = old.point - rec.contact_pt;
+                    if (old.triangle_a == rec.triangle_a && old.triangle_b == rec.triangle_b &&
+                        ktm::dot(old.normal, rec.normal) > 0.999f && ktm::dot(delta, delta) < 0.0004f)
+                        rec.accumulated_j = old.normal_impulse;
+                }
+                // Sleeping bodies do not extrapolate gravity. Their support
+                // therefore uses the same contact margin as narrow phase, not
+                // just the penetration slop of an awake predicted pose.
+                if (rec.normal.y < -0.25f) supported_bodies.insert(a.handle);
+                if (rec.normal.y > 0.25f) supported_bodies.insert(b.handle);
+                penetration_constraints.push_back({rec.index_a, rec.index_b, rec.normal, rec.penetration});
+                // Use hysteresis around the correction slop. Awake bodies are
+                // checked at their final pose below: prediction includes gravity
+                // that the solver may already have cancelled.
+                if (rec.penetration > positional_slop * 2.0f) {
+                    for (auto h : {a.handle, b.handle}) {
+                        if (frame_params.at(h).body_type != BodyType::Dynamic) continue;
+                        auto& body = impl_->body(h);
+                        if (body.sleeping) {
+                            body.sleeping = false; body.reset_sleep_timer = true;
+                        }
+                    }
+                }
                 const auto append_velocity = [&](const MechanicsWorldAABB& body,
                                                  const GpuCollisionPipeline::Instance& instance,
                                                  bool is_b) {
@@ -684,7 +705,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 visited[neighbor] = true;
                 auto& body = impl_->body(h);
                 body.sleeping = false;
-                body.reset_sleep_timer = true;
+                // The GPU speed test resets timers on a real impact. Preserving
+                // the timer here lets quiet connected bodies settle together.
                 wake_queue.push_back(neighbor);
             }
         }
@@ -705,7 +727,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             contact.surface_b = {rec.surface_b.x, rec.surface_b.y, rec.surface_b.z};
             contact.penetration = rec.penetration;
             contact.accumulated_j = rec.accumulated_j;
-            contact.accumulated_jt = rec.accumulated_jt;
             solver_contacts.push_back(contact);
             solver_pairs.push_back(pi);
         }
@@ -754,7 +775,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 rec.inv_ma = state.inv_ma;
                 rec.inv_mb = state.inv_mb;
                 rec.accumulated_j = state.accumulated_j;
-                rec.accumulated_jt = state.accumulated_jt;
                 rec.v_n_initial = state.v_n_initial;
             }
         }
@@ -767,7 +787,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 ? std::make_pair(pair.first, pair.second)
                 : std::make_pair(pair.second, pair.first);
             if (rec.in_contact && rec.accumulated_j > 0.f) {
-                impl_->warm_start_cache[sorted] = {rec.accumulated_j, rec.accumulated_jt};
+                impl_->warm_start_cache[sorted] = {rec.normal, rec.contact_pt, rec.accumulated_j, rec.triangle_a, rec.triangle_b};
             } else {
                 // 本子步无接触：清除缓存，防止下一子步因过期数据注入无效冲量
                 impl_->warm_start_cache.erase(sorted);
@@ -795,7 +815,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             const float inv_mb = rec.inv_mb;
 
             // 按穿透深度记录软位置校正（延迟到 Phase 6 积分后统一应用，避免抖动）
-            const float pen = std::max(0.f, rec.penetration - k_positional_slop);
+            const float pen = std::max(0.f, rec.penetration - positional_slop);
             // 钳制穿透深度以防止大穿透时的位置校正过大（如物体生成在碰撞体内部）
             const float pen_clamped = std::min(pen, max_position_correction / k_positional_percent);
             if (pen_clamped > 0.f) {
@@ -1038,7 +1058,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         const bool apply_velocity_locks = !impl_->body(h).sleeping;
 
         // 唤醒因地板降低而悬空的休眠体（物体搁在地板上休眠后，地板调低应自由落体）
-        if (impl_->body(h).sleeping && data.min_world.y > floor_y + floor_eps) {
+        if (impl_->body(h).sleeping && !supported_bodies.contains(h) && data.min_world.y > floor_y + floor_eps + 1e-4f) {
             impl_->body(h).sleeping = false;
             impl_->body(h).reset_sleep_timer = true;
         }
@@ -1111,7 +1131,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         world_aabb_from_local_bounds(transform, data.local_min, data.local_max, floor_min, floor_max, floor_center);
         auto& body = impl_->body(h);
         if (btype == BodyType::Dynamic && body.sleeping) {
-            if (floor_min.y > floor_y + floor_eps || floor_min.y < floor_y - floor_eps) {
+            if ((!supported_bodies.contains(h) && floor_min.y > floor_y + floor_eps + 1e-4f) || floor_min.y < floor_y - floor_eps) {
                 body.sleeping = false;
                 body.reset_sleep_timer = true;
             } else {
@@ -1179,6 +1199,23 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     }
                 }
             }
+        }
+    }
+
+    // Measure residual overlap on the predicted contact plane after the final
+    // translation/floor correction. Testing predicted depth alone continually
+    // resets quiet stacks because that pose still contains the gravity step.
+    // Angular motion is independently covered by the GPU sleep speed test.
+    for (const auto& contact : penetration_constraints) {
+        const auto& a = mechanics_data[contact.a];
+        const auto& b = mechanics_data[contact.b];
+        const auto delta_a = step_transforms.at(a.transform_handle).position - collision_transforms[contact.a].position;
+        const auto delta_b = step_transforms.at(b.transform_handle).position - collision_transforms[contact.b].position;
+        if (contact.depth - ktm::dot(delta_b - delta_a, contact.normal) <= positional_slop * 2.0f) continue;
+        for (auto h : {a.handle, b.handle}) {
+            if (frame_params.at(h).body_type != BodyType::Dynamic) continue;
+            auto& body = impl_->body(h);
+            body.sleeping = false; body.reset_sleep_timer = true;
         }
     }
 
