@@ -283,6 +283,7 @@ struct BodyRuntimeState {
     // CPU retains only routing state and explicit timer-reset commands.
     bool sleeping = false;
     bool reset_sleep_timer = false;
+    BodyType body_type = BodyType::Dynamic;
     uint8_t linear_lock = 0;
     uint8_t angular_lock = 0;
     float last_move_callback_time = -kMoveCallbackMinInterval;

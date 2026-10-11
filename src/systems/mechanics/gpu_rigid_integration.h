@@ -21,6 +21,8 @@ class GpuRigidIntegrationPipeline {
         float damping{1.0f};
         bool dynamic{true}, sleeping{};
         std::uint8_t linear_lock{}, angular_lock{};
+        // Clear resident momentum before integration (e.g. externally owned poses).
+        bool reset_velocity{};
     };
     struct VelocityParams {
         float dt{};
@@ -61,7 +63,8 @@ class GpuRigidIntegrationPipeline {
     GpuRigidIntegrationPipeline& operator=(const GpuRigidIntegrationPipeline&) = delete;
 
     // Apply damping, then gravity, then speed limits to awake dynamic bodies;
-    // all awake bodies apply axis locks afterwards. Sleeping bodies pass through.
+    // all awake bodies apply axis locks afterwards. Sleeping bodies pass through
+    // unless reset_velocity explicitly clears their momentum first.
     // Invalid input is rejected before submission. Empty batches submit nothing.
     [[nodiscard]] std::vector<VelocityResult> update_velocities(
         std::span<const VelocityInput> inputs, const VelocityParams& params);

@@ -83,6 +83,9 @@ struct VelocityKernel {
                         w[a] = input.values[base + Uint(a + 3u)];
                     }
                 }
+                $IF((bits & Uint(256u)) != Uint(0u)) {
+                    for (std::uint32_t a = 0; a < 3; ++a) { v[a] = 0.0f; w[a] = 0.0f; }
+                }
                 $IF((bits & Uint(2u)) == Uint(0u)) {
                     $IF((bits & Uint(1u)) != Uint(0u)) {
                         Float exponent, damping, linear_scale, angular_base, angular_scale;
@@ -260,7 +263,8 @@ void validate_velocity_metadata(const GpuRigidIntegrationPipeline::VelocityInput
 }
 std::uint32_t velocity_flags(const GpuRigidIntegrationPipeline::VelocityInput& value) {
     return std::uint32_t(value.dynamic) | (std::uint32_t(value.sleeping) << 1u) |
-           (std::uint32_t(value.linear_lock & 7u) << 2u) | (std::uint32_t(value.angular_lock & 7u) << 5u);
+           (std::uint32_t(value.linear_lock & 7u) << 2u) | (std::uint32_t(value.angular_lock & 7u) << 5u) |
+           (std::uint32_t(value.reset_velocity) << 8u);
 }
 void set_velocity_params(VelocityKernel& kernel, const GpuRigidIntegrationPipeline::VelocityParams& params) {
     kernel.dt = params.dt;

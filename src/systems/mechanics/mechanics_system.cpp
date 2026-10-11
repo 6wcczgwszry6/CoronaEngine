@@ -230,6 +230,14 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     std::unordered_map<std::uintptr_t, ModelTransform> step_transforms;
     std::unordered_set<std::uintptr_t> edited_bodies;
     for (auto h : mechanics_handles) {
+        auto& body = impl_->body(h);
+        const auto type = frame_params.at(h).body_type;
+        if (body.body_type != type) {
+            body.body_type = type;
+            body.sleeping = false;
+            body.reset_sleep_timer = true;
+            edited_bodies.insert(h);
+        }
         auto mechanics = mechanics_storage.try_acquire_read(h);
         if (!mechanics) continue;
         auto geometry = geometry_storage.try_acquire_read(mechanics->geometry_handle);
@@ -280,7 +288,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             const auto& params = frame_params.at(h);
             inputs.push_back({{}, {},
                               params.damping, params.body_type == BodyType::Dynamic, body.sleeping,
-                              body.linear_lock, body.angular_lock});
+                              body.linear_lock, body.angular_lock, params.body_type != BodyType::Dynamic});
         }
         integrated_velocities = impl_->gpu_rigid_integration->update_velocities_device(inputs,
             impl_->gpu_floor_sleep->initial_velocities(),
@@ -347,15 +355,15 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 (geom_acc->skinned_aabb_max.z - geom_acc->skinned_aabb_min.z) * 0.5f);
         }
         auto& body = impl_->body(h);
-        // Prediction has always extrapolated every awake type, including
-        // kinematic bodies. Its quaternion must not overwrite the runtime pose.
+        // Only physics-owned dynamic poses are extrapolated. Static/kinematic
+        // collision geometry must match the transform authored by the caller.
         GpuRigidIntegrationPipeline::PoseInput predicted;
         predicted.position = {t.position.x, t.position.y, t.position.z};
         predicted.orientation = {body.orientation_quat.i, body.orientation_quat.j,
                                  body.orientation_quat.k, body.orientation_quat.r};
         predicted.linear_lock = body.linear_lock;
         predicted.angular_lock = body.angular_lock;
-        predicted.advance = !body.sleeping;
+        predicted.advance = !body.sleeping && frame_params[h].body_type == BodyType::Dynamic;
         predicted_poses.push_back({predicted, body_state_indices.at(h), false});
         collision_transforms.push_back(t);
         if (frame_params[h].body_type != BodyType::Dynamic) {
@@ -1102,8 +1110,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         for (const auto& data : mechanics_data) {
             if (!data.is_skinned || !ready_collision_keys.contains(data.geom_handle)) continue;
             const auto params = frame_params.find(data.handle);
-            if (params == frame_params.end() || params->second.body_type == BodyType::Phantom ||
-                params->second.body_type == BodyType::Static) continue;
+            if (params == frame_params.end() || params->second.body_type != BodyType::Dynamic) continue;
             const auto& transform = step_transforms.at(data.transform_handle);
             queries.push_back({{data.geom_handle, gpu_matrix(transform.compute_matrix())}, {}});
             targets.push_back(data.handle);
@@ -1125,7 +1132,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         const auto fp_it = frame_params.find(h);
         if (fp_it == frame_params.end()) continue;
         const auto btype = fp_it->second.body_type;
-        if (btype == BodyType::Phantom || btype == BodyType::Static) continue;
+        if (btype != BodyType::Dynamic) continue;
         const auto& transform = step_transforms.at(data.transform_handle);
         ktm::fvec3 floor_min, floor_max, floor_center;
         world_aabb_from_local_bounds(transform, data.local_min, data.local_max, floor_min, floor_max, floor_center);
