@@ -1,6 +1,5 @@
 #include "stable_planes.h"
 #include "base/integral/integrator.h"
-#include "core/dynamic_buffer/dynamic_buffer_layout_codec.h"
 
 namespace vision {
 using namespace ocarina;
@@ -96,28 +95,14 @@ void StablePlanes::compile() noexcept {
     auto &lights = renderer().light_sampler();
     const auto &geometry = pipeline()->geometry();
     const uint recursion_limit = std::min(15u, max_recursion_ > 0u ? max_recursion_ - 1u : 0u);
-    // Adjacent threads clear adjacent words, rather than scattering an entire
-    // large empty record per pixel. Preserve every field's default value.
-    static_assert(sizeof(StablePlaneData) % sizeof(uint4) == 0u);
-    constexpr uint chunks = sizeof(StablePlaneData) / sizeof(uint4);
-    StablePlaneData defaults{};
-    HostByteBuffer bytes;
-    // The codec copies members and zeros padding; native struct padding must
-    // not become shader constants through a whole-object bit cast.
-    DynamicBufferLayoutCodec<StablePlaneData>::encode(&defaults, 1u, bytes,
-        StoragePrecisionPolicy{}, DynamicBufferLayout::AOS);
-    OC_ASSERT(bytes.size() == sizeof(StablePlaneData));
-    std::array<uint4, chunks> empty;
-    for (uint i = 0u; i < chunks; ++i) { empty[i] = bytes.load<uint4>(i * sizeof(uint4)); }
-    Kernel clear_children = [&](BufferVar<uint4> buffer) {
-        Uint chunk = dispatch_id() % chunks;
-        Uint4 value = make_uint4(0u);
-        for (uint i = 0u; i < chunks; ++i) {
-            if (any(empty[i] != make_uint4(0u))) {
-                $if(chunk == i) { value = empty[i]; };
-            }
-        }
-        buffer.write(dispatch_id(), value);
+    // FrameBuffer initializes every allocation to complete default records.
+    // Only a previously active child can contain data after initialization.
+    // Keep complete default records for invalid children without rewriting the
+    // mostly empty layers every frame. History has already been saved here.
+    Kernel clear_children = [](BufferVar<StablePlaneData> buffer) {
+        $if(buffer.read(dispatch_id()).valid != 0u) {
+            buffer.write(dispatch_id(), StablePlaneDataVar{});
+        };
     };
     clear_children_ = device().compile(clear_children, "Stable planes clear children");
     Kernel build_kernel = [&](Uint frame, Uint jitter) {
@@ -140,7 +125,14 @@ void StablePlanes::compile() noexcept {
             fb.stable_indirect().write(layer * (dispatch_dim().x * dispatch_dim().y) + dispatch_id(), make_float4(0.f));
             $if(path.active) {
                 $loop {
-                    TriangleHitVar hit = geometry.trace_closest(path.ray.ray);
+                    TriangleHitVar hit;
+                    if (layer == 0u) {
+                        // GBuffer traced this exact owned camera ray (including
+                        // lens and film samples). Only extended paths retrace.
+                        $if(path.depth == 0u) {
+                            hit = fb.cur_visibility_buffer_var(frame).read(dispatch_id());
+                        } $else { hit = geometry.trace_closest(path.ray.ray); };
+                    } else { hit = geometry.trace_closest(path.ray.ray); }
                     plane.surface.hit = hit;
                     plane.valid = 1u;
                     plane.depth = path.depth; plane.branch_sequence = path.sequence; plane.instance_hash = path.identity;
@@ -365,8 +357,8 @@ CommandBatch StablePlanes::build(uint frame, bool jitter, bool retain_history) c
     auto planes = frame_buffer().cur_stable_planes_view(frame);
     uint2 resolution = pipeline()->resolution();
     uint pixels = resolution.x * resolution.y;
-    BufferView<uint4> children{planes.handle() + pixels * sizeof(StablePlaneData),
-        (StablePlaneCount - 1u) * pixels * sizeof(StablePlaneData) / sizeof(uint4)};
+    BufferView<StablePlaneData> children{planes.handle() + pixels * sizeof(StablePlaneData),
+        (StablePlaneCount - 1u) * pixels};
     CommandBatch ret;
     if (retain_history && frame > 0u) {
         auto history = frame_buffer().prev_stable_planes_view(frame);

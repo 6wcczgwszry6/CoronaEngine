@@ -36,6 +36,7 @@ void check_restir_gi_depth_one_continuation(vision::Pipeline& pipeline);
 void check_restir_gi_receiver_support(vision::Pipeline& pipeline);
 void check_glass_transport_energy(vision::Pipeline& pipeline, unsigned recursion, const char* label);
 void check_glass_depth_guides(vision::Pipeline& pipeline);
+void check_glass_children_disappear(vision::Pipeline& pipeline);
 
 namespace {
 namespace fs = std::filesystem;
@@ -644,7 +645,8 @@ int main() {
         auto sky = glass_scene;
         sky["scene"]["shapes"] = vision::DataWrap::parse(R"([
             {"type":"model","param":{"fn":"glass-front.obj","material":"glass","normalize_to_unit_bounds":false}}])");
-        run_glass_variant(sky, 5u, "glass-sky");
+        auto sky_pipeline = run_glass_variant(sky, 5u, "glass-sky");
+        check_glass_children_disappear(*sky_pipeline);
         auto emitting = sky;
         emitting["scene"]["shapes"][0]["param"]["emission"] = vision::DataWrap::parse(
             R"({"type":"area","param":{"color":[0.2,0.4,0.8],"scale":1}})");

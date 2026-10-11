@@ -8,7 +8,7 @@ namespace vision {
 class StablePlanes final : public ReSTIR {
 private:
     uint max_recursion_{};
-    Shader<void(Buffer<uint4>)> clear_children_;
+    Shader<void(Buffer<StablePlaneData>)> clear_children_;
     Shader<void(uint, uint)> build_;
     Shader<void(uint)> fill_;
     Shader<void(Buffer<StablePlaneData>, Buffer<StablePlaneHistory>, Buffer<uint>)> save_history_;

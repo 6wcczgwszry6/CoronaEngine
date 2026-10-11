@@ -167,6 +167,44 @@ void check_glass_depth_guides(vision::Pipeline &pipeline) {
     }
 }
 
+// Empty child records must remain complete defaults when camera motion removes
+// a split, and become active again without recreating buffers or resetting time.
+void check_glass_children_disappear(vision::Pipeline& pipeline) {
+    using namespace vision;
+    pipeline.activate_global_context();
+    auto &camera = pipeline.scene().sensor();
+    auto &fb = *pipeline.frame_buffer();
+    const auto original_position = camera->position();
+    std::vector<StablePlaneData> planes(pipeline.pixel_num() * StablePlaneCount);
+    auto count_children = [&] {
+        pipeline.stream() << fb.cur_stable_planes_view(pipeline.frame_index() - 1u).download(planes.data())
+            << synchronize() << commit();
+        uint active = 0u;
+        for (uint i = pipeline.pixel_num(); i < planes.size(); ++i) { active += planes[i].valid != 0u; }
+        return active;
+    };
+    if (count_children() == 0u) throw std::runtime_error("glass fixture must initially have active children");
+    camera->set_position(original_position + make_float3(100.f, 0.f, 0.f));
+    camera->update_device_data();
+    for (uint frame = 0u; frame < 2u; ++frame) {
+        auto previous_frame = pipeline.frame_index();
+        pipeline.upload_data(); pipeline.display(1.0 / 60.0);
+        if (pipeline.frame_index() != previous_frame + 1u || count_children() != 0u)
+            throw std::runtime_error("camera motion must clear vanished children without resetting frame history");
+        for (uint i = pipeline.pixel_num(); i < planes.size(); ++i) {
+            const auto &p = planes[i];
+            if (p.branch_sequence != 1u || p.depth != 0u || p.instance_hash != 0u ||
+                p.material_id != InvalidUI32 || p.reservoir_eligible != 0u ||
+                p.surface.hit.inst_id != InvalidUI32 || any(p.extension.throughput != make_float3(1.f)))
+                throw std::runtime_error("inactive children must retain complete default records, not stale transport state");
+        }
+    }
+    camera->set_position(original_position); camera->update_device_data();
+    pipeline.upload_data(); pipeline.display(1.0 / 60.0);
+    if (count_children() == 0u) throw std::runtime_error("glass children must reappear when the camera returns");
+    std::cout << "PASS: glass children disappear, stay empty and reappear with continuous frame history\n";
+}
+
 // A pointer to the inherited protected data member edits the same host encoded
 // value as the GUI, without casting the actual renderer to a test subclass.
 struct RuntimeDepthAccess : vision::IlluminationIntegrator {
