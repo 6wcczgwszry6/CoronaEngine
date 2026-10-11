@@ -84,7 +84,7 @@ void MechanicsSystem::refresh_foot_ground_cache() {
                         impl_->skinned_collision_model_ids.at(gh) != model_id) continue;
                 } else {
                     if (ground.octree.empty()) ground.octree.build(ground.mesh.vertices, ground.mesh);
-                    if (!impl_->gpu_collision) impl_->gpu_collision = std::make_unique<GpuCollisionPipeline>();
+                    impl_->gpu_collision.ensure();
                     impl_->gpu_collision->set_mesh(gh, model_id, ground.mesh, ground.octree);
                 }
                 if (ground.mesh.triangles.empty()) continue;

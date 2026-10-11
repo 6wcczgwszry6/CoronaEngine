@@ -259,9 +259,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     // Stage 2/2b: one GPU batch preserves damping -> gravity -> speed limits ->
     // axis locks. Include handles without valid geometry, as the old integrator
     // also updated their velocities before resolving the transform below.
-    if (!impl_->gpu_rigid_integration)
-        impl_->gpu_rigid_integration = std::make_unique<GpuRigidIntegrationPipeline>();
-    if (!impl_->gpu_floor_sleep) impl_->gpu_floor_sleep = std::make_unique<GpuFloorSleepPipeline>();
+    impl_->gpu_rigid_integration.ensure();
+    impl_->gpu_floor_sleep.ensure();
     if (!impl_->gpu_submission_batch) impl_->gpu_submission_batch = std::make_unique<GpuSubmissionBatch>();
     auto& gpu_batch = *impl_->gpu_submission_batch;
     // A shutdown/exception must invalidate a recorded but unexecuted state.
@@ -473,7 +472,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         }
         if (mesh->triangles.empty()) continue;
         if (tree->empty()) tree->build(mesh->vertices, *mesh);
-        if (!impl_->gpu_collision) impl_->gpu_collision = std::make_unique<GpuCollisionPipeline>();
+        impl_->gpu_collision.ensure();
         impl_->gpu_collision->set_mesh(entry.geom_handle, entry.model_id, *mesh, *tree);
         ready_collision_keys.insert(entry.geom_handle);
     }
@@ -522,7 +521,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             scenes.push_back({members[si]});
         }
         if (impl_->shutdown_requested.load(std::memory_order_acquire)) return;
-        if (!impl_->gpu_broadphase) impl_->gpu_broadphase = std::make_unique<GpuBroadphasePipeline>();
+        impl_->gpu_broadphase.ensure();
         const auto pairs = impl_->gpu_broadphase->pairs(bounds, scenes);
         collision_pairs.reserve(pairs.size());
         // mechanics_data follows sorted mechanics handles. Canonical GPU pairs
@@ -762,8 +761,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 solver_source_indices.push_back(body_state_indices.at(data.handle));
             }
             if (impl_->shutdown_requested.load(std::memory_order_acquire)) return;
-            if (!impl_->gpu_contact_solver)
-                impl_->gpu_contact_solver = std::make_unique<GpuContactSolverPipeline>();
+            impl_->gpu_contact_solver.ensure();
             GpuContactSolverPipeline::Params params;
             params.dt = fixed_dt;
             params.restitution_threshold = 2.0f * std::sqrt(ktm::dot(gravity, gravity)) * fixed_dt + sleep_threshold;
@@ -1806,7 +1804,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
     for (const auto& job : frame_jobs) skin_batches.push_back({job.requests, job.finals});
     std::vector<GpuSkinningPipeline::Result> skin_results;
     if (!skin_batches.empty()) {
-        if (!impl_->gpu_skinning) impl_->gpu_skinning = std::make_unique<GpuSkinningPipeline>();
+        impl_->gpu_skinning.ensure();
         skin_results = impl_->gpu_skinning->update_batch(skin_batches);
     }
     std::size_t result_offset = 0;
@@ -1846,7 +1844,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
             }
             auto& tree = impl_->skinned_octree_cache[geom_handle];
             if (tree.empty()) tree.build(sc.vertices, sc);
-            if (!impl_->gpu_collision) impl_->gpu_collision = std::make_unique<GpuCollisionPipeline>();
+            impl_->gpu_collision.ensure();
             impl_->gpu_collision->set_mesh(geom_handle, model_id, sc, tree);
             const auto include_point = [&](const ktm::fvec3& p) {
                 job.bounds_min.x = std::min(job.bounds_min.x, p.x);

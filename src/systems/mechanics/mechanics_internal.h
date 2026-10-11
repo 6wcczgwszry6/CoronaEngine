@@ -14,15 +14,19 @@
 #include <cmath>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <limits>
 #include <optional>
 #include <shared_mutex>
+#include <string>
 #include <unordered_map>
 #include <map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 #include <tuple>
+#include <thread>
+#include <horizon/core/logging.h>
 
 #include "gpu_skinning.h"
 #include "gpu_collision.h"
@@ -34,6 +38,53 @@
 #include <ktm/ktm.h>
 
 namespace Corona::Systems::MechanicsInternal {
+
+// Construction owns only shader/pipeline state. A preparation worker never
+// touches scene data, GPU buffers or the slot; the future transfers ownership
+// to the mechanics thread before its first dispatch.
+template <class T>
+class PreparedGpuPipeline {
+public:
+    std::packaged_task<void()> prepare(std::string name) {
+        if (value_ || pending_.valid() || failure_) return {};
+        std::packaged_task<std::unique_ptr<T>()> task([name = std::move(name)] {
+            const auto start = std::chrono::steady_clock::now();
+            auto value = std::make_unique<T>();
+            const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+            CFW_LOG_INFO("Mechanics GPU pipeline '{}' prepared in {:.1f} ms", name, elapsed);
+            return value;
+        });
+        pending_ = task.get_future();
+        return std::packaged_task<void()>([task = std::move(task)]() mutable { task(); });
+    }
+    T& ensure() {
+        if (failure_) std::rethrow_exception(failure_);
+        if (!value_) {
+            GpuPerformance::Scope timing{"pipeline.acquire"};
+            try {
+                value_ = pending_.valid() ? pending_.get() : std::make_unique<T>();
+            } catch (...) {
+                failure_ = std::current_exception();
+                throw;
+            }
+        }
+        return *value_;
+    }
+    bool ready() const {
+        return value_ || (pending_.valid() && pending_.wait_for(std::chrono::seconds(0)) == std::future_status::ready);
+    }
+    explicit operator bool() const noexcept { return bool(value_); }
+    T* operator->() { return &ensure(); }
+    void reset() {
+        pending_ = {};
+        value_.reset();
+        failure_ = {};
+    }
+private:
+    std::unique_ptr<T> value_;
+    std::future<std::unique_ptr<T>> pending_;
+    std::exception_ptr failure_;
+};
 
 // 按分量构造 fvec3（result：输出向量）
 constexpr ktm::fvec3 make_fvec3(float x, float y, float z) {
@@ -968,14 +1019,18 @@ struct MechanicsSystem::Impl {
     /// 骨骼动画上一次蒙皮的时间戳（诊断用；dt 已由 update() 测量并传入，不再用于计算）。
     std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
 
-    // GPU skinning is created lazily when the first skinned geometry is ready.
+    // CPU shader compilation starts at initialization; the mechanics thread
+    // acquires each completed pipeline only when needed.
     std::unique_ptr<GpuSubmissionBatch> gpu_submission_batch;
-    std::unique_ptr<GpuSkinningPipeline> gpu_skinning;
-    std::unique_ptr<GpuCollisionPipeline> gpu_collision;
-    std::unique_ptr<GpuBroadphasePipeline> gpu_broadphase;
-    std::unique_ptr<GpuRigidIntegrationPipeline> gpu_rigid_integration;
-    std::unique_ptr<GpuContactSolverPipeline> gpu_contact_solver;
-    std::unique_ptr<GpuFloorSleepPipeline> gpu_floor_sleep;
+    MechanicsInternal::PreparedGpuPipeline<GpuSkinningPipeline> gpu_skinning;
+    MechanicsInternal::PreparedGpuPipeline<GpuCollisionPipeline> gpu_collision;
+    MechanicsInternal::PreparedGpuPipeline<GpuBroadphasePipeline> gpu_broadphase;
+    MechanicsInternal::PreparedGpuPipeline<GpuRigidIntegrationPipeline> gpu_rigid_integration;
+    MechanicsInternal::PreparedGpuPipeline<GpuContactSolverPipeline> gpu_contact_solver;
+    MechanicsInternal::PreparedGpuPipeline<GpuFloorSleepPipeline> gpu_floor_sleep;
+    // Declared after slots so workers join before those slots are destroyed.
+    std::vector<std::jthread> gpu_preparation_workers;
+    void start_gpu_preparation();
     using GpuMeshIdentity = std::tuple<std::uintptr_t, std::uint64_t, std::size_t, std::size_t>;
     std::map<GpuMeshIdentity, std::uint64_t> gpu_skinning_keys;
     std::uint64_t next_gpu_skinning_key = 1;
@@ -1026,6 +1081,8 @@ struct MechanicsSystem::Impl {
     }
 
     void clear_runtime_state() {
+        for (auto& worker : gpu_preparation_workers) worker.request_stop();
+        gpu_preparation_workers.clear();
         gpu_submission_batch.reset();
         gpu_floor_sleep.reset();
         gpu_contact_solver.reset();

@@ -75,9 +75,36 @@ MechanicsSystem::MechanicsSystem() : impl_(std::make_unique<Impl>()) {
 
 MechanicsSystem::~MechanicsSystem() = default;
 
+void MechanicsSystem::Impl::start_gpu_preparation() {
+    if (!gpu_preparation_workers.empty()) return;
+    struct Jobs {
+        std::vector<std::packaged_task<void()>> tasks;
+        std::atomic<std::size_t> next{};
+    };
+    auto jobs = std::make_shared<Jobs>();
+    jobs->tasks.push_back(gpu_collision.prepare("collision"));
+    jobs->tasks.push_back(gpu_rigid_integration.prepare("integration"));
+    jobs->tasks.push_back(gpu_floor_sleep.prepare("floor/sleep"));
+    jobs->tasks.push_back(gpu_contact_solver.prepare("contacts"));
+    jobs->tasks.push_back(gpu_broadphase.prepare("broad phase"));
+    jobs->tasks.push_back(gpu_skinning.prepare("skinning"));
+    // Bound compiler concurrency instead of starting a compiler for every
+    // kernel. No SystemContext/scene locks or object addresses cross threads.
+    for (unsigned i = 0; i < 2; ++i) {
+        gpu_preparation_workers.emplace_back([jobs](std::stop_token stop) {
+            while (!stop.stop_requested()) {
+                const auto index = jobs->next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= jobs->tasks.size()) break;
+                if (jobs->tasks[index].valid()) jobs->tasks[index]();
+            }
+        });
+    }
+}
+
 bool MechanicsSystem::initialize(Kernel::ISystemContext* ctx) {
     impl_->ctx = ctx;
     impl_->shutdown_requested.store(false, std::memory_order_release);
+    impl_->start_gpu_preparation();
 
     // GeometrySystem 指针缓存移到 update_physics() 首次调用时完成，
     // 因为 initialize() 在 SystemManager::initialize_all() 的锁内调用，
