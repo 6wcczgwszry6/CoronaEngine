@@ -19,6 +19,7 @@ namespace Corona::Systems {
 // compact contact/query records cross back to the existing impulse/IK solvers.
 class GpuCollisionPipeline {
    public:
+    static constexpr float contact_distance = 0.02f;
     using Matrix = std::array<float, 16>;
     using Point = std::array<float, 3>;
     struct VertexSource {
@@ -38,12 +39,12 @@ class GpuCollisionPipeline {
     };
     struct Pair {
         Instance a, b;
-        float threshold{0.02f};
+        float threshold{contact_distance};
     };
     struct Contact {
         bool has_contact{};
         Point normal{}, point{};
-        float penetration{};
+        float penetration{}; // Positive interior distance; negative separated gap.
         int triangle_a{-1}, triangle_b{-1};
     };
     struct VertexQuery {

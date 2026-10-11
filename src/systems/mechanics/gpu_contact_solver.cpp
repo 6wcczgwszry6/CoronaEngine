@@ -127,7 +127,7 @@ struct SolveKernel {
     Floats bodies, contacts, velocities, results, maxima;
     UInts flags, endpoints, order, offsets, control;
     Uint islands, iteration;
-    Float max_linear, max_angular, max_impulse, friction, static_friction;
+    Float max_linear, max_angular, max_impulse, friction, static_friction, inverse_dt, restitution_threshold;
     H::ComputePipeline<> pipeline;
 
     void apply_impulse(Vec& va, Vec& vb, Vec& wa, Vec& wb, const Vec& impulse,
@@ -205,7 +205,12 @@ struct SolveKernel {
                     target = 0.0f;
                     Float restitution;
                     restitution = (bodies.values[ba + Uint(16u)] + bodies.values[bb + Uint(16u)]) * Float(0.5f);
-                    target = (Float(0.0f) - restitution) * max(Float(0.0f), initial);
+                    $IF(initial > restitution_threshold) { target = (Float(0.0f) - restitution) * initial; }
+                    $IF(contacts.values[ca + Uint(12u)] < Float(0.0f)) {
+                        // A contact margin is not overlap: allow approach up to
+                        // the actual surface instead of stopping at the margin.
+                        target = (Float(0.0f) - contacts.values[ca + Uint(12u)]) * inverse_dt;
+                    }
                     raw = (vn - target) / denominator;
                     next = max(Float(0.0f), accumulated + raw);
                     impulse = max(Float(0.0f) - max_impulse, min(max_impulse, next - accumulated));
@@ -271,6 +276,7 @@ struct SolveKernel {
         islands.as_push_constant(); iteration.as_push_constant();
         max_linear.as_push_constant(); max_angular.as_push_constant(); max_impulse.as_push_constant();
         friction.as_push_constant(); static_friction.as_push_constant();
+        inverse_dt.as_push_constant(); restitution_threshold.as_push_constant();
         pipeline = H::ComputePipeline<>([&] {
             Uint island;
             island = dispatchThreadID()->x;
@@ -356,6 +362,9 @@ void validate(std::span<const GpuContactSolverPipeline::Body> bodies,
         throw std::length_error("GPU contact solver batch exceeds storage, dispatch or indexing limit");
     nonnegative(p.max_linear_speed); nonnegative(p.max_angular_speed); nonnegative(p.max_impulse);
     nonnegative(p.friction); nonnegative(p.static_friction); nonnegative(p.early_exit_velocity);
+    nonnegative(p.restitution_threshold);
+    if (!std::isfinite(p.dt) || p.dt <= 0 || !std::isfinite(1.0f / p.dt))
+        throw std::invalid_argument("GPU contact solver requires a positive finite timestep");
     if (p.iterations == 0 || p.iterations > 8) throw std::invalid_argument("GPU contact solver requires 1 to 8 iterations");
     for (const auto& body : bodies) {
         if (!resident_velocities) { finite(body.velocity); finite(body.angular_velocity); }
@@ -564,6 +573,7 @@ struct GpuContactSolverPipeline::Impl {
                 kernel.islands = island_count;
                 kernel.max_linear = p.max_linear_speed; kernel.max_angular = p.max_angular_speed;
                 kernel.max_impulse = p.max_impulse; kernel.friction = p.friction; kernel.static_friction = p.static_friction;
+                kernel.inverse_dt = 1.0f / p.dt; kernel.restitution_threshold = p.restitution_threshold;
                 reduce.control.bind(control.data); reduce.threshold_squared = p.early_exit_velocity * p.early_exit_velocity;
                 for (std::uint32_t iteration = 0; iteration < p.iterations; ++iteration) {
                     kernel.iteration = iteration;

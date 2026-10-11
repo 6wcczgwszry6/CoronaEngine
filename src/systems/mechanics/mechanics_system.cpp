@@ -491,9 +491,10 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             throw std::length_error("Too many mechanics bodies for GPU broad phase");
         std::vector<GpuBroadphasePipeline::Body> bounds;
         bounds.reserve(mechanics_data.size());
+        constexpr float margin = GpuCollisionPipeline::contact_distance * 0.5f;
         for (const auto& body : mechanics_data)
-            bounds.push_back({{body.min_world.x, body.min_world.y, body.min_world.z},
-                              {body.max_world.x, body.max_world.y, body.max_world.z}});
+            bounds.push_back({{body.min_world.x - margin, body.min_world.y - margin, body.min_world.z - margin},
+                              {body.max_world.x + margin, body.max_world.y + margin, body.max_world.z + margin}});
         std::vector<std::vector<std::uint32_t>> members(scene_mechanics.size());
         std::vector<GpuBroadphasePipeline::Scene> scenes;
         scenes.reserve(members.size());
@@ -596,7 +597,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 const auto& b = mechanics_data[rec.index_b];
                 rec.in_contact = true;
                 rec.normal = make_fvec3(hit.normal[0], hit.normal[1], hit.normal[2]);
-                rec.penetration = std::max(0.0f, hit.penetration);
+                rec.penetration = hit.penetration;
                 rec.contact_pt = make_fvec3(hit.point[0], hit.point[1], hit.point[2]);
                 const auto append_velocity = [&](const MechanicsWorldAABB& body,
                                                  const GpuCollisionPipeline::Instance& instance,
@@ -733,6 +734,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             if (!impl_->gpu_contact_solver)
                 impl_->gpu_contact_solver = std::make_unique<GpuContactSolverPipeline>();
             GpuContactSolverPipeline::Params params;
+            params.dt = fixed_dt;
+            params.restitution_threshold = 2.0f * std::sqrt(ktm::dot(gravity, gravity)) * fixed_dt + sleep_threshold;
             params.max_linear_speed = max_linear_speed;
             params.max_angular_speed = max_angular_speed;
             params.max_impulse = max_impulse_per_contact;

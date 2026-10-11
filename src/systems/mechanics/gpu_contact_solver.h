@@ -33,6 +33,7 @@ class GpuContactSolverPipeline {
         float max_linear_speed{80.0f}, max_angular_speed{30.0f}, max_impulse{500.0f};
         float friction{0.35f}, static_friction{0.55f}, early_exit_velocity{0.002f};
         std::uint32_t iterations{8};
+        float dt{1.0f / 60.0f}, restitution_threshold{0.5f};
     };
     struct Velocity {
         std::array<float, 3> velocity{}, angular_velocity{};

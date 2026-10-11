@@ -84,19 +84,80 @@ inline Float saturate(const Float& v) {
     return r;
 }
 
-// Sum/count, rather than one point per triangle pair, preserves the CPU
-// narrowphase's average across every accepted point-face / edge-edge contact.
+inline Vec3 closest_triangle_point(const Vec3& p, const std::array<Vec3, 3>& t) {
+    const auto ab = sub(t[1], t[0]);
+    const auto ac = sub(t[2], t[0]);
+    const auto n = cross(ab, ac);
+    Float nn, best;
+    nn = dot(n, n);
+    Vec3 result;
+    result = t[0];
+    best = dot(sub(p, result), sub(p, result));
+    // Edge candidates also handle degenerate triangles.
+    for (int i = 0; i < 3; ++i) {
+        const auto edge = sub(t[(i + 1) % 3], t[i]);
+        Float ee;
+        ee = dot(edge, edge);
+        $IF(ee > Float(1e-20f)) {
+            const auto q = add(t[i], mul(edge, saturate(dot(sub(p, t[i]), edge) / ee)));
+            Float distance;
+            distance = dot(sub(p, q), sub(p, q));
+            $IF(distance < best) { best = distance; result = q; }
+        }
+    }
+    $IF(nn > Float(1e-20f)) {
+        const auto q = sub(p, mul(n, dot(sub(p, t[0]), n) / nn));
+        $IF((dot(cross(ab, sub(q, t[0])), n) >= Float(0.0f)) &&
+            (dot(cross(sub(t[2], t[1]), sub(q, t[1])), n) >= Float(0.0f)) &&
+            (dot(cross(sub(t[0], t[2]), sub(q, t[2])), n) >= Float(0.0f))) { result = q; }
+    }
+    return result;
+}
+
+// Fixed oblique ray. Half-open projected edges count a shared edge/diagonal
+// once, independent of triangle winding, instead of toggling parity twice.
+inline Uint ray_crossing(const Vec3& p, const std::array<Vec3, 3>& t) {
+    std::array<Vec3, 3> r;
+    std::array<Float, 3> u, v, e;
+    for (int i = 0; i < 3; ++i) {
+        r[i] = sub(t[i], p);
+        u[i] = r[i].y - Float(0.37139067f) * r[i].x;
+        v[i] = r[i].z - Float(0.52917331f) * r[i].x;
+    }
+    for (int i = 0; i < 3; ++i) e[i] = u[(i + 1) % 3] * v[(i + 2) % 3] - v[(i + 1) % 3] * u[(i + 2) % 3];
+    Float det, sign;
+    det = e[0] + e[1] + e[2];
+    sign = 1.0f;
+    $IF(det < Float(0.0f)) { sign = -1.0f; }
+    Uint inside;
+    inside = 1u;
+    $IF(abs(det) < Float(1e-20f)) { inside = 0u; }
+    for (int i = 0; i < 3; ++i) {
+        Float edge, du, dv;
+        edge = e[i] * sign;
+        du = (u[(i + 2) % 3] - u[(i + 1) % 3]) * sign;
+        dv = (v[(i + 2) % 3] - v[(i + 1) % 3]) * sign;
+        $IF((edge < Float(0.0f)) || ((edge == Float(0.0f)) &&
+            !((dv > Float(0.0f)) || ((dv == Float(0.0f)) && (du < Float(0.0f)))))) { inside = 0u; }
+    }
+    $IF(inside != Uint(0u)) {
+        Float distance;
+        distance = (e[0] * r[0].x + e[1] * r[1].x + e[2] * r[2].x) / det;
+        $IF(distance <= Float(1e-7f)) { inside = 0u; }
+    }
+    return inside;
+}
+
+// Keep a geometric witness together with its normal and signed depth.
 struct Contact {
     Float depth, nx, ny, nz, sx, sy, sz;
     Uint count;
 };
 
 inline void accumulate(Contact& out, const Float& depth, const Vec3& normal, const Vec3& point) {
-    out.sx = out.sx + point.x;
-    out.sy = out.sy + point.y;
-    out.sz = out.sz + point.z;
-    out.count = out.count + Uint(1u);
-    $IF(out.depth < depth) {
+    $IF((out.count == Uint(0u)) || (out.depth < depth)) {
+        out.sx = point.x; out.sy = point.y; out.sz = point.z;
+        out.count = 1u;
         out.depth = depth;
         out.nx = normal.x;
         out.ny = normal.y;
@@ -277,7 +338,7 @@ inline void project_interval(const std::array<Float, 3>& source_distance,
 inline void moller_triangle_triangle_intersect(const std::array<Vec3, 3>& a,
                                                const std::array<Vec3, 3>& b,
                                                const Float& threshold,
-                                               Uint& hit, Vec3& normal, Float& depth) {
+                                               Uint& hit, Vec3& normal, Float& depth, Vec3& point) {
     hit = 0u;
     depth = 0.0f;
     normal.x = 0.0f;
@@ -322,7 +383,29 @@ inline void moller_triangle_triangle_intersect(const std::array<Vec3, 3>& a,
                 $IF(overlap != Uint(0u)) {
                     hit = 1u;
                     normal = na;
-                    depth = threshold;
+                    depth = 0.0f;
+                    Uint witness;
+                    witness = 0u;
+                    for (int i = 0; i < 3; ++i) {
+                        Float distance;
+                        Uint inside;
+                        point_triangle_signed_dist(a[i], b, nb, distance, inside);
+                        $IF((witness == Uint(0u)) && (inside != Uint(0u))) { point = a[i]; witness = 1u; }
+                        point_triangle_signed_dist(b[i], a, na, distance, inside);
+                        $IF((witness == Uint(0u)) && (inside != Uint(0u))) { point = b[i]; witness = 1u; }
+                        for (int j = 0; j < 3; ++j) {
+                            const auto da = sub(a[(i + 1) % 3], a[i]);
+                            const auto db = sub(b[(j + 1) % 3], b[j]);
+                            Float t, s;
+                            segment_segment_closest(a[i], da, b[j], db, t, s);
+                            const auto pa = add(a[i], mul(da, t));
+                            const auto pb = add(b[j], mul(db, s));
+                            $IF((witness == Uint(0u)) && (dot(sub(pa, pb), sub(pa, pb)) < Float(1e-10f))) {
+                                point = mul(add(pa, pb), Float(0.5f)); witness = 1u;
+                            }
+                        }
+                    }
+                    $IF(witness == Uint(0u)) { hit = 0u; }
                 }
             }
             $ELSE {
@@ -335,8 +418,13 @@ inline void moller_triangle_triangle_intersect(const std::array<Vec3, 3>& a,
                 end = min(amax, bmax);
                 $IF(!(end <= start - Float(1e-7f))) {
                     hit = 1u;
-                    depth = end - start;
+                    // Intersection length is tangential, not penetration.
+                    // Interior signed distances are supplied by the mesh pass.
+                    depth = 0.0f;
                     normal = mul(nb, Float(-1.0f));
+                    const auto origin = mul(cross(sub(mul(nb, plane_a), mul(na, plane_b)), line),
+                                            Float(1.0f) / (line_length * line_length));
+                    point = add(origin, mul(axis, (start + end) * Float(0.5f) - dot(axis, origin)));
                 }
             }
         }
@@ -378,18 +466,14 @@ inline void triangle_contact(const std::array<Vec3, 3>& a,
     $IF(!((amin.x - threshold > bmax.x) || (bmin.x - threshold > amax.x) ||
           (amin.y - threshold > bmax.y) || (bmin.y - threshold > amax.y) ||
           (amin.z - threshold > bmax.z) || (bmin.z - threshold > amax.z))) {
-        Vec3 na, nb, intersection_normal;
+        Vec3 na, nb, intersection_normal, intersection_point;
         na = normalize_safe(cross(sub(a[1], a[0]), sub(a[2], a[0])));
         nb = normalize_safe(cross(sub(b[1], b[0]), sub(b[2], b[0])));
         Float intersection_depth;
         Uint intersects;
-        moller_triangle_triangle_intersect(a, b, threshold, intersects, intersection_normal, intersection_depth);
+        moller_triangle_triangle_intersect(a, b, threshold, intersects, intersection_normal, intersection_depth, intersection_point);
         $IF(intersects != Uint(0u)) {
-            Vec3 point;
-            point.x = (a[0].x + a[1].x + a[2].x + b[0].x + b[1].x + b[2].x) / Float(6.0f);
-            point.y = (a[0].y + a[1].y + a[2].y + b[0].y + b[1].y + b[2].y) / Float(6.0f);
-            point.z = (a[0].z + a[1].z + a[2].z + b[0].z + b[1].z + b[2].z) / Float(6.0f);
-            accumulate(out, intersection_depth, intersection_normal, point);
+            accumulate(out, intersection_depth, intersection_normal, intersection_point);
         }
         $ELSE {
             for (std::size_t i = 0; i < 3; ++i) {
@@ -399,7 +483,7 @@ inline void triangle_contact(const std::array<Vec3, 3>& a,
                 $IF((inside != Uint(0u)) && (distance >= Float(0.0f)) && (distance <= threshold)) {
                     Vec3 point;
                     point = sub(b[i], mul(na, distance));
-                    accumulate(out, threshold - distance, na, point);
+                    accumulate(out, Float(0.0f) - distance, na, point);
                 }
             }
             for (std::size_t i = 0; i < 3; ++i) {
@@ -410,7 +494,7 @@ inline void triangle_contact(const std::array<Vec3, 3>& a,
                     Vec3 point, normal;
                     point = sub(a[i], mul(nb, distance));
                     normal = mul(nb, Float(-1.0f));
-                    accumulate(out, threshold - distance, normal, point);
+                    accumulate(out, Float(0.0f) - distance, normal, point);
                 }
             }
             for (std::size_t i = 0; i < 3; ++i) {
@@ -430,7 +514,7 @@ inline void triangle_contact(const std::array<Vec3, 3>& a,
                         Vec3 normal, point;
                         normal = mul(difference, Float(1.0f) / distance);
                         point = mul(add(pa, pb), Float(0.5f));
-                        accumulate(out, threshold - distance, normal, point);
+                        accumulate(out, Float(0.0f) - distance, normal, point);
                     }
                 }
             }
