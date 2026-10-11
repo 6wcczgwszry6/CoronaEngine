@@ -223,6 +223,29 @@ void MechanicsSystem::update_physics(float fixed_dt) {
 
     impl_->global_simulation_time += fixed_dt;
 
+    // Take one pose snapshot before forces/sleep flags are uploaded. An editor
+    // move is an explicit wake command; stale contact impulses belong to the
+    // previous placement and must not survive it.
+    std::unordered_map<std::uintptr_t, ModelTransform> step_transforms;
+    std::unordered_set<std::uintptr_t> edited_bodies;
+    for (auto h : mechanics_handles) {
+        auto mechanics = mechanics_storage.try_acquire_read(h);
+        if (!mechanics) continue;
+        auto geometry = geometry_storage.try_acquire_read(mechanics->geometry_handle);
+        if (!geometry) continue;
+        const auto transform_handle = geometry->transform_handle;
+        if (!step_transforms.contains(transform_handle)) {
+            auto transform = transform_storage.try_acquire_read(transform_handle);
+            if (!transform) continue;
+            step_transforms.emplace(transform_handle, *transform);
+        }
+        if (impl_->body(h).observe_transform(transform_handle, step_transforms.at(transform_handle)))
+            edited_bodies.insert(h);
+    }
+    std::erase_if(impl_->warm_start_cache, [&](const auto& item) {
+        return edited_bodies.contains(item.first.first) || edited_bodies.contains(item.first.second);
+    });
+
     phase.emplace("physics.prepare_forces");
     // Stage 2/2b: one GPU batch preserves damping -> gravity -> speed limits ->
     // axis locks. Include handles without valid geometry, as the old integrator
@@ -284,9 +307,10 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         auto geom_acc = geometry_storage.try_acquire_read(m.geometry_handle);
         if (!geom_acc) continue;
 
-        auto tx_acc = transform_storage.try_acquire_read(geom_acc->transform_handle);
-        if (!tx_acc) continue;
-        const auto& t = *tx_acc;  // 只读当前变换（复制后做预测）
+        const auto snapshot = step_transforms.find(geom_acc->transform_handle);
+        if (snapshot == step_transforms.end() ||
+            impl_->body(h).last_transform_handle != geom_acc->transform_handle) continue;
+        const auto& t = snapshot->second;
 
         ktm::fvec3 e_local = make_fvec3(  // mechanics 局部半棱长
             (m.max_xyz.x - m.min_xyz.x) * 0.5f,
@@ -321,12 +345,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 (geom_acc->skinned_aabb_max.y - geom_acc->skinned_aabb_min.y) * 0.5f,
                 (geom_acc->skinned_aabb_max.z - geom_acc->skinned_aabb_min.z) * 0.5f);
         }
-        // 无记录则从当前欧拉初始化四元数
         auto& body = impl_->body(h);
-        if (!body.orientation_initialized) {
-            body.orientation_quat = quat_from_model_euler(t.euler_rotation);
-            body.orientation_initialized = true;
-        }
         // Prediction has always extrapolated every awake type, including
         // kinematic bodies. Its quaternion must not overwrite the runtime pose.
         GpuRigidIntegrationPipeline::PoseInput predicted;
@@ -517,7 +536,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             ktm::fvec3 contact_pt{};  // S2：预计算 pass 填写的接触点（冲量迭代内直接读取）
             float inv_ma = 0.f;
             float inv_mb = 0.f;
-            float last_j = 0.f;       // 最后一轮施加的法向冲量；该轮处于分离（未施加）则为 0
             // E2：累积冲量（跨迭代轮次，本子步内累加，warm start 用）
             float accumulated_j  = 0.f;  // 法向累积冲量（≥ 0，不允许负值即拉力）
             float accumulated_jt = 0.f;  // 切向累积冲量绝对值（不超过 μ * accumulated_j）
@@ -559,12 +577,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 GpuCollisionPipeline::Pair query;
                 query.a.key = a.geom_handle;
                 query.b.key = b.geom_handle;
-                { auto tx = transform_storage.try_acquire_read(a.transform_handle);
-                  if (!tx) continue;
-                  query.a.transform = gpu_matrix(tx->compute_matrix()); }
-                { auto tx = transform_storage.try_acquire_read(b.transform_handle);
-                  if (!tx) continue;
-                  query.b.transform = gpu_matrix(tx->compute_matrix()); }
+                query.a.transform = gpu_matrix(collision_transforms[it_a->second].compute_matrix());
+                query.b.transform = gpu_matrix(collision_transforms[it_b->second].compute_matrix());
                 pair_records[pair_idx].index_a = it_a->second;
                 pair_records[pair_idx].index_b = it_b->second;
                 queries.push_back(query);
@@ -642,6 +656,38 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             }
         }
 
+        // Wake connected dynamic bodies before computing effective masses.
+        // A sleeping endpoint used to have zero inverse mass, so trying to wake
+        // it from its resulting impulse could never succeed. Fixed bodies only
+        // propagate an explicit edit, not wakefulness from unrelated contacts.
+        std::vector<std::vector<std::size_t>> contact_neighbors(mechanics_data.size());
+        for (const auto& rec : pair_records) {
+            if (!rec.in_contact) continue;
+            contact_neighbors[rec.index_a].push_back(rec.index_b);
+            contact_neighbors[rec.index_b].push_back(rec.index_a);
+        }
+        std::vector<std::size_t> wake_queue;
+        std::vector<bool> visited(mechanics_data.size(), false);
+        for (std::size_t i = 0; i < mechanics_data.size(); ++i) {
+            const auto h = mechanics_data[i].handle;
+            if (edited_bodies.contains(h) ||
+                (frame_params.at(h).body_type == BodyType::Dynamic && !impl_->body(h).sleeping)) {
+                visited[i] = true;
+                wake_queue.push_back(i);
+            }
+        }
+        for (std::size_t next = 0; next < wake_queue.size(); ++next) {
+            for (auto neighbor : contact_neighbors[wake_queue[next]]) {
+                const auto h = mechanics_data[neighbor].handle;
+                if (visited[neighbor] || frame_params.at(h).body_type != BodyType::Dynamic) continue;
+                visited[neighbor] = true;
+                auto& body = impl_->body(h);
+                body.sleeping = false;
+                body.reset_sleep_timer = true;
+                wake_queue.push_back(neighbor);
+            }
+        }
+
         // Upload compact contacts once; all GS iterations and the global
         // convergence decision execute on the GPU in a single submission.
         std::vector<GpuContactSolverPipeline::Contact> solver_contacts;
@@ -702,7 +748,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 const auto& state = solved.contacts[ci];
                 rec.inv_ma = state.inv_ma;
                 rec.inv_mb = state.inv_mb;
-                rec.last_j = state.last_j;
                 rec.accumulated_j = state.accumulated_j;
                 rec.accumulated_jt = state.accumulated_jt;
                 rec.v_n_initial = state.v_n_initial;
@@ -761,25 +806,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                     };
                     record_corr(ha, inv_ma, -1.f);
                     record_corr(hb, inv_mb, +1.f);
-                }
-            }
-
-            // 只有当法向冲量导致的速度变化超过休眠阈值时才唤醒。
-            // 取最后一轮施加的冲量（与原末轮语义一致）而非累计冲量：静止堆叠每子步
-            // 都要抵消重力，累计值恒超阈值，会让堆叠永远无法入睡。
-            // 早退时最后一轮 |j|·inv_m < k_early_exit_vel_eps，远低于阈值，不会误唤醒。
-            {
-                const float wake_impulse_threshold = sleep_threshold * 2.0f;
-                const float delta_v_a = std::abs(rec.last_j) * inv_ma;
-                const float delta_v_b = std::abs(rec.last_j) * inv_mb;
-
-                if (delta_v_a > wake_impulse_threshold) {
-                    impl_->body(ha).sleeping = false;
-                    impl_->body(ha).reset_sleep_timer = true;
-                }
-                if (delta_v_b > wake_impulse_threshold) {
-                    impl_->body(hb).sleeping = false;
-                    impl_->body(hb).reset_sleep_timer = true;
                 }
             }
 
@@ -966,24 +992,20 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             // a physical step. An invalidated transform still skips its body.
             auto tx_w = transform_storage.try_acquire_write(data.transform_handle);
             if (!tx_w) continue;
-            auto pose = poses[j];
-            const std::array current_position{tx_w->position.x, tx_w->position.y, tx_w->position.z};
-            if (current_position != final_pose_inputs[j].position) {
-                // A script moved this transform during the batch. Rebase the
-                // original input (including its unadvanced quaternion) while
-                // holding the write lock, preserving the former atomic update.
-                // Only this contended case waits for the GPU with a lock held.
-                auto rebased = resident_inputs[j];
-                rebased.pose.position = current_position;
-                pose = impl_->gpu_rigid_integration->integrate_poses_to_velocities(
-                    std::span<const GpuRigidIntegrationPipeline::ResidentPoseInput>(&rebased, 1),
-                    pose_velocity_source, pose_velocity_target,
-                    std::span<const std::uint32_t>(&destination_indices[j], 1), fixed_dt).front();
+            auto& expected = step_transforms.at(data.transform_handle);
+            if (!same_transform(*tx_w, expected)) {
+                // The GPU result belongs to the old pose. Leave the edit intact
+                // and observe it at the next step, including rotation/scale.
+                body.sleeping = false;
+                body.reset_sleep_timer = true;
+                continue;
             }
+            const auto& pose = poses[j];
             tx_w->position = make_fvec3(pose.position[0], pose.position[1], pose.position[2]);
             body.orientation_quat = ktm::fquat::real_imag(pose.orientation[3],
                 make_fvec3(pose.orientation[0], pose.orientation[1], pose.orientation[2]));
             sync_euler_from_orientation_quat(body.orientation_quat, tx_w->euler_rotation);
+            expected = *tx_w;
         }
         final_pose_inputs.clear();
         final_pose_targets.clear();
@@ -1017,9 +1039,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         GpuRigidIntegrationPipeline::PoseInput input;
         input.advance = advance;
         if (advance) {
-            auto tx_r = transform_storage.try_acquire_read(data.transform_handle);
-            if (tx_r) input.position = {tx_r->position.x, tx_r->position.y, tx_r->position.z};
-            else input.advance = false;
+            const auto& transform = step_transforms.at(data.transform_handle);
+            input.position = {transform.position.x, transform.position.y, transform.position.z};
         }
         input.orientation = {body.orientation_quat.i, body.orientation_quat.j,
                              body.orientation_quat.k, body.orientation_quat.r};
@@ -1047,9 +1068,8 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             const auto params = frame_params.find(data.handle);
             if (params == frame_params.end() || params->second.body_type == BodyType::Phantom ||
                 params->second.body_type == BodyType::Static) continue;
-            auto tx = transform_storage.try_acquire_read(data.transform_handle);
-            if (!tx) continue;
-            queries.push_back({{data.geom_handle, gpu_matrix(tx->compute_matrix())}, {}});
+            const auto& transform = step_transforms.at(data.transform_handle);
+            queries.push_back({{data.geom_handle, gpu_matrix(transform.compute_matrix())}, {}});
             targets.push_back(data.handle);
         }
         if (!queries.empty()) {
@@ -1070,9 +1090,12 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         if (fp_it == frame_params.end()) continue;
         const auto btype = fp_it->second.body_type;
         if (btype == BodyType::Phantom || btype == BodyType::Static) continue;
+        const auto& transform = step_transforms.at(data.transform_handle);
+        ktm::fvec3 floor_min, floor_max, floor_center;
+        world_aabb_from_local_bounds(transform, data.local_min, data.local_max, floor_min, floor_max, floor_center);
         auto& body = impl_->body(h);
         if (btype == BodyType::Dynamic && body.sleeping) {
-            if (data.min_world.y > floor_y + floor_eps) {
+            if (floor_min.y > floor_y + floor_eps || floor_min.y < floor_y - floor_eps) {
                 body.sleeping = false;
                 body.reset_sleep_timer = true;
             } else {
@@ -1081,13 +1104,14 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         }
         GpuFloorSleepPipeline::FloorInput input;
         input.body = body_state_indices.at(h);
-        input.center = {data.center_world.x, data.center_world.y, data.center_world.z};
+        input.center = {floor_center.x, floor_center.y, floor_center.z};
         input.inertia_inv = {data.inertia_inv_body.x, data.inertia_inv_body.y, data.inertia_inv_body.z};
+        const auto floor_rotation = quat_from_model_euler(transform.euler_rotation).matrix3x3();
         for (std::size_t col = 0; col < 3; ++col)
             for (std::size_t row = 0; row < 3; ++row)
-                input.rotation[col * 3 + row] = data.rot_body_to_world[col][row];
+                input.rotation[col * 3 + row] = floor_rotation[col][row];
         input.mass = fp_it->second.mass;
-        input.bottom = data.min_world.y;
+        input.bottom = floor_min.y;
         input.linear_lock = body.linear_lock;
         input.angular_lock = body.angular_lock;
         input.skinned = data.is_skinned;
@@ -1096,9 +1120,6 @@ void MechanicsSystem::update_physics(float fixed_dt) {
             if (sample == floor_samples.end()) continue;
             input.lowest = sample->second.lowest_world;
             input.bottom = input.lowest[1];
-        } else if (!(body.linear_lock & kLockAxisY)) {
-            if (const auto correction = position_correction.find(h); correction != position_correction.end())
-                input.bottom += correction->second.y;
         }
         floor_inputs.push_back(input);
         floor_targets.push_back(i);
@@ -1114,9 +1135,10 @@ void MechanicsSystem::update_physics(float fixed_dt) {
         const auto h = data.handle;
         auto tx_w = transform_storage.try_acquire_write(data.transform_handle);
         if (!tx_w) continue;
-        // Apply the GPU delta to the latest position under the original write
-        // lock. Aliased transforms retain their ordered additive corrections.
+        auto& expected = step_transforms.at(data.transform_handle);
+        if (!same_transform(*tx_w, expected)) continue;
         if (!(impl_->body(h).linear_lock & kLockAxisY)) tx_w->position.y += floor_contacts[i].delta_y;
+        expected = *tx_w;
         accepted_floor[i] = 1;
         // 蒙皮额外：IK target 入队（最低顶点所在骨骼）
         if (data.is_skinned) {
@@ -1142,6 +1164,13 @@ void MechanicsSystem::update_physics(float fixed_dt) {
                 }
             }
         }
+    }
+
+    // Record only snapshots and accepted physics writes. A UI edit arriving
+    // during GPU work stays different and will wake the body next step.
+    for (const auto& data : mechanics_data) {
+        auto& body = impl_->body(data.handle);
+        body.last_transform = step_transforms.at(data.transform_handle);
     }
 
     phase.emplace("physics.sleep");

@@ -264,9 +264,21 @@ struct DeferredIkTargetUpdate {
 // 注意：八叉树实现已迁移到 include/corona/spatial/octree.h，由 GeometrySystem 持有并维护。
 // MechanicsSystem 仅作为消费者使用（宽相候选对生成仍可复用该通用实现）。
 
+inline bool same_transform(const ModelTransform& a, const ModelTransform& b) {
+    for (int axis = 0; axis < 3; ++axis) {
+        if (a.position[axis] != b.position[axis] ||
+            a.euler_rotation[axis] != b.euler_rotation[axis] || a.scale[axis] != b.scale[axis]) return false;
+    }
+    return true;
+}
+
 struct BodyRuntimeState {
     ktm::fquat orientation_quat{};
     bool orientation_initialized = false;
+    // Last accepted input or physics write, never a fresh end-of-step read.
+    // This detects edits through every Transform writer, including scripts/UI.
+    ModelTransform last_transform;
+    std::uintptr_t last_transform_handle = 0;
     // Velocities and sleep timers are authoritative on GPU across fixed steps.
     // CPU retains only routing state and explicit timer-reset commands.
     bool sleeping = false;
@@ -275,6 +287,24 @@ struct BodyRuntimeState {
     uint8_t angular_lock = 0;
     float last_move_callback_time = -kMoveCallbackMinInterval;
     ktm::fvec3 last_move_callback_pos = make_fvec3(1e9f, 1e9f, 1e9f);
+
+    bool observe_transform(std::uintptr_t handle, const ModelTransform& transform) {
+        const bool changed = !orientation_initialized || last_transform_handle != handle ||
+                             !same_transform(last_transform, transform);
+        if (!changed) return false;
+        if (!orientation_initialized || last_transform_handle != handle ||
+            last_transform.euler_rotation.x != transform.euler_rotation.x ||
+            last_transform.euler_rotation.y != transform.euler_rotation.y ||
+            last_transform.euler_rotation.z != transform.euler_rotation.z) {
+            orientation_quat = quat_from_model_euler(transform.euler_rotation);
+            orientation_initialized = true;
+        }
+        last_transform = transform;
+        last_transform_handle = handle;
+        sleeping = false;
+        reset_sleep_timer = true;
+        return true;
+    }
 };
 
 struct BodyFrameParams {
