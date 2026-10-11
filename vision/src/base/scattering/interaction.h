@@ -32,6 +32,8 @@ public:
     float3 virtual_normal{};
     float3 virtual_geometric_normal{};
     float3 denoiser_albedo{};
+    float3 depth_position{};
+    uint approximate{false};
     uint stable_branch{0u};
     uint is_replaced{false};
     uint is_split{false};
@@ -39,7 +41,7 @@ public:
 };
 }// namespace vision
 // clang-format off
-OC_STRUCT(vision, SurfaceData, hit, normal_depth, pos_diff, diffuse_roughness, specular_roughness, virtual_position, virtual_normal, virtual_geometric_normal, denoiser_albedo, stable_branch, is_replaced, is_split, flag) {
+OC_STRUCT(vision, SurfaceData, hit, normal_depth, pos_diff, diffuse_roughness, specular_roughness, virtual_position, virtual_normal, virtual_geometric_normal, denoiser_albedo, depth_position, approximate, stable_branch, is_replaced, is_split, flag) {
     void set_normal(const Float3 &n) {
         normal_depth = make_float4(n, normal_depth.w);
     }
@@ -60,11 +62,67 @@ struct SurfaceExtend {
     float3 view_pos{};
     float t_max{};
     float3 final_direction{};
+    uint prefix_depth{};
 };
 }// namespace vision
 // clang-format off
-OC_STRUCT(vision, SurfaceExtend, throughput, view_pos, t_max, final_direction) {};
+OC_STRUCT(vision, SurfaceExtend, throughput, view_pos, t_max, final_direction, prefix_depth) {};
 // clang-format om
+
+namespace vision {
+inline constexpr uint StablePlaneCount = 3u;
+// Only immutable geometry/identity is needed when reprojecting the next frame.
+// Keep full precision; transport state and material evaluation stay current-only.
+struct StablePlaneHistorySurface {
+    TriangleHit hit{};
+    float3 virtual_position{};
+    float3 virtual_geometric_normal{};
+    uint approximate{};
+    uint stable_branch{};
+};
+struct StablePlaneHistory {
+    StablePlaneHistorySurface surface{};
+    float2 motion{};
+    float3 depth_position{};
+    uint branch_sequence{1u};
+    uint instance_hash{};
+    uint depth{};
+    uint material_id{InvalidUI32};
+    uint valid{};
+};
+static_assert(sizeof(StablePlaneHistory) <= 128u);
+struct StablePlaneData {
+    SurfaceData surface{};
+    SurfaceExtend extension{};
+    float2 motion{};
+    float3 depth_position{};
+    uint branch_sequence{1u};
+    uint instance_hash{};
+    uint depth{};
+    uint material_id{InvalidUI32};
+    uint valid{};
+    uint reservoir_eligible{};
+};
+}// namespace vision
+OC_STRUCT(vision, StablePlaneHistorySurface, hit, virtual_position, virtual_geometric_normal,
+          approximate, stable_branch) {};
+OC_STRUCT(vision, StablePlaneHistory, surface, motion, depth_position,
+          branch_sequence, instance_hash, depth, material_id, valid) {};
+OC_STRUCT(vision, StablePlaneData, surface, extension, motion, depth_position,
+          branch_sequence, instance_hash, depth, material_id, valid, reservoir_eligible) {
+    [[nodiscard]] Var<vision::StablePlaneHistory> history() const noexcept {
+        Var<vision::StablePlaneHistory> ret;
+        ret.surface.hit = surface.hit;
+        ret.surface.virtual_position = surface.virtual_position;
+        ret.surface.virtual_geometric_normal = surface.virtual_geometric_normal;
+        ret.surface.approximate = surface.approximate;
+        ret.surface.stable_branch = surface.stable_branch;
+        ret.motion = motion; ret.depth_position = depth_position;
+        ret.branch_sequence = branch_sequence; ret.instance_hash = instance_hash;
+        ret.depth = depth; ret.material_id = material_id; ret.valid = valid;
+        return ret;
+    }
+};
 
 namespace vision {
 struct HitBSDF {
@@ -324,6 +382,10 @@ public:
     // ReSTIR GI starts at the secondary vertex; DI already owns emission
     // reached by that first continuation ray. Later emission remains indirect.
     bool suppress_initial_emission{false};
+    const Bool *suppress_initial_emission_if{};
+    bool complete_terminal_direct{false};
+    // ReSTIR's direct channel also owns emission reached by its first BSDF ray.
+    bool restir_direct_split{false};
 
 public:
     HitContext() = default;
