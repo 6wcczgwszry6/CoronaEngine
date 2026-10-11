@@ -22,6 +22,98 @@ constexpr float kMinFixedDt = 1.0f / 120.0f;
 constexpr float kMaxFixedDt = 1.0f / 30.0f;
 constexpr int kMaxCatchUpSteps = 4;
 
+// Horizon creates native Vulkan pipelines on the first submission. Exercise
+// every kernel with tiny private inputs on the preparation worker, then clear
+// identities/mesh caches before publishing the pipeline. No scene data, events
+// or physical time are involved. Empty dispatches would skip native creation.
+GpuRigidVelocityView warmup_velocities() {
+    const std::array<float, 24> zeroes{};
+    auto desc = Horizon::HardwareBufferDesc::typed<float>(zeroes.size(),
+        Horizon::BufferUsage_Storage | Horizon::BufferUsage_TransferSrc | Horizon::BufferUsage_TransferDst,
+        "mechanics.startup.velocities");
+    return {Horizon::HardwareBuffer(desc, std::as_bytes(std::span(zeroes))), 4};
+}
+
+void warmup_pipeline(GpuSkinningPipeline& pipeline) {
+    const std::array<Resource::Vertex, 2> vertices{};
+    const std::array<Resource::BoneWeights, 2> weights{};
+    GpuSkinningPipeline::Request request;
+    request.key = 1; request.revision = 1;
+    request.vertices = vertices; request.weights = weights; request.readback = false;
+    (void)pipeline.update(std::span(&request, 1), {});
+    pipeline.reset();
+}
+
+void warmup_pipeline(GpuCollisionPipeline& pipeline) {
+    CollisionMesh mesh;
+    mesh.vertices = {{0, 0, 0}, {1, 0, 0}, {0, 1, 0}, {0, 0, 1}};
+    mesh.triangles = {{0, 2, 1}, {0, 1, 3}, {0, 3, 2}, {1, 2, 3}};
+    mesh.total_vertex_count = 4;
+    TriangleOctree tree;
+    tree.build(mesh.vertices, mesh);
+    pipeline.set_mesh(1, 1, mesh, tree);
+    pipeline.set_mesh(2, 1, mesh, tree);
+    const auto identity = gpu_matrix(ktm::fmat4x4::from_eye());
+    const GpuCollisionPipeline::Pair pair{{1, identity}, {2, identity}};
+    (void)pipeline.contacts(std::span(&pair, 1));
+    const GpuCollisionPipeline::VertexQuery vertex{{1, identity}, {0, 0, 0}};
+    (void)pipeline.sample_vertices(std::span(&vertex, 1));
+    const GpuCollisionPipeline::GroundQuery ground{{1, identity}, {0.1f, 2, 0.1f}, 3};
+    (void)pipeline.ground(std::span(&ground, 1));
+    pipeline.retain({});
+}
+
+void warmup_pipeline(GpuBroadphasePipeline& pipeline) {
+    const std::array<GpuBroadphasePipeline::Body, 2> bodies{{
+        {{0, 0, 0}, {1, 1, 1}}, {{0, 0, 0}, {1, 1, 1}}}};
+    const std::array<std::uint32_t, 2> indices{0, 1};
+    const GpuBroadphasePipeline::Scene scene{indices};
+    (void)pipeline.pairs(bodies, std::span(&scene, 1));
+}
+
+void warmup_pipeline(GpuRigidIntegrationPipeline& pipeline) {
+    const auto source = warmup_velocities();
+    const auto destination = warmup_velocities();
+    const std::array<GpuRigidIntegrationPipeline::VelocityInput, 4> velocities{};
+    (void)pipeline.update_velocities(velocities, {});
+    (void)pipeline.update_velocities_device(velocities, source, {});
+    const std::array<GpuRigidIntegrationPipeline::PoseInput, 1> poses{};
+    const std::array<GpuRigidIntegrationPipeline::ResidentPoseInput, 1> resident{};
+    (void)pipeline.integrate_poses(poses, 0);
+    (void)pipeline.integrate_poses_from_velocities(resident, source, 0);
+    (void)pipeline.predict_poses_from_velocities(resident, source, 0);
+    const std::array<std::uint32_t, 1> indices{0};
+    (void)pipeline.integrate_poses_to_velocities(resident, source,
+        {destination.buffer, destination.count}, indices, 0);
+}
+
+void warmup_pipeline(GpuContactSolverPipeline& pipeline) {
+    const auto source = warmup_velocities();
+    const std::array<GpuContactSolverPipeline::Body, 4> bodies{};
+    std::array<GpuContactSolverPipeline::Contact, 2> contacts{};
+    contacts[0].a = 0; contacts[0].b = 1; contacts[0].normal = {0, 1, 0};
+    contacts[1].a = 2; contacts[1].b = 3; contacts[1].normal = {0, 1, 0};
+    const std::array<std::uint32_t, 4> indices{0, 1, 2, 3};
+    (void)pipeline.solve_from_velocities(bodies, contacts, {}, source, indices);
+    (void)pipeline.solve_device({}, {}, {});
+}
+
+void warmup_pipeline(GpuFloorSleepPipeline& pipeline) {
+    const std::array<GpuFloorSleepPipeline::Velocity, 1> velocities{};
+    const std::array<GpuFloorSleepPipeline::SleepInput, 1> sleep{};
+    pipeline.begin(velocities);
+    (void)pipeline.finish_sleep(sleep, {});
+    const std::array<std::uint64_t, 1> identities{1};
+    pipeline.begin_resident(identities);
+    const std::array<GpuFloorSleepPipeline::FloorInput, 1> floor{};
+    (void)pipeline.evaluate_floor(floor, {});
+    const std::array<std::uint8_t, 1> accepted{1};
+    pipeline.commit_floor(accepted);
+    const std::array<GpuFloorSleepPipeline::ResidentSleepInput, 1> resident{};
+    (void)pipeline.finish_sleep_resident(resident, {});
+    pipeline.begin_resident({});
+}
+
 std::uint64_t performance_report_interval() {
     static const auto interval = [] {
         std::uint64_t value = 120;
@@ -82,14 +174,14 @@ void MechanicsSystem::Impl::start_gpu_preparation() {
         std::atomic<std::size_t> next{};
     };
     auto jobs = std::make_shared<Jobs>();
-    jobs->tasks.push_back(gpu_collision.prepare("collision"));
-    jobs->tasks.push_back(gpu_rigid_integration.prepare("integration"));
-    jobs->tasks.push_back(gpu_floor_sleep.prepare("floor/sleep"));
-    jobs->tasks.push_back(gpu_contact_solver.prepare("contacts"));
-    jobs->tasks.push_back(gpu_broadphase.prepare("broad phase"));
-    jobs->tasks.push_back(gpu_skinning.prepare("skinning"));
+    jobs->tasks.push_back(gpu_collision.prepare("collision", warmup_pipeline));
+    jobs->tasks.push_back(gpu_rigid_integration.prepare("integration", warmup_pipeline));
+    jobs->tasks.push_back(gpu_floor_sleep.prepare("floor/sleep", warmup_pipeline));
+    jobs->tasks.push_back(gpu_contact_solver.prepare("contacts", warmup_pipeline));
+    jobs->tasks.push_back(gpu_broadphase.prepare("broad phase", warmup_pipeline));
+    jobs->tasks.push_back(gpu_skinning.prepare("skinning", warmup_pipeline));
     // Bound compiler concurrency instead of starting a compiler for every
-    // kernel. No SystemContext/scene locks or object addresses cross threads.
+    // kernel. Workers capture only their job queue, never Impl or SystemContext.
     for (unsigned i = 0; i < 2; ++i) {
         gpu_preparation_workers.emplace_back([jobs](std::stop_token stop) {
             while (!stop.stop_requested()) {

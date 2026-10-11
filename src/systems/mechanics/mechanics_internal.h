@@ -39,17 +39,18 @@
 
 namespace Corona::Systems::MechanicsInternal {
 
-// Construction owns only shader/pipeline state. A preparation worker never
-// touches scene data, GPU buffers or the slot; the future transfers ownership
-// to the mechanics thread before its first dispatch.
+// Preparation owns its pipelines and private warmup buffers. Workers never
+// touch scene data or the slot; the future transfers ownership after all
+// warmup submissions complete and before the first scene dispatch.
 template <class T>
 class PreparedGpuPipeline {
 public:
-    std::packaged_task<void()> prepare(std::string name) {
+    std::packaged_task<void()> prepare(std::string name, void (*warmup)(T&) = nullptr) {
         if (value_ || pending_.valid() || failure_) return {};
-        std::packaged_task<std::unique_ptr<T>()> task([name = std::move(name)] {
+        std::packaged_task<std::unique_ptr<T>()> task([name = std::move(name), warmup] {
             const auto start = std::chrono::steady_clock::now();
             auto value = std::make_unique<T>();
+            if (warmup) warmup(*value);
             const auto elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             CFW_LOG_INFO("Mechanics GPU pipeline '{}' prepared in {:.1f} ms", name, elapsed);
             return value;
@@ -1019,8 +1020,8 @@ struct MechanicsSystem::Impl {
     /// 骨骼动画上一次蒙皮的时间戳（诊断用；dt 已由 update() 测量并传入，不再用于计算）。
     std::optional<std::chrono::steady_clock::time_point> last_skin_update_time;
 
-    // CPU shader compilation starts at initialization; the mechanics thread
-    // acquires each completed pipeline only when needed.
+    // Shader compilation and native GPU warmup start at initialization; the
+    // mechanics thread acquires each completed pipeline only when needed.
     std::unique_ptr<GpuSubmissionBatch> gpu_submission_batch;
     MechanicsInternal::PreparedGpuPipeline<GpuSkinningPipeline> gpu_skinning;
     MechanicsInternal::PreparedGpuPipeline<GpuCollisionPipeline> gpu_collision;
