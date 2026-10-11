@@ -25,6 +25,7 @@ class GpuContactSolverPipeline {
     };
     struct Contact {
         std::uint32_t a{}, b{};
+        // Unit normal from A toward B; positive accumulated_j separates them.
         std::array<float, 3> normal{}, point{}, surface_a{}, surface_b{};
         float penetration{}, accumulated_j{}, accumulated_jt{};
     };

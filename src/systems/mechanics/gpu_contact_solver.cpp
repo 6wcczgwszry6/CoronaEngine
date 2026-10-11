@@ -126,7 +126,7 @@ struct GatherKernel {
 struct SolveKernel {
     Floats bodies, contacts, velocities, results, maxima;
     UInts flags, endpoints, order, offsets, control;
-    Uint islands, iteration, iterations;
+    Uint islands, iteration;
     Float max_linear, max_angular, max_impulse, friction, static_friction;
     H::ComputePipeline<> pipeline;
 
@@ -169,26 +169,30 @@ struct SolveKernel {
             auto wa = load3(velocities, a * Uint(6u) + Uint(3u));
             auto vb = load3(velocities, b * Uint(6u));
             auto wb = load3(velocities, b * Uint(6u) + Uint(3u));
-            Float accumulated, accumulated_t, initial, penetration;
+            Float accumulated, accumulated_t, initial;
             accumulated = results.values[out + Uint(3u)];
             accumulated_t = results.values[out + Uint(4u)];
             initial = results.values[out + Uint(5u)];
-            penetration = contacts.values[ca + Uint(12u)];
-            $IF((iteration == Uint(0u)) && (accumulated > Float(0.0f))) {
-                apply_impulse(va, vb, wa, wb, mul(n, accumulated), inv_a, inv_b, bits_a, bits_b, ba, bb, ra, rb);
-            }
             auto pa = add(va, cross3(wa, ra));
             auto pb = add(vb, cross3(wb, rb));
-            $IF(iteration == Uint(0u)) {
-                initial = dot3(sub(pa, pb), n);
-                results.values[out + Uint(5u)] = initial;
-            }
             add_in_place(pa, load3(contacts, ca + Uint(6u)));
             add_in_place(pb, load3(contacts, ca + Uint(9u)));
+            $IF(iteration == Uint(0u)) {
+                // Restitution uses the incoming speed, before warm starting.
+                initial = dot3(sub(pa, pb), n);
+                results.values[out + Uint(5u)] = initial;
+                $IF(accumulated > Float(0.0f)) {
+                    apply_impulse(va, vb, wa, wb, mul(n, Float(0.0f) - accumulated), inv_a, inv_b, bits_a, bits_b, ba, bb, ra, rb);
+                }
+            }
+            pa = add(add(va, cross3(wa, ra)), load3(contacts, ca + Uint(6u)));
+            pb = add(add(vb, cross3(wb, rb)), load3(contacts, ca + Uint(9u)));
             Float vn;
             vn = dot3(sub(pa, pb), n);
-            $IF(((penetration <= Float(0.0f)) && (vn > Float(0.0f))) ||
-                ((penetration > Float(0.0f)) && (vn >= Float(-1e-4f)))) {
+            // n points A -> B, so positive vn is approach. A positive normal
+            // multiplier pushes A along -n and B along +n. Separating contacts
+            // must still solve so an excessive warm start can be removed.
+            {
                 auto ran = cross3(ra, n);
                 auto rbn = cross3(rb, n);
                 Float angular_a, angular_b, denominator;
@@ -199,17 +203,15 @@ struct SolveKernel {
                 $IF(denominator > Float(1e-12f)) {
                     Float target, raw, next, impulse;
                     target = 0.0f;
-                    $IF(iteration + Uint(1u) == iterations) {
-                        Float restitution;
-                        restitution = (bodies.values[ba + Uint(16u)] + bodies.values[bb + Uint(16u)]) * Float(0.5f);
-                        target = (Float(0.0f) - restitution) * max(Float(0.0f), initial);
-                    }
-                    raw = (target - vn) / denominator;
+                    Float restitution;
+                    restitution = (bodies.values[ba + Uint(16u)] + bodies.values[bb + Uint(16u)]) * Float(0.5f);
+                    target = (Float(0.0f) - restitution) * max(Float(0.0f), initial);
+                    raw = (vn - target) / denominator;
                     next = max(Float(0.0f), accumulated + raw);
                     impulse = max(Float(0.0f) - max_impulse, min(max_impulse, next - accumulated));
-                    accumulated = next; // Deliberately store the uncapped accumulation.
+                    accumulated = accumulated + impulse;
                     results.values[out + Uint(2u)] = impulse;
-                    apply_impulse(va, vb, wa, wb, mul(n, impulse), inv_a, inv_b, bits_a, bits_b, ba, bb, ra, rb);
+                    apply_impulse(va, vb, wa, wb, mul(n, Float(0.0f) - impulse), inv_a, inv_b, bits_a, bits_b, ba, bb, ra, rb);
                     clamp_pair(va, vb, wa, wb, bits_a, bits_b);
                     Float dv;
                     dv = max(abs(impulse) * inv_a, abs(impulse) * inv_b);
@@ -254,7 +256,7 @@ struct SolveKernel {
                     }
                 }
             }
-            // Warm-start changes survive a subsequently separating contact.
+            // Store the converged velocity and the impulse actually applied.
             for (std::uint32_t axis = 0; axis < 3; ++axis) {
                 velocities.values[a * Uint(6u) + Uint(axis)] = va[axis];
                 velocities.values[a * Uint(6u) + Uint(axis + 3u)] = wa[axis];
@@ -266,7 +268,7 @@ struct SolveKernel {
         }
     }
     SolveKernel() {
-        islands.as_push_constant(); iteration.as_push_constant(); iterations.as_push_constant();
+        islands.as_push_constant(); iteration.as_push_constant();
         max_linear.as_push_constant(); max_angular.as_push_constant(); max_impulse.as_push_constant();
         friction.as_push_constant(); static_friction.as_push_constant();
         pipeline = H::ComputePipeline<>([&] {
@@ -559,7 +561,7 @@ struct GpuContactSolverPipeline::Impl {
                 kernel.bodies.bind(bodies.data); kernel.contacts.bind(contacts.data); kernel.velocities.bind(velocities.data);
                 kernel.results.bind(results.data); kernel.maxima.bind(maxima.data); kernel.flags.bind(flags.data);
                 kernel.endpoints.bind(endpoints.data); kernel.order.bind(order.data); kernel.offsets.bind(offsets.data); kernel.control.bind(control.data);
-                kernel.islands = island_count; kernel.iterations = p.iterations;
+                kernel.islands = island_count;
                 kernel.max_linear = p.max_linear_speed; kernel.max_angular = p.max_angular_speed;
                 kernel.max_impulse = p.max_impulse; kernel.friction = p.friction; kernel.static_friction = p.static_friction;
                 reduce.control.bind(control.data); reduce.threshold_squared = p.early_exit_velocity * p.early_exit_velocity;
