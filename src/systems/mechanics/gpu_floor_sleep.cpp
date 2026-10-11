@@ -121,16 +121,22 @@ struct FloorKernel {
                         auto rxn = cross3(r, normal);
                         Float denominator;
                         denominator = inverse_mass + dot3(rxn, inertia_apply(inputs, base, rxn)) + Float(1e-8f);
-                        $IF(point_velocity[1] < Float(0.0f) - low_velocity) {
-                            normal_impulse = (Float(0.0f) - (Float(1.0f) + restitution)) * point_velocity[1] / denominator;
+                        $IF(point_velocity[1] < Float(0.0f)) {
+                            Float bounce;
+                            bounce = 0.0f;
+                            // Resting support cancels this step's gravity. It
+                            // is not a new impact that should bounce or reset
+                            // the sleep timer on every fixed step.
+                            $IF(point_velocity[1] < Float(0.0f) -
+                                (abs(gravity_y) * dt + max(low_velocity, zero_velocity))) {
+                                bounce = restitution;
+                                reset_timer = 1.0f;
+                            }
+                            normal_impulse = (Float(0.0f) - (Float(1.0f) + bounce)) * point_velocity[1] / denominator;
                             v[1] = v[1] + normal_impulse * inverse_mass;
                             Vec impulse;
                             impulse[0] = 0.0f; impulse[1] = normal_impulse; impulse[2] = 0.0f;
                             apply_angular(w, inertia_apply(inputs, base, cross3(r, impulse)), bits);
-                            reset_timer = 1.0f;
-                        } $ELSE {
-                            v[1] = point_velocity[1] * Float(0.15f);
-                            $IF(abs(point_velocity[1]) < zero_velocity) { v[1] = 0.0f; }
                         }
                     }
                     // The original floor response uses the contact velocity
