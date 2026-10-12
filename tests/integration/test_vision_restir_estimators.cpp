@@ -6,6 +6,8 @@
 #include "base/mgr/global.h"
 #include "base/mgr/pipeline.h"
 #include "rhi/context.h"
+#include "base/scattering/material.h"
+#include "base/sampler.h"
 
 #include <algorithm>
 #include <chrono>
@@ -26,9 +28,15 @@
 
 void check_restir_reprojection(vision::Pipeline& pipeline);
 void check_stable_plane(vision::Pipeline& pipeline, bool tinted_mirror = true);
+void check_stable_emitter_coverage(vision::Pipeline& pipeline);
+void check_glass_svgf(vision::Pipeline& pipeline);
+void check_glass_runtime_depth(vision::Pipeline&, vision::Pipeline&, unsigned);
 void check_restir_material_reuse(vision::Pipeline& pipeline, const std::vector<vision::SurfaceData>& surfaces);
 void check_restir_gi_depth_one_continuation(vision::Pipeline& pipeline);
 void check_restir_gi_receiver_support(vision::Pipeline& pipeline);
+void check_glass_transport_energy(vision::Pipeline& pipeline, unsigned recursion, const char* label);
+void check_glass_depth_guides(vision::Pipeline& pipeline);
+void check_glass_children_disappear(vision::Pipeline& pipeline);
 
 namespace {
 namespace fs = std::filesystem;
@@ -39,6 +47,185 @@ void expect(bool condition, const char* message) {
     if (!condition) throw std::runtime_error(message);
 }
 
+// Removing deterministic enumeration, swapping branch IDs, using f instead of
+// p*f*cos/pdf, or consuming RNG in the query must fail this GPU contract.
+template<typename Glass = vision::DielectricLobe, typename Mirror = vision::PureReflectionLobe,
+         typename Evaluator = vision::MaterialEvaluator, typename Mix = vision::LobeSet>
+void check_stable_lobes(vision::Pipeline& pipeline) {
+    using namespace vision;
+    if constexpr (!requires(const Glass& glass, const Float3& wo) { glass.eval_stable_lobes(wo); }) {
+        expect(false, "missing deterministic stable lobe contract");
+    } else {
+        pipeline.activate_global_context();
+        Global::SceneGpuContextScope scope{pipeline.geometry().bindless_array(), pipeline.device()};
+        DielectricLobe::prepare();
+        // These LUTs are added after the diffuse fixture was prepared. No scene
+        // material changed, so upload_data alone does not refresh these handles.
+        pipeline.geometry().upload_bindless_array(pipeline.stream());
+        pipeline.upload_data();
+        auto& sampler = pipeline.renderer().sampler();
+        constexpr uint samples = 4096u;
+        Kernel kernel = [&](BufferVar<float4> output) {
+            Env::instance().clear_global_vars();
+            sampler->load_data();
+            Uint id = dispatch_id();
+            Uint scenario = id % 8u;
+            SampledWavelengths swl{3u};
+            Float eta = select(scenario == 2u || scenario == 3u, 1.f / 1.5f, 1.5f);
+            Float x = select(scenario == 0u || scenario == 4u, 0.f, 0.5f);
+            x = select(scenario == 3u, 0.9f, x);
+            Float z = sqrt(1.f - x * x) * select(scenario == 2u || scenario == 3u, -1.f, 1.f);
+            Float3 wo = make_float3(x, Float{0.f}, z);
+            SampledSpectrum color{Float3{make_float3(0.25f, 0.f, 0.8f)}};
+            color = select(scenario == 4u, SampledSpectrum::zero(swl), color);
+            auto fresnel = make_shared<FresnelDielectric>(SampledSpectrum{swl, eta}, swl);
+            auto microfacet = make_shared<GGXMicrofacet>(make_float2(0.001f), true);
+            Glass glass{fresnel, microfacet, color, scenario == 6u,
+                        select(scenario == 5u, SurfaceData::Glossy, SurfaceData::NearSpec)};
+            sampler->set_seed(dispatch_idx().xy(), Uint{17u}, Dimension::PathTracing);
+            Float expected_rng = sampler->next_1d();
+            sampler->set_seed(dispatch_idx().xy(), Uint{17u}, Dimension::PathTracing);
+            auto branches = glass.eval_stable_lobes(wo);
+            auto repeated = glass.eval_stable_lobes(wo);
+            Float actual_rng = sampler->next_1d();
+            Bool ok = expected_rng == actual_rng;
+            Float failed_stage = select(ok, 0.f, 1.f);
+            Bool supported = scenario != 5u && scenario != 6u;
+            ok &= branches.has_stochastic_remainder == !supported;
+            for (uint branch = 0u; branch < 2u; ++branch) {
+                auto& b = branches.lobes[branch];
+                auto& repeat = repeated.lobes[branch];
+                ok &= all(b.wi == repeat.wi) && b.probability == repeat.probability &&
+                      all(b.weight.vec3() == repeat.weight.vec3()) && b.valid == repeat.valid;
+                ok &= b.transmission == (branch == 0u);
+                $if(!supported) { ok &= !b.valid; };
+            }
+            failed_stage = select(failed_stage == 0.f && !ok, 2.f, failed_stage);
+            auto bs = glass.sample_delta_local(wo, sampler);
+            $if(supported) {
+                ok &= bs.stable_lobe_index < 2u;
+                for (uint branch = 0u; branch < 2u; ++branch) {
+                    auto& b = branches.lobes[branch];
+                    $if(bs.stable_lobe_index == branch) {
+                        Float3 expected = bs.eval.throughput().vec3() * abs_cos_theta(bs.wi) * b.probability;
+                        ok &= b.valid && length(b.wi - bs.wi) < 1e-6f &&
+                              all(abs(b.weight.vec3() - expected) <= 2e-5f * max(abs(expected), make_float3(1.f)));
+                    };
+                }
+                failed_stage = select(failed_stage == 0.f && !ok, 3.f, failed_stage);
+                ok &= abs(branches.lobes[0].probability + branches.lobes[1].probability - 1.f) < 1e-6f;
+                ok &= length(branches.lobes[1].wi - make_float3(-wo.xy(), wo.z)) < 1e-6f;
+                failed_stage = select(failed_stage == 0.f && !ok, 4.f, failed_stage);
+                $if(scenario == 0u) {
+                    // At normal incidence Fresnel=0.04; selection is tint weighted.
+                    ok &= abs(branches.lobes[1].probability - (0.04f / (0.04f + 0.96f * 0.35f))) < 1e-5f;
+                    ok &= length(branches.lobes[0].wi - make_float3(0.f, 0.f, -1.f)) < 1e-6f;
+                };
+                $if(scenario == 1u) {
+                    ok &= length(branches.lobes[0].wi - make_float3(-1.f / 3.f, 0.f, -0.94280904f)) < 1e-5f;
+                };
+                $if(scenario == 2u) {
+                    ok &= length(branches.lobes[0].wi - make_float3(-0.75f, 0.f, 0.66143783f)) < 1e-5f;
+                };
+                $if(scenario == 3u || scenario == 4u) {
+                    ok &= !branches.lobes[0].valid && branches.lobes[0].probability == 0.f &&
+                          all(branches.lobes[0].weight.vec3() == make_float3(0.f)) && bs.stable_lobe_index == 1u;
+                };
+                $if(branches.lobes[0].valid) { ok &= branches.lobes[0].weight[1] == 0.f; };
+                failed_stage = select(failed_stage == 0.f && !ok, 5.f, failed_stage);
+            }
+            $else { ok &= bs.stable_lobe_index == InvalidUI32; };
+            output.write(id, make_float4(select(ok, 1.f, -failed_stage), cast<float>(bs.stable_lobe_index),
+                                         branches.lobes[0].weight[0], branches.lobes[1].weight[0]));
+        };
+        auto shader = pipeline.device().compile(kernel, "stable_lobe_contract");
+        auto buffer = pipeline.device().create_buffer<float4>(samples, "stable_lobe_contract_results");
+        std::vector<float4> data(samples);
+        pipeline.stream() << shader(buffer).dispatch(samples) << buffer.download(data.data()) << synchronize() << commit();
+        uint reflected = 0u, transmitted = 0u;
+        for (uint i = 0; i < samples; ++i) {
+            const auto& value = data[i];
+            if (value.x != 1.f) std::cerr << "stable_lobe_failed_sample=" << i << " stage=" << value.x << " branch=" << value.y << " weights=" << value.z << ',' << value.w << '\n';
+            expect(value.x == 1.f && std::isfinite(value.z) && std::isfinite(value.w),
+                   "stable lobe enumeration must preserve RNG, branch IDs, directions and unconditioned transport");
+            if (i % 8u == 0u) { reflected += value.y == 1.f; transmitted += value.y == 0.f; }
+        }
+        expect(reflected > 20u && transmitted > 100u, "contract fixture must sample both glass branches");
+        Kernel adapter_kernel = [&](BufferVar<float4> output) {
+            Env::instance().clear_global_vars();
+            sampler->load_data();
+            sampler->set_seed(dispatch_idx().xy(), Uint{19u}, Dimension::PathTracing);
+            SampledWavelengths swl{3u};
+            Float3 wo = normalize(Float3{make_float3(0.3f, 0.1f, 1.f)});
+            auto fresnel = make_shared<FresnelConstant>(swl);
+            auto microfacet = make_shared<GGXMicrofacet>(make_float2(0.001f), true);
+            auto reflection = make_shared<Mirror>(fresnel,
+                make_unique<MicrofacetReflection>(SampledSpectrum{swl, 0.7f}, swl, microfacet), SurfaceData::NearSpec);
+            auto branches = reflection->eval_stable_lobes(wo);
+            auto sample = reflection->sample_delta_local(wo, sampler);
+            Bool ok = !branches.has_stochastic_remainder && !branches.lobes[0].valid &&
+                      branches.lobes[1].valid && branches.lobes[1].probability == 1.f &&
+                      sample.stable_lobe_index == 1u &&
+                      all(abs(branches.lobes[1].weight.vec3() - sample.eval.throughput().vec3() * abs_cos_theta(sample.wi)) < 1e-5f);
+            auto mix = Mix::create_mix(Float{0.5f}, reflection, make_shared<DiffuseLobe>(SampledSpectrum{swl, 0.4f}, swl));
+            auto mixed = mix->eval_stable_lobes(wo);
+            ok &= mixed.has_stochastic_remainder && !mixed.lobes[0].valid && !mixed.lobes[1].valid;
+            Interaction it{false};
+            it.shading.x = make_float3(0.f, 1.f, 0.f);
+            it.shading.y = make_float3(0.f, 0.f, 1.f);
+            it.shading.z = make_float3(1.f, 0.f, 0.f);
+            it.ng = it.shading.z;
+            Evaluator evaluator{it, swl};
+            // No per-lobe frame: the adapter must use the existing delta frame,
+            // including when individual_ns is enabled in the material registry.
+            evaluator.link(make_unique<Glass>(make_shared<FresnelDielectric>(SampledSpectrum{swl, 1.5f}, swl),
+                                              microfacet, SampledSpectrum{swl, 0.7f}, false, SurfaceData::NearSpec));
+            auto world_wo = it.shading.to_world(wo);
+            auto world = evaluator.eval_stable_lobes(world_wo);
+            auto world_sample = evaluator.sample_delta(world_wo, sampler);
+            for (uint branch = 0u; branch < 2u; ++branch) {
+                $if(world_sample.stable_lobe_index == branch) {
+                    ok &= world.lobes[branch].valid && length(world.lobes[branch].wi - world_sample.wi) < 1e-6f &&
+                          all(abs(world.lobes[branch].weight.vec3() - world_sample.eval.throughput().vec3() * world.lobes[branch].probability) < 1e-5f);
+                };
+            }
+            output.write(dispatch_id(), make_float4(cast<float>(ok)));
+        };
+        auto adapter = pipeline.device().compile(adapter_kernel, "stable_lobe_adapter_contract");
+        pipeline.stream() << adapter(buffer).dispatch(samples) << buffer.download(data.data()) << synchronize() << commit();
+        for (const auto& value : data) {
+            expect(value.x == 1.f, "mirror, mixed-lobe rejection and world-frame stable lobe contracts must agree with sampling");
+        }
+        std::cout << "PASS: stable lobe contract, 4096 GPU samples including TIR and zero-colour transmission\n";
+    }
+}
+
+template<typename FrameBuffer>
+void check_glass_planes(vision::Pipeline& pipeline, FrameBuffer& fb) {
+    if constexpr (!requires { fb.cur_stable_planes_view(0u, 0u); }) {
+        expect(false, "missing layered stable-plane storage for glass reflection and transmission");
+    } else {
+        using Plane = typename std::remove_reference_t<decltype(fb.stable_planes())>::element_type;
+        std::vector<Plane> base(pipeline.pixel_num()), transmitted(base.size()), reflected(base.size());
+        std::vector<vision::TriangleHit> primary(base.size());
+        pipeline.stream() << fb.cur_stable_planes_view(0u, 0u).download(base.data())
+            << fb.cur_stable_planes_view(0u, 1u).download(transmitted.data())
+            << fb.cur_stable_planes_view(0u, 2u).download(reflected.data())
+            << fb.cur_visibility_buffer_view(0u).download(primary.data())
+            << vision::synchronize() << vision::commit();
+        const unsigned i = 8u * 16u + 8u;
+        expect(primary[i].inst_id == base[i].surface.hit.inst_id && base[i].depth == 0u,
+               "glass base must preserve the original camera visibility");
+        expect(transmitted[i].valid && reflected[i].valid &&
+               transmitted[i].surface.hit.inst_id != reflected[i].surface.hit.inst_id,
+               "glass must produce distinct valid reflection and transmission endpoint guides");
+        expect(transmitted[i].surface.pos_diff.z < -2.f && reflected[i].surface.pos_diff.z > 0.f,
+               "glass branches must reach the separately coloured targets");
+        expect(transmitted[i].branch_sequence != reflected[i].branch_sequence,
+               "glass reflection and transmission must retain fixed distinct branch identities");
+        std::cout << "PASS: glass layered endpoint guides and primary visibility\n";
+    }
+}
 void configure_headless_process() {
 #ifdef _WIN32
     SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
@@ -265,6 +452,7 @@ int main() {
         const auto direct_pipeline = vision::Importer::import_scene(fixture / "direct.json");
         expect(bool(direct_pipeline), "could not import direct-channel fixture");
         const auto direct = render_channel(*direct_pipeline);
+        check_stable_lobes(*direct_pipeline);
         std::cout << "direct_mean=" << direct.mean() << " direct_max=" << direct.max_abs << '\n';
         std::cout << "raw_static_primary_bary_delta=" << direct.max_primary_bary_delta << '\n';
         expect(direct.max_primary_bary_delta <= 1e-6f,
@@ -368,6 +556,116 @@ int main() {
             }
         }
         check_restir_material_reuse(*material_pipeline, material_surfaces);
+        write_file(fixture / "glass-front.obj", "v -4 -4 -1\nv 4 -4 -1\nv 0 4 -1\nvn 0 0 1\nf 1//1 2//1 3//1\n");
+        write_file(fixture / "glass-back-target.obj", "v -4 -4 -3\nv 4 -4 -3\nv 0 4 -3\nvn 0 0 1\nf 1//1 2//1 3//1\n");
+        write_file(fixture / "glass-front-target.obj", "v -4 -4 1\nv 0 4 1\nv 4 -4 1\nvn 0 0 -1\nf 1//1 2//1 3//1\n");
+        auto glass_scene = scene_description(true);
+        glass_scene["render"]["integrator"]["param"]["indirect"]["open"] = true;
+        glass_scene["scene"]["materials"] = vision::DataWrap::parse(R"([
+            {"name":"glass","type":"glass","param":{"material_name":"BK7","roughness":0.001,"remapping_roughness":false}},
+            {"name":"red","type":"diffuse","param":{"color":[0.8,0.1,0.1]}},
+            {"name":"blue","type":"diffuse","param":{"color":[0.1,0.1,0.8]}}])");
+        glass_scene["scene"]["shapes"] = vision::DataWrap::parse(R"([
+            {"type":"model","param":{"fn":"glass-front.obj","material":"glass","normalize_to_unit_bounds":false}},
+            {"type":"model","param":{"fn":"glass-back-target.obj","material":"red","normalize_to_unit_bounds":false}},
+            {"type":"model","param":{"fn":"glass-front-target.obj","material":"blue","normalize_to_unit_bounds":false}}])");
+        write_file(fixture / "glass.json", glass_scene.dump(2));
+        auto glass_pipeline = vision::Importer::import_scene(fixture / "glass.json");
+        glass_pipeline->frame_buffer()->set_enable_accumulation(false);
+        glass_pipeline->prepare(); glass_pipeline->frame_buffer()->prepare_view_texture();
+        glass_pipeline->upload_data(); glass_pipeline->display(1.0 / 60.0);
+        check_glass_planes(*glass_pipeline, *glass_pipeline->frame_buffer());
+        check_glass_transport_energy(*glass_pipeline, 5u, "two-sided");
+        check_glass_depth_guides(*glass_pipeline);
+        write_file(fixture / "glass-rear.obj", "v -4 -4 -1.2\nv 0 4 -1.2\nv 4 -4 -1.2\nvn 0 0 -1\nf 1//1 2//1 3//1\n");
+        std::vector<vision::SP<vision::Pipeline>> glass_fixtures;
+        auto run_glass_variant = [&](vision::DataWrap description, unsigned recursion, const char* label) {
+            std::cerr << "Running glass fixture: " << label << '\n';
+            description["render"]["integrator"]["param"]["direct"]["max_recursion"] = recursion;
+            write_file(fixture / "glass-variant.json", description.dump(2));
+            auto p = vision::Importer::import_scene(fixture / "glass-variant.json");
+            glass_fixtures.push_back(p);
+            p->frame_buffer()->set_enable_accumulation(false);
+            p->prepare(); p->frame_buffer()->prepare_view_texture(); p->upload_data(); p->display(1.0 / 60.0);
+            check_glass_transport_energy(*p, recursion, label);
+            return p;
+        };
+        auto thick = glass_scene;
+        write_file(fixture / "glass-occluder.obj", "v -4 -4 0.8\nv 0 4 0.8\nv 4 -4 0.8\nvn 0 0 -1\nf 1//1 2//1 3//1\n");
+        auto occluded = glass_scene;
+        occluded["scene"]["materials"].push_back(vision::DataWrap::parse(
+            R"({"name":"black","type":"diffuse","param":{"color":[0,0,0]}})"));
+        occluded["scene"]["shapes"].push_back(vision::DataWrap::parse(
+            R"({"type":"model","param":{"fn":"glass-occluder.obj","material":"black","normalize_to_unit_bounds":false}})"));
+        run_glass_variant(occluded, 5u, "occluded-reflection");
+        thick["render"]["integrator"]["param"]["max_depth"] = 8;
+        thick["scene"]["shapes"].push_back(vision::DataWrap::parse(
+            R"({"type":"model","param":{"fn":"glass-rear.obj","material":"glass","normalize_to_unit_bounds":false}})"));
+        auto thick_pipeline = run_glass_variant(thick, 16u, "thick-overflow");
+        std::vector<vision::StablePlaneData> thick_planes(thick_pipeline->pixel_num());
+        thick_pipeline->stream() << thick_pipeline->frame_buffer()->cur_stable_planes_view(64u, 1u).download(thick_planes.data())
+            << vision::synchronize() << vision::commit();
+        expect(thick_planes[136].depth == 2u && thick_planes[136].surface.pos_diff.z < -2.f,
+               "preferred transmission must reach the target through the rear interface despite full layer capacity");
+        check_glass_depth_guides(*thick_pipeline);
+        auto long_prefix = thick;
+        long_prefix["render"]["integrator"]["param"]["direct"]["max_recursion"] = 16u;
+        write_file(fixture / "glass-third.obj", "v -4 -4 -1.4\nv 4 -4 -1.4\nv 0 4 -1.4\nvn 0 0 1\nf 1//1 2//1 3//1\n");
+        write_file(fixture / "glass-fourth.obj", "v -4 -4 -1.6\nv 0 4 -1.6\nv 4 -4 -1.6\nvn 0 0 -1\nf 1//1 2//1 3//1\n");
+        for (const char* file : {"glass-third.obj", "glass-fourth.obj"}) {
+            auto shape = long_prefix["scene"]["shapes"][0]; shape["param"]["fn"] = file;
+            long_prefix["scene"]["shapes"].push_back(shape);
+        }
+        write_file(fixture / "glass-runtime.json", long_prefix.dump(2));
+        auto runtime_pipeline = vision::Importer::import_scene(fixture / "glass-runtime.json");
+        glass_fixtures.push_back(runtime_pipeline);
+        runtime_pipeline->frame_buffer()->set_enable_accumulation(false);
+        runtime_pipeline->prepare(); runtime_pipeline->frame_buffer()->prepare_view_texture();
+        for (unsigned budget : {0u, 1u, 3u, 5u}) {
+            auto fresh_scene = long_prefix;
+            fresh_scene["render"]["integrator"]["param"]["max_depth"] = budget + 1u;
+            write_file(fixture / "glass-runtime-fresh.json", fresh_scene.dump(2));
+            auto fresh = vision::Importer::import_scene(fixture / "glass-runtime-fresh.json");
+            glass_fixtures.push_back(fresh);
+            fresh->frame_buffer()->set_enable_accumulation(false);
+            fresh->prepare(); fresh->frame_buffer()->prepare_view_texture();
+            check_glass_runtime_depth(*runtime_pipeline, *fresh, budget);
+        }
+        auto one_suffix = thick;
+        one_suffix["render"]["integrator"]["param"]["max_depth"] = 4u;
+        run_glass_variant(one_suffix, 16u, "dominant-prefix-two-one-suffix");
+        auto oblique = thick;
+        oblique["scene"]["camera"]["param"]["transform"]["param"]["target_pos"] = vision::DataWrap::parse("[0.5,0,-1]");
+        auto oblique_pipeline = run_glass_variant(oblique, 16u, "oblique-thick");
+        check_glass_depth_guides(*oblique_pipeline);
+        run_glass_variant(thick, 2u, "depth-exhaustion");
+        auto zero_color = thick;
+        zero_color["scene"]["materials"][0]["param"]["color"] = vision::DataWrap::parse("[0.25,0,0.8]");
+        run_glass_variant(zero_color, 16u, "zero-prefix-channel");
+        auto sky = glass_scene;
+        sky["scene"]["shapes"] = vision::DataWrap::parse(R"([
+            {"type":"model","param":{"fn":"glass-front.obj","material":"glass","normalize_to_unit_bounds":false}}])");
+        auto sky_pipeline = run_glass_variant(sky, 5u, "glass-sky");
+        check_glass_children_disappear(*sky_pipeline);
+        auto emitting = sky;
+        emitting["scene"]["shapes"][0]["param"]["emission"] = vision::DataWrap::parse(
+            R"({"type":"area","param":{"color":[0.2,0.4,0.8],"scale":1}})");
+        run_glass_variant(emitting, 5u, "prefix-emission");
+        for (unsigned depth : {1u, 2u}) {
+            auto shallow = emitting;
+            shallow["render"]["integrator"]["param"]["max_depth"] = depth;
+            run_glass_variant(shallow, 5u, depth == 1u ? "depth-one-emission" : "depth-two-emission");
+        }
+        write_file(fixture / "glass-tir.obj",
+            "v -2 -4 -4.464101615\nv 0 4 -1\nv 2 -4 2.464101615\nvn 0.866025404 0 -0.5\nf 1//1 2//1 3//1\n");
+        auto tir = sky;
+        tir["scene"]["shapes"][0]["param"]["fn"] = "glass-tir.obj";
+        auto tir_pipeline = run_glass_variant(tir, 5u, "tir-sky");
+        std::vector<vision::StablePlaneData> tir_planes(tir_pipeline->pixel_num());
+        tir_pipeline->stream() << tir_pipeline->frame_buffer()->cur_stable_planes_view(64u, 0u).download(tir_planes.data())
+            << vision::synchronize() << vision::commit();
+        expect(tir_planes[136].depth == 1u && tir_planes[136].branch_sequence == 6u,
+               "total internal reflection must continue the valid reflection slot without an invalid transmission direction");
         // A planar mirror at z=-1 reflects the receiver at z=+1. Its virtual
         // image is z=-3: endpoint guides and primary mirror guides must differ.
         write_file(fixture / "mirror-receiver.obj",
@@ -407,6 +705,29 @@ int main() {
         expect(std::abs(reflected.normal_depth.w - 3.f) < 1e-4f,
                "stable plane depth must describe the virtual image behind the mirror");
         check_stable_plane(*mirror_pipeline);
+        auto mirror_emitter_scene = mirror_scene;
+        mirror_emitter_scene["scene"]["shapes"].back()["param"]["emission"] = vision::DataWrap::parse(
+            R"({"type":"area","param":{"color":[1,0.5,0.25],"scale":2}})");
+        write_file(fixture / "mirror-emitter.json", mirror_emitter_scene.dump(2));
+        auto mirror_emitter = vision::Importer::import_scene(fixture / "mirror-emitter.json");
+        material_fixtures.push_back(mirror_emitter);
+        mirror_emitter->frame_buffer()->set_enable_accumulation(false);
+        mirror_emitter->prepare(); mirror_emitter->frame_buffer()->prepare_view_texture();
+        check_stable_emitter_coverage(*mirror_emitter);
+        auto filtered_glass = glass_scene;
+        filtered_glass["output"]["denoise"] = true;
+        filtered_glass["render"]["denoiser"] = mirror_scene["render"]["denoiser"];
+        filtered_glass["render"]["integrator"]["param"]["denoiser"] = mirror_scene["render"]["integrator"]["param"]["denoiser"];
+        write_file(fixture / "glass-filtered.json", filtered_glass.dump(2));
+        // Two retained runtimes must begin with independent layer histories.
+        for (unsigned camera = 0u; camera < 2u; ++camera) {
+            auto filtered_pipeline = vision::Importer::import_scene(fixture / "glass-filtered.json");
+            material_fixtures.push_back(filtered_pipeline);
+            filtered_pipeline->frame_buffer()->set_enable_accumulation(false);
+            filtered_pipeline->prepare(); filtered_pipeline->frame_buffer()->prepare_view_texture();
+            check_glass_svgf(*filtered_pipeline);
+        }
+        fs::remove(fixture / "glass-filtered.json");
         // One mesh contains a coplanar two-triangle mirror on the left and
         // another plane on the right. Branch identity must describe the plane,
         // not just the instance and not the individual triangle.
@@ -474,7 +795,6 @@ int main() {
         check_stable_plane(*metal_pipeline, false);
         const char* rejected_materials[] = {
             R"({"type":"metal","param":{"material_name":"Cr","roughness":0.3,"remapping_roughness":false}})",
-            R"({"type":"glass","param":{"material_name":"BK7","roughness":0.001,"remapping_roughness":false}})",
             R"({"type":"metal","param":{"material_name":"Cr","roughness":0.002,"remapping_roughness":false,"normal":{"node":"tilted","channels":"xyz"}},"node_tab":{"tilted":{"type":"number","param":{"value":[0.6,0,0.8]}}}})",
             R"({"type":"mix","param":{"frac":0.5,"mat0":{"type":"mirror","param":{"color":[1,1,1],"roughness":0.001}},"mat1":{"type":"diffuse","param":{"color":[0.5,0.5,0.5]}}}})",
         };
@@ -494,7 +814,7 @@ int main() {
                 << vision::synchronize() << vision::commit();
             const auto& center = data[8u * 16u + 8u];
             expect(center.stable_branch == 0u || center.stable_branch == vision::InvalidUI32,
-                   "rough, transmitting, perturbed or mixed scattering must not form a stable reflection branch");
+                   "rough, perturbed or mixed scattering must not form a stable reflection branch");
         }
         std::cout << "PASS: BSDF stable capability for metal and conservative scattering rejection\n";
         fs::remove(fixture / "stable-rejected.json");
@@ -502,6 +822,7 @@ int main() {
         fs::remove(fixture / "mirror-off.json");
         fs::remove(fixture / "faceted-mirror.obj");
         fs::remove(fixture / "mirror.json");
+        fs::remove(fixture / "mirror-emitter.json");
         fs::remove(fixture / "mirror-receiver.obj");
         fs::remove(fixture / "material.json");
         expect(!regression_failed, "ReSTIR regression checks failed");
@@ -512,6 +833,10 @@ int main() {
         fs::remove(fixture / "receiver.obj");
         fs::remove(fixture / "receiver-tilted.obj");
         fs::remove(fixture / "support.json");
+        for (const char* name : {"glass-front.obj", "glass-back-target.obj", "glass-front-target.obj",
+                                "glass-rear.obj", "glass-third.obj", "glass-fourth.obj", "glass-runtime.json", "glass-runtime-fresh.json", "glass-tir.obj", "glass-occluder.obj", "glass.json", "glass-variant.json"}) {
+            fs::remove(fixture / name);
+        }
         // Importers may have left their own cache files in this directory.
         std::error_code cleanup_error;
         fs::remove(fixture, cleanup_error);

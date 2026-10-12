@@ -27,13 +27,21 @@ void Renderer::init(const RendererDesc &renderer_desc, Scene &scene) {
     Interaction::set_ray_offset_factor(renderer_desc.render_setting.ray_offset_factor);
 }
 
-void Renderer::prepare(Scene &scene) noexcept {
+void Renderer::prepare(Scene &scene, bool prepare_integrator_resources) noexcept {
     switch_profile::Scope profile{"renderer.prepare", "resources"};
     {
         switch_profile::Scope sampler_profile{"sampler.prepare", "resources"};
         sampler_->prepare();
     }
-    integrator_->prepare();
+    if (prepare_integrator_resources) {
+        integrator_->prepare();
+    } else {
+        // An embedded base view supplies scene state but may never render.
+        // Keep its encoded parameters valid for pipeline-wide data uploads,
+        // without allocating another full-resolution set of path/history buffers.
+        integrator_->prepare_data();
+        integrator_->upload_immediately();
+    }
     prepare_lights(scene);
     spectrum()->set_scene_has_dispersive_materials(scene.material_registry().has_dispersive());
     spectrum()->prepare();

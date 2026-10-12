@@ -22,6 +22,7 @@ void check_substrate_sample_classification(vision::Pipeline& pipeline);
 void check_svgf_shading_guide(vision::Pipeline& pipeline);
 void check_svgf_total_albedo(vision::Pipeline& pipeline);
 void check_svgf_spatial_bypass(vision::Pipeline& pipeline);
+void check_svgf_layered_history(vision::Pipeline& pipeline);
 
 namespace Corona::Systems {
 struct VisionEmbeddedModeSwitchTest {
@@ -1008,7 +1009,28 @@ struct VisionEmbeddedModeSwitchTest {
         expect(restir != pt && restir->renderer().integrator()->impl_type() == "rt",
                "ReSTIR must own a real rt integrator and separate history");
         expect(!restir->frame_buffer()->enable_accumulation(), "ReSTIR must stay realtime");
+        auto base_framebuffer = restir->renderer().frame_buffer_sp();
+        expect(base_framebuffer->stable_planes_size() == 0u,
+               "unused embedded base view must not allocate full-resolution ReSTIR planes");
+        expect(restir->create_view_context(98, vision::make_uint2(16, 16)),
+               "camera must render before the deferred base view allocates its resources");
+        render(*restir, "ReSTIR-view-before-base");
+        expect(base_framebuffer->stable_planes_size() == 0u,
+               "rendering a camera must keep unused base-view resources deferred");
+        restir->activate_view_context(0);
+        restir->change_resolution(vision::make_uint2(20, 18));
+        expect(vision::all(base_framebuffer->resolution() == vision::make_uint2(20, 18)) &&
+                   base_framebuffer->stable_planes_size() == 0u,
+               "resizing an unused base view must preserve deferred ReSTIR resources");
+        restir->activate_view_context(98);
+        render(*restir, "ReSTIR-view-after-deferred-base-resize");
+        restir->activate_view_context(0);
+        restir->change_resolution(vision::make_uint2(16, 16));
+        restir->remove_view_context(98);
         render(*restir, "ReSTIR");
+        expect(base_framebuffer->stable_planes_size() == 16u * 16u * vision::StablePlaneCount,
+               "first explicit base render must prepare its deferred ReSTIR resources");
+        base_framebuffer.reset();
         check_stationary_history_reset(*restir);
         check_independent_denoise(system, *restir, "rt", false);
         check_independent_accumulation(system, *restir, "rt");
@@ -1114,6 +1136,7 @@ struct VisionEmbeddedModeSwitchTest {
         check_motion_visibility_history(*svgf);
         check_realtime_camera_history(*svgf);
         check_camera_dolly_reprojection(*svgf);
+        check_svgf_layered_history(*svgf);
         check_svgf_restir_motion_history(*svgf);
         check_svgf_spatial_bypass(*svgf);
         // Restore the PT view through the same production group helper. The

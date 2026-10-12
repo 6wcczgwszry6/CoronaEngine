@@ -1,4 +1,5 @@
 #include "mechanics_internal.h"
+#include "gpu_performance.h"
 #include "ik_runtime.h"
 
 namespace Corona::Systems {
@@ -75,84 +76,129 @@ void MechanicsSystem::refresh_foot_ground_cache() {
                     ground.mesh = mesh->second;
                     ground.model_id = model_id;
                 }
-                // Animated supports use the most recent shared CPU collision pose.
+                // Animated supports reference the last completed GPU pose. Bind
+                // positions remain CPU topology only and are never used for probing.
                 if (ground.uses_skin) {
-                    auto skin = impl_->skinned_collision_cache.find(gh);
-                    // Bind vertices of a skin are not normalized output-model vertices.
-                    // Wait for a pose of this model rather than probing stale/bind data.
-                    if (skin == impl_->skinned_collision_cache.end() ||
-                        !impl_->skinned_collision_model_ids.contains(gh) || impl_->skinned_collision_model_ids.at(gh) != model_id) continue;
-                    if (ground.mesh.vertices.size() != skin->second.vertices.size() ||
-                        ground.mesh.triangles != skin->second.triangles) ground.octree = {};
-                    ground.mesh = skin->second;
+                    if (!impl_->gpu_collision || !impl_->gpu_collision->contains(gh) ||
+                        !impl_->skinned_collision_model_ids.contains(gh) ||
+                        impl_->skinned_collision_model_ids.at(gh) != model_id) continue;
+                } else {
+                    if (ground.octree.empty()) ground.octree.build(ground.mesh.vertices, ground.mesh);
+                    impl_->gpu_collision.ensure();
+                    impl_->gpu_collision->set_mesh(gh, model_id, ground.mesh, ground.octree);
                 }
                 if (ground.mesh.triangles.empty()) continue;
                 ground.scene = scene.handle;
                 ground.actor = actor_handle;
                 ground.model_to_world = transform.compute_matrix();
                 ground.world_to_model = ktm::inverse(ground.model_to_world);
-                transform_vertices_to_world(ground.mesh.vertices, transform, ground.world_vertices);
-                if (ground.octree.empty()) ground.octree.build(ground.world_vertices, ground.mesh);
-                else ground.octree.refit(ground.world_vertices, ground.mesh);
                 alive.insert(gh);
             }
         }
     }
     std::erase_if(impl_->foot_ground_cache, [&](const auto& item) { return !alive.count(item.first); });
+    // Freeze every animated support before any instance advances its skin pose.
+    // All feet in this animation update therefore observe the same geometry epoch.
+    std::vector<std::uint64_t> snapshot_keys;
+    for (const auto& [key, support] : impl_->foot_ground_cache)
+        if (support.uses_skin) snapshot_keys.push_back(key);
+    if (!snapshot_keys.empty()) impl_->gpu_collision->snapshot_ground(snapshot_keys);
 }
 
 void MechanicsSystem::update_foot_targets(std::uintptr_t geom_handle,
     const Resource::SkeletonData& skeleton,
     const std::vector<std::array<float, 16>>& locals,
     std::vector<Resource::IkChain>& chains, float dt) {
+    const FootPose pose{geom_handle, &skeleton, &locals, &chains};
+    update_foot_targets(std::span(&pose, 1), dt);
+}
+
+void MechanicsSystem::update_foot_targets(std::span<const FootPose> poses, float dt) {
+    GpuPerformance::Scope performance{"animation.foot_targets"};
+    GpuPerformance::record_work_items(poses.size());
     auto& hub = SharedDataHub::instance();
-    std::uintptr_t transform_handle = 0;
-    { auto geometry = hub.geometry_storage().try_acquire_read(geom_handle); if (geometry) transform_handle = geometry->transform_handle; }
-    ktm::fmat4x4 model_to_world{}, world_to_model{};
-    bool have_transform = false;
-    { auto transform = hub.model_transform_storage().try_acquire_read(transform_handle);
-      if (transform && invertible_transform(*transform)) {
-          model_to_world = transform->compute_matrix();
-          world_to_model = ktm::inverse(model_to_world);
-          have_transform = true;
-      } }
-    const auto scene_it = impl_->ik_geometry_scenes.find(geom_handle);
-    const auto actor_it = impl_->ik_geometry_actors.find(geom_handle);
-    for (auto& chain : chains) {
-        if (chain.mode != Resource::IkChain::Mode::FootPlant) continue;
-        if (!sanitize_foot_ik_endpoint(chain, skeleton)) continue;
-        std::optional<std::array<float, 3>> target;
-        const auto bone = ik_bone_model_position(skeleton, locals, chain.end_node);
-        if (!chain.enabled || chain.weight <= 0 || !bone || !have_transform || scene_it == impl_->ik_geometry_scenes.end()) {
-            advance_ik_activation(chain, target, dt);
-            continue;
+    struct FootProbe {
+        Resource::IkChain* chain{};
+        ktm::fmat4x4 world_to_model{};
+        ktm::fvec3 position{};
+        float height{}, max_drop{}, best_y{};
+        bool found_floor{};
+        std::size_t query_begin{}, query_end{};
+    };
+    std::vector<FootProbe> probes;
+    std::vector<GpuCollisionPipeline::GroundQuery> queries;
+    std::vector<std::uintptr_t> query_handles;
+
+    for (const auto& pose : poses) {
+        if (!pose.skeleton || !pose.locals || !pose.chains) continue;
+        std::uintptr_t transform_handle = 0;
+        { auto geometry = hub.geometry_storage().try_acquire_read(pose.geometry); if (geometry) transform_handle = geometry->transform_handle; }
+        ktm::fmat4x4 model_to_world{}, world_to_model{};
+        bool have_transform = false;
+        { auto transform = hub.model_transform_storage().try_acquire_read(transform_handle);
+          if (transform && invertible_transform(*transform)) {
+              model_to_world = transform->compute_matrix();
+              world_to_model = ktm::inverse(model_to_world);
+              have_transform = true;
+          } }
+        const auto scene_it = impl_->ik_geometry_scenes.find(pose.geometry);
+        const auto actor_it = impl_->ik_geometry_actors.find(pose.geometry);
+        for (auto& chain : *pose.chains) {
+            if (chain.mode != Resource::IkChain::Mode::FootPlant) continue;
+            if (!sanitize_foot_ik_endpoint(chain, *pose.skeleton)) continue;
+            const auto bone = ik_bone_model_position(*pose.skeleton, *pose.locals, chain.end_node);
+            if (!chain.enabled || chain.weight <= 0 || !bone || !have_transform || scene_it == impl_->ik_geometry_scenes.end()) {
+                advance_ik_activation(chain, std::nullopt, dt);
+                continue;
+            }
+            FootProbe foot;
+            foot.chain = &chain;
+            foot.world_to_model = world_to_model;
+            foot.position = transform_point(model_to_world, as_vector(*bone));
+            foot.height = std::max(0.0f, chain.foot_height);
+            // Probe the sole; ankle clearance must not consume the drop range.
+            foot.position.y -= foot.height;
+            foot.max_drop = std::clamp(chain.probe_max_drop, 0.0f, 100.0f);
+            foot.best_y = foot.position.y - foot.max_drop;
+            const auto floor = impl_->ik_scene_floors.find(scene_it->second);
+            if (floor != impl_->ik_scene_floors.end() && floor->second >= foot.best_y && floor->second <= foot.position.y + 0.05f) {
+                foot.best_y = floor->second;
+                foot.found_floor = true;
+            }
+            foot.query_begin = queries.size();
+            for (const auto& [gh, ground] : impl_->foot_ground_cache) {
+                if (gh == pose.geometry || ground.scene != scene_it->second ||
+                    (actor_it != impl_->ik_geometry_actors.end() && ground.actor == actor_it->second)) continue;
+                queries.push_back({{gh, gpu_matrix(ground.model_to_world)}, as_array(foot.position), foot.max_drop, ground.uses_skin});
+                query_handles.push_back(gh);
+            }
+            foot.query_end = queries.size();
+            probes.push_back(foot);
         }
-        auto probe = transform_point(model_to_world, as_vector(*bone));
-        const float height = std::max(0.0f, chain.foot_height);
-        probe.y -= height; // Probe the sole; ankle clearance must not consume the drop range.
-        const float max_drop = std::clamp(chain.probe_max_drop, 0.0f, 100.0f);
-        float best_y = probe.y - max_drop;
+    }
+
+    // Preserve each foot's original candidate order and strict height comparison
+    // while sharing a single device submission/readback for the entire scene.
+    const auto hits = queries.empty() ? std::vector<GpuCollisionPipeline::GroundResult>{}
+                                     : impl_->gpu_collision->ground(queries);
+    for (const auto& foot : probes) {
+        auto& chain = *foot.chain;
+        const auto& probe = foot.position;
+        const float height = foot.height, max_drop = foot.max_drop;
+        const auto& world_to_model = foot.world_to_model;
+        float best_y = foot.best_y;
+        bool found = foot.found_floor;
         ktm::fvec3 normal = make_fvec3(0, 1, 0);
         std::uintptr_t support = 0;
-        bool found = false;
-        auto floor = impl_->ik_scene_floors.find(scene_it->second);
-        if (floor != impl_->ik_scene_floors.end() && floor->second >= best_y && floor->second <= probe.y + 0.05f) {
-            best_y = floor->second;
-            found = true;
-        }
-        for (const auto& [gh, ground] : impl_->foot_ground_cache) {
-            if (gh == geom_handle || ground.scene != scene_it->second ||
-                (actor_it != impl_->ik_geometry_actors.end() && ground.actor == actor_it->second)) continue;
-            float y = 0;
-            ktm::fvec3 hit_normal{};
-            if (ground.octree.query_ground_height(ground.world_vertices, ground.mesh, probe, max_drop, y, &hit_normal) &&
-                (!found || y > best_y)) {
-                best_y = y;
-                normal = hit_normal;
-                support = gh;
+        for (std::size_t i = foot.query_begin; i < foot.query_end; ++i) {
+            if (hits[i].found && (!found || hits[i].height > best_y)) {
+                best_y = hits[i].height;
+                normal = as_vector(hits[i].normal);
+                support = query_handles[i];
                 found = true;
             }
         }
+        std::optional<std::array<float, 3>> target;
         const float enter = std::max(0.0f, chain.plant_threshold);
         const float release = std::max(0.12f, enter * 1.5f);
         const float gap = probe.y - best_y;

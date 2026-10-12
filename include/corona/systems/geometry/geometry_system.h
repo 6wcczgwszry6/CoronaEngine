@@ -548,8 +548,8 @@ class GeometrySystem : public Kernel::SystemBase {
 
     /// 蒙皮专用：一次性拷出某 mesh 所有 LOD 级别的 (vertex, vertex_storage) 句柄对。
     ///
-    /// 供 MechanicsSystem 在物理线程把蒙皮后顶点 write_bytes 回所有 LOD 级别的 GPU
-    /// 缓冲。下标 0 = LOD0（= MeshDevice 缓冲），1..N = 各级简化。单次 shared_lock
+    /// 借出所有 LOD 级别的 GPU 顶点缓冲。下标 0 = LOD0（= MeshDevice 缓冲），
+    /// 1..N = 各级简化；需要匹配源网格时使用 get_skinning_lod_targets。单次 shared_lock
     /// 拷贝；HardwareBuffer 为引用计数句柄，拷出后即便 Geometry 线程后续 evict 缓存，
     /// 调用方持有的拷贝仍保活底层 buffer。无 LOD 缓存条目时返回空 vector（调用方回退
     /// 到只写 LOD0，即 GeometryDevice.mesh_handles 里的缓冲）。
@@ -559,6 +559,20 @@ class GeometrySystem : public Kernel::SystemBase {
     /// @return 各 LOD 级别的 (vertexBuffer, vertexStorageBuffer) 句柄对，含 LOD0
     [[nodiscard]] std::vector<std::pair<Horizon::HardwareBuffer, Horizon::HardwareBuffer>>
     get_skinning_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const;
+
+    struct SkinningLodTarget {
+        // Stable index in MeshData::lod_levels, independent of CPU residency.
+        int source_lod_index = -1;
+        Horizon::HardwareBuffer vertex_buffer;
+        Horizon::HardwareBuffer storage_buffer;
+    };
+
+    /// Simplified LODs only (LOD1..N), with their original MeshData::lod_levels
+    /// index. CPU eviction may empty intermediate source levels, so consumers
+    /// must use this index instead of matching the current nonempty levels.
+    /// Nonresident GPU levels retain their index and have empty buffer handles.
+    [[nodiscard]] std::vector<SkinningLodTarget>
+    get_skinning_lod_targets(std::uintptr_t geometry_handle, uint32_t mesh_index) const;
 
     // ========================================
     // 统计

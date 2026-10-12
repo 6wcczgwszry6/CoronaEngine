@@ -24,8 +24,18 @@ CollisionMesh ground_mesh() {
     return mesh;
 }
 
-FootGroundInstance instance(const CollisionMesh& mesh, std::uintptr_t actor, const ktm::fvec3& position) {
-    FootGroundInstance ground;
+// CPU reference fixture only. Runtime FootGroundInstance keeps topology and GPU
+// identity, and no longer owns per-frame CPU world vertices.
+struct GroundReference {
+    std::uintptr_t actor{};
+    std::uint64_t model_id{};
+    CollisionMesh mesh;
+    TriangleOctree octree;
+    std::vector<ktm::fvec3> world_vertices;
+};
+
+GroundReference instance(const CollisionMesh& mesh, std::uintptr_t actor, const ktm::fvec3& position) {
+    GroundReference ground;
     ground.actor = actor;
     ground.model_id = 42; // Both instances intentionally share a resource identity.
     ground.mesh = mesh;

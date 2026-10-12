@@ -6,10 +6,12 @@
 #include "base/integral/radiance_cache.h"
 #include "base/mgr/pipeline.h"
 #include "base/mgr/switch_profile.h"
+#include "base/mgr/evaluation_debug.h"
 #include "math/warp.h"
 #include "base/color/spectrum.h"
 #include "ReSTIR/direct.h"
 #include "ReSTIR/indirect.h"
+#include "ReSTIR/stable_planes.h"
 #include <cstdlib>
 #include <fstream>
 
@@ -32,8 +34,12 @@ class RealTimeIntegrator : public IlluminationIntegrator,
 private:
     SP<ReSTIRDI> direct_;
     SP<ReSTIRGI> indirect_;
+    SP<StablePlanes> stable_planes_;
+    mutable bool stable_resources_dirty_{};
     SP<ScreenBuffer> specular_buffer_{make_shared<ScreenBuffer>("RealTimeIntegrator::specular_buffer_")};
-    Shader<void(uint, float, float)> combine_;
+    Shader<void(uint, float, float, uint)> combine_;
+    Shader<void()> merge_dominant_;
+    Shader<void()> compose_layers_;
     Shader<void(uint, Buffer<SurfaceData>)> path_tracing_;
     SP<RadianceCache> cache_;
 
@@ -48,6 +54,7 @@ public:
         const Desc &desc = static_cast<const Desc &>(node_desc);
         direct_ = make_shared<ReSTIRDI>(shared_from_this(), desc["direct"]);
         indirect_ = make_shared<ReSTIRGI>(shared_from_this(), desc["indirect"]);
+        stable_planes_ = make_shared<StablePlanes>(shared_from_this(), direct_->max_recursion());
         cache_->set_integrator(shared_from_this());
     }
 
@@ -55,10 +62,11 @@ public:
 
     void restore(vision::RuntimeObject *old_obj) noexcept override {
         IlluminationIntegrator::restore(old_obj);
-        VS_HOTFIX_MOVE_ATTRS(direct_, indirect_, specular_buffer_,
-                             combine_, path_tracing_, denoiser_)
+        VS_HOTFIX_MOVE_ATTRS(direct_, indirect_, stable_planes_, stable_resources_dirty_, specular_buffer_,
+                             combine_, merge_dominant_, compose_layers_, path_tracing_, denoiser_)
         direct_->set_integrator(shared_from_this());
         indirect_->set_integrator(shared_from_this());
+        stable_planes_->set_integrator(shared_from_this());
         cache_->set_integrator(shared_from_this());
     }
 
@@ -72,7 +80,7 @@ public:
     }
 
     void update_runtime_object(const vision::IObjectConstructor *constructor) noexcept override {
-        std::tuple tp = {addressof(direct_), addressof(indirect_), addressof(cache_)};
+        std::tuple tp = {addressof(direct_), addressof(indirect_), addressof(stable_planes_), addressof(cache_)};
         HotfixSystem::replace_objects(constructor, tp);
     }
 
@@ -101,6 +109,8 @@ public:
         frame_buffer().prepare_surface_exts();
         frame_buffer().prepare_visibility_buffer();
         frame_buffer().prepare_motion_vectors();
+        stable_planes_->prepare();
+        stable_resources_dirty_ = false;
     }
 
     [[nodiscard]] bool stable_planes_enabled() const noexcept override {
@@ -110,9 +120,10 @@ public:
     void set_stable_planes_enabled(bool enabled) noexcept override {
         if (stable_planes_enabled() == enabled) { return; }
         direct_->set_stable_planes_enabled(enabled);
-        // All producers and consumers switch together. Restart reservoirs,
-        // SVGF and frame accumulation so primary and virtual guides never mix.
-        pipeline()->invalidate();
+        stable_resources_dirty_ = true;
+        // This setter may target an inactive camera. Defer GPU resources until
+        // render activates this integrator's own framebuffer/bindless context.
+        Integrator::invalidation();
     }
 
     void render_sub_UI(Widgets *widgets) noexcept override {
@@ -129,25 +140,61 @@ public:
         switch_profile::Scope profile{"integrator.compile", "compile"};
         direct_->compile();
         indirect_->compile();
+        stable_planes_->set_max_recursion(direct_->max_recursion());
+        stable_planes_->compile();
         if (!denoiser_runtime_disabled() && denoiser_ &&
             (denoiser_->enabled() || denoiser_->has_prepared_resources())) {
             denoiser_->compile();
         }
         TSensor &camera = scene().sensor();
-        Kernel kernel = [&](Uint frame_index, Float di, Float ii) {
+        Kernel kernel = [&](Uint frame_index, Float di, Float ii, Uint layered) {
             camera->load_data();
-            Float3 direct = direct_->radiance()->read(dispatch_id()).xyz() * di;
-            Float3 indirect = indirect_->radiance()->read(dispatch_id()).xyz() * ii;
-            Float3 L = direct + indirect;
+            Float3 direct = direct_->radiance()->read(dispatch_id()).xyz();
+            Float3 indirect = indirect_->radiance()->read(dispatch_id()).xyz();
+            Float3 L = direct * di + indirect * ii;
+            $if(layered != 0u) {
+                L = frame_buffer().stable_radiance().read(dispatch_id()).xyz() * di;
+                for (uint layer = 0; layer < StablePlaneCount; ++layer) {
+                    Uint address = layer * (dispatch_dim().x * dispatch_dim().y) + dispatch_id();
+                    Float3 ld = frame_buffer().stable_direct().read(address).xyz();
+                    Float3 li = frame_buffer().stable_indirect().read(address).xyz();
+                    L += ld * di + li * ii;
+                }
+            };
             frame_buffer().add_sample(dispatch_idx().xy(), L, frame_index);
         };
+        Kernel merge = [&] {
+            Uint dominant = frame_buffer().stable_dominant().read(dispatch_id());
+            $if(dominant < StablePlaneCount) {
+                Uint address = dominant * (dispatch_dim().x * dispatch_dim().y) + dispatch_id();
+                Float3 direct = frame_buffer().stable_direct().read(address).xyz() + direct_->radiance()->read(dispatch_id()).xyz();
+                Float3 indirect = frame_buffer().stable_indirect().read(address).xyz() + indirect_->radiance()->read(dispatch_id()).xyz();
+                frame_buffer().stable_direct().write(address, make_float4(direct, 1.f));
+                frame_buffer().stable_indirect().write(address, make_float4(indirect, 1.f));
+            };
+        };
+        merge_dominant_ = device().compile(merge, "StablePlanes-MergeDominant");
+        Kernel compose = [&] {
+            Float3 direct = frame_buffer().stable_radiance().read(dispatch_id()).xyz();
+            Float3 indirect = make_float3(0.f);
+            for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
+                Uint address = layer * (dispatch_dim().x * dispatch_dim().y) + dispatch_id();
+                direct += frame_buffer().stable_direct().read(address).xyz();
+                indirect += frame_buffer().stable_indirect().read(address).xyz();
+            }
+            // Estimator buffers are no longer needed after the dominant merge.
+            // Reuse them for the unscaled complete DirectIndirect pixel signal.
+            direct_->radiance()->write(dispatch_id(), make_float4(direct, 1.f));
+            indirect_->radiance()->write(dispatch_id(), make_float4(indirect, 1.f));
+        };
+        compose_layers_ = device().compile(compose, "StablePlanes-ComposeCoverage");
         {
             switch_profile::Scope combine_profile{"combine.compile", "compile"};
             combine_ = device().compile(kernel, "combine");
         }
     }
 
-    RealTimeDenoiseInput denoise_input() const noexcept {
+    RealTimeDenoiseInput denoise_input(uint layer = 0u) const noexcept {
         RealTimeDenoiseInput ret;
         TSensor &camera = scene().sensor();
         ret.frame_index = frame_index_;
@@ -160,6 +207,15 @@ public:
         ret.prev_stable_surfaces = frame_buffer().prev_surfaces_view(frame_index_);
         ret.direct = direct_->radiance()->view();
         ret.indirect = indirect_->radiance()->view();
+        if (stable_planes_enabled()) {
+            ret.use_stable_planes = true;
+            ret.layer_count = StablePlaneCount;
+            ret.layer_index = layer;
+            ret.stable_planes = frame_buffer().cur_stable_planes_view(frame_index_, layer);
+            ret.prev_stable_planes = frame_buffer().prev_stable_planes_view(frame_index_, layer);
+            ret.direct = frame_buffer().stable_direct_view(layer);
+            ret.indirect = frame_buffer().stable_indirect_view(layer);
+        }
         // Camera positions for depth calculation from visibility buffer
         float3 cam_pos = camera->position();
         float3 prev_cam_pos = camera->prev_host_position();
@@ -173,6 +229,14 @@ public:
     void render() const noexcept override {
         const Pipeline *rp = pipeline();
         Stream &stream = rp->stream();
+        if (stable_resources_dirty_) {
+            stream << synchronize() << commit();
+            frame_buffer().manage_stable_plane_buffers(stable_planes_enabled());
+            pipeline()->upload_bindless_array();
+            if (denoiser_) { denoiser_->set_stable_planes_enabled(stable_planes_enabled()); }
+            stable_resources_dirty_ = false;
+            pipeline()->invalidate();
+        }
         cur_stage_profile_ = {};
         cur_stage_profile_.enabled = stage_profile_runtime_enabled();
         auto submit = [&](auto &&command, double *stage_ms) {
@@ -189,12 +253,17 @@ public:
         };
 
         submit(frame_buffer().compute_GBuffer(frame_index_), &cur_stage_profile_.gbuffer_ms);
-        submit(direct_->dispatch(frame_index_), &cur_stage_profile_.path_tracing_ms);
-        submit(indirect_->dispatch(frame_index_), &cur_stage_profile_.path_tracing_ms);
-        auto debug_readback = [&](const char *stage) {
-            const char *frame = std::getenv("VISION_EVAL_DEBUG_FRAME");
-            const char *directory = std::getenv("VISION_EVAL_DEBUG_DIR");
-            if (!frame || !directory || frame_index_ != std::strtoul(frame, nullptr, 10)) return;
+        if (stable_planes_enabled()) {
+            const bool retain_history = !denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled();
+            submit(stable_planes_->build(frame_index_, jitter_primary_samples(), retain_history), &cur_stage_profile_.stable_build_ms);
+            submit(stable_planes_->fill(frame_index_), &cur_stage_profile_.stable_fill_ms);
+        }
+        submit(direct_->dispatch(frame_index_), &cur_stage_profile_.restir_di_ms);
+        submit(indirect_->dispatch(frame_index_), &cur_stage_profile_.restir_gi_ms);
+        cur_stage_profile_.path_tracing_ms = cur_stage_profile_.restir_di_ms + cur_stage_profile_.restir_gi_ms;
+        auto debug_readback = [&](const char *stage, bool layers = true) {
+            const auto directory = evaluation_debug::directory(frame_index_);
+            if (directory.empty()) return;
             fs::create_directories(directory);
             vector<float4> direct(rp->pixel_num()), indirect(rp->pixel_num());
             stream << direct_->radiance()->view().download(direct.data())
@@ -205,22 +274,49 @@ public:
                 if (!out) throw std::runtime_error("ReSTIR diagnostic write failed");
             };
             write("_direct", direct); write("_indirect", indirect);
+            if (layers && stable_planes_enabled()) {
+                for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
+                    stream << frame_buffer().stable_direct_view(layer).download(direct.data())
+                           << frame_buffer().stable_indirect_view(layer).download(indirect.data())
+                           << synchronize() << commit();
+                    const auto prefix = "_layer_" + std::to_string(layer);
+                    write((prefix + "_direct").c_str(), direct);
+                    write((prefix + "_indirect").c_str(), indirect);
+                }
+            }
         };
+        if (stable_planes_enabled()) {
+            submit(merge_dominant_().dispatch(pipeline()->resolution()), &cur_stage_profile_.combine_ms);
+        }
+        // Opt-in raw layer diagnostics belong here, after merging ownership and
+        // before any per-layer denoising. No permanent copy buffers are needed.
         debug_readback("raw");
         if (!denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled()) {
-            auto dn_input = denoise_input();
-            submit(denoiser_->dispatch(dn_input), &cur_stage_profile_.spatial_angular_ms);
+            const uint count = stable_planes_enabled() ? StablePlaneCount : 1u;
+            for (uint layer = 0u; layer < count; ++layer) {
+                auto dn_input = denoise_input(layer);
+                submit(denoiser_->dispatch(dn_input), &cur_stage_profile_.spatial_angular_ms);
+            }
             debug_readback("filtered");
-            submit(combine_(frame_index_, direct_->factor(),
-                            indirect_->factor())
-                       .dispatch(pipeline()->resolution()),
-                   &cur_stage_profile_.combine_ms);
-        } else {
-            submit(combine_(frame_index_, direct_->factor(),
-                            indirect_->factor())
-                       .dispatch(pipeline()->resolution()),
-                   &cur_stage_profile_.combine_ms);
+            if (stable_planes_enabled()) {
+                submit(compose_layers_().dispatch(pipeline()->resolution()), &cur_stage_profile_.combine_ms);
+                debug_readback("composite_pre", false);
+                auto coverage = denoise_input();
+                coverage.layer_count = 1u;
+                coverage.composed_coverage = true;
+                coverage.direct = direct_->radiance()->view();
+                coverage.indirect = indirect_->radiance()->view();
+                coverage.coverage_planes = frame_buffer().cur_stable_planes_view(frame_index_);
+                coverage.prev_coverage_planes = frame_buffer().prev_stable_planes_view(frame_index_);
+                submit(denoiser_->dispatch(coverage), &cur_stage_profile_.spatial_angular_ms);
+                debug_readback("composite_post", false);
+            }
         }
+        const bool resolved = !denoiser_runtime_disabled() && denoiser_ && denoiser_->enabled();
+        // Raw ownership is unchanged. Filtered output resolves that same sum
+        // before channel factors are applied exactly once in presentation.
+        submit(combine_(frame_index_, direct_->factor(), indirect_->factor(), uint(stable_planes_enabled() && !resolved))
+                   .dispatch(pipeline()->resolution()), &cur_stage_profile_.combine_ms);
         submit(frame_buffer().post_path_tracing(frame_index_), &cur_stage_profile_.postprocess_ms);
         submit(frame_buffer().render_final(frame_index_), &cur_stage_profile_.render_final_ms);
         increase_frame_index();
