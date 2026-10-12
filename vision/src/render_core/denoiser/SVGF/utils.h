@@ -13,6 +13,24 @@
 #include "base/using.h"
 
 namespace vision::svgf {
+inline Float3 modulation_albedo(Float3 albedo, Float epsilon) {
+    return make_float3(sqrt(albedo.x * albedo.x + epsilon * epsilon),
+                       sqrt(albedo.y * albedo.y + epsilon * epsilon),
+                       sqrt(albedo.z * albedo.z + epsilon * epsilon));
+}
+
+// Preparation resets invalid history/output and invalidates guide identities.
+// Empty-tile scratch and invalid geometry may remain stale; spatial consumers
+// must mask invalid taps before radiance/variance arithmetic.
+template<typename Param>
+inline void skip_empty_tile(const Param &param) {
+    $if(param.layered != 0u) {
+        Uint2 tile = dispatch_idx().xy() / 16u;
+        Uint width = (dispatch_dim().x + 15u) / 16u;
+        $if(param.active_tiles.read(tile.y * width + tile.x) == 0u) { $return(); };
+    };
+}
+
 // Keep the legacy single-surface contract available for existing producers.
 template<typename Param>
 inline void bind_stable_planes(Param &param, const RealTimeDenoiseInput &input) {
@@ -63,8 +81,9 @@ struct StableGeometryGuide {
     Bool replaced{false}, valid{true}, layered{false}, approximate{false};
 
     template<typename Param>
-    StableGeometryGuide(const Param &param, Uint index, TriangleHitVar primary, bool previous = false) : hit(primary) {
-        $if(param.use_stable_planes != 0u) {
+    StableGeometryGuide(const Param &param, Uint index, TriangleHitVar primary, bool previous = false,
+                        Bool load_stable = true) : hit(primary) {
+        $if(load_stable && param.use_stable_planes != 0u) {
             auto surface = load_stable_surface(param, index, previous);
             branch = ocarina::select(surface.stable_branch == InvalidUI32, 0u, surface.stable_branch);
             replaced = surface.is_replaced && surface.stable_branch != InvalidUI32;
@@ -109,18 +128,19 @@ struct StableGeometryGuide {
 
 struct CachedSpatialGuide {
     TriangleHitVar hit;
-    Float3 position, normal;
+    Float3 position, normal, shading_normal;
     Uint4 identity, surface;
     Bool emissive;
     template<typename Param>
     CachedSpatialGuide(const Param &param, Uint idx) {
         auto p = param.guide_position.read(idx), n = param.guide_normal.read(idx);
         position = p.xyz(); normal = n.xyz(); emissive = n.w != 0.f;
+        shading_normal = param.guide_shading_normal.read(idx).xyz();
         identity = param.guide_identity.read(idx); surface = param.guide_surface.read(idx);
-        hit.inst_id = surface.z;
+        hit.inst_id = ocarina::select(identity.x == 1u, surface.z, InvalidUI32);
     }
     [[nodiscard]] Bool compatible(const CachedSpatialGuide &other) const {
-        return identity.x != 0u && other.identity.x != 0u && identity.y == other.identity.y &&
+        return identity.x == 1u && other.identity.x == 1u && identity.y == other.identity.y &&
             (surface.w == 0u || (identity.z == other.identity.z && identity.w == other.identity.w &&
              surface.x == other.surface.x && surface.y == other.surface.y && surface.z == other.surface.z));
     }
@@ -164,7 +184,7 @@ struct CoverageGeometryGuide : StableGeometryGuide {
     Float2 motion;
     template<typename Param>
     CoverageGeometryGuide(const Param &param, Uint index, TriangleHitVar primary, bool previous = false)
-        : StableGeometryGuide(param, index, primary, previous) {
+        : StableGeometryGuide(param, index, primary, previous, param.composed_coverage == 0u) {
         motion = stable_motion(param, index);
         $if(param.composed_coverage != 0u) {
             Uint count = dispatch_dim().x * dispatch_dim().y;

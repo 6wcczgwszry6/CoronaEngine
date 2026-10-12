@@ -12,6 +12,16 @@
 
 namespace vision::svgf {
 
+struct PrepareLayerParam {
+    BufferDesc<StablePlaneData> planes;
+    BufferDesc<SVGFDataDual> history;
+    BufferDesc<RadType4> direct, indirect, temp_direct, temp_indirect;
+    BufferDesc<float4> guide_position, guide_normal;
+    BufferDesc<uint4> guide_identity, guide_surface;
+    BufferDesc<uint> active_tiles;
+    uint width{}, height{};
+};
+
 struct ResolveParam {
     // Current guides borrow the spatial-filter scratch after edge classification.
     // Previous guides have separate storage for reprojection reads.
@@ -53,6 +63,9 @@ struct ResolveParam {
 
 }// namespace vision::svgf
 
+OC_PARAM_STRUCT(vision::svgf, PrepareLayerParam, planes, history, direct, indirect, temp_direct, temp_indirect,
+                guide_position, guide_normal, guide_identity, guide_surface, active_tiles, width, height){};
+
 OC_PARAM_STRUCT(vision::svgf, ResolveParam, guide_position, guide_normal, guide_depth, guide_meta, prev_guide_position, prev_guide_normal, prev_guide_depth, prev_guide_meta, edge_position, edge_normal, edge_identity, edge_surface, edge_flags, edge_layer, composed_coverage, coverage_planes, prev_coverage_planes, use_stable_planes, layered, stable_planes, prev_stable_planes, stable_surfaces, prev_stable_surfaces, direct, indirect,
                 history_direct, history_indirect, output_direct, output_indirect,
                 visibility, prev_visibility, motion_vectors, camera_pos, prev_camera_pos,
@@ -92,12 +105,14 @@ private:
     Buffer<float4> coverage_position_, coverage_normal_, coverage_depth_;
     Buffer<uint4> coverage_meta_;
     Buffer<uint> edge_flags_;
-    Shader<void(ResolveParam)> edge_guide_shader_, edge_classify_shader_;
+    Shader<void(ResolveParam)> edge_guide_shader_, edge_classify_shader_, spatial_edge_classify_shader_;
+    uint edge_frame_{InvalidUI32}, edge_mask_{};
     Shader<void(ResolveParam)> publish_resolve_shader_;
-    Shader<void(VarianceEstimatorParam)> clear_invalid_shader_;
+    Shader<void(PrepareLayerParam)> prepare_layer_shader_;
+    Buffer<uint> active_tiles_;
 
     void prepare_resolve(uint pixel_num);
-    void prepare_stable_resources(uint pixel_num, bool layered, bool guided);
+    void prepare_stable_resources(uint2 resolution, bool layered, bool guided);
     void compile_resolve();
     [[nodiscard]] CommandBatch resolve(RealTimeDenoiseInput &input);
 
@@ -134,9 +149,9 @@ public:
     VS_HOTFIX_MAKE_RESTORE(Denoiser, svgf_data, svgf_data2,
                            poisson_, modulator_, variance_estimator_, prefilter_, params_,
                            resolve_direct_, resolve_indirect_, resolve_direct2_, resolve_indirect2_,
-                           resolve_shader_, publish_resolve_shader_, clear_invalid_shader_, coverage_guide_shader_, legacy_resolve_shader_,
+                           resolve_shader_, publish_resolve_shader_, prepare_layer_shader_, active_tiles_, coverage_guide_shader_, legacy_resolve_shader_,
                            coverage_position_, coverage_normal_, coverage_depth_, coverage_meta_,
-                           edge_flags_, edge_guide_shader_, edge_classify_shader_,
+                           edge_flags_, edge_guide_shader_, edge_classify_shader_, spatial_edge_classify_shader_, edge_frame_, edge_mask_,
                            layer_data_, layer_data2_, layer_state_)
     VS_MAKE_PLUGIN_NAME_FUNC
 
@@ -153,6 +168,9 @@ public:
 
     [[nodiscard]] PoissonFilter *poisson() noexcept { return poisson_.get(); }
     [[nodiscard]] const PoissonFilter *poisson() const noexcept { return poisson_.get(); }
+
+    template<typename Param>
+    void bind_tiles(Param &param) const { param.active_tiles = active_tiles_.descriptor(); }
 
     void prepare_buffers();
     void render_sub_UI(Widgets *widgets) noexcept override;
