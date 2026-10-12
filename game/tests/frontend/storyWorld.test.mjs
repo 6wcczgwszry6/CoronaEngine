@@ -34,8 +34,19 @@ for (const node of babelParse(compiled.content, { sourceType: 'module' }).progra
   .filter(node => node.type === 'ImportDeclaration').reverse()) {
   // 样式副作用导入在这里无需执行，直接摘除
   if (/\.css$/.test(node.source.value)) { setupSource = setupSource.slice(0, node.start) + setupSource.slice(node.end); continue; }
-  const bindings = node.specifiers.map(specifier => `${JSON.stringify(specifier.imported.name)}: ${specifier.local.name}`).join(', ');
-  setupSource = setupSource.slice(0, node.start) + `const { ${bindings} } = modules[${JSON.stringify(node.source.value)}];`
+  // 默认导入（例如图片资源）与具名导入都要能改写：
+  // specifier.imported 只存在于具名导入上。
+  const defaults = node.specifiers.filter(specifier => specifier.type === 'ImportDefaultSpecifier');
+  const named = node.specifiers.filter(specifier => specifier.type === 'ImportSpecifier');
+  const parts = [];
+  if (named.length) {
+    const bindings = named.map(specifier => `${JSON.stringify(specifier.imported.name)}: ${specifier.local.name}`).join(', ');
+    parts.push(`const { ${bindings} } = modules[${JSON.stringify(node.source.value)}];`);
+  }
+  for (const specifier of defaults) {
+    parts.push(`const ${specifier.local.name} = modules[${JSON.stringify(node.source.value)}].default;`);
+  }
+  setupSource = setupSource.slice(0, node.start) + parts.join(' ')
     + setupSource.slice(node.end);
 }
 const makeComponent = new Function('modules', `${setupSource}; return StoryWorld;`);
@@ -43,7 +54,14 @@ const template = compileTemplate({ source: descriptor.template.content, filename
   id: 'story-ui-test', compilerOptions: { mode: 'function' } });
 assert.deepEqual(template.errors, []);
 const renderStory = new Function('Vue', template.code)(vue);
-const styles = require('postcss').parse(descriptor.styles.map(style => style.content).join('\n'));
+// HUD 与行囊的视觉分别移到了 StoryWorld.hud.css / StoryWorld.bag.css
+// （分别复刻 ui2.html 与 bag2.html）；这里把三者一起解析，
+// 使断言覆盖组件实际生效的样式。
+const styles = require('postcss').parse([
+  ...descriptor.styles.map(style => style.content),
+  fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.hud.css', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.bag.css', import.meta.url), 'utf8'),
+].join('\n'));
 function findNode(node, predicate) {
   if (!node || typeof node !== 'object') return null;
   if (predicate(node)) return node;
@@ -163,6 +181,8 @@ async function fixture(t, options = {}) {
       '@/services/projectLauncherService.js': launcher,
       '@/services/worldSessionLifecycle.js': lifecycle,
       '@/utils/viewportStoryCamera.js': { createStoryCameraController },
+      // 图片资源：测试里只当作一个 URL 字符串
+      '@/assets/hero-figure.png': { default: 'hero-figure.png' },
       '../../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
       '../../../../../game/frontend/storyActors.mjs': { ensureStoryCharacters, syncPlacementActors },
       '../../../../../game/frontend/playerController.mjs': { createPlayerController, VIEW_LABELS },
@@ -508,7 +528,7 @@ test('inventory template captures pointer input and its close button restores co
   const before = page.instance.camera.snapshotPose();
   const tree = renderStory(proxyRefs(page.instance), []);
   const overlay = findNode(tree, node => node.props?.class === 'story-bag');
-  const close = findNode(overlay, node => node.type === 'button' && node.props?.['aria-label'] === '合上行囊');
+  const close = findNode(overlay, node => node.type === 'button' && node.props?.['aria-label'] === '关闭行囊');
   assert.ok(overlay); assert.ok(close);
 
   for (const selector of ['.story-bag']) {
@@ -643,39 +663,42 @@ test('HUD pins the boss plate top-center, vitals bottom-left and skills bottom-r
   const bottom = findNode(tree, node => node.props?.class === 'story-bottom-stack');
   assert.deepEqual(bottom.children.filter(node => node.type !== vue.Comment).map(node => node.props?.class),
     ['gameplay-error', 'story-feedback']);
-  const controls = findNode(tree, node => node.props?.class === 'story-controls tip');
+  const controls = findNode(tree, node => node.props?.class === 'action-tips');
   assert.match(JSON.stringify(controls, (key, value) => key === 'ctx' ? undefined : value), /Space/);
-  const vitals = findNode(tree, node => node.props?.class === 'player-vitals vitals plate');
-  const skills = findNode(tree, node => node.props?.class === 'skill-strip skills');
-  const boss = findNode(tree, node => node.props?.class === 'boss-status plate');
-  assert.ok(vitals && skills && boss, 'vitals, skills and the boss plate are independent HUD anchors');
+  // ui2.html 的四个 HUD 锚点：首领血条 / 生命栏 / 操作提示 / 战技群
+  const vitals = findNode(tree, node => node.props?.class === 'vitals-container');
+  const cluster = findNode(tree, node => node.props?.class === 'action-cluster');
+  const spells = findNode(tree, node => node.props?.class === 'spells-group');
+  const boss = findNode(tree, node => node.props?.class === 'boss-wrap');
+  assert.ok(vitals && cluster && spells && boss,
+    'boss, vitals, action tips and the spell cluster are independent HUD anchors');
   const declarations = selector => {
     const values = {};
     styles.walkRules(rule => { if (rule.parent.type === 'root' && rule.selectors.includes(selector))
       rule.walkDecls(d => { values[d.prop] = d.value; }); });
     return values;
   };
+  // #hud -> .story-hud：仍然不参与命中测试
   assert.equal(declarations('.story-hud')['pointer-events'], 'none');
-  // The notice stack owns the bottom-center lane only; vitals and skills anchor the corners.
-  assert.equal(declarations('.story-bottom-stack')['pointer-events'], undefined);
-  assert.match(declarations('.story-bottom-stack').bottom, /^calc\(/);
+  assert.equal(declarations('.story-hud').position, 'fixed');
+  // 原型的四角落布局
+  assert.equal(declarations('.boss-wrap').position, 'absolute');
+  assert.equal(declarations('.boss-wrap').left, '50%');
+  assert.equal(declarations('.vitals-container').position, 'absolute');
+  assert.equal(declarations('.vitals-container')['pointer-events'], 'auto');
+  assert.match(declarations('.vitals-container').left, /^clamp\(/);
+  assert.match(declarations('.vitals-container').top, /^clamp\(/);
+  assert.equal(declarations('.action-cluster').position, 'absolute');
+  assert.equal(declarations('.action-cluster')['pointer-events'], 'auto');
+  assert.equal(declarations('.action-cluster').right, 'var(--gap-edge)');
+  assert.equal(declarations('.action-cluster').bottom, 'var(--gap-edge)');
+  assert.equal(declarations('.action-tips').position, 'absolute');
+  assert.equal(declarations('.action-tips').left, 'var(--gap-edge)');
+  assert.equal(declarations('.action-tips').bottom, 'var(--gap-edge)');
+  assert.equal(declarations('.spells-group').display, 'flex');
+  // 原型没有这一层，但存档失败与反馈仍需要一条底部居中的通道
   assert.equal(declarations('.story-bottom-stack').position, 'absolute');
-  assert.equal(declarations('.story-bottom-stack').left, '50%');
-  assert.equal(declarations('.player-vitals').position, 'absolute');
-  assert.equal(declarations('.player-vitals')['pointer-events'], 'auto');
-  assert.match(declarations('.player-vitals').left, /^var\(--gap-edge\)$/);
-  assert.match(declarations('.player-vitals').bottom, /^var\(--gap-edge\)$/);
-  assert.equal(declarations('.skills').position, 'absolute');
-  assert.equal(declarations('.skills')['pointer-events'], 'auto');
-  assert.match(declarations('.skills').right, /^var\(--gap-edge\)$/);
-  assert.match(declarations('.skills').bottom, /^var\(--gap-edge\)$/);
-  assert.equal(declarations('.boss-status').position, 'absolute');
-  assert.equal(declarations('.boss-status').top, 'var(--boss-top)');
-  assert.equal(declarations('.tip').position, 'absolute');
-  assert.equal(declarations('.story-controls')['display'], undefined);
-  assert.equal(declarations('.tip span').display, 'flex');
-  assert.equal(declarations('.tip').display, 'grid');
-  assert.match(declarations('.tip').top, /^clamp\(/);
+  assert.match(declarations('.story-bottom-stack').bottom, /^calc\(/);
   assert.equal(declarations('.gameplay-error').position, undefined);
 });
 

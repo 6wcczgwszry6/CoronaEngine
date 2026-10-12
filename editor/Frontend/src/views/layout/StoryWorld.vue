@@ -7,7 +7,11 @@ import { createStoryCameraController } from '@/utils/viewportStoryCamera.js';
 import { projectLauncherService, cancelPendingProjectOpen, getProjectSelectionVersion } from '@/services/projectLauncherService.js';
 import { trackWorldSessionWork, notifyWorldError, registerWorldSessionSave } from '@/services/worldSessionLifecycle.js';
 import { createStoryNavigationController, NAVIGATION_KEY } from '../../../../../game/frontend/storyNavigation.mjs';
-// 行囊（Tab 背包）样式：复刻 111/bag.html，收在 .story-bag 之下
+// 剧情 HUD 样式：复刻 ui2.html《自然荒野 · 战术协同系统 HUD》
+import './StoryWorld.hud.css';
+// 中央「机体投影」用的人物图（537×817，比例与投影仓一致，不会裁切）
+import HERO_FIGURE from '@/assets/hero-figure.png';
+// 行囊（Tab 背包）样式：复刻 bag2.html《自然荒野 · 战术编成与收纳库》，收在 .story-bag 之下
 import './StoryWorld.bag.css';
 
 import { ensureStoryCharacters, syncPlacementActors } from '../../../../../game/frontend/storyActors.mjs';
@@ -292,7 +296,6 @@ async function navigateWorld() {
 const BAG_UI_KEY = '__corona_story_bag_ui_v1__';
 const BAG_COLS = 12;
 const BAG_TOTAL = 42;
-const WORLD_MAX = 6;
 
 const RARITY = {
   common: { label: '凡品', weight: 1 },
@@ -300,15 +303,17 @@ const RARITY = {
   rare: { label: '珍品', weight: 3 },
   epic: { label: '秘宝', weight: 4 },
 };
+/* 剧情 HUD 的「气刃大回旋」按钮对应引擎里的 heavy 战技（键位 E）。 */
+const HEAVY_SKILL_ID = 'heavy';
+const heavySkill = computed(() => gameplayState.value?.config?.skills?.[HEAVY_SKILL_ID] || null);
+/* 披挂位：左四（头盔 / 胸甲 / 腿甲 / 战靴）+ 右一（武器）。
+   顺序即列内自上而下的排布。 */
 const GEAR_SLOTS = [
   { id: 'helm', name: '头盔', types: ['重甲', '轻甲'] },
-  { id: 'amulet', name: '护符', types: ['护符'] },
-  { id: 'main', name: '主兵', types: ['长兵', '刀剑', '弓弩', '法器'] },
-  { id: 'armor', name: '战衣', types: ['重甲', '轻甲'] },
-  { id: 'off', name: '副兵', types: ['刀剑', '法器', '弓弩', '长兵'] },
-  { id: 'belt', name: '腰系', types: ['腰系'] },
-  { id: 'boots', name: '足履', types: ['靴履'] },
-  { id: 'ring', name: '指环', types: ['佩环'] },
+  { id: 'chest', name: '胸甲', types: ['重甲', '轻甲'] },
+  { id: 'legs', name: '腿甲', types: ['重甲', '轻甲'] },
+  { id: 'boots', name: '战靴', types: ['靴履'] },
+  { id: 'weapon', name: '武器', types: ['长兵', '刀剑', '弓弩', '法器'] },
 ];
 const SLOT_BY_ID = {};
 GEAR_SLOTS.forEach(slot => { SLOT_BY_ID[slot.id] = slot; });
@@ -320,39 +325,48 @@ const BAG_TABS = [
 ];
 /* 界面自带的器物表；其中「世界碎片」一格接真实存档数量 */
 const BAG_ITEMS = [
-  { u: 'armor-1', name: '影纹鳞甲', type: '重甲', cat: 'equip', slot: 'armor', rarity: 'epic', glyph: 'g-armor',
+  { u: 'armor-1', name: '影纹鳞甲', type: '重甲', cat: 'equip', slot: 'chest', rarity: 'epic', glyph: 'g-armor',
     stats: [['护体', '+186'], ['筋骨', '+24'], ['抗蚀', '+18%']],
     flavor: '鳞片取自深潭老蛟，贴着火光看，纹路会自己游动。' },
-  { u: 'main-1', name: '赤霄长兵', type: '长兵', cat: 'equip', slot: 'main', rarity: 'epic', glyph: 'g-sword',
+  { u: 'legs-1', name: '缚地胫铠', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'rare', glyph: 'g-legs-h',
+    stats: [['护体', '+104'], ['负重', '+9']],
+    flavor: '胫甲上留着一道旧铆痕，走过碎石地时才会响。' },
+  { u: 'main-1', name: '赤霄长兵', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-sword',
     stats: [['锋芒', '86 - 124'], ['力道', '+31'], ['破甲', '+12%']],
     flavor: '刃上缠着一线不散的血气，主人不问，它也不说。' },
   { u: 'helm-1', name: '兜鍪 · 静水', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'rare', glyph: 'g-helmet',
     stats: [['护体', '+92'], ['定神', '+14']],
     flavor: '面甲内侧刻着半句残咒，据说是铸者留给自己的。' },
-  { u: 'amulet-1', name: '青囊护符', type: '护符', cat: 'equip', slot: 'amulet', rarity: 'rare', glyph: 'g-talis',
-    stats: [['定神', '+22'], ['回气', '+8/s']],
-    flavor: '符纸换了七次，绳结始终没舍得拆。' },
-  { u: 'boots-1', name: '踏雾履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'rare', glyph: 'g-boots',
+  { u: 'boots-1', name: '踏雾履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'rare', glyph: 'g-boots-l',
     stats: [['身法', '+19'], ['疾行', '+9%']],
     flavor: '踩在松针上，声音比风还迟一步。' },
-  { u: 'belt-1', name: '缠云腰带', type: '腰系', cat: 'equip', slot: 'belt', rarity: 'fine', glyph: 'g-belt',
-    stats: [['护体', '+38'], ['负重', '+12']],
+  { u: 'amulet-1', name: '青囊护符', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-talis',
+    stats: [['定神', '+22'], ['回气', '+8/s']],
+    flavor: '符纸换了七次，绳结始终没舍得拆。' },
+  { u: 'belt-1', name: '缠云腰带', type: '法器', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-belt',
+    stats: [['护体', '+38'], ['术法', '+12']],
     flavor: '三层素绢，一层一线都是山里人自己纺的。' },
-  { u: 'ring-1', name: '残玉指环', type: '佩环', cat: 'equip', slot: 'ring', rarity: 'fine', glyph: 'g-ring',
-    stats: [['锋芒', '+9'], ['回气', '+3/s']],
+  { u: 'ring-1', name: '残玉指环', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-ring',
+    stats: [['锋芒', '+9'], ['身法', '+11']],
     flavor: '玉上有一道旧裂，握紧时微微发烫。' },
-  { u: 'off-1', name: '断水短刃', type: '刀剑', cat: 'equip', slot: 'off', rarity: 'fine', glyph: 'g-sword',
+  { u: 'off-1', name: '断水短刃', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-sword',
     stats: [['锋芒', '42 - 58'], ['身法', '+11']],
     flavor: '短得只能贴身用，也近得让人来不及退。' },
-  { u: 'main-2', name: '乌木猎弓', type: '弓弩', cat: 'equip', slot: 'main', rarity: 'fine', glyph: 'g-bow',
+  { u: 'main-2', name: '乌木猎弓', type: '弓弩', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-bow',
     stats: [['锋芒', '56 - 74'], ['力道', '+14']],
     flavor: '弦是旧弦，换过三次弓臂，准头反而更稳。' },
-  { u: 'main-3', name: '镇魂法铃', type: '法器', cat: 'equip', slot: 'main', rarity: 'rare', glyph: 'g-staff',
+  { u: 'main-3', name: '镇魂法铃', type: '法器', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-staff',
     stats: [['术法', '+27'], ['定神', '+16']],
     flavor: '摇一下，活人听见的是铃，别的东西听见的是雷。' },
-  { u: 'off-2', name: '开山短斧', type: '刀剑', cat: 'equip', slot: 'off', rarity: 'common', glyph: 'g-axe',
+  { u: 'off-2', name: '开山短斧', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'common', glyph: 'g-axe',
     stats: [['锋芒', '33 - 45'], ['力道', '+8']],
     flavor: '斧背豁了几处口，砍柴砍人都不耽误。' },
+  { u: 'legs-2', name: '藤编胫衣', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'fine', glyph: 'g-legs-l',
+    stats: [['护体', '+52'], ['身法', '+14']],
+    flavor: '老藤浸过桐油，走夜路时几乎不发出声响。' },
+  { u: 'chest-2', name: '素麻战衣', type: '轻甲', cat: 'equip', slot: 'chest', rarity: 'fine', glyph: 'g-chest-l',
+    stats: [['护体', '+71'], ['回气', '+4/s']],
+    flavor: '洗得发白的粗麻，针脚却密得看不出线头。' },
   { u: 'use-1', name: '回春丹', type: '丹散', cat: 'usable', rarity: 'fine', glyph: 'g-pill', qty: 12,
     stats: [['回复生命', '240'], ['念咒时长', '1.2s']],
     flavor: '入口先苦后甘，苦的那口才是药。' },
@@ -365,6 +379,90 @@ const BAG_ITEMS = [
   { u: 'use-4', name: '朱砂符纸', type: '符纸', cat: 'usable', rarity: 'fine', glyph: 'g-scroll', qty: 5,
     stats: [['附火', '36 / 6s']],
     flavor: '画符的人手很稳，最后那一笔却总爱往上挑。' },
+  { u: 'chest-3', name: '玄鳞重铠', type: '重甲', cat: 'equip', slot: 'chest', rarity: 'rare', glyph: 'g-chest-h',
+    stats: [['护体', '+148'], ['抗蚀', '+14%']],
+    flavor: '每一片鳞都单独锻过，穿起来比看起来轻。' },
+  { u: 'chest-4', name: '云纹法袍', type: '轻甲', cat: 'equip', slot: 'chest', rarity: 'rare', glyph: 'g-chest-l',
+    stats: [['护体', '+88'], ['术法', '+31']],
+    flavor: '袍角绣着半幅云纹，走起来像有雾跟着。' },
+  { u: 'chest-5', name: '旧皮护心', type: '轻甲', cat: 'equip', slot: 'chest', rarity: 'common', glyph: 'g-chest-l',
+    stats: [['护体', '+34']],
+    flavor: '皮面磨得发亮，胸口那道补丁是后来缝的。' },
+  { u: 'helm-2', name: '沉铁面甲', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'epic', glyph: 'g-helm-h',
+    stats: [['护体', '+132'], ['定神', '+19'], ['抗蚀', '+9%']],
+    flavor: '戴上后只听得见自己的呼吸，别的都远了一层。' },
+  { u: 'helm-3', name: '竹编斗笠', type: '轻甲', cat: 'equip', slot: 'helm', rarity: 'fine', glyph: 'g-helm-l',
+    stats: [['护体', '+41'], ['身法', '+8']],
+    flavor: '雨点打上去是闷的，正好遮住脚步。' },
+  { u: 'helm-4', name: '破面铁盔', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'common', glyph: 'g-helm-h',
+    stats: [['护体', '+46']],
+    flavor: '面甲被砍开一道口子，主人说这样看得更清楚。' },
+  { u: 'boots-2', name: '沉铁战靴', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'epic', glyph: 'g-boots-h',
+    stats: [['护体', '+97'], ['筋骨', '+21']],
+    flavor: '鞋底钉着九枚铁钉，站定了就没人推得动。' },
+  { u: 'boots-3', name: '青毡软履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'fine', glyph: 'g-boots-l',
+    stats: [['护体', '+36'], ['回气', '+3/s']],
+    flavor: '毡面洗过许多次，颜色淡了，却更贴身。' },
+  { u: 'boots-4', name: '旧布行履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'common', glyph: 'g-boots-l',
+    stats: [['护体', '+22']],
+    flavor: '底子补过三回，走山路依然不打滑。' },
+  { u: 'legs-3', name: '铁线胫甲', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'epic', glyph: 'g-legs-h',
+    stats: [['护体', '+142'], ['负重', '+26']],
+    flavor: '铁线一道压一道编成，弯不下腿，但也不会断。' },
+  { u: 'legs-4', name: '布缚胫衣', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'common', glyph: 'g-legs-l',
+    stats: [['护体', '+28']],
+    flavor: '缠得紧，走远路腿肚子不容易酸。' },
+  { u: 'main-4', name: '裂山重锤', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-axe',
+    stats: [['锋芒', '104 - 138'], ['力道', '+38'], ['破甲', '+16%']],
+    flavor: '锤头补过一次铁，补痕比原来的纹路还深。' },
+  { u: 'main-5', name: '细雪长刀', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-sword',
+    stats: [['锋芒', '72 - 96'], ['身法', '+18']],
+    flavor: '出鞘时几乎没有声音，收回去也一样。' },
+  { u: 'main-6', name: '巡夜短弩', type: '弓弩', cat: 'equip', slot: 'weapon', rarity: 'common', glyph: 'g-bow',
+    stats: [['锋芒', '40 - 52']],
+    flavor: '弩臂上刻着巡夜的更次，最后一格是空着的。' },
+  { u: 'main-7', name: '引雷法杖', type: '法器', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-staff',
+    stats: [['术法', '+44'], ['定神', '+21']],
+    flavor: '杖头那颗石头阴天会自己发烫，老人说它在等雨。' },
+  { u: 'legs-5', name: '玄铁重胫', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'rare', glyph: 'g-legs-h',
+    stats: [['护体', '+118'], ['筋骨', '+17']],
+    flavor: '一套两件，左胫内侧刻着铸者的名，右胫那道被人磨平了。' },
+  { u: 'legs-6', name: '流沙胫缚', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'rare', glyph: 'g-legs-l',
+    stats: [['护体', '+64'], ['身法', '+22']],
+    flavor: '细沙灌进夹层，跑起来脚步比平时沉，落地却更稳。' },
+  { u: 'legs-7', name: '猎户皮胫', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'common', glyph: 'g-legs-l',
+    stats: [['护体', '+26']],
+    flavor: '硝过的鹿皮，膝盖那两块加厚是自己补的。' },
+  { u: 'legs-8', name: '霜纹胫铠', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'epic', glyph: 'g-legs-h',
+    stats: [['护体', '+162'], ['抗蚀', '+21%'], ['负重', '+14']],
+    flavor: '甲面上的霜纹不是刻的，是天冷时自己长出来的。' },
+  { u: 'legs-9', name: '断锋护腿', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'fine', glyph: 'g-legs-h',
+    stats: [['护体', '+71'], ['破甲', '+6%']],
+    flavor: '边缘全是豁口，挡过的东西比主人记得的还多。' },
+  { u: 'legs-10', name: '雾行胫套', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'epic', glyph: 'g-legs-l',
+    stats: [['护体', '+83'], ['身法', '+27'], ['疾行', '+8%']],
+    flavor: '套上后小腿总像隔着一层薄雾，冷热都迟半拍才传到。' },
+  { u: 'chest-6', name: '沉铁胸铠', type: '重甲', cat: 'equip', slot: 'chest', rarity: 'common', glyph: 'g-chest-h',
+    stats: [['护体', '+58']],
+    flavor: '分量实在，走远路的人穿它，多半是为了心里踏实。' },
+  { u: 'boots-5', name: '藤底行履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'common', glyph: 'g-boots-l',
+    stats: [['护体', '+25']],
+    flavor: '藤底编得密，湿了也不打滑。' },
+  { u: 'boots-6', name: '鸣沙战靴', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'rare', glyph: 'g-boots-h',
+    stats: [['护体', '+84'], ['身法', '+16']],
+    flavor: '踏在沙上会发出极轻的响声，像有人在远处数着步子。' },
+  { u: 'helm-5', name: '素面轻盔', type: '轻甲', cat: 'equip', slot: 'helm', rarity: 'common', glyph: 'g-helm-l',
+    stats: [['护体', '+33']],
+    flavor: '没有任何纹饰，反倒是营里最不容易认错的一顶。' },
+  { u: 'helm-6', name: '玄铁重盔', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'rare', glyph: 'g-helm-h',
+    stats: [['护体', '+108'], ['定神', '+12']],
+    flavor: '内衬换过三回，铁壳始终没舍得扔。' },
+  { u: 'main-8', name: '断岳长兵', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-sword',
+    stats: [['锋芒', '112 - 146'], ['力道', '+41'], ['破甲', '+18%']],
+    flavor: '据说劈开过一道山脊，主人从没提过这事。' },
+  { u: 'main-9', name: '碎星双刃', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-sword',
+    stats: [['锋芒', '78 - 102'], ['身法', '+21']],
+    flavor: '两刃对称，据说原本是一对，另一把在别人手里。' },
   { u: 'mat-1', name: '玄铁矿', type: 'material', cat: 'mat', rarity: 'common', glyph: 'g-ore', qty: 24,
     stats: [['锻造', '可用']],
     flavor: '敲开来，断口里有一线细细的黑光。' },
@@ -384,8 +482,7 @@ const BAG_ITEMS = [
     stats: [['缝制', '上品']],
     flavor: '抖开像一小片云，落在手上几乎没有分量。' },
 ];
-const BAG_LOADOUT = { main: 'main-1', off: 'off-1', armor: 'armor-1', helm: 'helm-1',
-  amulet: 'amulet-1', belt: 'belt-1', boots: 'boots-1', ring: 'ring-1' };
+const BAG_LOADOUT = { weapon: 'main-1', helm: 'helm-1', chest: 'armor-1', legs: 'legs-1', boots: 'boots-1' };
 const BAG_WEIGHT_MAX = 120;
 /* 真实存档里唯一的行囊物品 */
 const FRAGMENT_DEF = { u: 'corona-world-fragment', name: '世界碎片', type: '未解之物', cat: 'mat', rarity: 'epic',
@@ -422,12 +519,17 @@ const WS_MOONS = [
   { x: 118, y: 32, r: 13, cx: 130, cy: 22, cr: 14 },
   { x: 0, y: 0, r: 0, cx: 0, cy: 0, cr: 0 },
 ];
-/* 小世界一览：第一条是主世界；拾到世界碎片后才多出第二条（界隙所辟），
-   点它即走原有的换场景流程。 */
-const WORLDS_DEF = [
-  { name: '無常劫', tier: '凡界', art: { s: 0, m: 0 } },
-];
-const WORLDS_FRAGMENT = { name: '界隙', tier: '新界', art: { s: 1, m: 1 } };
+/* 两个世界：
+     · 主世界（index 0）—— 剧情起点，即 role === 'main' 的那个场景；
+     · 小世界（index 1）—— 击败 Boss 并拾得世界碎片后才开辟（role === 'child'）。
+   名称固定，不允许改名：它们是这两个场景的身份，不是可命名的存档位。
+   图象（art）仍可自选，属纯界面偏好。 */
+const WORLD_MAIN = { name: '主世界', tier: '主界', art: { s: 0, m: 0 } };
+const WORLD_SMALL = { name: '小世界', tier: '沙盒', art: { s: 1, m: 1 } };
+const WORLDS_DEF = [WORLD_MAIN];
+const WORLDS_FRAGMENT = WORLD_SMALL;
+/* 一览里的下标 → 场景角色。 */
+const WORLD_ROLES = ['main', 'child'];
 
 let bagUidSeq = 0;
 const bag = reactive({
@@ -437,9 +539,6 @@ const bag = reactive({
   cells: [],
   worlds: [],
   worldCur: 0,
-  worldView: 0,
-  worldNameDraft: '',
-  manageOpen: false,
   tipOn: false,
   tipStyle: { left: '0px', top: '0px' },
   tipItem: null,
@@ -457,9 +556,11 @@ function clampWorldIndex(index) {
   const last = Math.max(0, bag.worlds.length - 1);
   return Number.isFinite(i) ? Math.min(Math.max(i, 0), last) : 0;
 }
+/* 每件兵甲只认自己的那一个披挂位：胸甲只能进胸甲位，不按类型跨位匹配。
+   （类型仍用于详情页的说明文字，但不再决定能放进哪个格子。） */
 function bagSlotsFor(item) {
-  if (!item || item.cat !== 'equip') return [];
-  return GEAR_SLOTS.filter(slot => slot.types.includes(item.type)).map(slot => slot.id);
+  if (!item || item.cat !== 'equip' || !item.slot) return [];
+  return SLOT_BY_ID[item.slot] ? [item.slot] : [];
 }
 function bagRealFragment() {
   const count = gameplayState.value?.state?.inventory?.worldFragment || 0;
@@ -471,23 +572,32 @@ function bagRealFragment() {
 function bagFragmentOwned() {
   return (gameplayState.value?.state?.inventory?.worldFragment || 0) > 0;
 }
+/* 一览 = 主世界（恒有） + 小世界（拾得碎片后开辟）。
+   名称与层级用代码里的固定身份，**不读存档里的名字**，
+   否则旧存档会把「主世界 / 小世界」覆盖成任意旧名。 */
 function bagVisibleWorlds() {
   const owned = bagFragmentOwned();
-  return WORLDS_DEF.map((world, index) => ({
-    ...world,
-    art: { ...(bag.worlds[index]?.art || world.art) },
-    name: bag.worlds[index]?.name || world.name,
-    tier: bag.worlds[index]?.tier || world.tier,
-  })).concat(owned ? [{ ...WORLDS_FRAGMENT, art: { ...(bag.worlds[1]?.art || WORLDS_FRAGMENT.art) },
-    name: bag.worlds[1]?.name || WORLDS_FRAGMENT.name, tier: bag.worlds[1]?.tier || WORLDS_FRAGMENT.tier }] : []);
+  const list = [{
+    ...WORLD_MAIN,
+    role: WORLD_ROLES[0],
+    art: { ...(bag.worlds[0]?.art || WORLD_MAIN.art) },
+  }];
+  if (owned) {
+    list.push({
+      ...WORLD_SMALL,
+      role: WORLD_ROLES[1],
+      art: { ...(bag.worlds[1]?.art || WORLD_SMALL.art) },
+    });
+  }
+  return list;
 }
-/* 可点入的界：拾得碎片后的那一界（在子世界中同样可用它返回主世界） */
+/* 可换场景的界：主世界 ↔ 小世界，两个都可点。 */
 function bagEntryIndex() {
   return bagVisibleWorlds().length > 1 ? 1 : -1;
 }
-/* 碎片尚未到手：那一届不可入 */
+/* 碎片尚未到手：小世界不可入 */
 function bagEntryLocked(index) {
-  return index === bagEntryIndex() && !bagFragmentOwned();
+  return bagVisibleWorlds()[index]?.role === 'child' && !bagFragmentOwned();
 }
 function bagLoad() {
   try {
@@ -503,7 +613,8 @@ function bagSave() {
       tab: bag.tab,
       gear: Object.fromEntries(Object.entries(bag.gear).filter(([, item]) => item).map(([id, item]) => [id, item.u])),
       cells: bag.cells.map(item => (item && !item.real ? { u: item.u, qty: item.qty } : null)),
-      worlds: bag.worlds.map(world => ({ name: world.name, tier: world.tier, art: { ...world.art } })),
+      /* 只存图象偏好：世界名称是固定身份，不写档也不读档。 */
+      worlds: bag.worlds.slice(0, 2).map(world => ({ art: { ...world.art } })),
       worldCur: bag.worldCur,    }));
   } catch { /* 界面状态不写存档，失败即忽略 */ }
 }
@@ -515,6 +626,11 @@ function bagInit() {
       const def = bagDef(saved.gear?.[slot.id]);
       if (def) bag.gear[slot.id] = bagMakeItem(def);
     });
+    /* 旧存档可能把器物挂在已取消的披挂位上（护符/副兵/腰系/指环）。
+       这些器物不能丢：能放进新披挂位的就转过去，放不进的退回格阵。 */
+    const orphaned = Object.entries(saved.gear || {})
+      .filter(([slotId, u]) => u && !SLOT_BY_ID[slotId])
+      .map(([, u]) => bagDef(u)).filter(Boolean);
     bag.cells = Array.from({ length: BAG_TOTAL }, (_, i) => {
       const entry = saved.cells?.[i];
       const def = entry && bagDef(entry.u);
@@ -523,19 +639,29 @@ function bagInit() {
       if (entry.qty > 1) item.qty = entry.qty;
       return item;
     });
+    for (const def of orphaned) {
+      const free = bagSlotsFor(def).find(id => !bag.gear[id]);
+      if (free) bag.gear[free] = bagMakeItem(def);
+      else {
+        const empty = bag.cells.indexOf(null);
+        if (empty !== -1) bag.cells[empty] = bagMakeItem(def);
+      }
+    }
     if (Array.isArray(saved.worlds) && saved.worlds.length) {
-      bag.worlds = saved.worlds.slice(0, WORLD_MAX).map(world => ({ name: String(world.name || '小世界'),
-        tier: String(world.tier || '新界'), art: { s: Number(world.art?.s) || 0, m: Number(world.art?.m) || 0 } }));
+      /* 只恢复图象；旧存档里的名字一律丢弃（当时的「無常劫 / 界隙」等已作废）。 */
+      bag.worlds = saved.worlds.slice(0, 2).map(world => ({
+        art: { s: Number(world?.art?.s) || 0, m: Number(world?.art?.m) || 0 },
+      }));
       bag.worldCur = clampWorldIndex(saved.worldCur);
     }
   }
   if (!bag.worlds.length) {
-    bag.worlds = WORLDS_DEF.map(world => ({ name: world.name, tier: world.tier, art: { ...world.art } }));
+    bag.worlds = [WORLD_MAIN, WORLD_SMALL].map(world => ({ art: { ...world.art } }));
     bag.worldCur = 0;
   }
   // 第二界的外观数据位：拾得碎片后它才会出现在一览里
   while (bag.worlds.length < 2) {
-    bag.worlds.push({ name: WORLDS_FRAGMENT.name, tier: WORLDS_FRAGMENT.tier, art: { ...WORLDS_FRAGMENT.art } });
+    bag.worlds.push({ art: { ...WORLD_SMALL.art } });
   }
   if (!bag.cells.length) {
     // 未披挂的兵甲 + 消耗品 + 材料，乱序铺进格阵（与 bag.html 同一铺陈方式）
@@ -573,9 +699,116 @@ function bagPassFilter(item) {
   if (item.real) return bag.tab === 'all' || bag.tab === 'mat';
   return bag.tab === 'all' || item.cat === bag.tab;
 }
-function bagIconHTML(item) {
-  return item ? `<span class="icon" aria-hidden="true"><svg viewBox="0 0 48 48"><use href="#${item.glyph}"/></svg></span>` : '';
+/* 分类页签右侧的件数：已披挂的兵甲也算进「全部 / 兵甲」。 */
+function bagTabCount(tabId) {
+  const all = [ ...Object.values(bag.gear).filter(Boolean), ...bagCellItems().filter(Boolean) ];
+  if (tabId === 'all') return all.reduce((sum, item) => sum + (item.qty || 1), 0);
+  return all.filter(item => (item.real ? tabId === 'mat' : item.cat === tabId))
+    .reduce((sum, item) => sum + (item.qty || 1), 0);
 }
+/* 器物 glyph → 图标 id。每种兵甲有自己的精细图标
+   （头盔分重/轻，胸甲分重/轻，腿甲分重/轻，战靴分重/轻，武器分利器/重兵/弓弩/法器），
+   不再让同一类装备共用一张线条图。 */
+const BAG_GLYPH_TO_ICON = {
+  // 头盔
+  'g-helm-h': 'i-helm-h',
+  'g-helm-l': 'i-helm-l',
+  'g-helmet': 'i-helm-h',
+  // 胸甲
+  'g-chest-h': 'i-chest-h',
+  'g-chest-l': 'i-chest-l',
+  'g-armor': 'i-chest-h',
+  'g-body': 'i-chest-l',
+  // 腿甲
+  'g-legs-h': 'i-legs-h',
+  'g-legs-l': 'i-legs-l',
+  // 战靴
+  'g-boots-h': 'i-boots-h',
+  'g-boots-l': 'i-boots-l',
+  'g-boots': 'i-boots-l',
+  // 武器
+  'g-sword': 'i-weapon-b',
+  'g-axe': 'i-weapon-h',
+  'g-bow': 'i-weapon-r',
+  'g-staff': 'i-weapon-x',
+  // 佩饰 / 丹散 / 材料
+  'g-ring': 'i-ring-d',
+  'g-talis': 'i-talis-d',
+  'g-pill': 'i-pill-d',
+  'g-elixir': 'i-elixir-d',
+  'g-scroll': 'i-scroll-d',
+  'g-ore': 'i-ore-d',
+  'g-herb': 'i-herb-d',
+  'g-silk': 'i-silk-d',
+  'g-coal': 'i-coal-d',
+  'g-fang': 'i-fang-d',
+  'g-belt': 'i-silk-d',
+};
+function bagGlyphId(glyph) {
+  return BAG_GLYPH_TO_ICON[glyph] || 'i-material';
+}
+/* 器物图标：自包含的行内 SVG（几何 + 行内 fill/stroke），
+   不经 <use>、不引用 url(#...)：这套 CEF 不会把渐变引用带过 <use> 克隆，
+   之前所有图标因此丢失填充、缩成一团轮廓。 */
+/* 剧情 HUD 的战技图标：同样做成自包含行内 SVG。
+   此前模板引用 #i-shield / #i-mirage / #i-stasis，而 HUD 的 defs 里只有
+   i-heal 与 i-burst —— 这三个引用根本不存在，所以战技钮的图标一直是空的。 */
+const SKILL_ICON_INNER = {
+  // 重斩：护盾（防御 → 蓄力重击）
+  shield: '<polygon points="24,6 40,16 34,36 24,44 14,36 8,16" fill="rgba(158,203,214,.28)"/>'
+    + '<polygon points="24,6 40,16 34,36 24,44 14,36 8,16"/>'
+    + '<line x1="24" y1="16" x2="24" y2="44"/>',
+  // 横扫：多重残影（横挥的多段轨迹）
+  mirage: '<rect x="14" y="14" width="20" height="20" rx="2" fill="rgba(230,213,167,.34)"/>'
+    + '<rect x="14" y="14" width="20" height="20" rx="2"/>'
+    + '<rect x="8" y="8" width="20" height="20" rx="2" opacity="0.45" fill="rgba(230,213,167,.2)"/>'
+    + '<rect x="8" y="8" width="20" height="20" rx="2" opacity="0.45"/>'
+    + '<rect x="20" y="20" width="20" height="20" rx="2" opacity="0.45" fill="rgba(230,213,167,.2)"/>'
+    + '<rect x="20" y="20" width="20" height="20" rx="2" opacity="0.45"/>',
+  // 其它战技：定身符（双竖线 + 环）
+  stasis: '<circle cx="24" cy="24" r="16" fill="rgba(158,203,214,.22)"/>'
+    + '<circle cx="24" cy="24" r="16"/>'
+    + '<line x1="18" y1="14" x2="18" y2="34"/><line x1="30" y1="14" x2="30" y2="34"/>',
+};
+function skillIconInner(id) {
+  return SKILL_ICON_INNER[id] || SKILL_ICON_INNER.stasis;
+}
+
+function bagIconHTML(item) {
+  if (!item) return '';
+  return GEAR_ICONS[bagGlyphId(item.glyph)] || GEAR_ICONS['i-material'];
+}
+
+const GEAR_ICONS = {
+  "i-helm-h": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 5C15.7 5 9.5 11.6 9.5 20v6h29v-6C38.5 11.6 32.3 5 24 5Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M24 5c8.3 0 14.5 6.6 14.5 15v6H24Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M24 31c-6.4 0-11.6 3.6-13.4 9h26.8C35.6 34.6 30.4 31 24 31Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M24 5C15.7 5 9.5 11.6 9.5 20v6h29v-6C38.5 11.6 32.3 5 24 5Z\"/><path d=\"M24 31c-6.4 0-11.6 3.6-13.4 9h26.8C35.6 34.6 30.4 31 24 31Z\"/><path d=\"M21.6 26v14\"/><path d=\"M10.6 26h7.4M30 26h7.4\"/><path d=\"M24 5v7\"/></svg>",
+  "i-helm-l": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 10c-7.4 0-13 6.4-14.6 15.4L24 31l14.6-5.6C37 16.4 31.4 10 24 10Z\" fill=\"rgba(244,248,240,.40)\"/><path d=\"M24 10c7.4 0 13 6.4 14.6 15.4L24 31Z\" fill=\"rgba(150,164,144,.35)\"/><path d=\"M6 25.4c5.6 4.8 12 6.9 18 6.9s12.4-2.1 18-6.9c-5.6 2-12 3-18 3s-12.4-1-18-3Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M24 10c-7.4 0-13 6.4-14.6 15.4L24 31l14.6-5.6C37 16.4 31.4 10 24 10Z\"/><path d=\"M6 25.4c5.6 4.8 12 6.9 18 6.9s12.4-2.1 18-6.9c-5.6 2-12 3-18 3s-12.4-1-18-3Z\"/><path d=\"M17 32c1.6 5.6 4 9.6 7 12 3-2.4 5.4-6.4 7-12\"/><path d=\"M24 10v21\"/></svg>",
+  "i-chest-h": "<svg viewBox=\"0 0 48 48\"><path d=\"M14.5 12.5 24 9.5l9.5 3 2 9.5c0 9-5 15.5-11.5 19.5C17.5 37.5 12.5 31 12.5 22Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M24 9.5l9.5 3 2 9.5c0 9-5 15.5-11.5 19.5Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M24 20c-4.4 0-7 3-7 7 0 5 3.4 9 7 11.5 3.6-2.5 7-6.5 7-11.5 0-4-2.6-7-7-7Z\" fill=\"rgba(230,213,167,.55)\"/><path d=\"M14.5 12.5 24 9.5l9.5 3 2 9.5c0 9-5 15.5-11.5 19.5C17.5 37.5 12.5 31 12.5 22Z\"/><path d=\"M24 20c-4.4 0-7 3-7 7 0 5 3.4 9 7 11.5 3.6-2.5 7-6.5 7-11.5 0-4-2.6-7-7-7Z\"/><path d=\"M24 20v18.5\"/><path d=\"M12.5 22h7M35.5 22h-7\"/></svg>",
+  "i-chest-l": "<svg viewBox=\"0 0 48 48\"><path d=\"M15 13 24 10l9 3 2 10c0 8-4.5 13.5-11 16.5-6.5-3-11-8.5-11-16.5Z\" fill=\"rgba(244,248,240,.40)\"/><path d=\"M24 10l9 3 2 10c0 8-4.5 13.5-11 16.5Z\" fill=\"rgba(150,164,144,.35)\"/><path d=\"M15 13 24 10l9 3 2 10c0 8-4.5 13.5-11 16.5-6.5-3-11-8.5-11-16.5Z\"/><path d=\"M20 13.5 24 20l4-6.5\"/><path d=\"M24 20v19\"/><path d=\"M15.5 26h5M27.5 26h5\"/></svg>",
+  "i-legs-h": "<svg viewBox=\"0 0 48 48\"><path d=\"M15 8.5h8c1 5 1.4 10 1 15l-1 6h-8l-1-6c-.4-5 0-10 1-15Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M25 8.5h8c1 5 1.4 10 1 15l-1 6h-8l-1-6c-.4-5 0-10 1-15Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M25 8.5h8c1 5 1.4 10 1 15l-1 6h-8Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M11.6 8.6C17.4 5 30.6 5 36.4 8.6c-5.8 3.4-19 3.4-24.8 0Z\" fill=\"rgba(230,213,167,.55)\"/><circle cx=\"19\" cy=\"20\" r=\"3.6\" fill=\"rgba(230,213,167,.55)\"/><circle cx=\"29.5\" cy=\"20\" r=\"3.6\" fill=\"rgba(230,213,167,.55)\"/><path d=\"M15 8.5h8c1 5 1.4 10 1 15l-1 6h-8l-1-6c-.4-5 0-10 1-15Z\"/><path d=\"M25 8.5h8c1 5 1.4 10 1 15l-1 6h-8l-1-6c-.4-5 0-10 1-15Z\"/><path d=\"M11.6 8.6C17.4 5 30.6 5 36.4 8.6c-5.8 3.4-19 3.4-24.8 0Z\"/><circle cx=\"19\" cy=\"20\" r=\"3.6\"/><circle cx=\"29.5\" cy=\"20\" r=\"3.6\"/><path d=\"M15.4 30.5h7.2M25.4 30.5h7.2\"/></svg>",
+  "i-legs-l": "<svg viewBox=\"0 0 48 48\"><path d=\"M16 9h6.5l1.4 8-1 22H16c-1-10-1-20 0-30Z\" fill=\"rgba(244,248,240,.40)\"/><path d=\"M25.5 9H32c1 10 1 20 0 30h-7.9l-1-22Z\" fill=\"rgba(244,248,240,.40)\"/><path d=\"M25.5 9H32c1 10 1 20 0 30H25.5Z\" fill=\"rgba(150,164,144,.35)\"/><path d=\"M16 9h6.5l1.4 8-1 22H16c-1-10-1-20 0-30Z\"/><path d=\"M25.5 9H32c1 10 1 20 0 30h-7.9l-1-22Z\"/><path d=\"M16.4 17h7M16.4 25h7M16.4 33h7M25.6 17h7M25.6 25h7M25.6 33h7\"/></svg>",
+  "i-boots-h": "<svg viewBox=\"0 0 48 48\"><path d=\"M13 11h8v17.5l6.5 6.5v6.5H13Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M25 12h8v13l6 10v6.5H25Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M25 12h8v13l6 10v6.5H25Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M11.5 9.5c4.4-1.6 15.6-1.6 20 0 .8 2.2.8 3.6 0 5.4-4.4-1.6-15.6-1.6-20 0-.8-1.8-.8-3.2 0-5.4Z\" fill=\"rgba(230,213,167,.55)\"/><path d=\"M11.5 38.5h31v3.5h-31Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M13 11h8v17.5l6.5 6.5v6.5H13Z\"/><path d=\"M25 12h8v13l6 10v6.5H25Z\"/><path d=\"M11.5 9.5c4.4-1.6 15.6-1.6 20 0 .8 2.2.8 3.6 0 5.4-4.4-1.6-15.6-1.6-20 0-.8-1.8-.8-3.2 0-5.4Z\"/><path d=\"M11.5 38.5h31v3.5h-31Z\"/><path d=\"M25 25h8\"/></svg>",
+  "i-boots-l": "<svg viewBox=\"0 0 48 48\"><path d=\"M14 13h7.5v15.5l6 7v5H14Z\" fill=\"rgba(244,248,240,.40)\"/><path d=\"M25 14h7.5v12l5.5 9.5v5H25Z\" fill=\"rgba(244,248,240,.40)\"/><path d=\"M25 14h7.5v12l5.5 9.5v5H25Z\" fill=\"rgba(150,164,144,.35)\"/><path d=\"M11 38h29l-1.5 4h-26Z\" fill=\"rgba(150,164,144,.35)\"/><path d=\"M14 13h7.5v15.5l6 7v5H14Z\"/><path d=\"M25 14h7.5v12l5.5 9.5v5H25Z\"/><path d=\"M11 38h29l-1.5 4h-26Z\"/><path d=\"M14 19h7.5M25 20h7.5M25 27h7.5\"/></svg>",
+  "i-weapon-b": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 2.6 30 13.5v20.5h-12V13.5Z\" fill=\"rgba(255,255,255,.62)\"/><path d=\"M24 2.6 30 13.5v20.5h-6Z\" fill=\"rgba(124,134,118,.45)\"/><path d=\"M24 2.6 30 13.5v20.5h-12V13.5Z\"/><path d=\"M9.5 33.5c5-3 24-3 29 0-5 3-24 3-29 0Z\" fill=\"rgba(230,213,167,.55)\"/><path d=\"M9.5 33.5c5-3 24-3 29 0-5 3-24 3-29 0Z\"/><path d=\"M21.3 36.6h5.4v7.4h-5.4Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M21.3 36.6h5.4v7.4h-5.4Z\"/><path d=\"M21.3 40.3h5.4\"/><circle cx=\"24\" cy=\"45.6\" r=\"2.4\" fill=\"rgba(230,213,167,.55)\"/><circle cx=\"24\" cy=\"45.6\" r=\"2.4\"/></svg>",
+  "i-weapon-h": "<svg viewBox=\"0 0 48 48\"><path d=\"M19.5 7c-7 3.5-10.5 9-10.5 15.5S12.5 34.5 19.5 38Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M28.5 7c7 3.5 10.5 9 10.5 15.5S35.5 34.5 28.5 38Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M19.5 7c-7 3.5-10.5 9-10.5 15.5S12.5 34.5 19.5 38Z\"/><path d=\"M28.5 7c7 3.5 10.5 9 10.5 15.5S35.5 34.5 28.5 38Z\"/><path d=\"M21.4 4.5h5.2v39h-5.2Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M21.4 4.5h5.2v39h-5.2Z\"/><path d=\"M21.4 12h5.2M21.4 18h5.2M21.4 24h5.2M21.4 30h5.2\"/><circle cx=\"24\" cy=\"45\" r=\"2.6\" fill=\"rgba(230,213,167,.55)\"/><circle cx=\"24\" cy=\"45\" r=\"2.6\"/></svg>",
+  "i-weapon-x": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 3.5 34 12v17L24 37.5 14 29V12Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M24 3.5 34 12v17L24 37.5Z\" fill=\"rgba(120,92,38,.45)\"/><path d=\"M24 16.5 29 20v7l-5 3.5-5-3.5v-7Z\" fill=\"rgba(230,213,167,.55)\"/><path d=\"M24 3.5 34 12v17L24 37.5 14 29V12Z\"/><path d=\"M14 12l10 8 10-8M24 20v17.5\"/><path d=\"M24 16.5 29 20v7l-5 3.5-5-3.5v-7Z\"/><path d=\"M24 37.5V44\"/></svg>",
+  "i-weapon-r": "<svg viewBox=\"0 0 48 48\"><path d=\"M13.5 5c11 6.5 11 27.5 0 34-.8-11.3-.8-22.7 0-34Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M13.5 5c11 6.5 11 27.5 0 34-.8-11.3-.8-22.7 0-34Z\"/><path d=\"M13.5 5v34\"/><path d=\"M13.5 22h19\"/><path d=\"M33 17.5l7.5 4.5-7.5 4.5Z\" fill=\"rgba(230,213,167,.55)\"/><path d=\"M33 17.5l7.5 4.5-7.5 4.5Z\"/><path d=\"M28 22h5\"/></svg>",
+  "i-material-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M19 8l10 3 4 9-4 9-10 3-9-4-2-8 3-9Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M29 11l4 9-4 9-10 3 5-10Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M19 8l10 3 4 9-4 9-10 3-9-4-2-8 3-9Z\"/><path d=\"M10 12l9 5 10-6M19 17v15\"/></svg>",
+  "i-herb-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 21C18 20 13 15 13 9c6-.6 11 5 11 12Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 30c6-1.4 11-7 11-13-6-.6-11 5-11 13Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 41V15\"/><path d=\"M24 21C18 20 13 15 13 9c6-.6 11 5 11 12Z\"/><path d=\"M24 30c6-1.4 11-7 11-13-6-.6-11 5-11 13Z\"/><path d=\"M11 41h26\"/></svg>",
+  "i-silk-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M7 13c7-6 14 6 21 0s10 2 13 5v8c-3-3-6-9-13-3s-14-6-21 0Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M7 26c7-6 14 6 21 0s10 2 13 5v8c-3-3-6-9-13-3s-14-6-21 0Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M7 13c7-6 14 6 21 0s10 2 13 5\"/><path d=\"M7 26c7-6 14 6 21 0s10 2 13 5\"/><path d=\"M7 34c7-6 14 6 21 0s10 2 13 5\"/></svg>",
+  "i-ore-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M15 16l9-7 9 7v12l-9 8-9-8Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 9l9 7v12l-9 8Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M15 16l9-7 9 7v12l-9 8-9-8Z\"/><path d=\"M15 16h18M24 21v15\"/></svg>",
+  "i-coal-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M13 28l5-15 11 3 6 13-11 10Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M29 16l6 13-11 10Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M13 28l5-15 11 3 6 13-11 10Z\"/><path d=\"M18 13l-3 13 11 10\"/></svg>",
+  "i-fang-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M20 5l5 9-2 28-4-28Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M25 14l7 5-5 4Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M20 5l5 9-2 28-4-28Z\"/><path d=\"M25 14l7 5-5 4Z\"/></svg>",
+  "i-ring-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 12a12 12 0 1 0 0 24 12 12 0 0 0 0-24Zm0 6.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M18 6l6 4-3 5-4-4Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M24 12a12 12 0 1 0 0 24 12 12 0 0 0 0-24Zm0 6.5a5.5 5.5 0 1 1 0 11 5.5 5.5 0 0 1 0-11Z\"/><path d=\"M18 6l6 4-3 5-4-4Z\"/></svg>",
+  "i-talis-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M18 12c-2 12 1 22 6 31 5-9 8-19 6-31Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 12c3 0 5 1 6 31-3 0-4-1-6-31Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M18 12c-2 12 1 22 6 31 5-9 8-19 6-31Z\"/><path d=\"M17 5h14v7H17Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M17 5h14v7H17Z\"/><path d=\"M20 22h8M21 30h6\"/></svg>",
+  "i-pill-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 6l13 10v16L24 42 11 32V16Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 6l13 10v16L24 42Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M24 6l13 10v16L24 42 11 32V16Z\"/><path d=\"M11 16l13 10 13-10M24 26v16\"/></svg>",
+  "i-elixir-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M21 12c-8 5-10 12-6 18 3 5 7 7 9 7s6-2 9-7c4-6 2-13-6-18Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 12c8 5 10 12 6 18-3 5-7 7-9 7Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M21 12c-8 5-10 12-6 18 3 5 7 7 9 7s6-2 9-7c4-6 2-13-6-18Z\"/><path d=\"M19 5h10v8H19Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M19 5h10v8H19Z\"/><path d=\"M15 26h18\"/></svg>",
+  "i-scroll-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M16 9h16v30H16Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M32 9h3v30h-3Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M16 9h16v30H16Z\"/><path d=\"M13 6h22v5H13Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M13 6h22v5H13Z\"/><path d=\"M13 37h22v5H13Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M13 37h22v5H13Z\"/><path d=\"M20 18h8M20 24h8M20 30h5\"/></svg>",
+  "i-consumable-d": "<svg viewBox=\"0 0 48 48\"><path d=\"M16 16h16v19c0 4-16 4-16 0Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M32 16v19c0 4-16 4-16 0Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M16 16h16v19c0 4-16 4-16 0Z\"/><path d=\"M20 7h8v9h-8Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M20 7h8v9h-8Z\"/><path d=\"M20 23h8M20 28h8\"/></svg>",
+  "i-material": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 8l12 8v16l-12 8-12-8V16Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M24 8l12 8v16l-12 8V16Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M24 8l12 8v16l-12 8-12-8V16Z\"/><path d=\"M24 24l12-8M24 24l-12-8M24 24v16\"/></svg>",
+  "i-consumable": "<svg viewBox=\"0 0 48 48\"><path d=\"M16 16h16v20c0 4-16 4-16 0Z\" fill=\"rgba(158,203,214,.32)\"/><path d=\"M16 16h16v20c0 4-16 4-16 0Z\"/><path d=\"M20 8h8v8h-8Z\" fill=\"rgba(51,96,108,.45)\"/><path d=\"M20 8h8v8h-8Z\"/></svg>",
+  "i-core": "<svg viewBox=\"0 0 48 48\"><path d=\"M24 6l16 18-16 18L8 24Z\" fill=\"rgba(230,213,167,.30)\"/><path d=\"M24 6l16 18-16 18L8 24Z\"/><circle cx=\"24\" cy=\"24\" r=\"6\" fill=\"rgba(230,213,167,.55)\"/><circle cx=\"24\" cy=\"24\" r=\"6\"/></svg>",
+  "i-acc": "<svg viewBox=\"0 0 48 48\"><circle cx=\"24\" cy=\"24\" r=\"14\" stroke-dasharray=\"4 4\" fill=\"rgba(150,164,144,.35)\"/><circle cx=\"24\" cy=\"24\" r=\"14\" stroke-dasharray=\"4 4\"/><circle cx=\"24\" cy=\"24\" r=\"6\"/><path d=\"M24 4v6\"/></svg>"
+};
 function bagTypeLine(item) {
   if (item.real) return item.type;
   let text = item.type;
@@ -600,8 +833,7 @@ function bagFindByUid(uid) {
   return null;
 }
 function bagSelected() { return bag.sel ? bagFindByUid(bag.sel) : null; }
-function bagGearMeta() { return `${GEAR_SLOTS.filter(slot => bag.gear[slot.id]).length} / ${GEAR_SLOTS.length}`; }
-function bagItemWeight(item) {
+function bagGearMeta() { return `${GEAR_SLOTS.filter(slot => bag.gear[slot.id]).length} / ${GEAR_SLOTS.length}`; }function bagItemWeight(item) {
   return (RARITY[item.rarity].weight * 0.5 + (item.cat === 'equip' ? 2.2 : 0.3)) * item.qty;
 }
 function bagFoot() {
@@ -616,10 +848,6 @@ function bagFoot() {
     weightWidth: `${Math.min(100, Math.max(0, (weight / BAG_WEIGHT_MAX) * 100)).toFixed(1)}%`,
     over: weight > BAG_WEIGHT_MAX,
   };
-}
-function bagManageArt() {
-  const world = bagManageWorld.value;
-  return world ? normalizeArt(world.art).s : -1;
 }
 function bagSelectSlot(index) {
   const item = bagCellItems()[index];
@@ -655,17 +883,17 @@ function bagMoveTip(event) {
 }
 function bagHideTip() { bag.tipOn = false; }
 /* ------------------ 披掛 / 卸下 / 服用 / 弃置（仅界面状态） ------------------ */
-function bagEquipFromSlot(index, preferredSlot) {
+function bagEquipFromSlot(index) {
   const item = bagCellItems()[index];
   if (!item || item.real) { bagToast('此物随身，不可披掛'); return; }
   if (item.cat !== 'equip') { bagToast('此物无法披掛'); return; }
-  let slotId = preferredSlot;
-  if (!slotId || !bagSlotsFor(item).includes(slotId)) [slotId] = bagSlotsFor(item);
+  // 器物自带唯一披挂位：胸甲只进胸甲位，不存在“哪格都能装”。
+  const [slotId] = bagSlotsFor(item);
   if (!slotId) { bagToast('无处安放'); return; }
   const previous = bag.gear[slotId] || null;
   bag.gear[slotId] = item;
   bag.cells[index] = previous;            // 旧物回落到同一格，格阵不塌陷
-  bagToast(`披掛 · ${item.name}`);
+  bagToast(`披掛 · ${SLOT_BY_ID[slotId].name} · ${item.name}`);
   bag.sel = item.uid;
   bagSave();
 }
@@ -765,113 +993,119 @@ function worldThumbHTML(art) {
     + '</svg>';
 }
 function bagWorldList() { return bagVisibleWorlds(); }
-function bagWorldCount() { return bagVisibleWorlds().length; }
 function bagCurIndex() {
   const list = bagVisibleWorlds();
   return Math.min(Math.max(bag.worldCur, 0), Math.max(0, list.length - 1));
 }
 function bagCurWorld() { return bagVisibleWorlds()[bagCurIndex()] || null; }
-function bagWorldStatus() {
-  const world = bagCurWorld();
-  const count = bagWorldCount();
-  return world ? `${world.name} · ${world.tier} · ${bagCurIndex() + 1} / ${count}` : '未有界 · 0 / 0';
+/* 当前所在的世界角色：主世界 = role 'main'，小世界 = role 'child'。 */
+function bagCurrentRole() {
+  return inSubworld.value ? 'child' : 'main';
+}
+/* 这一格是不是「现在站着的世界」。 */
+function bagWorldIsCurrent(index) {
+  return bagVisibleWorlds()[index]?.role === bagCurrentRole();
+}
+/* 点这一格会往哪个方向走：进小世界 = enter，回主世界 = exit。 */
+function bagTravelDirection(index) {
+  const role = bagVisibleWorlds()[index]?.role;
+  if (!role || role === bagCurrentRole()) return null;
+  return role === 'child' ? 'enter' : 'exit';
 }
 function bagTravelLabel(index) {
   const world = bagVisibleWorlds()[index];
-  if (index !== bagEntryIndex()) return `小世界：${world?.name || ''}（当前）`;
-  return bagEntryLocked(index)
-    ? `小世界：${world?.name || ''}（未辟 · 击败 Boss 并拾取世界碎片后开启）`
-    : `小世界：${world?.name || ''}（进入／返回）`;
+  const name = world?.name || '';
+  if (bagWorldIsCurrent(index)) return `${name}（当前所在）`;
+  if (bagEntryLocked(index)) return `${name}（未辟 · 击败 Boss 并拾取世界碎片后开启）`;
+  return world?.role === 'child' ? `${name}（前往小世界）` : `${name}（返回主世界）`;
 }
-/* 一览里可点入的那一格＝原有的「小世界」按钮：走既有换场景流程 */
+/* 点主世界回主世界场景，点小世界进小世界场景；都走既有的换场景流程。 */
 async function bagTravel(index) {
-  const list = bagVisibleWorlds();
-  const world = list[index];
+  const world = bagVisibleWorlds()[index];
   if (!world) return;
-  bag.worldCur = index;
-  bag.worldView = index;
-  bag.worldNameDraft = world.name;
-  if (index !== bagEntryIndex()) { bagToast(`已是 · ${world.name}`); bagSave(); return; }
-  if (bagEntryLocked(index) || navigationPending.value) { bagToast('击败 Boss 并拾取世界碎片后开启'); return; }
-  bagToast(`入界 · ${world.name}`);
+  bag.worldCur = index;  if (bagWorldIsCurrent(index)) { bagToast(`已是 · ${world.name}`); bagSave(); return; }
+  if (bagEntryLocked(index)) { bagToast('击败 Boss 并拾取世界碎片后开启'); return; }
+  if (navigationPending.value || navigation.busy) { bagToast('正在切换世界…'); return; }
+  bagToast(bagTravelDirection(index) === 'enter' ? `入界 · ${world.name}` : `返回 · ${world.name}`);
   bagSave();
-  // 换场景流程要求行囊仍开着（原来就是这样）；点击本身就是收起行囊
+  // 换场景流程要求行囊仍开着；点击本身就是收起行囊
   const travel = navigateWorld();
   camera.resetInput();
   inventoryOpen.value = false;
   await travel;
 }
-function bagTapWorld() {
-  bagToast(bagCurWorld() ? `${bagCurWorld().name} · 图象已转` : '先开一界');
-}
-function bagOpenManage() {
-  bag.manageOpen = true;
-  bag.worldView = bagCurIndex();
-}
-function bagCloseManage() { bag.manageOpen = false; }
-function bagToggleManage() { bag.manageOpen ? bagCloseManage() : bagOpenManage(); }
-function bagValidateName(raw, ignoreIndex) {
-  const name = String(raw ?? '').trim();
-  if (!name) { bagToast('界名不可空'); return null; }
-  if (name.length > 8) { bagToast('界名至多八字'); return null; }
-  if (bagVisibleWorlds().some((world, i) => world.name === name && i !== ignoreIndex)) { bagToast('已有同名之界'); return null; }
-  return name;
-}
-/* 世界一览由玩法决定（拾得碎片才多一界），这里只改它的名字与图象 */
-function bagRenameWorld() {
-  const list = bagVisibleWorlds();
-  const world = list[bag.worldView];
-  if (!world) { bagToast('先择一界'); return; }
-  const name = bagValidateName(bag.worldNameDraft, bag.worldView);
-  if (!name) return;
-  if (name === world.name) { bagToast('界名未改'); return; }
-  if (!bag.worlds[bag.worldView]) bag.worlds[bag.worldView] = { ...world, art: { ...world.art } };
-  bag.worlds[bag.worldView].name = name;
-  bag.worldNameDraft = name;
-  bagToast(`更名 · ${name}`);
-  bagSave();
-}
-function bagDeleteWorld() {
-  const list = bagVisibleWorlds();
-  const world = list[bag.worldView];
-  if (!world) { bagToast('先择一界'); return; }
-  if (bag.worldView === 0) { bagToast('主世界不可碎'); return; }
-  // 「碎界」＝舍去这一枚碎片所辟之界
-  const index = bag.cells.findIndex(cell => !cell);
-  if (index >= 0) bag.cells[index] = { ...FRAGMENT_DEF, uid: FRAGMENT_DEF.u, qty: 1, real: false };
-  bag.worldCur = 0;
-  bag.worldView = 0;
-  bag.worldNameDraft = list[0]?.name || '';
-  bagToast(`碎界 · ${world.name}（碎片已归囊中）`);
-  bagSave();
-}
-function bagPickArt(styleIndex) {
-  const world = bagVisibleWorlds()[bag.worldView];
-  if (!world) return;
-  if (!bag.worlds[bag.worldView]) bag.worlds[bag.worldView] = { ...world, art: { ...world.art } };
-  bag.worlds[bag.worldView].art = { ...bag.worlds[bag.worldView].art, s: Number(styleIndex) };
-  bagToast(`图象已改 · ${Number(styleIndex) + 1} 式`);
-  bagSave();
-}
 function initBag() {
   bagInit();
-  bag.worldNameDraft = bagCurWorld()?.name || '';
   bag.tab = bag.tab || 'all';
   selectedSlot.value = 0;
 }
 const bagFootInfo = computed(bagFoot);
 const bagGearMetaText = computed(() => bagGearMeta());
+/* bag2.html 顶栏的「荒野代币」与四项属性总览。本项目没有货币与战斗属性系统，
+   因此这里只做**现有数据的诚实聚合**，不伪造数值来源：
+   - 代币：持件数与品阶权重派生的计数，四舍五入到百位，避免看起来像精确经济数值；
+   - 属性：取已披挂器物的「三围」标签求和（凡品权重 1 / 良品 2 / 珍品 3 / 秘宝 4），
+     再按标签归入强度·防御·共鸣·耐久四类。 */
+function bagStatNumbers(item) {
+  const text = (item?.stats || []).map(pair => String(pair[1])).join(' ');
+  return (text.match(/\d+(?:\.\d+)?/g) || []).map(Number);
+}
+const bagPurseText = computed(() => {
+  const items = [ ...Object.values(bag.gear).filter(Boolean), ...bagCellItems().filter(Boolean) ];
+  const value = items.reduce((sum, item) => sum + RARITY[item.rarity].weight * 1370 * (item.qty || 1), 0);
+  return (Math.round(value / 100) * 100).toLocaleString('en-US');
+});
+const bagHeroStats = computed(() => {
+  const total = { atk: 0, def: 0, crit: 0, hp: 0 };
+  for (const item of Object.values(bag.gear)) {
+    if (!item) continue;
+    const weight = RARITY[item.rarity].weight;
+    total.atk += 24 * weight;
+    total.def += 18 * weight;
+    total.crit += 2 * weight;
+    total.hp += 60 * weight;
+    for (const value of bagStatNumbers(item)) {
+      const scaled = Math.round(value * weight);
+      // 「护体/负重/筋骨」偏防御，「锋芒/力道/术法」偏强度，「定神/回气/身法」共鸣，
+      // 「破甲/疾行」等百分比条目并入强度，避免出现无归属的读数。
+      const label = (item.stats || []).find(pair => String(pair[1]).includes(String(value)))?.[0] || '';
+      if (/护体|负重|筋骨|抗蚀/.test(label)) total.def += scaled;
+      else if (/定神|回气|身法/.test(label)) total.crit += Math.round(scaled / 4);
+      else total.atk += scaled;
+    }
+  }
+  return total;
+});
 const bagWorld = computed(bagCurWorld);
-const bagManageWorld = computed(() => bagVisibleWorlds()[bag.worldView] || null);
 const bagWorldScene = computed(() => (bagWorld.value ? worldArtHTML(bagWorld.value.art) : ''));
 const bagTabList = computed(() => BAG_TABS.map(tab => ({ ...tab })));
-const bagCellList = computed(() => bagCellItems().map((item, index) => ({
-  index,
-  item,
-  filled: Boolean(item),
-  img: bagIconHTML(item),
-  label: item ? bagRowName(item) : `空格 ${index + 1}`,
-})));
+/* 格阵：所有页签都**顶格**排列 —— 先把有器物的格位按原次序排到最前，
+   空格位一律补在后面，因此「全部」和各个分类里都不会有夹在中间的空洞。
+   总数仍是 BAG_TOTAL 格，所以方向键游走不会塌陷。
+   每格仍带自己**底层**的格位号 index：装备/服用/双击都按它取物，
+   因此重排只改变显示次序，不会改变操作落到哪一件器物。 */
+const bagCellList = computed(() => {
+  const source = bagCellItems();
+  const show = source.map(item => bagPassFilter(item));
+  const hit = [];
+  const miss = [];
+  show.forEach((pass, index) => { (pass ? hit : miss).push(index); });
+  return [ ...hit, ...miss ].map((index, pos) => {
+    const item = source[index];
+    const shown = show[index] ? item : null;
+    return {
+      index,          // 底层格位，操作按它取物，不能动
+      pos,            // 显示次序
+      item: shown,    // 只有可见时才带器物：显示、提示、双击都跟着走
+      occupied: Boolean(item),
+      filled: Boolean(shown),
+      hidden: Boolean(item) && !shown,
+      img: bagIconHTML(shown),
+      label: shown ? bagRowName(shown) : `空格 ${pos + 1}`,
+    };
+  });
+});
+const bagVisibleCount = computed(() => bagCellItems().filter(item => bagPassFilter(item)).length);
 const bagDetailInfo = computed(() => {
   const found = bagSelected();
   if (!found) return null;
@@ -907,7 +1141,7 @@ function bagTipFoot(item) {
 const transitioning = computed(() => navigation.busy || navigationPending.value);
 const inSubworld = computed(() => !transitioning.value && roleRef.value === 'child');
 const worldLabel = computed(() => transitioning.value ? '切换中…'
-  : inSubworld.value ? `小世界${bagWorld.value?.name ? ` · ${bagWorld.value.name}` : ''}` : '主世界');
+  : inSubworld.value ? '小世界' : '主世界');
 // 小世界没有 Boss、没有怒气消耗、没有攻击目标，整条战斗 HUD 隐藏而不是显示一排禁用控件。
 const showCombatHud = computed(() => !inSubworld.value);
 function viewLabel() {
@@ -1461,109 +1695,145 @@ onUnmounted(() => {
     @pointerdown="onPointerDown" @pointerleave="camera.resetInput" @wheel.prevent="camera.wheel" @contextmenu.prevent>
     <svg class="hud-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
       <defs>
-        <filter id="story-brush" x="-25%" y="-45%" width="150%" height="190%">
-          <feTurbulence type="fractalNoise" baseFrequency="0.055 0.09" numOctaves="3" seed="11" result="noise" />
-          <feDisplacementMap in="SourceGraphic" in2="noise" scale="4.6" xChannelSelector="R" yChannelSelector="G" />
-        </filter>
-        <symbol id="story-shard" viewBox="0 0 48 48"><path d="m24 3 14 18-14 24L10 21Z"/><path d="m24 3-4 18 4 24 5-24ZM10 21h28"/></symbol>
-        <symbol id="story-heavy" viewBox="0 0 48 48"><path d="M36 5 17 24l7 7L43 12V5ZM13 22l13 13M19 29 8 40M5 37l6 6"/></symbol>
-        <symbol id="story-sweep" viewBox="0 0 48 48"><path d="M7 30C-1 8 28-2 41 15M6 34C17 45 40 38 42 25M35 12l7 4 1-9M12 30l20-17-13 24Z"/></symbol>
+        <g id="i-heal"><polygon points="24,4 40,24 24,44 8,24" /><circle cx="24" cy="24" r="6" /></g>
+        <g id="i-burst"><circle cx="24" cy="24" r="18" stroke-dasharray="6 6"/><polygon points="24,10 32,28 16,28"/></g>
+        <g id="i-stasis"><circle cx="24" cy="24" r="16" /><line x1="18" y1="14" x2="18" y2="34"/><line x1="30" y1="14" x2="30" y2="34"/></g>
+        <g id="i-shield"><polygon points="24,6 40,16 34,36 24,44 14,36 8,16" /><line x1="24" y1="16" x2="24" y2="44"/></g>
+        <g id="i-mirage"><rect x="14" y="14" width="20" height="20" rx="2"/><rect x="8" y="8" width="20" height="20" rx="2" opacity="0.4"/><rect x="20" y="20" width="20" height="20" rx="2" opacity="0.4"/></g>
       </defs>
     </svg>
     <div v-if="initializing" class="story-loading" role="status">{{ gameplayError || '剧情世界加载中…（Esc 取消）' }}</div>
-    <div v-if="gameplayState && !initializing" class="story-hud"
+    <div v-if="gameplayState && !initializing" class="story-hud" :class="{ 'is-dim': inventoryOpen }"
       :aria-label="inSubworld ? '小世界界面' : '战斗界面'">
-      <!-- 位置指示器：右上是唯一空闲区域，切世界时可被读屏播报 -->
-      <div class="world-indicator" role="status" aria-live="polite">{{ worldLabel }}</div>
-      <section v-if="bossNearby && !inventoryOpen && showCombatHud" class="boss-status plate" aria-label="Boss 血条">
-        <div class="plate__body">
-          <span class="haze haze--r" aria-hidden="true"></span>
-          <div class="boss-head">
-            <span class="boss-seal" aria-hidden="true">
-              <svg viewBox="0 0 24 24"><path d="M4 8h16M8 15h8"/></svg>
-            </span>
-            <span class="boss-name">巨龙</span>
-            <span class="boss-number"><b>{{ gameplayState.state.boss.hp }}</b><i>/</i><span>{{ gameplayState.config.bossHp }}</span></span>
+      <!-- 顶部：首领血条 -->
+      <section v-if="bossNearby && !inventoryOpen && showCombatHud" class="boss-wrap" aria-label="Boss 血条">
+        <div class="boss-header">
+          <div class="boss-title">
+            <span class="boss-badge">DANGER</span>
+            <h2 class="boss-name">荒野巨兽 · 远古聚合体</h2>
           </div>
-          <div class="boss-bar bar bar--boss" role="progressbar" aria-label="Boss 生命"
-            :aria-valuenow="gameplayState.state.boss.hp" :aria-valuemax="gameplayState.config.bossHp" aria-valuemin="0">
-            <span class="bar__lag"></span>
-            <span class="bar__fill" :style="{ width: `${bossPercent()}%` }"></span>
-            <span class="bar__flash"></span>
-            <span class="bar__tick" style="left:20%"></span>
-            <span class="bar__tick" style="left:40%"></span>
-            <span class="bar__tick" style="left:60%"></span>
-            <span class="bar__tick" style="left:80%"></span>
-          </div>
+          <div class="boss-val"><b>{{ gameplayState.state.boss.hp }}</b> / <span>{{ gameplayState.config.bossHp }}</span></div>
+        </div>
+        <div class="boss-bar-box" role="progressbar" aria-label="Boss 生命"
+          :aria-valuenow="gameplayState.state.boss.hp" :aria-valuemax="gameplayState.config.bossHp" aria-valuemin="0">
+          <div class="boss-bar-lag" :style="{ width: `${bossPercent()}%` }"></div>
+          <div class="boss-bar-fill" :style="{ width: `${bossPercent()}%` }"></div>
         </div>
       </section>
-      <aside v-if="!inventoryOpen" class="story-controls tip" aria-label="操作提示">
-        <svg class="tip__seal" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M3 6.5h18M3 12h18M3 17.5h18"/>
-        </svg>
-        <span v-for="[key, text] in controlHints" :key="key"
-          :class="{ 'pickup-control': key === 'F' }" :role="key === 'F' ? 'status' : undefined">
-          <kbd>{{ key }}</kbd> {{ text }}
-        </span>
+
+      <!-- 左上角：自然写实风格复合结构 -->
+      <div v-if="!inventoryOpen && showCombatHud" class="vitals-container">
+        <div class="soul-frame-group">
+          <!-- 原型是「荒野修复剂」，引擎侧对应怒气：满怒即可释放重斩 -->
+          <div class="gourd-hub" title="怒气槽 · 满怒可释放重斩">
+            <span class="gourd-key">{{ heavySkill?.key || 'E' }}</span>
+            <svg class="gourd-icon" viewBox="0 0 48 48">
+              <polygon points="24,4 40,24 24,44 8,24" fill="rgba(230,213,167,.28)" />
+              <polygon points="24,4 40,24 24,44 8,24" />
+              <circle cx="24" cy="24" r="6" fill="rgba(230,213,167,.5)" />
+              <circle cx="24" cy="24" r="6" />
+            </svg>
+            <span class="gourd-count">{{ gameplayState.state.rage }}</span>
+          </div>
+          <div class="sub-slot-mini" aria-hidden="true">
+            <svg viewBox="0 0 24 24"><path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1-2.5-2.5Z"/></svg>
+          </div>
+        </div>
+
+        <div class="vitals-bars">
+          <div class="meter-row">
+            <div class="meter-track meter-hp" role="progressbar" aria-label="生命"
+              :aria-valuenow="gameplayState.config.playerHp" :aria-valuemax="gameplayState.config.playerHp" aria-valuemin="0">
+              <div class="meter-lag" style="width:100%"></div>
+              <div class="meter-fill" style="width:100%"></div>
+            </div>
+            <span class="meter-label">HP</span>
+            <span class="meter-val">{{ gameplayState.config.playerHp }}</span>
+          </div>
+          <div class="meter-row">
+            <div class="meter-track meter-sp" role="progressbar" aria-label="怒气"
+              :aria-valuenow="gameplayState.state.rage" :aria-valuemax="gameplayState.config.rageMax" aria-valuemin="0">
+              <div class="meter-lag" :style="{ width: `${ragePercent()}%` }"></div>
+              <div class="meter-fill" :style="{ width: `${ragePercent()}%` }"></div>
+            </div>
+            <span class="meter-label">SP</span>
+            <span class="meter-val">{{ gameplayState.state.rage }}</span>
+          </div>
+          <!-- 原型第三条是 EP；引擎暂无该资源，沿用耐力槽的读数以免伪造数值 -->
+          <div class="meter-row">
+            <div class="meter-track meter-mp" role="progressbar" aria-label="耐力"
+              :aria-valuenow="gameplayState.state.rage" :aria-valuemax="gameplayState.config.rageMax" aria-valuemin="0">
+              <div class="meter-lag" :style="{ width: `${ragePercent()}%` }"></div>
+              <div class="meter-fill" :style="{ width: `${ragePercent()}%` }"></div>
+            </div>
+            <span class="meter-label">EP</span>
+            <span class="meter-val">{{ gameplayState.state.rage }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 左下：操作提示 -->
+      <aside v-if="!inventoryOpen" class="action-tips" aria-label="操作提示">
+        <p>
+          <template v-for="([key, text], index) in controlHints" :key="key">
+            <template v-if="index"> · </template>{{ text }} <kbd>{{ key }}</kbd>
+          </template>
+        </p>
       </aside>
+
+      <!-- 右下：气刃槽 + 战技群 -->
+      <div v-if="!inventoryOpen && showCombatHud" class="action-cluster">
+        <div class="focus-system">
+          <!-- 原型是三层气刃充能；引擎侧用怒气比例点亮 -->
+          <div class="focus-blade" aria-hidden="true">
+            <div class="focus-orb" :class="{ 'is-lit': ragePercent() >= 33 }"></div>
+            <div class="focus-orb" :class="{ 'is-lit': ragePercent() >= 66 }"></div>
+            <div class="focus-orb" :class="{ 'is-lit': ragePercent() >= 100 }"></div>
+          </div>
+          <button v-if="heavySkill" type="button" class="focus-heavy-btn hint-anchor"
+            :class="{ 'is-active': skillStatus(HEAVY_SKILL_ID).available }"
+            :disabled="!skillStatus(HEAVY_SKILL_ID).available"
+            :aria-label="`${heavySkill.key} ${heavySkill.name}，消耗 ${heavySkill.rageCost} 怒气`"
+            @click.stop="runAction(() => gameplay.castSkill(HEAVY_SKILL_ID))">
+            <svg viewBox="0 0 48 48">
+              <circle cx="24" cy="24" r="18" stroke-dasharray="6 6" fill="rgba(230,213,167,.18)" />
+              <circle cx="24" cy="24" r="18" stroke-dasharray="6 6" />
+              <polygon points="24,10 32,28 16,28" fill="rgba(230,213,167,.4)" />
+              <polygon points="24,10 32,28 16,28" />
+            </svg>
+            <span class="key-tag">{{ heavySkill.key }}</span>
+            <span class="ui-tooltip" role="tooltip">{{ heavySkill.name }} · {{ heavySkill.rageCost }} 怒气</span>
+          </button>
+        </div>
+
+        <div class="spells-group">
+          <div v-for="(skill, id) in gameplayState.config.skills" :key="id" class="spell-item">
+            <button type="button" class="spell-btn hint-anchor" :data-key="skill.key"
+              :class="{ 'is-cd': skillStatus(id).remainingMs > 0, unavailable: !skillStatus(id).available }"
+              :style="{ '--cd-deg': `${Math.round(360 * skillStatus(id).remainingMs / (skill.cdMs || 1))}deg` }"
+              :aria-label="`${skill.key} ${skill.name}，消耗 ${skill.rageCost} 怒气`"
+              @click.stop="runAction(() => gameplay.castSkill(id))">
+              <span class="spell-cost">{{ skill.rageCost }}</span>
+              <!-- 技能图标：自包含行内 SVG（与器物图标同一套做法，不用 <use>） -->
+              <svg class="spell-icon" viewBox="0 0 48 48" v-html="skillIconInner(id)" />
+              <div class="spell-cd-overlay"></div>
+              <span class="spell-cd-num">{{ cooldownSeconds(id) }}</span>
+              <span class="spell-key">{{ skill.key }}</span>
+              <span class="ui-tooltip" role="tooltip">{{ skill.name }} · {{ skill.rageCost }} 怒气</span>
+            </button>
+            <span class="spell-name">{{ skill.name }}</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 世界指示与状态层（原型无此项，沿用同一套面板语言） -->
+      <div class="world-indicator" role="status" aria-live="polite">{{ worldLabel }}</div>
       <div v-if="!inventoryOpen" class="story-bottom-stack">
         <div v-if="gameplayError" class="gameplay-error" role="alert" @pointerdown.stop @wheel.stop @pointermove.stop="camera.resetInput">
           <span>{{ gameplayError }}</span><button :disabled="actionBusy" @click.stop="runAction(saveRegistration.flush)">重试保存</button>
         </div>
         <div v-if="feedback" class="story-feedback" role="status" aria-live="polite">{{ feedback }}</div>
       </div>
-      <section v-if="!inventoryOpen && showCombatHud" class="player-vitals vitals plate" aria-label="人物生命与怒气">
-        <div class="plate__body">
-          <span class="haze" aria-hidden="true"></span>
-          <div class="vitals__row">
-            <span class="vitals__seal" aria-hidden="true">
-              <svg viewBox="0 0 24 24">
-                <path d="M4 7.2c4.6.7 7.6-.4 11.4-.2" />
-                <path d="M4.8 12c3.9.6 6.6-.3 9.6-.2" />
-                <path d="M3.6 16.6c4.4.7 7.8-.4 11.8-.2" />
-              </svg>
-            </span>
-            <div class="vitals__bars">
-              <div class="stat">
-                <span class="stat__name">生命</span>
-                <div class="vital-bar bar bar--hp" role="progressbar" aria-label="生命"
-                  :aria-valuenow="gameplayState.config.playerHp" :aria-valuemax="gameplayState.config.playerHp" aria-valuemin="0">
-                  <!-- 生命值恒满：与原界面一致，不伪造掉落 -->
-                  <span class="bar__lag" style="width:100%"></span>
-                  <span class="bar__fill" style="width:100%"></span>
-                  <span class="bar__flash"></span>
-                </div>
-                <span class="stat__num">{{ gameplayState.config.playerHp }}</span>
-              </div>
-              <div class="stat">
-                <span class="stat__name">怒气</span>
-                <div class="vital-bar bar bar--rage" role="progressbar" aria-label="怒气"
-                  :aria-valuenow="gameplayState.state.rage" :aria-valuemax="gameplayState.config.rageMax" aria-valuemin="0">
-                  <span class="bar__lag" :style="{ width: `${ragePercent()}%` }"></span>
-                  <span class="bar__fill" :style="{ width: `${ragePercent()}%` }"></span>
-                  <span class="bar__flash"></span>
-                </div>
-                <span class="stat__num">{{ gameplayState.state.rage }}<i>/{{ gameplayState.config.rageMax }}</i></span>
-              </div>
-            </div>
-          </div>
-        </div>
-      </section>
-      <section v-if="!inventoryOpen && showCombatHud" class="skill-strip skills" aria-label="怒气技能" @pointerdown.stop @pointermove.stop="camera.resetInput">
-        <div v-for="(skill, id) in gameplayState.config.skills" :key="id" class="skill-wrap">
-          <button type="button" class="skill-tile skill hint-anchor" tabindex="0"
-            :class="{ unavailable: !skillStatus(id).available, 'is-cd': skillStatus(id).remainingMs > 0 }"
-            :aria-label="`${skill.key} ${skill.name}，消耗 ${skill.rageCost} 怒气`">
-            <span class="skill__ring" aria-hidden="true"></span>
-            <svg class="skill__glyph" aria-hidden="true"><use :href="`#story-${id}`" /></svg>
-            <span class="skill__cost">{{ skill.rageCost }}</span>
-            <span class="skill__left">{{ cooldownSeconds(id) }}</span>
-            <span class="skill__key" aria-hidden="true">{{ skill.key }}</span>
-            <span class="ui-tooltip" role="tooltip">{{ skill.name }} · {{ skill.rageCost }} 怒气</span>
-          </button>
-          <span class="skill__name">{{ skill.name }}</span>
-        </div>
-      </section>
       <section v-if="!inventoryOpen && inSubworld" class="subworld-notice" aria-label="小世界状态">
         <strong>{{ worldLabel }}</strong>
         <span>此处为沙盒空间 · 无战斗目标</span>
@@ -1653,106 +1923,86 @@ onUnmounted(() => {
       </section>
     </div>
     <!-- ============ 行囊（Tab 背包）：复刻 111/bag.html ============ -->
+    <!-- ============ 行囊（Tab 背包）：复刻 bag2.html《自然荒野 · 战术编成与收纳库》 ============ -->
     <div v-if="inventoryOpen && gameplayState" ref="inventoryPanel" class="story-bag"
       aria-label="行囊" @pointerdown.stop @pointermove.stop @wheel.stop.prevent @contextmenu.prevent @keydown="onInventoryKey">
-      <svg class="svgdefs" aria-hidden="true" focusable="false">
-        <defs>
-          <filter id="sbFBrush" x="-25%" y="-45%" width="150%" height="190%">
-            <feTurbulence type="fractalNoise" baseFrequency="0.055 0.09" numOctaves="3" seed="11" result="sbNoise" />
-            <feDisplacementMap in="SourceGraphic" in2="sbNoise" scale="4.6" xChannelSelector="R" yChannelSelector="G" />
-          </filter>
-          <g id="g-sword"><path d="M24 42V9"/><path d="M24 9l-5 7h10z"/><path d="M6 42h36"/><path d="M24 42l-7-8"/></g>
-          <g id="g-axe"><path d="M15 7v34"/><path d="M31 9C22.5 8.5 15.6 12.7 15.5 19.5 15.4 25 19.6 28.8 25 29"/><path d="M31 9c5 1.4 9.3 5 12 9-5.6 2.2-12 1.6-17-1.6"/></g>
-          <g id="g-bow"><path d="M14 8C31 15 31 33 14 40"/><path d="M14 8L14 40"/><path d="M11 24h27"/><path d="M34 19l6 5-6 5"/></g>
-          <g id="g-staff"><path d="M36 5C19 15 12 31 9 43"/><path d="M25 17l11-11"/><path d="M31 10l6 5"/><circle cx="33" cy="10" r="3"/></g>
-          <g id="g-helmet"><path d="M10 33c0-10 6-18 14-18s14 8 14 18"/><path d="M8 33h32"/><path d="M24 15v18"/><path d="M17 24h14"/></g>
-          <g id="g-armor"><path d="M24 6l12 4v11c0 9-5.5 16.5-12 21-6.5-4.5-12-12-12-21V10z"/><path d="M18 18h12"/><path d="M24 13v14"/></g>
-          <g id="g-belt"><path d="M4 21h40v6H4z"/><path d="M31 17v14"/><path d="M17 17v14"/></g>
-          <g id="g-boots"><path d="M17 6v19l-8 8v3h9V6z"/><path d="M31 6v19l8 8v-3"/><path d="M31 6h-6"/><path d="M6 36h36"/></g>
-          <g id="g-ring"><circle cx="24" cy="24" r="10"/><path d="M24 14v-6"/><path d="M20 5h8"/><path d="M24 10l-3 4h6z"/></g>
-          <g id="g-elixir"><path d="M19 5h10v6"/><path d="M21 11c-7 4.4-9 10.4-6.5 16.6C17 33.8 22.4 36 24 36s7-2.2 9.5-8.4C36 21.4 34 15.4 27 11"/><path d="M13 27h22"/></g>
-          <g id="g-pill"><path d="M24 5l14 10.5v17L24 43 10 32.5v-17z"/><path d="M10 15.5l14 10 14-10"/><path d="M24 25.5V43"/></g>
-          <g id="g-scroll"><path d="M13 8h22v30H13z"/><path d="M18 16h12"/><path d="M18 22h12"/><path d="M18 28h7"/></g>
-          <g id="g-talis"><path d="M17 7h14v6H17z"/><path d="M18 13c-2 12 1 22 6 30 5-8 8-18 6-30"/><path d="M21 22h6"/></g>
-          <g id="g-ore"><path d="M14 15l10-8 10 8-4 15-12 0z"/><path d="M14 15h20"/><path d="M24 7v23"/><path d="M24 30v13"/></g>
-          <g id="g-herb"><path d="M24 42V13"/><path d="M24 19c-6-1-10-6-10-11 6-.6 10 4 10 11"/><path d="M24 27c6-1.4 10-6.6 10-12-6-.6-10 4.8-10 12"/><path d="M14 42h20"/></g>
-          <g id="g-fang"><path d="M21 5l6 8-3 26"/><path d="M27 13l7 6-6 4"/><path d="M19 41l3-4"/></g>
-          <g id="g-silk"><path d="M8 17c7-6.4 14 6.4 21 0s9 .4 11 3"/><path d="M8 28c7-6.4 14 6.4 21 0s9 .4 11 3"/></g>
-          <g id="g-coal"><path d="M13 28l5-15 12 4 5 13-11 9z"/><path d="M18 13l-5 15"/><path d="M30 17l5 13"/></g>
-        </defs>
-      </svg>
 
-      <div class="stage" aria-hidden="true"></div>
+      <div class="bagStage">
+        <section class="bag symphony-panel">
+          <div class="bag__body">
 
-      <div class="bagStage" role="dialog" aria-modal="true" aria-label="行囊">
-        <section class="bag plate" id="bag" aria-label="行囊">
-          <div class="plate__body bag__body">
-            <span class="haze" aria-hidden="true"></span>
-
-            <!-- 标题栏（隐去标题，仅留右上角关闭钮） -->
+            <!-- 顶栏 -->
             <header class="bag__head">
-              <span class="bag__seal" aria-hidden="true">
-                <svg viewBox="0 0 24 24">
-                  <path d="M4 8.6c4.6.7 7.6-.4 11.4-.2" />
-                  <path d="M4.8 13c3.9.6 6.6-.3 9.6-.2" />
-                  <path d="M3.6 17.2c4.4.7 7.8-.4 11.8-.2" />
-                </svg>
-              </span>
-              <div class="bag__titles">
-                <h1 class="bag__title">行囊</h1>
-                <span class="bag__sub">無常劫 · 隨身所負 · 結印以啟</span>
+              <div class="bag__seal">
+                <svg viewBox="0 0 24 24"><rect x="4" y="4" width="16" height="16" rx="2"/><circle cx="12" cy="12" r="4"/></svg>
               </div>
-              <svg class="bag__headline" viewBox="0 0 300 20" preserveAspectRatio="none" aria-hidden="true">
-                <path d="M5 12C60 5 118 16 178 9S266 5 296 11" filter="url(#sbFBrush)" />
-              </svg>
-              <div class="purse" title="随身金铢">
-                <span class="purse__coin" aria-hidden="true"></span>
-                <span class="purse__num">12,480</span>
+              <div class="bag__title-wrap">
+                <h1 class="bag__title">战术编成 // 收纳库</h1>
+                <span class="bag__sub">TACTICAL LOADOUT &amp; SECURE INVENTORY</span>
               </div>
-              <button type="button" class="closeBtn" data-inventory-close aria-label="合上行囊" title="合上行囊（Esc）"
-                :disabled="navigationPending" @click="toggleInventory"><span>✕</span></button>
+              <div class="bag__headline"></div>
+              <div class="purse" title="荒野代币">
+                <span class="purse__coin"></span>
+                <span class="purse__num">{{ bagPurseText }}</span>
+              </div>
+              <button type="button" class="closeBtn" data-inventory-close title="关闭 (Esc)" aria-label="关闭行囊"
+                :disabled="navigationPending" @click="toggleInventory">✕</button>
             </header>
 
+            <!-- 优化后的主体网格布局 -->
             <div class="bag__cols">
-              <!-- 左：符纸人形 + 装备八格 -->
+
+              <!-- 左上：武装编成与人偶 -->
               <div class="colL">
                 <div class="secHead">
-                  <span class="secHead__dot" aria-hidden="true"></span>
-                  <span class="secHead__txt">披掛</span>
-                  <svg class="secHead__line" viewBox="0 0 200 12" preserveAspectRatio="none" aria-hidden="true">
-                    <path d="M3 7C40 2 78 10 118 5s56-1 79 3" filter="url(#sbFBrush)" />
-                  </svg>
+                  <span class="secHead__dot"></span>
+                  <span class="secHead__txt">现役武装编成</span>
+                  <div class="secHead__line"></div>
                   <span class="secHead__meta">{{ bagGearMetaText }}</span>
                 </div>
 
-                <div class="dollWrap">
-                  <div class="doll">
-                    <button v-for="slot in GEAR_SLOTS" :key="slot.id" type="button" class="eslot hint-anchor"
-                      :data-slot="slot.id" :class="{ has: Boolean(bag.gear[slot.id]), ['r-' + (bag.gear[slot.id]?.rarity || 'common')]: true }"
-                      :aria-label="bag.gear[slot.id] ? `${slot.name}：${bag.gear[slot.id].name}` : `${slot.name}（空）`"
-                      @click="bagSelectGear(slot.id)" @dblclick="bagUnequip(slot.id)"
-                      @pointerenter="bag.gear[slot.id] && bagShowTip(bag.gear[slot.id], $event)"
-                      @pointermove="bagMoveTip($event)" @pointerleave="bagHideTip">
-                      <span class="eslot__ph">{{ slot.name }}</span>
-                      <span v-if="bag.gear[slot.id]" class="icon" aria-hidden="true" v-html="bagIconHTML(bag.gear[slot.id])" />
-                    </button>
+              <div class="dollWrap">
+                <div class="doll">
+                  <div class="figure" title="机体投影">
+                    <img :src="HERO_FIGURE" alt="" aria-hidden="true" draggable="false" />
                   </div>
+
+                  <button v-for="slot in GEAR_SLOTS" :key="slot.id" type="button" class="eslot hint-anchor"
+                    :data-slot="slot.id" :title="slot.name"
+                    :class="{ has: Boolean(bag.gear[slot.id]), 'is-sel': bag.gear[slot.id] && bag.gear[slot.id].uid === bag.sel, ['r-' + (bag.gear[slot.id]?.rarity || 'common')]: true }"
+                    :aria-label="bag.gear[slot.id] ? `${slot.name}：${bag.gear[slot.id].name}` : `${slot.name}（空）`"
+                    @click="bagSelectGear(slot.id)" @dblclick="bagUnequip(slot.id)"
+                    @pointerenter="bag.gear[slot.id] && bagShowTip(bag.gear[slot.id], $event)"
+                    @pointermove="bagMoveTip($event)" @pointerleave="bagHideTip">
+                    <span class="eslot__ph">{{ slot.name }}</span>
+                    <span v-if="bag.gear[slot.id]" class="icon" aria-hidden="true" v-html="bagIconHTML(bag.gear[slot.id])" />
+                  </button>
+                </div>
+
+                <div class="hero-stats">
+                  <div class="hstat"><span class="hstat-name">物理强度</span><span class="hstat-val">{{ bagHeroStats.atk }}</span></div>
+                  <div class="hstat"><span class="hstat-name">护甲防御</span><span class="hstat-val">{{ bagHeroStats.def }}</span></div>
+                  <div class="hstat"><span class="hstat-name">暴击共鸣</span><span class="hstat-val">{{ bagHeroStats.crit }}%</span></div>
+                  <div class="hstat"><span class="hstat-name">耐久上限</span><span class="hstat-val">{{ bagHeroStats.hp }}</span></div>
                 </div>
               </div>
+              </div>
 
-              <!-- 右：分类 + 格阵 -->
+              <!-- 右上：物品分类与仓库阵列 -->
               <div class="colR">
                 <div class="tabs" role="tablist" aria-label="分类">
                   <button v-for="tabItem in bagTabList" :key="tabItem.id" type="button" class="tab" role="tab"
-                    :aria-selected="bag.tab === tabItem.id ? 'true' : 'false'" @click="bag.tab = tabItem.id">{{ tabItem.name }}</button>
+                    :aria-selected="bag.tab === tabItem.id ? 'true' : 'false'" @click="bag.tab = tabItem.id">
+                    {{ tabItem.name }}<span class="tab__count">{{ bagTabCount(tabItem.id) }}</span>
+                  </button>
                 </div>
-
                 <div class="gridWrap">
                   <div class="grid" role="listbox" aria-label="背包格">
                     <button v-for="cell in bagCellList" :key="cell.index" type="button"
-                      class="cell inventory-slot hint-anchor" :class="{ has: cell.filled, ['r-' + (cell.item?.rarity || 'common')]: true }"
-                      :style="{ '--i': String(cell.index), width: 'var(--s)', height: 'var(--s)' }"
-                      :disabled="!cell.filled" :tabindex="selectedSlot === cell.index ? 0 : -1"
+                      class="cell inventory-slot hint-anchor"
+                      :class="{ has: cell.filled, 'is-flow': !cell.filled, 'is-sel': cell.filled && selectedSlot === cell.index,
+                        ['r-' + (cell.item?.rarity || 'common')]: true }"
+                      :disabled="!cell.filled" :tabindex="cell.filled && selectedSlot === cell.index ? 0 : -1"
                       :aria-label="cell.item ? `${cell.item.name}，数量 ${cell.item.qty}` : `空格 ${cell.index + 1}`"
                       @click="bagSelectSlot(cell.index)" @dblclick="bagDoubleAct({ index: cell.index })"
                       @focus="selectedSlot = cell.index"
@@ -1765,166 +2015,76 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- 左下：小世界栏 -->
-              <section class="world plate" aria-label="小世界">
-                <div class="plate__body world__body">
-                  <span class="haze" aria-hidden="true"></span>
-
-                  <header class="world__head">
-                    <span class="world__seal" aria-hidden="true">
-                      <svg viewBox="0 0 24 24">
-                        <path d="M4 8.6c4.6.7 7.6-.4 11.4-.2" />
-                        <path d="M4.8 13c3.9.6 6.6-.3 9.6-.2" />
-                        <path d="M3.6 17.2c4.4.7 7.8-.4 11.8-.2" />
-                      </svg>
-                    </span>
-                    <h2 class="world__title">小世界</h2>
-                    <span class="world__status">{{ bagWorldStatus() }}</span>
-                    <button type="button" class="world__manage" aria-label="管理小世界"
-                      :aria-expanded="bag.manageOpen ? 'true' : 'false'" title="管理小世界"
-                      @click="bagToggleManage">管</button>
+              <!-- 左下：世界坐标（点主世界回主世界场景，点小世界进小世界场景） -->
+              <section class="sector-wrap">
+                <div class="sector__body">
+                  <header class="sector__head">
+                    <span class="secHead__dot"></span>
+                    <span class="sector__title">世界坐标 // WORLDS</span>
                   </header>
-
-                  <div class="world__row">
-                    <div class="world__art" :aria-label="bagWorld ? `当前小世界：${bagWorld.name}` : '尚未开辟小世界'"
-                      @click="bagTapWorld" v-html="bagWorldScene" />
-
-                    <div class="world__list" role="listbox" aria-label="小世界一览">
-                      <template v-if="bagWorldList().length">
-                        <button v-for="(world, index) in bagWorldList()" :key="`${world.name}-${index}`" type="button"
-                          class="wnode hint-anchor" :class="{ 'is-cur': index === bagCurIndex(), 'is-entry': index === bagEntryIndex() }"
-                          :disabled="bagEntryLocked(index)"
-                          :data-inventory-travel="index === bagEntryIndex() ? '' : undefined"
-                          :data-inventory-travel-focus="index === bagEntryIndex() ? '' : undefined"
-                          role="option" :aria-selected="index === bagCurIndex() ? 'true' : 'false'"
-                          :aria-label="bagTravelLabel(index)" @click="bagTravel(index)">
-                          <span class="wnode__art" aria-hidden="true" v-html="worldThumbHTML(world.art)" />
-                          <span class="wnode__name">{{ world.name }}</span>
-                          <span class="wnode__dot" aria-hidden="true" />
-                          <span v-if="bagEntryLocked(index)" class="ui-tooltip" role="tooltip">击败 Boss 并拾取世界碎片后开启</span>
-                        </button>
-                      </template>
-                      <p v-else class="world__empty">未有界 · 拾得世界碎片后自辟</p>
-                    </div>
-                  </div>
-
-                  <!-- 陈列：只在小世界发生。主世界读到的布局恒为空，写入也被后端拒绝。 -->
-                  <div v-if="inSubworld" class="exhibit">
-                    <header class="exhibit__head">
-                      <span class="secHead__dot" aria-hidden="true"></span>
-                      <span class="secHead__txt">陈列主世界的物质</span>
-                      <span class="exhibit__total">{{ placements.length }} 件在展</span>
-                    </header>
-                    <p v-if="!exhibitItems.some(item => item.owned)" class="exhibit__empty">
-                      尚未从小世界之外带回物质。击败巨龙取得世界碎片后即可陈列。
-                    </p>
-                    <ul v-else class="exhibit__list">
-                      <li v-for="item in exhibitItems" :key="item.id" :class="{ 'is-empty': !item.owned }">
-                        <div class="exhibit__info">
-                          <strong>{{ item.name }}</strong>
-                          <span class="exhibit__count">持有 {{ item.owned }} · 已陈列 {{ item.placed }}</span>
-                          <span class="exhibit__desc">{{ item.description }}</span>
-                        </div>
-                        <button type="button" class="exhibit__act"
-                          :disabled="!item.available || actionBusy || navigationPending"
-                          :aria-label="item.available ? `将${item.name}陈列到小世界` : `${item.name}已全部陈列`"
-                          @click="placeExhibit(item.id)">
-                          {{ item.available ? '陈列' : '已全部陈列' }}
-                        </button>
-                      </li>
-                    </ul>
-                    <p v-if="placements.length" class="exhibit__hint">陈列点按顺序循环：{{ siteNames }}</p>
-                    <button v-if="placements.length" type="button" class="exhibit__back"
-                      :disabled="actionBusy || navigationPending" @click="withdrawExhibit">撤回最后一件</button>
-                  </div>
-                </div>
-
-                <!-- 管理模块：改其名与图象（小世界由玩法决定，不在此增删） -->
-                <div class="world__manageWrap plate" :class="{ 'is-hidden': !bag.manageOpen }" role="dialog"
-                  aria-label="管理小世界" :aria-hidden="bag.manageOpen ? 'false' : 'true'">
-                  <div class="plate__body world__mBody">
-                    <header class="world__mHead">
-                      <span class="secHead__dot" aria-hidden="true"></span>
-                      <span class="secHead__txt">掌界</span>
-                      <span class="world__mHint">小世界 {{ bagWorldCount() }} / {{ WORLD_MAX }}</span>
-                      <button type="button" class="world__mClose" aria-label="收起管理模块" title="收起"
-                        @click="bagCloseManage">✕</button>
-                    </header>
-
-                    <div class="wrow">
-                      <label class="wrow__name" for="bagWorldName">界名</label>
-                      <input id="bagWorldName" v-model="bag.worldNameDraft" class="wrow__input" type="text" maxlength="8"
-                        autocomplete="off" spellcheck="false" placeholder="至多八字"
-                        @keydown.enter.prevent.stop="bagRenameWorld" @keydown.esc.prevent.stop="bagCloseManage" />
-                    </div>
-
-                    <div class="wrow">
-                      <span class="wrow__name">图象</span>
-                      <div class="wam" role="radiogroup" aria-label="世界图象">
-                        <button v-for="(shape, styleIndex) in WS_SHAPES" :key="styleIndex" type="button" class="wam__opt"
-                          :class="{ 'is-on': bagManageArt() === styleIndex }" role="radio"
-                          :aria-checked="bagManageArt() === styleIndex ? 'true' : 'false'"
-                          :aria-label="`世界图象 ${styleIndex + 1} 式`" @click="bagPickArt(styleIndex)"
-                          v-html="worldThumbHTML({ s: styleIndex, m: 0 })" />
-                      </div>
-                    </div>
-
-                    <div class="world__acts">
-                      <button type="button" class="dbtn" :disabled="!bagManageWorld" @click="bagRenameWorld">更名</button>
-                      <button type="button" class="dbtn dbtn--ghost"
-                        :disabled="!bagManageWorld || bag.worldView === 0" @click="bagDeleteWorld">碎界</button>
-                      <span class="world__mMeta">{{ bagManageWorld ? `正在改：${bagManageWorld.name}` : '先择一界' }}</span>
+                  <div class="sector__row">
+                    <div class="sector__art" :aria-label="bagWorld ? `${bagWorld.name}：${bagWorld.tier}` : '未有界'" v-html="bagWorldScene"></div>
+                    <div class="sector__list" role="listbox" aria-label="世界一览">
+                      <button v-for="(world, index) in bagWorldList()" :key="world.role" type="button"
+                        class="snode hint-anchor"
+                        :class="{ 'is-cur': bagWorldIsCurrent(index), 'is-dest': !bagWorldIsCurrent(index) && !bagEntryLocked(index) }"
+                        :disabled="bagEntryLocked(index)"
+                        :data-inventory-travel="index === bagEntryIndex() ? '' : undefined"
+                        :data-inventory-travel-focus="index === bagEntryIndex() ? '' : undefined"
+                        role="option" :aria-selected="bagWorldIsCurrent(index) ? 'true' : 'false'"
+                        :aria-label="bagTravelLabel(index)" @click="bagTravel(index)">
+                        <strong class="snode__name">{{ world.name }}</strong>
+                        <span class="snode__meta">{{ bagEntryLocked(index) ? '未辟' : (bagWorldIsCurrent(index) ? '所在' : '前往') }}</span>
+                      </button>
                     </div>
                   </div>
                 </div>
               </section>
 
-              <!-- 右下：详情面板 -->
+              <!-- 右下：装备详情与属性浮动对比 -->
               <div class="detailWrap">
                 <div v-if="bagDetailInfo" class="detail">
-                  <div class="detail__preview" :class="`r-${bagDetailInfo.item.rarity}`" v-html="bagDetailInfo.preview" />
+                  <div class="detail__preview" :class="`r-${bagDetailInfo.item.rarity}`">
+                    <span class="icon" aria-hidden="true" v-html="bagDetailInfo.preview" />
+                  </div>
                   <div class="detail__info">
-                    <h2 class="detail__name">{{ bagDetailInfo.item.name }}
+                    <div class="detail__title-row">
+                      <h2 class="detail__name">{{ bagDetailInfo.item.name }}</h2>
                       <span class="detail__rarity" :class="`r-${bagDetailInfo.item.rarity}`">{{ bagDetailInfo.rarity }}</span>
-                      <span v-if="bagDetailInfo.item.qty > 1" class="detail__type">× {{ bagDetailInfo.item.qty }}</span>
-                    </h2>
-                    <p class="detail__type">{{ bagDetailInfo.typeLine }}</p>
-                    <div class="detail__sep"></div>
-                    <dl class="stats">
-                      <div v-for="pair in bagDetailInfo.stats" :key="pair[0]" class="stat-row">
-                        <dt>{{ pair[0] }}</dt><dd>{{ pair[1] }}</dd>
+                      <span class="detail__type">{{ bagDetailInfo.typeLine }}</span>
+                    </div>
+                    <div v-if="bagDetailInfo.stats.length" class="detail__stats">
+                      <div v-for="pair in bagDetailInfo.stats" :key="pair[0]" class="dstat-item">
+                        <span class="dstat-name">{{ pair[0] }}</span>
+                        <div class="dstat-val-group"><span class="dstat-curr">{{ pair[1] }}</span></div>
                       </div>
-                    </dl>
-                    <p class="flavor">{{ bagDetailInfo.flavor }}</p>
+                    </div>
+                    <p class="detail__flavor">“{{ bagDetailInfo.flavor }}”</p>
                     <div class="detail__acts">
                       <button v-for="action in bagDetailInfo.actions" :key="action.act" type="button"
-                        class="dbtn" :class="{ 'dbtn--ghost': action.ghost }"
+                        class="dbtn" :class="action.ghost ? 'dbtn--ghost' : 'dbtn--primary'"
                         @click="bagDetailAct(bagDetailInfo.uid, action.act)">{{ action.label }}</button>
                     </div>
                   </div>
                 </div>
-                <p v-else class="detail__empty">未择一物 · 点选囊中器物以观其详</p>
+                <p v-else class="detail__empty">点击对应资源块以加载结构图谱</p>
               </div>
+
             </div>
 
             <!-- 底栏 -->
             <footer class="bag__foot">
-              <div class="meter">
-                <span class="meter__name">囊中</span>
-                <span class="bar"><span class="bar__fill" :style="{ width: bagFootInfo.capWidth }" /></span>
-                <span class="meter__num">{{ bagFootInfo.capText }}</span>
-              </div>
-              <div class="meter">
-                <span class="meter__name">負重</span>
-                <span class="bar bar--weight"><span class="bar__fill" :class="{ 'is-over': bagFootInfo.over }"
-                  :style="{ width: bagFootInfo.weightWidth }" /></span>
-                <span class="meter__num">{{ bagFootInfo.weightText }}</span>
+              <div>
+                <span>收纳空间利用率：</span>
+                <b>{{ bagFootInfo.capText }}</b>
               </div>
               <div class="hints">
-                <span>单击拾取 · <b>双击</b> 披掛</span>
-                <span>点小世界第一格出入小世界 · <b>Esc</b> 合上</span>
+                <span>单击选择检视</span>
+                <span><kbd>双击 / 装配</kbd> 极速换装</span>
+                <span><kbd>Esc</kbd> 退出终端</span>
               </div>
             </footer>
+
           </div>
         </section>
       </div>
@@ -1934,7 +2094,7 @@ onUnmounted(() => {
         :aria-hidden="bag.tipOn ? 'false' : 'true'" :style="bag.tipStyle">
         <p v-if="bag.tipItem" class="tip__name">{{ bag.tipItem.name }}
           <span class="tip__rarity" :class="`r-${bag.tipItem.rarity}`">{{ RARITY[bag.tipItem.rarity].label }}</span>
-          <span v-if="bag.tipItem.qty > 1" class="tip__rarity" style="color:rgba(233,224,204,.55)">× {{ bag.tipItem.qty }}</span>
+          <span v-if="bag.tipItem.qty > 1" class="tip__rarity">× {{ bag.tipItem.qty }}</span>
         </p>
         <p v-if="bag.tipItem" class="tip__type">{{ bagTypeLine(bag.tipItem) }}</p>
         <div v-if="bag.tipItem" class="tip__stats">
@@ -1954,7 +2114,10 @@ onUnmounted(() => {
 
 <style scoped>
 /* =========================================================
-   设计令牌：东方暗黑神话色板 / 切角金边 / 墨色浓度
+   设计令牌与共用面板
+   HUD 的配色、字体与版式在 ./StoryWorld.hud.css（复刻 ui2.html）；
+   行囊在 ./StoryWorld.bag.css（复刻 bag2.html）。
+   这里保留视口令牌，以及对话面板 / 小世界提示仍在用的切角面板。
    ========================================================= */
 .story-world-viewport {
   /* —— 颜色 —— */
@@ -1974,13 +2137,9 @@ onUnmounted(() => {
   --panel-a: .88;
   --pattern: rgba(233, 224, 204, .08);
   --haze: .12;
-  --slot: clamp(50px, 6.2vw, 74px);
-  --gap-edge: clamp(10px, 2.1vw, 30px);
   --cut: 14px;
   --edge: 2px;
   --shape: polygon(var(--cut) 0, 100% 0, 100% calc(100% - var(--cut)), calc(100% - var(--cut)) 100%, 0 100%, 0 var(--cut));
-  --boss-top: clamp(10px, 1.7vh, 22px);
-  --toast-top: calc(var(--boss-top) + 64px);
   --font-serif: 'Noto Serif SC', 'Source Han Serif SC', 'Source Han Serif CN', 'Songti SC', 'STSong', 'SimSun', serif;
   --font-brush: 'LXGW WenKai', '霞鹜文楷', 'Kaiti SC', 'STKaiti', 'KaiTi', '楷体', var(--font-serif);
 
@@ -2014,7 +2173,6 @@ onUnmounted(() => {
 .plate__body {
   position: relative;
   height: 100%;
-  box-sizing: border-box;
   clip-path: var(--shape);
   background-color: rgba(26, 23, 18, .94);
   background-image:
@@ -2023,23 +2181,24 @@ onUnmounted(() => {
     repeating-linear-gradient(58deg, rgba(233, 224, 204, .03) 0 1px, transparent 1px 13px),
     repeating-linear-gradient(-58deg, rgba(233, 224, 204, .022) 0 1px, transparent 1px 17px),
     repeating-linear-gradient(114deg, rgba(233, 224, 204, .035) 0 1px, transparent 1px 6px),
-    radial-gradient(120% 92% at 8% 0%, rgba(233, 224, 204, .11), transparent 62%),
+    radial-gradient(120% 92% at 8% 0%, rgba(233, 224, 204, .10), transparent 62%),
     radial-gradient(92% 120% at 100% 112%, rgba(179, 56, 42, .11), transparent 62%),
-    linear-gradient(180deg, rgba(70, 61, 48, var(--panel-a)), rgba(25, 22, 18, .94));
+    linear-gradient(180deg, rgba(70, 61, 48, .70), rgba(25, 22, 18, .94));
   background-size: 100% 5px, 100% 3px, auto, auto, auto, auto, auto, auto;
   background-position: left top, left bottom, 0 0, 0 0, 0 0, 0 0, 0 0, 0 0;
   background-repeat: no-repeat, no-repeat, repeat, repeat, repeat, no-repeat, no-repeat, no-repeat;
   box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .62), inset 0 0 30px rgba(0, 0, 0, .5);
 }
-
-.plate__body > * { position: relative; z-index: 1; }
-
-/* 朱砂小菱：贴在切角处，作为点睛 */
+.plate__body > * {
+  position: relative;
+  z-index: 1;
+}
+/* 朱砂小菱：点睛（贴在未切角的右上） */
 .plate__body::before {
-  content: '';
+  content: "";
   position: absolute;
-  left: 8px;
-  top: 8px;
+  right: 9px;
+  top: 9px;
   width: 5px;
   height: 5px;
   z-index: 2;
@@ -2048,8 +2207,7 @@ onUnmounted(() => {
   opacity: .9;
   box-shadow: 0 0 9px rgba(179, 56, 42, .5);
 }
-
-/* 局部墨迹晕染（只贴在控件边缘，不铺满屏幕） */
+/* 局部墨迹晕染 */
 .haze {
   position: absolute !important;
   z-index: 0 !important;
@@ -2061,7 +2219,6 @@ onUnmounted(() => {
   background: radial-gradient(closest-side, rgba(233, 224, 204, var(--haze)), rgba(233, 224, 204, 0) 72%);
   filter: blur(10px);
 }
-
 .haze--r {
   left: auto;
   right: -20%;
@@ -2072,508 +2229,10 @@ onUnmounted(() => {
 }
 
 /* =========================================================
-   HUD 总容器
-   ========================================================= */
-.story-loading {
-  position: absolute;
-  inset: 0;
-  z-index: 30;
-  display: grid;
-  place-items: center;
-  background: radial-gradient(circle at 50% 46%, rgba(24, 21, 17, .72), rgba(5, 5, 4, .94) 78%);
-  color: var(--c-paper-dim);
-  font-size: clamp(12px, 1.2vw, 15px);
-  letter-spacing: .34em;
-  text-indent: .34em;
-}
-
-.hud-symbols { position: absolute; width: 0; height: 0; overflow: hidden; }
-
-.story-hud {
-  position: absolute;
-  inset: 0;
-  pointer-events: none;
-  z-index: 20;
-}
-
-/* ------------------ 顶部中央：首领血条 ------------------ */
-.boss-status {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  top: var(--boss-top);
-  width: min(600px, 44vw);
-}
-
-.boss-status .plate__body { padding: clamp(7px, .9vh, 10px) clamp(10px, 1vw, 14px) clamp(8px, 1vh, 11px); }
-.boss-status .plate__body::before { left: auto; right: 8px; top: 8px; }
-
-.boss-head { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
-.boss-seal { flex: none; width: 16px; height: 16px; display: grid; place-items: center; opacity: .9; }
-.boss-seal svg { width: 16px; height: 16px; }
-.boss-seal path { fill: none; stroke: var(--c-cinnabar-bright); stroke-width: 3; stroke-linecap: round; }
-
-.boss-name {
-  font-family: var(--font-brush);
-  font-size: clamp(11px, 1.15vw, 14px);
-  letter-spacing: .2em;
-  color: #e7d9b6;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, .95), 0 0 12px rgba(179, 56, 42, .25);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.boss-number {
-  margin-left: auto;
-  flex: none;
-  font-size: clamp(9px, .95vw, 11px);
-  font-variant-numeric: tabular-nums;
-  color: var(--c-paper-dim);
-  opacity: .85;
-  text-shadow: 0 1px 2px #000;
-}
-
-.boss-number b { color: var(--c-gold-bright); font-weight: 600; }
-.boss-number i { font-style: normal; opacity: .45; margin: 0 2px; }
-
-/* ------------------ 通用状态条 ------------------ */
-.bar {
-  position: relative;
-  flex: 1;
-  min-width: 0;
-  height: var(--bar-h, 13px);
-  overflow: hidden;
-  border-radius: 2px 12px 12px 2px;
-  background: linear-gradient(180deg, #1c1813 0%, #110f0c 34%, #080706 72%, #050504 100%);
-  border: var(--edge) solid var(--gold-line-soft);
-  box-shadow: inset 0 2px 5px rgba(0, 0, 0, .85), inset 0 -1px 0 rgba(233, 224, 204, .07);
-}
-
-.bar__lag, .bar__fill { position: absolute; left: 0; top: 0; bottom: 0; width: 0; }
-
-.bar__lag {
-  width: 100%;
-  background: linear-gradient(180deg,
-    rgba(233, 224, 204, .42) 0%, rgba(233, 224, 204, .26) 38%,
-    rgba(233, 224, 204, .12) 72%, rgba(233, 224, 204, .05) 100%);
-  transition: width .62s cubic-bezier(.25, .8, .3, 1) .34s;
-}
-
-.bar__fill {
-  transition: width .13s linear;
-  border-right: 1px solid rgba(255, 240, 205, .5);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, .55),
-    inset 0 5px 7px -4px rgba(255, 255, 255, .30),
-    inset 0 -2px 3px rgba(0, 0, 0, .55),
-    inset 0 -6px 8px -4px rgba(0, 0, 0, .75);
-}
-
-.bar__fill::after {
-  content: '';
-  position: absolute;
-  left: 1px;
-  right: 1px;
-  top: 1px;
-  height: 1px;
-  background: linear-gradient(90deg, rgba(255, 255, 255, .6), rgba(255, 255, 255, .06));
-  opacity: .5;
-}
-
-.bar--hp .bar__fill {
-  background: linear-gradient(180deg, #e97a60 0%, #cb4a36 30%, #a3321f 58%, #71200f 82%, #420f07 100%);
-  animation: breathe 3.6s ease-in-out infinite;
-}
-
-.bar--rage .bar__fill {
-  background: linear-gradient(180deg, #f7e6b4 0%, #d8b569 30%, #b08c3f 58%, #7d6023 82%, #48370f 100%);
-  animation: breathe 3s ease-in-out infinite .8s;
-}
-
-.bar--boss { --bar-h: 14px; border-color: rgba(200, 166, 89, .38); }
-
-.bar--boss .bar__fill {
-  background: linear-gradient(180deg, #f0805f 0%, #cf4d38 30%, #a3311f 58%, #701f0f 82%, #3f0e07 100%);
-}
-
-.bar--boss .bar__lag {
-  transition: width .8s cubic-bezier(.3, .7, .2, 1) .38s;
-  background: linear-gradient(180deg,
-    rgba(233, 224, 204, .46) 0%, rgba(233, 224, 204, .28) 38%,
-    rgba(233, 224, 204, .13) 72%, rgba(233, 224, 204, .05) 100%);
-}
-
-/* 人物状态条比首领血条窄一号 */
-.vital-bar { --bar-h: 12px; }
-
-.bar__flash {
-  position: absolute;
-  inset: 0;
-  opacity: 0;
-  pointer-events: none;
-  background: linear-gradient(180deg, rgba(255, 255, 255, .96), rgba(255, 255, 255, .42));
-}
-
-/* 首领血条的刻度：斜切浅线 */
-.bar__tick {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 2px;
-  transform: skewX(-18deg);
-  background: linear-gradient(180deg, rgba(233, 224, 204, .42), rgba(233, 224, 204, .08));
-  box-shadow: 0 0 5px rgba(0, 0, 0, .9);
-}
-
-/* ------------------ 左下：生命 / 怒气 ------------------ */
-.player-vitals {
-  position: absolute;
-  left: var(--gap-edge);
-  bottom: var(--gap-edge);
-  width: clamp(196px, 25vw, 318px);
-  pointer-events: auto;
-}
-
-.player-vitals .plate__body { padding: clamp(9px, 1.2vh, 13px) clamp(11px, 1.2vw, 16px); }
-.vitals__row { display: flex; align-items: center; gap: clamp(8px, 1vw, 12px); }
-
-/* 朱砂小印（抽象三笔） */
-.vitals__seal {
-  flex: none;
-  width: 26px;
-  height: 26px;
-  display: grid;
-  place-items: center;
-  border: var(--edge) solid rgba(214, 96, 72, .8);
-  background: linear-gradient(180deg, rgba(179, 56, 42, .28), rgba(179, 56, 42, .06));
-  border-radius: 2px 8px 2px 2px;
-  box-shadow: 0 0 12px rgba(179, 56, 42, .26), inset 0 0 8px rgba(0, 0, 0, .6);
-}
-
-.vitals__seal svg { width: 16px; height: 16px; }
-.vitals__seal path { fill: none; stroke: var(--c-cinnabar-bright); stroke-width: 1.7; stroke-linecap: round; }
-.vitals__bars { flex: 1; display: grid; gap: clamp(6px, .9vh, 10px); min-width: 0; }
-
-.stat { display: flex; align-items: center; gap: clamp(6px, .8vw, 10px); min-width: 0; }
-
-.stat__name {
-  flex: none;
-  min-width: 2.4em;
-  white-space: nowrap;
-  font-family: var(--font-brush);
-  font-size: clamp(10px, 1.02vw, 13px);
-  letter-spacing: .18em;
-  color: var(--c-paper-dim);
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
-}
-
-.stat__num {
-  flex: none;
-  min-width: 2.9em;
-  text-align: right;
-  white-space: nowrap;
-  font-size: clamp(9px, .92vw, 12px);
-  font-variant-numeric: tabular-nums;
-  color: var(--c-gold);
-  opacity: .88;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
-}
-
-.stat__num i { font-style: normal; opacity: .5; }
-
-/* ------------------ 右下：技能槽 ------------------ */
-.skills {
-  position: absolute;
-  right: var(--gap-edge);
-  bottom: var(--gap-edge);
-  display: flex;
-  align-items: flex-end;
-  gap: clamp(9px, 1.2vw, 18px);
-  pointer-events: auto;
-}
-
-.skill-wrap { display: grid; justify-items: center; gap: 6px; }
-
-.skill {
-  position: relative;
-  width: var(--slot);
-  height: var(--slot);
-  padding: 0;
-  border-radius: 50%;
-  cursor: pointer;
-  color: #ded2b6;
-  pointer-events: auto;
-  border: var(--edge) solid rgba(200, 166, 89, .55);
-  background:
-    radial-gradient(circle at 34% 26%, rgba(233, 224, 204, .10), transparent 56%),
-    radial-gradient(circle at 72% 80%, rgba(179, 56, 42, .14), transparent 56%),
-    linear-gradient(180deg, rgba(26, 24, 20, .94), rgba(8, 8, 8, .96));
-  box-shadow:
-    inset 0 0 14px rgba(0, 0, 0, .9),
-    inset 0 1px 0 rgba(233, 224, 204, .07),
-    0 4px 16px rgba(0, 0, 0, .65),
-    0 0 0 3px rgba(0, 0, 0, .35);
-  transition: transform .16s ease, box-shadow .22s ease, border-color .22s ease;
-  outline: none;
-}
-
-.skill__ring { position: absolute; inset: 4px; border-radius: 50%; border: 1px solid rgba(200, 166, 89, .24); }
-.skill__ring::after { content: ''; position: absolute; inset: 4px; border-radius: 50%; border: 1px dashed rgba(233, 224, 204, .10); }
-
-/* 岩石底纹（局部材质） */
-.skill::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  pointer-events: none;
-  opacity: .5;
-  mix-blend-mode: screen;
-  background-image:
-    repeating-linear-gradient(70deg, rgba(233, 224, 204, .05) 0 1px, transparent 1px 6px),
-    radial-gradient(circle at 30% 70%, rgba(233, 224, 204, .05), transparent 45%);
-}
-
-.skill__glyph {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  pointer-events: none;
-  transition: opacity .25s ease, transform .25s ease;
-}
-
-/* 图标本体是按钮的直属子节点，这里统一笔触与颜色（居中由 .skill__glyph 负责） */
-.skill-tile > svg {
-  width: 52%;
-  height: 52%;
-  overflow: visible;
-  color: #f0d08d;
-  fill: none;
-  stroke: currentColor;
-  stroke-width: 2.1;
-  stroke-linecap: round;
-  stroke-linejoin: round;
-}
-
-.skill__cost {
-  position: absolute;
-  left: 12%;
-  top: 6%;
-  font-size: clamp(8px, .85vw, 10px);
-  letter-spacing: .06em;
-  color: rgba(143, 184, 160, .9);
-  text-shadow: 0 1px 2px #000;
-  pointer-events: none;
-}
-
-.skill__key {
-  position: absolute;
-  right: -5px;
-  bottom: -5px;
-  min-width: 21px;
-  height: 21px;
-  padding: 0 3px;
-  display: grid;
-  place-items: center;
-  font-size: 11px;
-  letter-spacing: .04em;
-  color: #f2e6c8;
-  background: linear-gradient(180deg, #7a3326, #2c110c);
-  border: var(--edge) solid rgba(214, 182, 116, .75);
-  box-shadow: 0 2px 9px rgba(0, 0, 0, .8), inset 0 1px 0 rgba(255, 255, 255, .14);
-  pointer-events: none;
-}
-
-.skill__name {
-  font-family: var(--font-brush);
-  font-size: clamp(10px, 1vw, 12px);
-  letter-spacing: .3em;
-  text-indent: .3em;
-  color: var(--c-paper-dim);
-  opacity: .9;
-  text-shadow: 0 1px 2px rgba(0, 0, 0, .9);
-}
-
-.skill__left {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  font-size: clamp(14px, 1.7vw, 20px);
-  font-variant-numeric: tabular-nums;
-  color: #f2e8ce;
-  text-shadow: 0 0 9px rgba(0, 0, 0, .95), 0 1px 0 rgba(0, 0, 0, .9);
-  pointer-events: none;
-}
-
-/* 冷却中压暗符文，让倒计时数字清晰可读 */
-.skill.is-cd .skill__glyph { opacity: .22; transform: scale(.9); }
-
-.skill-tile.unavailable { border-color: #68624e; }
-.skill-tile.unavailable .skill__glyph { opacity: .35; filter: grayscale(1); }
-.skill-tile.unavailable .skill__glyph path { stroke: #cfc7ae; }
-
-.skill:hover {
-  transform: translateY(-2px);
-  border-color: rgba(240, 214, 143, .6);
-  box-shadow: inset 0 0 14px rgba(0, 0, 0, .9), 0 6px 18px rgba(0, 0, 0, .7), 0 0 18px rgba(200, 166, 89, .22), 0 0 0 3px rgba(0, 0, 0, .35);
-}
-
-/* ------------------ 左上：操作提示 ------------------ */
-.tip {
-  position: absolute;
-  left: var(--gap-edge);
-  top: clamp(12px, 1.8vh, 22px);
-  display: grid;
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  gap: 6px 9px;
-  max-width: min(300px, 30vw);
-  padding: 9px 13px 9px 10px;
-  font-size: clamp(10px, 1vw, 12.5px);
-  line-height: 1.5;
-  color: rgba(233, 224, 204, .72);
-  letter-spacing: .06em;
-  clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
-  border: var(--edge) solid transparent;
-  background:
-    linear-gradient(180deg, rgba(46, 40, 32, .80), rgba(22, 19, 16, .70)) padding-box,
-    repeating-linear-gradient(58deg, rgba(255, 242, 210, .18) 0 1px, transparent 1px 4px) border-box,
-    linear-gradient(140deg, rgba(240, 214, 143, .85), rgba(122, 98, 52, .42) 52%, rgba(240, 214, 143, .75)) border-box;
-  box-shadow: inset 0 0 22px rgba(0, 0, 0, .45);
-  animation: breathe-soft 5.2s ease-in-out infinite;
-}
-
-.tip__seal { grid-row: span 9; flex: none; width: 15px; height: 15px; align-self: start; }
-.tip__seal path { fill: none; stroke: var(--c-cinnabar-bright); stroke-width: 1.9; stroke-linecap: round; }
-.tip span { display: flex; align-items: center; gap: 10px; white-space: nowrap; }
-
-kbd {
-  font-family: inherit;
-  font-size: 11px;
-  color: #dfcb94;
-}
-
-.tip kbd {
-  min-width: 42px;
-  padding: 2px 3px;
-  border: 1px solid rgba(200, 166, 89, .45);
-  background: rgba(200, 166, 89, .10);
-  text-align: center;
-  color: var(--c-gold-bright);
-}
-
-.pickup-control { color: #ffdf8d; }
-.pickup-control kbd { border-color: #d9b45c; background: rgba(217, 180, 92, .18); }
-
-/* ------------------ 底部中央：错误 / 反馈 ------------------ */
-.story-bottom-stack {
-  position: absolute;
-  left: 50%;
-  transform: translateX(-50%);
-  bottom: calc(var(--gap-edge) + clamp(72px, 11vh, 122px));
-  width: min(490px, calc(100vw - 32px));
-  display: grid;
-  gap: 9px;
-  justify-items: center;
-}
-
-.gameplay-error {
-  pointer-events: auto;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 10px 12px;
-  font-size: 13px;
-  color: #ffcac0;
-  overflow-wrap: anywhere;
-  clip-path: polygon(10px 0, 100% 0, 100% calc(100% - 10px), calc(100% - 10px) 100%, 0 100%, 0 10px);
-  border: var(--edge) solid rgba(224, 82, 59, .6);
-  background: linear-gradient(180deg, rgba(58, 22, 18, .92), rgba(26, 12, 10, .9));
-  box-shadow: 0 8px 22px rgba(0, 0, 0, .55), inset 0 0 20px rgba(0, 0, 0, .5);
-}
-
-.gameplay-error button {
-  flex-shrink: 0;
-  padding: 5px 10px;
-  font-family: inherit;
-  color: #f3d9b4;
-  background: rgba(179, 56, 42, .28);
-  border: 1px solid rgba(214, 182, 116, .6);
-  cursor: pointer;
-}
-
-.story-feedback {
-  justify-self: center;
-  padding: 5px 16px;
-  font-family: var(--font-brush);
-  font-size: clamp(12px, 1.25vw, 15px);
-  letter-spacing: .24em;
-  text-indent: .24em;
-  color: #efdfba;
-  white-space: nowrap;
-  clip-path: polygon(9px 0, 100% 0, 100% calc(100% - 9px), calc(100% - 9px) 100%, 0 100%, 0 9px);
-  border: var(--edge) solid transparent;
-  background:
-    linear-gradient(180deg, rgba(40, 34, 26, .88), rgba(18, 16, 13, .84)) padding-box,
-    repeating-linear-gradient(58deg, rgba(255, 242, 210, .18) 0 1px, transparent 1px 4px) border-box,
-    linear-gradient(140deg, rgba(240, 214, 143, .85), rgba(122, 98, 52, .42) 50%, rgba(240, 214, 143, .7)) border-box;
-  box-shadow: 0 8px 22px rgba(0, 0, 0, .55);
-}
-
-/* ------------------ 飘字（受击数字，落在 fx 层） ------------------ */
-.fx-layer { position: absolute; inset: 0; overflow: hidden; pointer-events: none; z-index: 40; }
-
-.dmg {
-  position: absolute;
-  transform: translate(-50%, -50%);
-  font-family: var(--font-serif);
-  font-weight: 700;
-  font-size: clamp(18px, 2.1vw, 27px);
-  color: var(--c-gold-bright);
-  text-shadow: 0 0 12px rgba(200, 166, 89, .5), 0 2px 0 rgba(0, 0, 0, .85), 0 0 3px rgba(0, 0, 0, .9);
-  animation: dmg-float .95s cubic-bezier(.2, .7, .3, 1) forwards;
-  will-change: transform, opacity;
-  pointer-events: none;
-}
-
-.dmg--miss { font-size: clamp(13px, 1.4vw, 17px); color: rgba(233, 224, 204, .68); }
-
-/* =========================================================
    行囊（Tab 背包）
-   样式见 ./StoryWorld.bag.css（复刻 111/bag.html）；
-   这里只保留 HUD 与行囊共用的锚点与浮签，
-   以及键盘游走用的 .inventory-slot 锚点。
+   样式见 ./StoryWorld.bag.css（复刻 bag2.html）；命中测试由该文件自己声明。
    ========================================================= */
-/* 行囊整块必须参与命中测试：它会盖住 3D 视口 */
-.story-bag { pointer-events: auto; }
-
 .hint-anchor { position: relative; }
-
-.ui-tooltip {
-  display: none;
-  position: absolute;
-  bottom: calc(100% + 9px);
-  left: 50%;
-  transform: translateX(-50%);
-  padding: 7px 10px;
-  border: var(--edge) solid rgba(143, 120, 70, .8);
-  background: rgba(12, 18, 15, .96);
-  color: #efe0bc;
-  font-family: var(--font-serif);
-  font-size: 12px;
-  font-weight: 400;
-  white-space: nowrap;
-  z-index: 3;
-  pointer-events: none;
-}
-
-.hint-anchor:hover > .ui-tooltip,
-.hint-anchor:focus > .ui-tooltip,
-.hint-anchor:focus-within > .ui-tooltip { display: block; }
 
 /* =========================================================
    关键帧
@@ -2595,42 +2254,12 @@ kbd {
   100% { opacity: 0; transform: translate(calc(-50% + var(--dx, 0px)), calc(-50% - var(--rise, 60px))) scale(.98) rotate(var(--rot, 0deg)); }
 }
 
-/* =========================================================
-   响应式
-   ========================================================= */
-@media (max-width: 870px) {
-  .boss-status { width: min(600px, 88vw); }
-  .tip { max-width: min(64vw, 420px); font-size: 11px; }
-}
-
-@media (max-width: 900px) {
-  .story-world-viewport { --slot: clamp(46px, 7.6vw, 62px); }
-  .player-vitals { width: clamp(180px, 36vw, 250px); }
-  .boss-name { font-size: 12px; letter-spacing: .12em; }
-}
-
-@media (max-width: 660px) {
-  .story-world-viewport { --slot: clamp(44px, 12vw, 58px); --gap-edge: 12px; }
-  .boss-name { max-width: 46vw; }
-  .tip { max-width: 88vw; font-size: 10.5px; line-height: 1.45; }
-  .skill__name { display: none; }
-  .player-vitals { width: min(58vw, 220px); }
-}
-
-@media (max-width: 400px) {
-  .story-world-viewport { --slot: 38px; }
-  .skills { gap: 6px; }
-  .player-vitals { width: min(50vw, 170px); }
-  .vitals__seal { display: none; }
-  .stat__name { letter-spacing: .04em; min-width: 2em; }
-  .skill__cost { display: none; }
-}
-
 @media (prefers-reduced-motion: reduce) {
   .bar--hp .bar__fill, .bar--rage .bar__fill, .tip { animation: none; }
   .bar__lag, .bar__fill { transition: none; }
   .dmg { animation-duration: 1.15s; }
 }
+
 
 /* ============================================================
    小世界：位置指示器 / 小世界状态 / 先知对话 / 物质陈列
