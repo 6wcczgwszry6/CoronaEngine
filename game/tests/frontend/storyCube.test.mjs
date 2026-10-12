@@ -254,11 +254,25 @@ test('the adjust screen lists the scene objects so a name can be clicked instead
     { actor_guid: 'bad', name: '无几何', handle: 9, semantic_role: 'prophet',
       geometry: { position: [0, NaN, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
     { actor_guid: 'prophet', name: '先知', handle: 12, semantic_role: 'prophet',
+      entity_type: 'story_character', entity_id: 'story.prophet',
+      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    { actor_guid: 'boss', name: 'Boss', handle: 13, semantic_role: 'boss',
+      entity_type: 'story_character', entity_id: 'story.boss',
+      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    { actor_guid: 'merchant', name: '商人', handle: 14, semantic_role: 'merchant',
+      entity_type: 'story_character', entity_id: 'story.merchant',
+      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    { actor_guid: 'frag-1', name: '世界碎片1', handle: 15, semantic_role: 'placement',
+      entity_type: 'story_prop', entity_id: 'story.placement.fragment-1',
+      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    { actor_guid: 'frag-2', name: '世界碎片2', handle: 16, semantic_role: 'placement',
+      entity_type: 'story_prop', entity_id: 'story.placement.fragment-2',
       geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
   ] } } };
   const list = selectableObjects(snapshot);
   assert.deepEqual(list.map(entry => entry.guid), ['cube'],
-    'only usable objects inside the small world; never the player or the prophet');
+    'only small-world objects; never a character (player/prophet/boss/merchant) '
+    + 'and never a world fragment');
   assert.deepEqual(list[0].transform.position, [1, 0, 1]);
   assert.equal(objectLabel(list[0]), '先知方块（prophet-cube）');
   assert.equal(objectLabel({}), '未命名（物体）');

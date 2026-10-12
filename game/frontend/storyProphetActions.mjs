@@ -33,23 +33,36 @@ const MOVE_DIRECTIONS = Object.freeze({
   'move-forward': 'forward', 'move-back': 'back', 'move-left': 'left', 'move-right': 'right',
 });
 
-/** The prophet is the quest giver and the world's own anchors are not props: neither moves. */
-const UNEDITABLE_ROLES = Object.freeze(['player', 'prophet']);
+/**
+ * Characters are people, not scenery, so none of them may be rearranged: the player, the
+ * prophet, the boss and the merchant. Matching on the entity type as well as the role means
+ * a character added later is excluded without having to remember to list it here.
+ */
+const CHARACTER_ENTITY_TYPE = 'story_character';
+const CHARACTER_ROLES = Object.freeze(['player', 'prophet', 'boss', 'merchant']);
+/**
+ * World fragments are collectibles the world itself placed (entity id `story.placement.*`,
+ * role `placement`); they belong to the world rather than to the small world, so they are not
+ * adjustable either. They share the `story_prop` entity type with the prophet's own cube,
+ * which is why this matches the role and the entity id instead of the type.
+ */
+const PLACEMENT_ROLE = 'placement';
+const PLACEMENT_ENTITY_PREFIX = 'story.placement.';
 
 /**
- * The objects the adjust screen offers as a click-to-select list.
- *
- * Listing names sidesteps viewport ray picking entirely, which is why it exists: picking a
- * label always works, whereas picking a pixel depends on the engine's readback. The scene
- * passed in is the small world's own scene, so everything listed is inside it; the player
- * and the prophet are excluded because they are not objects the player may rearrange.
+ * The objects the adjust screen offers as a click-to-select list: only what lives inside the
+ * small world. Listing names sidesteps viewport ray picking entirely, which is why it exists;
+ * the player and the other characters are excluded, and so are the world fragments.
  */
 export function selectableObjects(snapshot) {
   const actors = sceneSnapshot(snapshot)?.actors;
   const list = [];
   for (const actor of Array.isArray(actors) ? actors : []) {
     const role = actor?.semantic_role || actor?.runtime?.semantic_role || '';
-    if (UNEDITABLE_ROLES.includes(role)) continue;
+    const entityType = actor?.entity_type || actor?.runtime?.entity_type || '';
+    const entityId = String(actor?.entity_id || actor?.runtime?.entity_id || '');
+    if (CHARACTER_ROLES.includes(role) || entityType === CHARACTER_ENTITY_TYPE) continue;
+    if (role === PLACEMENT_ROLE || entityId.startsWith(PLACEMENT_ENTITY_PREFIX)) continue;
     const handle = Number(actor?.handle);
     const transform = cubeTransformOf(actor);
     if (!Number.isInteger(handle) || handle <= 0 || !transform) continue;
