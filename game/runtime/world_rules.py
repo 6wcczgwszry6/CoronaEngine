@@ -17,10 +17,14 @@ import tempfile
 SAVE_PATH = Path('.game/story-world-rules.json')
 MAX_BYTES = 65536
 MAX_RULES = 16
-_TYPES = ('sway',)
+_TYPES = ('sway', 'spin')
 _AXES = ('x', 'y', 'z')
+# sway 的 amplitude 是位移（米）；spin 的 amplitude 是绕轴旋转的幅度（度），两者都只要求
+# `0 < 值 <= 上限`，共用同一个上限。周期上限也只有一份。
 _AMPLITUDE_LIMIT = 100.0
 _PERIOD_LIMIT_MS = 600_000
+# 每种规则允许的轴：sway 可以沿任意一条轴平移，spin 只能绕 Z 轴旋转。
+_TYPE_AXES = {'sway': _AXES, 'spin': ('z',)}
 
 
 class WorldRuleError(RuntimeError):
@@ -38,15 +42,19 @@ def validate_rule(entry: object) -> dict:
     fragment_id = entry.get('fragmentId')
     if not isinstance(fragment_id, str) or not fragment_id or len(fragment_id) > 64:
         raise WorldRuleError('碎片标识无效')
-    if entry.get('type') not in _TYPES:
+    rule_type = entry.get('type')
+    if rule_type not in _TYPES:
         raise WorldRuleError('未知的世界规则类型')
     if entry.get('axis') not in _AXES:
         raise WorldRuleError('未知的浮动轴')
+    # 轴与类型必须配套：sway 可以沿任意一条轴平移，spin 只绕 Z 轴旋转。
+    if entry.get('axis') not in _TYPE_AXES[rule_type]:
+        raise WorldRuleError('该世界规则不支持这条浮动轴')
     if not _positive(entry.get('amplitude'), limit=_AMPLITUDE_LIMIT):
         raise WorldRuleError('世界规则幅度无效')
     if not _positive(entry.get('periodMs'), limit=_PERIOD_LIMIT_MS):
         raise WorldRuleError('世界规则周期无效')
-    return {'fragmentId': fragment_id, 'type': entry['type'], 'axis': entry['axis'],
+    return {'fragmentId': fragment_id, 'type': rule_type, 'axis': entry['axis'],
             'amplitude': entry['amplitude'], 'periodMs': entry['periodMs']}
 
 

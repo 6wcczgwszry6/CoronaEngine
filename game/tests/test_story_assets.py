@@ -100,13 +100,23 @@ class StoryAssetTests(unittest.TestCase):
             for key in ("id", "name", "initial", "description", "rule"):
                 self.assertEqual(projected[key], declared[key], f'{declared["id"]}.{key}')
         # The requirement's initial fragment must be the left/right sway, excluding the player.
-        self.assertEqual([f["id"] for f in catalogue["fragments"] if f["initial"]], ["sway"])
+        # `spin` (the z rotation) is initial too: no reward path exists yet that could grant a
+        # fragment later, so it has to be owned from the start to be installable at all.
+        self.assertEqual([f["id"] for f in catalogue["fragments"] if f["initial"]], ["sway", "spin"])
         rule = catalogue["fragments"][0]["rule"]
         self.assertEqual(rule["type"], "sway")
         self.assertEqual(rule["axis"], "x")
         self.assertIn("player", rule["excludeRoles"])
         self.assertGreater(rule["amplitude"], 0)
         self.assertGreater(rule["periodMs"], 0)
+        # The second fragment turns objects around z, in degrees, and excludes the player too.
+        spin = catalogue["fragments"][1]["rule"]
+        self.assertEqual(spin["type"], "spin")
+        self.assertEqual(spin["axis"], "z")
+        self.assertIn("player", spin["excludeRoles"])
+        self.assertGreater(spin["amplitude"], 0)
+        self.assertLessEqual(spin["amplitude"], 100.0)
+        self.assertGreater(spin["periodMs"], 0)
 
     def test_frontend_deployment_contains_every_module_and_cleans_stale_modules(self):
         spec = importlib.util.spec_from_file_location("story_asset_deployment", ROOT / "tools/build/editor_copy_and_build.py")

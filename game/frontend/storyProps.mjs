@@ -22,15 +22,83 @@ export const PLACEMENT_SITES = Object.freeze([
 export const STORY_PROPS = Object.freeze([
   Object.freeze({
     id: 'world-fragment', name: '世界碎片', itemKey: 'worldFragment',
-    asset: 'fragment/Ball.obj', description: '主世界击败巨龙后得到的世界残片，可陈列于小世界。',
+    asset: 'fragment/Ball.obj', description: '主世界击败巨龙后得到的世界残片。',
     height: 0.5, yaw: 0,
+    // A keepsake the world hands over: it is counted, never put down.
+    placeable: false,
+  }),
+  Object.freeze({
+    // The art a world yields goes straight into the small world: the block stack the bag
+    // starts with. It reuses the prophet's cube art, so no new model has to be authored.
+    id: 'block', name: '方块', itemKey: 'block',
+    asset: 'cube/cube.obj', description: '主世界带回的方块，可直接在小世界中摆放。',
+    height: 0.5, yaw: 0,
+    placeable: true,
   }),
 ]);
+
+/** The props the player may actually put down. A keepsake is never one of them. */
+export function placeableProps() {
+  return STORY_PROPS.filter(prop => prop.placeable === true);
+}
+
+/** Whether a prop may be placed, by id, without throwing on an unknown id. */
+export function canPlace(propId) {
+  return findProp(propId)?.placeable === true;
+}
 
 const LIMIT = 1e6;
 const vectors = value => Array.isArray(value) && value.length === 3 && value.every(Number.isFinite);
 const inRange = value => vectors(value) && value.every(n => Math.abs(n) <= LIMIT);
 const positive = value => Number.isFinite(value) && value > 0 && value <= LIMIT;
+
+/**
+ * How many props one small world may hold. Mirrors `MAX_PLACEMENTS` in
+ * `game/runtime/placements.py`, which rejects `index >= MAX_PLACEMENTS`: the page needs the
+ * same ceiling to refuse a placement *before* the save fails, and the two are asserted to
+ * agree by the frontend test.
+ */
+export const MAX_PLACEMENTS = 64;
+
+/** How far in front of the player a newly placed block lands, in metres. */
+export const PLACEMENT_DISTANCE = 2.0;
+
+/**
+ * Where the block the player is holding lands: `distance` metres straight ahead on the
+ * ground, turned to face the same way the player does.
+ *
+ * The forward vector is `(sin, cos)` of the yaw — the same convention
+ * `storyCube.screenAxes`/`cubeSpawnTransform` uses — duplicated here on purpose rather than
+ * imported, so this module keeps its promise of importing nothing and a geometry change in
+ * the cube can never silently move where a player's own block goes.
+ *
+ * `y` is taken from the player, so the block stands on whatever ground the player is on;
+ * `siteId` stays null because the spot is derived from the player, not chosen from a list.
+ */
+export function blockSpawnTransform(player, yaw, distance = PLACEMENT_DISTANCE) {
+  const position = player?.position;
+  if (!vectors(position) || !inRange(position)) throw new Error('玩家位置未就绪');
+  if (!Number.isFinite(yaw)) throw new Error('玩家朝向未就绪');
+  if (!positive(distance)) throw new Error('摆放距离无效');
+  return {
+    siteId: null,
+    position: [position[0] + Math.sin(yaw) * distance, position[1],
+      position[2] + Math.cos(yaw) * distance],
+    rotation: [0, yaw, 0],
+    scale: 1,
+  };
+}
+
+/**
+ * How close the player must stand to take a placed block back.
+ *
+ * Placing puts the block `PLACEMENT_DISTANCE` (2 m) in front of the player, so a reach a
+ * little beyond that makes place → retrieve symmetrical: stand where you put it down and F
+ * takes it back, without having to walk into it. 2.5 m keeps the round trip one step while
+ * staying far shorter than the prophet's 12 m range, so a block can never out-prioritise
+ * the prophet the player is actually walking towards.
+ */
+export const PLACED_BLOCK_REACH = 2.5;
 
 export function findProp(id) {
   return STORY_PROPS.find(prop => prop.id === id) || null;
@@ -83,6 +151,45 @@ export function nextPlacementIndex(placements) {
   return index;
 }
 
+/**
+ * The placement the player may take back: the nearest one within `reach`.
+ *
+ * Distance is horizontal (x/z), the same measure `storyGameplay.pickupDistance` uses for the
+ * drop, so every proximity rule on the page reads the same way. Only props that may be placed
+ * (`canPlace`) are ever candidates — a keepsake that somehow sits in the layout, or an entry
+ * written by a future build, is never something F can hand back.
+ *
+ * The reach is the whole gate: unlike the drop, retrieving is symmetric with placing, and
+ * placing itself is allowed mid-air or mid-dodge, so a movement state must not silently
+ * remove the prompt. Pure: junk player data, junk lists and a junk reach all answer `null`
+ * instead of throwing.
+ */
+export function nearestPlacedBlock(player, placements, reach = PLACED_BLOCK_REACH) {
+  const position = player?.position;
+  if (!vectors(position) || !inRange(position)) return null;
+  if (!Number.isFinite(reach) || reach < 0) return null;
+  let best = null;
+  for (const entry of sanitizePlacements(placements)) {
+    if (!canPlace(entry.propId)) continue;
+    const distance = Math.hypot(position[0] - entry.position[0], position[2] - entry.position[2]);
+    if (distance > reach) continue;
+    if (!best || distance < best.distance) {
+      best = { index: entry.index, propId: entry.propId, distance };
+    }
+  }
+  return best;
+}
+
+/**
+ * The layout without one entry. Every other entry keeps its own index: the sequence is the
+ * actor identity (`placementGuid`) persisted in the scene, so renumbering would leave the
+ * remaining exhibits addressing the wrong actors. Junk input answers an empty layout, and an
+ * index that matches nothing leaves the layout untouched.
+ */
+export function removePlacement(placements, index) {
+  return sanitizePlacements(placements).filter(entry => entry.index !== index);
+}
+
 /** The site a placement was authored on, or null when it was moved by hand. */
 export function siteFor(placement) {
   return PLACEMENT_SITES.find(site => site.id === placement?.siteId) || null;
@@ -97,17 +204,66 @@ export function placementScene(placements, propId) {
 }
 
 /**
- * What the main world currently yields that a small world may exhibit. `owned` is the
- * gameplay inventory counter, `placed` is how many are already on display, so the two
- * numbers together drive the authoring affordance.
+ * What the player may put into a small world, with `owned` from the gameplay inventory
+ * counter and `placed` from what is already down, so the two numbers drive the item bar.
+ *
+ * Only placeable props are listed: the world fragment is a keepsake and must never appear
+ * as something to put down, so it cannot be selected or placed by construction.
  */
 export function exhibitItems(inventory = {}, placements = []) {
   const entries = sanitizePlacements(placements);
-  return STORY_PROPS.map(prop => {
+  return placeableProps().map(prop => {
     const raw = inventory?.[prop.itemKey];
     const owned = Number.isInteger(raw) && raw > 0 ? raw : 0;
     const placed = entries.filter(entry => entry.propId === prop.id).length;
     return { id: prop.id, name: prop.name, description: prop.description,
       owned, placed, available: Math.max(0, owned - placed) };
   });
+}
+
+/**
+ * How many cells the item bar always shows, Minecraft-style: a fixed row rather than one
+ * cell per item, so the wheel and the number keys address the same slots no matter what the
+ * player is carrying. Empty cells are still selectable — they simply have nothing to place.
+ *
+ * If the placeable prop list ever grows past this, raise `HOTBAR_SLOTS`: it is the single
+ * constant that sizes the bar, and `hotbarSlots` pads or truncates nothing beyond it.
+ */
+export const HOTBAR_SLOTS = 8;
+
+/**
+ * The item bar: exactly `size` cells in slot order. What the player actually holds fills the
+ * leading cells (keeping `id`/`name`/`owned`/`placed`/`available`), the rest are empty cells
+ * the player can still select but cannot place from. `exhibitItems` lists every placeable prop
+ * whether or not it is in the bag, so a prop with `owned: 0` is not an item yet and fills no
+ * cell — an empty bag is a row of empty cells, not one unusable one. The row is always the
+ * full length, so a bad `size` falls back to `HOTBAR_SLOTS` instead of throwing.
+ */
+export function hotbarSlots(inventory = {}, placements = [], size = HOTBAR_SLOTS) {
+  const total = Number.isInteger(size) && size > 0 ? size : HOTBAR_SLOTS;
+  const items = exhibitItems(inventory, placements).filter(item => item.owned > 0);
+  return Array.from({ length: total }, (unused, slot) => {
+    const item = items[slot];
+    return item
+      ? { slot, ...item, empty: false }
+      : { slot, id: null, name: '', owned: 0, placed: 0, available: 0, empty: true };
+  });
+}
+
+/**
+ * The selected slot after one wheel notch, wrapping in both directions.
+ *
+ * `delta` is a raw wheel `deltaY` (or any signed number) and only its direction is used: each
+ * notch moves the selection exactly one slot, and the wrap is modulo, so scrolling back from
+ * the first slot lands on the last one and forward from the last returns to the first — the
+ * behaviour a Minecraft-style bar is expected to have. A list with nothing to choose between
+ * has no selection to move, so it answers 0 instead of inventing one.
+ */
+export function cycleSlot(current, length, delta) {
+  const size = Number.isInteger(length) && length > 0 ? length : 0;
+  if (size <= 1) return 0;
+  const raw = Number.isFinite(delta) ? Math.sign(delta) : 0;
+  const step = raw > 0 ? 1 : raw < 0 ? -1 : 0;
+  const from = Number.isInteger(current) && current >= 0 ? current % size : 0;
+  return ((from + step) % size + size) % size;
 }
