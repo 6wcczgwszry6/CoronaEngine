@@ -4,8 +4,10 @@ import { CUBE_GUID, CUBE_MODEL_REF, CUBE_PLACEMENT, cubeMoveTransform, cubeScale
   cubeSpawnTransform, cubeTransformOf, ensureStoryCube, isCubeActor, isCubeReady, playerFacingYaw,
   screenAxes, validateCubePlacement } from '../../frontend/storyCube.mjs';
 import { PLAYER_MODEL_YAW_OFFSET } from '../../frontend/storyCharacters.mjs';
-import { ADJUST_ACTIONS, PROPHET_SCREENS, adjustActionForKey, adjustFeedback,
-  fragmentForKey, fragmentPanel, isAdjustAction, nextObjectTransform, objectLabel,
+import { ADJUST_ACTIONS, FRAGMENT_ADJUST_ACTIONS, FRAGMENT_RULE_BOUNDS, PROPHET_SCREENS,
+  adjustActionForKey, adjustFeedback, adjustFragmentRule, fragmentAdjustActionForKey,
+  fragmentAdjustPanel, fragmentForKey, fragmentPanel, fragmentRuleOf, isAdjustAction,
+  nextObjectTransform, objectLabel, prophetKeyAction,
   ruleDetails, screenForKey, selectableObjects, toggleFragment } from '../../frontend/storyProphetActions.mjs';
 
 const prophet = (position = [0, 0, -4]) => ({
@@ -162,31 +164,46 @@ test('adjustment feedback names what happened', () => {
 
 test('the fragment screen lists state and details for every catalogued fragment', () => {
   const empty = fragmentPanel([]);
-  assert.deepEqual(empty.map(entry => entry.id), ['sway']);
-  assert.deepEqual(empty.map(entry => entry.state), ['owned']);
+  assert.deepEqual(empty.map(entry => entry.id), ['sway', 'spin']);
+  assert.deepEqual(empty.map(entry => entry.state), ['owned', 'owned']);
   assert.equal(empty[0].stateLabel, '可装填');
   assert.equal(empty[0].owned, true);
   assert.equal(empty[0].installed, false);
   assert.equal(empty[0].initial, true);
   assert.match(empty[0].details, /左右浮动 0\.25 米，周期 2\.40 秒/);
   assert.match(empty[0].details, /player不浮动/);
+  assert.equal(empty[0].amplitudeUnit, '米');
+  // The rotation fragment is described in degrees and says 不旋转, not 不浮动.
+  assert.equal(empty[1].stateLabel, '可装填');
+  assert.equal(empty[1].initial, true);
+  assert.match(empty[1].details, /绕前后轴旋转 ±15\.00 度，周期 3\.60 秒/);
+  assert.match(empty[1].details, /player不旋转/);
+  assert.equal(empty[1].amplitudeUnit, '度');
+  assert.equal(empty[1].amplitude, 15);
+  assert.equal(empty[1].periodMs, 3600);
 
-  const installed = fragmentPanel([{ fragmentId: 'sway' }]);
-  assert.deepEqual(installed.map(entry => entry.state), ['installed']);
+  const installed = fragmentPanel([{ fragmentId: 'sway' }, { fragmentId: 'spin' }]);
+  assert.deepEqual(installed.map(entry => entry.state), ['installed', 'installed']);
   assert.equal(installed[0].stateLabel, '已装填');
   assert.equal(installed[0].installed, true);
+  assert.equal(installed[1].stateLabel, '已装填');
 
   // A catalogued fragment the player does not own is shown as locked, not hidden.
   const locked = fragmentPanel([]).map(entry => entry.id);
-  assert.deepEqual(locked, ['sway']);
+  assert.deepEqual(locked, ['sway', 'spin']);
   assert.equal(ruleDetails({ axis: 'z', amplitude: 0.5, periodMs: 1000, excludeRoles: [] }),
     '前后浮动 0.50 米，周期 1.00 秒');
   assert.match(ruleDetails({}), /未知方向/);
+  assert.equal(ruleDetails({ type: 'spin', axis: 'z', amplitude: 20, periodMs: 2000, excludeRoles: [] }),
+    '绕前后轴旋转 ±20.00 度，周期 2.00 秒');
+  assert.equal(ruleDetails({ type: 'spin', axis: 'z', amplitude: 20, periodMs: 2000,
+    excludeRoles: ['player', 'prophet'] }), '绕前后轴旋转 ±20.00 度，周期 2.00 秒（player、prophet不旋转）');
 });
 
 test('fragment keys select an entry and toggling装填/拆下 rewrites the rule records', () => {
   assert.equal(fragmentForKey('1', []).id, 'sway');
-  assert.equal(fragmentForKey('2', []), null);
+  assert.equal(fragmentForKey('2', []).id, 'spin');
+  assert.equal(fragmentForKey('3', []), null);
   assert.equal(fragmentForKey('a', []), null);
 
   const loaded = toggleFragment([], 'sway');
@@ -202,6 +219,229 @@ test('fragment keys select an entry and toggling装填/拆下 rewrites the rule 
   // Toggling is idempotent in both directions.
   assert.deepEqual(toggleFragment(toggleFragment([], 'sway').rules, 'sway').rules, []);
   assert.throws(() => toggleFragment([], 'nope'), /未知碎片/);
+
+  // The rotation fragment installs as its own record, beside the sway.
+  const spun = toggleFragment(loaded.rules, 'spin');
+  assert.equal(spun.action, 'installed');
+  assert.match(spun.feedback, /已装填：旋转碎片/);
+  assert.deepEqual(spun.rules, [{ fragmentId: 'sway', type: 'sway', axis: 'x',
+    amplitude: 0.25, periodMs: 2400 },
+  { fragmentId: 'spin', type: 'spin', axis: 'z', amplitude: 15, periodMs: 3600 }]);
+});
+
+/** 装填一块碎片后得到的那份记录，作为「调整碎片」各条测试的共同起点。 */
+const swayRecord = (amplitude = 0.25, periodMs = 2400) =>
+  ({ fragmentId: 'sway', type: 'sway', axis: 'x', amplitude, periodMs });
+const spinRecord = (amplitude = 15, periodMs = 3600) =>
+  ({ fragmentId: 'spin', type: 'spin', axis: 'z', amplitude, periodMs });
+
+test('「调整碎片」走一步只改一个数字，且始终贴着后端的上下限', () => {
+  // 镜像自 game/runtime/world_rules.py：_AMPLITUDE_LIMIT = 100.0（第 24 行）、
+  // _PERIOD_LIMIT_MS = 600_000（第 25 行），而 _positive()（第 34-36 行）要求
+  // 0 < 值 <= 上限 —— 上限合法、0 不合法，所以前端的最小值必须严格大于 0。
+  assert.equal(FRAGMENT_RULE_BOUNDS.sway.amplitude.max, 100.0);
+  assert.equal(FRAGMENT_RULE_BOUNDS.sway.periodMs.max, 600_000);
+  assert.ok(FRAGMENT_RULE_BOUNDS.sway.amplitude.min > 0, '0 会被 _positive() 拒绝');
+  assert.ok(FRAGMENT_RULE_BOUNDS.sway.periodMs.min > 0);
+  // spin 的幅度以「度」计，共用同一个 100 的上限，但步长与单位都是它自己的。
+  assert.equal(FRAGMENT_RULE_BOUNDS.spin.amplitude.max, 100.0);
+  assert.equal(FRAGMENT_RULE_BOUNDS.spin.amplitude.unit, '度');
+  assert.equal(FRAGMENT_RULE_BOUNDS.spin.amplitude.step, 5);
+  assert.ok(FRAGMENT_RULE_BOUNDS.spin.amplitude.min > 0);
+  assert.equal(FRAGMENT_RULE_BOUNDS.spin.periodMs.max, 600_000);
+  assert.equal(FRAGMENT_RULE_BOUNDS.spin.periodMs.unit, '秒');
+  assert.notEqual(FRAGMENT_RULE_BOUNDS.spin.amplitude.step, FRAGMENT_RULE_BOUNDS.sway.amplitude.step,
+    '旋转按 5 度一步，浮动按 0.05 米一步');
+  assert.deepEqual(FRAGMENT_ADJUST_ACTIONS.map(action =>
+    [action.id, action.key, action.group, action.label]), [
+    ['amplitude-up', '1', '幅度', '幅度增大'],
+    ['amplitude-down', '2', '幅度', '幅度减小'],
+    ['period-up', '3', '周期', '周期加长'],
+    ['period-down', '4', '周期', '周期缩短'],
+  ]);
+  assert.equal(fragmentAdjustActionForKey('1').id, 'amplitude-up');
+  assert.equal(fragmentAdjustActionForKey('5'), null);
+
+  const start = [swayRecord()];
+  const up = adjustFragmentRule(start, 'sway', 'amplitude-up');
+  assert.equal(up.changed, true);
+  assert.equal(up.rules[0].amplitude, 0.3, '四舍五入，不是 0.30000000000000004');
+  assert.equal(up.rules[0].periodMs, 2400, '周期没被碰过');
+  assert.match(up.feedback, /幅度已调到 0\.30 米/);
+  const back = adjustFragmentRule(up.rules, 'sway', 'amplitude-down');
+  assert.equal(back.rules[0].amplitude, 0.25, '往回一步就回到原处');
+  assert.deepEqual(back.rules, start);
+
+  const longer = adjustFragmentRule(start, 'sway', 'period-up');
+  assert.equal(longer.rules[0].periodMs, 2400 + FRAGMENT_RULE_BOUNDS.sway.periodMs.step);
+  assert.equal(longer.rules[0].amplitude, 0.25);
+  assert.match(longer.feedback, /周期已调到 2\.60 秒/);
+  assert.equal(adjustFragmentRule(longer.rules, 'sway', 'period-down').rules[0].periodMs, 2400);
+});
+
+test('旋转碎片的幅度按「度」走 5 度一步，并且在两端都被夹住', () => {
+  const start = [spinRecord()];
+  const up = adjustFragmentRule(start, 'spin', 'amplitude-up');
+  assert.equal(up.changed, true);
+  assert.equal(up.rules[0].amplitude, 20, '15 度 + 5 度');
+  assert.equal(up.rules[0].periodMs, 3600, '周期没被碰过');
+  assert.equal(up.rules[0].type, 'spin', '类型与轴在调整后不变');
+  assert.equal(up.rules[0].axis, 'z');
+  assert.match(up.feedback, /幅度已调到 20\.00 度/, '反馈用的是度，不是米');
+  const back = adjustFragmentRule(up.rules, 'spin', 'amplitude-down');
+  assert.equal(back.rules[0].amplitude, 15);
+  assert.deepEqual(back.rules, start);
+
+  // 步长是 5 度一档，一路点到上限就停住，不会越过去。
+  const climb = adjustFragmentRule([spinRecord(95)], 'spin', 'amplitude-up');
+  assert.equal(climb.rules[0].amplitude, FRAGMENT_RULE_BOUNDS.spin.amplitude.max);
+  assert.match(climb.feedback, /已达幅度上限/);
+  const atMax = adjustFragmentRule(climb.rules, 'spin', 'amplitude-up');
+  assert.equal(atMax.changed, false);
+  assert.match(atMax.feedback, /幅度已是上限 100\.00 度/);
+  // 下限同样：1 度是最小值，再往下就拒绝。
+  const atMin = adjustFragmentRule([spinRecord(FRAGMENT_RULE_BOUNDS.spin.amplitude.min)], 'spin', 'amplitude-down');
+  assert.equal(atMin.changed, false);
+  assert.match(atMin.feedback, /幅度已是下限 1\.00 度/);
+  // 周期仍然按毫秒步进、以秒显示，与浮动碎片同一条路径。
+  const slower = adjustFragmentRule(start, 'spin', 'period-up');
+  assert.equal(slower.rules[0].periodMs, 3600 + FRAGMENT_RULE_BOUNDS.spin.periodMs.step);
+  assert.match(slower.feedback, /周期已调到 3\.80 秒/);
+});
+
+test('无论怎么点，产出的规则都落在 validate_rule / _positive() 接受的区间里', () => {
+  // This is the mirror of validate_rule (world_rules.py:39-58): the same checks（类型、
+  // 轴、类型与轴配套、幅度、周期，加上 fragmentId）。
+  const backendValid = (rule, fragmentId) => rule.fragmentId === fragmentId
+    && ['sway', 'spin'].includes(rule.type)
+    && (rule.type === 'sway' ? ['x', 'y', 'z'] : ['z']).includes(rule.axis)
+    && typeof rule.amplitude === 'number' && rule.amplitude > 0
+    && rule.amplitude <= FRAGMENT_RULE_BOUNDS[rule.type].amplitude.max
+    && typeof rule.periodMs === 'number' && rule.periodMs > 0
+    && rule.periodMs <= FRAGMENT_RULE_BOUNDS[rule.type].periodMs.max;
+  for (const [fragmentId, record, bounds] of [
+    ['sway', swayRecord(50, 3000), FRAGMENT_RULE_BOUNDS.sway],
+    ['spin', spinRecord(50, 3000), FRAGMENT_RULE_BOUNDS.spin],
+  ]) {
+    for (const [actionId, field, edge] of [
+      ['amplitude-up', 'amplitude', 'max'], ['amplitude-down', 'amplitude', 'min'],
+      ['period-up', 'periodMs', 'max'], ['period-down', 'periodMs', 'min'],
+    ]) {
+      let rules = [record];
+      let feedback = '';
+      let steps = 0;
+      for (; steps < 4000; steps++) {
+        const result = adjustFragmentRule(rules, fragmentId, actionId);
+        for (const rule of result.rules) {
+          assert.equal(backendValid(rule, fragmentId), true, JSON.stringify(rule));
+        }
+        if (!result.changed) { feedback = result.feedback; break; }
+        rules = result.rules;
+      }
+      assert.equal(rules[0][field], bounds[field][edge], '停在边界上，不会越过去');
+      assert.match(feedback, edge === 'max' ? /已是上限/ : /已是下限/);
+      assert.ok(steps > 0 && steps < 4000, '先真的走了若干步，再被边界拦住');
+    }
+  }
+  // 手改过的存档值也拉回区间内，绝不原样写回去。
+  const repaired = adjustFragmentRule([swayRecord(100, 9e9)], 'sway', 'amplitude-down');
+  assert.equal(repaired.changed, true);
+  assert.equal(repaired.rules[0].periodMs, FRAGMENT_RULE_BOUNDS.sway.periodMs.max);
+  assert.equal(backendValid(repaired.rules[0], 'sway'), true);
+  const repairedSpin = adjustFragmentRule([spinRecord(1e6, 9e9)], 'spin', 'amplitude-down');
+  assert.equal(repairedSpin.changed, true);
+  assert.equal(repairedSpin.rules[0].periodMs, FRAGMENT_RULE_BOUNDS.spin.periodMs.max,
+    '手改过的周期被拉回上限');
+  assert.equal(repairedSpin.rules[0].amplitude, FRAGMENT_RULE_BOUNDS.spin.amplitude.max,
+    '手改过的幅度被夹在上限，而不是原样写回 1e6');
+  assert.equal(backendValid(repairedSpin.rules[0], 'spin'), true);
+});
+
+test('调整碎片：未知动作、未知碎片、未装填一律拒绝，且从不抛异常', () => {
+  const installed = [swayRecord()];
+  for (const [rules, id, action] of [
+    [installed, 'sway', 'nope'], [installed, 'nope', 'amplitude-up'],
+    [[], 'sway', 'amplitude-up'], [null, 'sway', 'amplitude-up'],
+    [installed, 'sway', null], [installed, null, 'amplitude-up'],
+  ]) {
+    const result = adjustFragmentRule(rules, id, action);
+    assert.equal(result.changed, false, `${String(id)} / ${String(action)}`);
+    assert.ok(result.feedback.length > 0);
+  }
+  assert.match(adjustFragmentRule([], 'sway', 'amplitude-up').feedback, /先装填该碎片再调整/);
+  assert.deepEqual(adjustFragmentRule([], 'sway', 'amplitude-up').rules, [], '一条也没写');
+  assert.match(adjustFragmentRule(installed, 'nope', 'amplitude-up').feedback, /未知碎片/);
+  assert.match(adjustFragmentRule(installed, 'sway', 'nope').feedback, /未知的调整/);
+  // 记录里读不到数字时退回目录默认值，产出的仍是合法数字。
+  const bare = adjustFragmentRule([{ fragmentId: 'sway' }], 'sway', 'amplitude-up');
+  assert.equal(bare.changed, true);
+  assert.equal(bare.rules[0].amplitude, 0.3);
+  assert.equal(bare.rules[0].periodMs, 2400);
+  assert.equal(fragmentRuleOf(null, 'sway'), null);
+  assert.equal(fragmentRuleOf(installed, 'nope'), null);
+  assert.equal(fragmentRuleOf(installed, 'sway').periodMs, 2400);
+});
+
+test('调整一块碎片不动其它记录，也不改它们的顺序', () => {
+  const other = { fragmentId: 'other', type: 'sway', axis: 'y', amplitude: 0.5, periodMs: 1000 };
+  const third = { fragmentId: 'third', type: 'sway', axis: 'z', amplitude: 1.5, periodMs: 5000 };
+  const rules = [other, swayRecord(), third];
+  const result = adjustFragmentRule(rules, 'sway', 'period-up');
+  assert.equal(result.changed, true);
+  assert.deepEqual(result.rules.map(rule => rule.fragmentId), ['other', 'sway', 'third']);
+  assert.equal(result.rules[0], other, '没被改的记录还是原来那一份');
+  assert.equal(result.rules[2], third);
+  assert.equal(result.rules[1].periodMs, 2600);
+  assert.equal(rules[1].periodMs, 2400, '传入的列表本身不被就地修改');
+});
+
+test('「调整碎片」子屏：按键分发、当前数字，以及未装填时的说法', () => {
+  assert.equal(prophetKeyAction('2').screen, 'fragments', '主选项没被改动');
+  assert.equal(prophetKeyAction('1', 'fragments').fragmentId, 'sway');
+  assert.equal(prophetKeyAction('9', 'fragments'), null);
+  assert.equal(prophetKeyAction('1', 'fragment-adjust').type, 'adjust-fragment');
+  assert.equal(prophetKeyAction('1', 'fragment-adjust').id, 'amplitude-up');
+  assert.equal(prophetKeyAction('4', 'fragment-adjust', 'sway').fragmentId, 'sway');
+  assert.equal(prophetKeyAction('5', 'fragment-adjust'), null);
+  assert.equal(prophetKeyAction('1', 'fragment-adjust').type, 'adjust-fragment');
+
+  const installed = [swayRecord(0.6, 1200)];
+  const panel = fragmentAdjustPanel(installed, 'sway');
+  assert.equal(panel.name, '浮动碎片');
+  assert.equal(panel.installed, true);
+  assert.equal(panel.amplitude, 0.6);
+  assert.equal(panel.amplitudeLabel, '幅度 0.60 米');
+  assert.equal(panel.periodLabel, '周期 1.20 秒');
+  assert.equal(panel.actions, FRAGMENT_ADJUST_ACTIONS);
+  assert.equal(panel.hint, '');
+  // 「碎片」屏那一行显示的也必须是装填进去的数字，而不是目录默认值。
+  assert.match(fragmentPanel(installed)[0].details, /左右浮动 0\.60 米，周期 1\.20 秒/);
+  assert.match(fragmentPanel(installed)[0].details, /player不浮动/);
+
+  const missing = fragmentAdjustPanel([], 'sway');
+  assert.equal(missing.installed, false);
+  assert.equal(missing.amplitude, 0.25, '先显示目录默认值，子屏不至于是空白');
+  assert.match(missing.hint, /先装填该碎片再调整/);
+  assert.equal(fragmentAdjustPanel([], 'nope').known, false);
+  assert.match(fragmentAdjustPanel([], 'nope').hint, /先装填该碎片再调整/);
+
+  // 旋转碎片的子屏：相同的四个按键，数字按「度」显示，标题行说的是绕轴旋转。
+  assert.equal(prophetKeyAction('2', 'fragments').fragmentId, 'spin', '第二块碎片用 2 键');
+  const spinPanel = fragmentAdjustPanel([spinRecord(20, 1800)], 'spin');
+  assert.equal(spinPanel.name, '旋转碎片');
+  assert.equal(spinPanel.installed, true);
+  assert.equal(spinPanel.amplitude, 20);
+  assert.equal(spinPanel.amplitudeLabel, '幅度 20.00 度');
+  assert.equal(spinPanel.periodLabel, '周期 1.80 秒');
+  assert.equal(spinPanel.amplitudeUnit, '度');
+  assert.match(spinPanel.details, /绕前后轴旋转 ±20\.00 度/);
+  assert.match(fragmentPanel([spinRecord(20, 1800)])[1].details, /绕前后轴旋转 ±20\.00 度，周期 1\.80 秒/);
+  assert.match(fragmentPanel([spinRecord(20, 1800)])[1].details, /player不旋转/);
+  const spinMissing = fragmentAdjustPanel([], 'spin');
+  assert.equal(spinMissing.installed, false);
+  assert.equal(spinMissing.amplitude, 15, '先显示目录默认值');
+  assert.equal(spinMissing.amplitudeLabel, '幅度 15.00 度');
+  assert.equal(spinMissing.periodLabel, '周期 3.60 秒');
 });
 
 /** A minimal engine stand-in: it only updates in place when told to skip-if-exists. */
@@ -262,20 +502,31 @@ test('the adjust screen lists the scene objects so a name can be clicked instead
     { actor_guid: 'merchant', name: '商人', handle: 14, semantic_role: 'merchant',
       entity_type: 'story_character', entity_id: 'story.merchant',
       geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
-    { actor_guid: 'frag-1', name: '世界碎片1', handle: 15, semantic_role: 'placement',
-      entity_type: 'story_prop', entity_id: 'story.placement.fragment-1',
+    { actor_guid: 'placed-fragment', name: '世界碎片1', handle: 15, semantic_role: 'placement',
+      entity_type: 'story_prop', entity_id: 'story.placement.world-fragment',
       geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
-    { actor_guid: 'frag-2', name: '世界碎片2', handle: 16, semantic_role: 'placement',
-      entity_type: 'story_prop', entity_id: 'story.placement.fragment-2',
-      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    { actor_guid: 'placed-block', name: '方块1', handle: 16, semantic_role: 'placement',
+      entity_type: 'story_prop', entity_id: 'story.placement.block',
+      geometry: { position: [2, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
   ] } } };
   const list = selectableObjects(snapshot);
-  assert.deepEqual(list.map(entry => entry.guid), ['cube'],
-    'only small-world objects; never a character (player/prophet/boss/merchant) '
-    + 'and never a world fragment');
-  assert.deepEqual(list[0].transform.position, [1, 0, 1]);
-  assert.equal(objectLabel(list[0]), '先知方块（prophet-cube）');
+  assert.deepEqual(list.map(entry => entry.guid), ['placed-block', 'cube'],
+    'only small-world objects; never a character (player/prophet/boss/merchant), '
+    + 'never a world fragment — but a block the player placed IS a small-world object');
+  assert.deepEqual(list.find(entry => entry.guid === 'cube').transform.position, [1, 0, 1]);
+  assert.deepEqual(list.find(entry => entry.guid === 'placed-block').transform.position, [2, 0, 0]);
+  assert.equal(objectLabel(list.find(entry => entry.guid === 'cube')), '先知方块（prophet-cube）');
   assert.equal(objectLabel({}), '未命名（物体）');
+  // Another collectible prop under the same prefix is still a collectible, not scenery.
+  assert.deepEqual(selectableObjects({ data: { scene: { actors: [
+    { actor_guid: 'frag-2', name: '世界碎片2', handle: 16, semantic_role: 'placement',
+      entity_type: 'story_prop', entity_id: 'story.placement.world-fragment',
+      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    { actor_guid: 'placed-block-2', name: '方块2', handle: 17, semantic_role: 'placement',
+      entity_type: 'story_prop', entity_id: 'story.placement.block',
+      geometry: { position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+  ] } } }).map(entry => entry.guid), ['placed-block-2'],
+  '只排除碎片这一件，同角色的方块仍然可调');
   // A missing or empty scene is an empty list, never a throw.
   assert.deepEqual(selectableObjects(null), []);
   assert.deepEqual(selectableObjects({ data: { scene: {} } }), []);

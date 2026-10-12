@@ -118,15 +118,48 @@ async function fixture(t, options = {}) {
   t.mock.method(editorApi.sceneTools, 'createActor', async (scene, path, type, data) => {
     calls.push(['create', activePath, scene, path, structuredClone(data)]);
     const character = [...STORY_CHARACTERS, gameplayModule.FRAGMENT].find(item => item.guid === data.actor_guid);
-    assert.ok(character, `createActor 收到未知 GUID：${data.actor_guid}`);
+    // 陈列物（guid 形如 story.placement.0000）不是剧情角色：它由布局驱动创建，
+    // 形状与名字来自 storyProps / syncPlacementActors 写下的字段，不能套用角色夹具。
+    if (!character) {
+      const index = storyPropsModule.placementIndex(data.actor_guid);
+      assert.notEqual(index, null, `createActor 收到未知 GUID：${data.actor_guid}`);
+      const prop = storyPropsModule.findProp(
+        String(data.entity_id || '').slice(storyPropsModule.PLACEMENT_PREFIX.length));
+      assert.ok(prop, `createActor 收到未知陈列物：${data.entity_id}`);
+      assert.equal(data.semantic_role, 'placement');
+      const actor = { ...actorFixture({ role: 'placement', name: data.name, guid: data.actor_guid,
+        height: prop.height, rotation: [...data.rotation], x: 0, z: 0 }),
+        model_ref: '', route: path,
+        geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } };
+      actors.get(activePath).push(actor);
+      return { status: 'success', actor: structuredClone(actor) };
+    }
     const actor = { ...actorFixture(character), model_ref: data.model_ref || '',
       geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } };
     actors.get(activePath).push(actor);
     return { status: 'success', actor: structuredClone(actor) };
   });
+  // 陈列物退场：syncPlacementActors 用 removeActor 撤下布局里已经没有的那一件。
+  t.mock.method(editorApi.sceneTools, 'removeActor', async (scene, guid) => {
+    calls.push(['remove', activePath, scene, guid]);
+    const list = actors.get(activePath);
+    const index = list.findIndex(item => item.actor_guid === guid);
+    if (index >= 0) list.splice(index, 1);
+    return { status: 'success' };
+  });
   t.mock.method(editorApi.scratch, 'sendKeyEvent', async (key, mods, displayKey) => {
     if (key === gameplayModule.GAMEPLAY_KEY) {
-      if (options.gameplay) return options.gameplay(JSON.parse(displayKey));
+      const request = JSON.parse(displayKey);
+      // 小世界的自有文档（陈列 / 世界规则 / 名册）在进入世界时各读一次，它们不是战斗操作，
+      // 因此不交给用例的战斗桩：默认给一份合法的空文档，用例可用 options.documents 覆盖。
+      const documents = { loadPlacements: { version: 1, placements: [] },
+        loadWorldRules: { version: 1, rules: [] },
+        loadSubworlds: { version: 1, subworlds: [] }, ...options.documents };
+      if (documents[request.action]) {
+        return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+          state: structuredClone(documents[request.action]) };
+      }
+      if (options.gameplay) return options.gameplay(request, activePath);
       return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
         state: { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null, inventory: { worldFragment: 0 } },
         config: gameplayConfig };
@@ -756,4 +789,346 @@ test('the bag travel entry appears only after the world fragment is collected, t
   assert.equal(page.instance.inventoryOpen.value, false);
   assert.equal(page.instance.gameplayError.value, '');
   assert.deepEqual(f.opens(), [CHILD]);
+});
+
+// 回归：F 的提示与 F 的动作必须永远一致。碎片只掉在主世界，先知只站在小世界，
+// 所以两个世界各有一条 F；两条都必须「提示说什么，F 就做什么」。
+test('the F prompt and the F key agree: near the pickup it picks up, near the prophet it talks', async t => {
+  const state = { version: 2, revision: 0, rage: 20, boss: { hp: 0 },
+    drop: { id: 'story.boss.world-fragment', position: [0, 0, 0], collected: false },
+    inventory: { worldFragment: 0 } };
+  const f = await fixture(t, { gameplay: async (request, activePath) => {
+    if (request.action === 'pickupDrop') { state.drop.collected = true; state.inventory.worldFragment += 1; }
+    return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+      config: gameplayConfig, state: structuredClone(state) };
+  } });
+  let page = f.mount(); await page.mount();
+
+  // 主世界：碎片就在玩家脚下（距离 0 ≤ pickupRange 2），先知根本不在场。
+  const p = () => page.instance;
+  const hint = () => p().controlHints.value.find(([key]) => key === 'F')?.[1];
+  p().updateProximity();
+  assert.equal(p().fKeyAction.value.kind, 'pickup');
+  assert.equal(hint(), '按 F 拾取');
+  p().onKeyDown(event({ code: 'KeyF' }));
+  await turn();
+  assert.equal(p().gameplayState.value.state.inventory.worldFragment, 1, '提示说拾取，F 就必须拾取');
+  assert.equal(p().dialogueOpen.value, false, '主世界没有先知可谈');
+
+  // 小世界：碎片在主世界已经拾走，这里只可能谈先知。分两次进入同一份夹具：
+  // 先知远在天边时 F 什么都不做，把它挪到玩家身边后提示与 F 一起变成交谈。
+  const character = role => STORY_CHARACTERS.find(item => item.role === role);
+  const childActor = role => f.actors.get(CHILD).find(item => item.actor_guid === character(role).guid);
+  const prophetAt = [...childActor('prophet').geometry.position];
+  clickWorld(page); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  assert.equal(p().fKeyAction.value.kind, null, '先知远在射程外，没有可执行的动作');
+  assert.equal(hint(), undefined, '没有动作就没有 F 提示');
+  p().onKeyDown(event({ code: 'KeyF' }));
+  assert.equal(p().dialogueOpen.value, false, '够不着就不能交谈');
+
+  // 让玩家站到先知面前：页面在挂载时把场景快照读进 prophetActor，所以摆位要在挂载前完成。
+  childActor('player').geometry.position = [...prophetAt];
+  page.unmount(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  assert.equal(p().fKeyAction.value.kind, 'prophet', '先知就在身上，裁决必须选它');
+  assert.equal(hint(), 'F 与先知交谈');
+  assert.ok(p().fKeyAction.value.distance <= 1, '先知确实在射程内');
+  p().onKeyDown(event({ code: 'KeyF' }));
+  assert.equal(p().dialogueOpen.value, true, '提示说交谈，F 就必须交谈');
+  p().closeDialogue(); await turn();
+  assert.equal(p().gameplayState.value.state.inventory.worldFragment, 1, '交谈不会顺手改动拾取进度');
+});
+
+// 回归（拾取失效）：F 的距离与射程必须和玩法模块自己那套逐字对齐。
+// 上一条用例手写的 state 少了一整块盘上字段（operations / legacyRevision / inventory.block），
+// 于是「页面的 state 是不是后端真的那份」从来没被验过：真存档多一个字段、少一个 position，
+// 页面就会算出 Infinity 距离，提示不出现、F 静默什么都不做——玩家看到的就是「不能拾取物体」。
+// 这里把 game/runtime/story_gameplay.py 的 initial_state() / CONFIG 原样取来当夹具，
+// 再验同一条规则的两侧：距离用 state.drop.position，射程用 config.pickupRange。
+function readPythonGameplay(t) {
+  const python = process.env.CORONA_PYTHON || 'conda';
+  const args = process.env.CORONA_PYTHON ? ['-c'] : ['run', '-n', 'coronaengine-dev', 'python', '-c'];
+  try {
+    const { execFileSync } = require('child_process');
+    const output = execFileSync(python, [...args,
+      'import json, sys; sys.path.insert(0, "."); '
+      + 'from game.runtime import story_gameplay as m; '
+      + "print(json.dumps({'config': m.CONFIG, 'state': m.initial_state()}))"],
+    { encoding: 'utf8', cwd: new URL('../../..', import.meta.url) });
+    return JSON.parse(output.trim().split(/\r?\n/).at(-1));
+  } catch (error) {
+    t.skip(`无法读取故事玩法的真实状态（需要一个可用的 Python 与 coronaengine-dev 环境）：${error.message}`);
+    return null;
+  }
+}
+test('the real save shape from story_gameplay.py picks up inside config.pickupRange and refuses outside it', async t => {
+  const { config: realConfig, state: realState } = readPythonGameplay(t);
+  if (!realConfig) return;
+  // 盘上的初始存档形状：这些字段一个都不能少，否则页面拿到的不是后端真的那份 state。
+  assert.deepEqual(Object.keys(realState).sort(),
+    ['boss', 'drop', 'inventory', 'legacyRevision', 'operations', 'rage', 'revision', 'version'],
+    '夹具必须就是 story_gameplay.initial_state() 的真实字段');
+  assert.equal(realConfig.pickupRange, 2, '射程来自后端的 CONFIG，不是前端自己写的数');
+
+  // 真存档的红球：position 是 [x, y, z]，收集标记是 collected；用后端自己的射程把它放在边界内。
+  const state = structuredClone(realState);
+  const range = realConfig.pickupRange;
+  state.boss.hp = 0;
+  state.drop = { id: 'story.boss.world-fragment', position: [range - 1, 0, 0], collected: false };
+  const f = await fixture(t, { gameplay: async (request, activePath) => {
+    if (request.action === 'pickupDrop') { state.drop.collected = true; state.inventory.worldFragment += 1; }
+    return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+      config: realConfig, state: structuredClone(state) };
+  } });
+  const page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  const hint = () => p().controlHints.value.find(([key]) => key === 'F')?.[1];
+  p().camera.snapshotPlayer().position = [0, 0, 0];
+  p().updateProximity();
+
+  assert.equal(p().fKeyAction.value.kind, 'pickup', '真实 state + 真实射程：边界内的红球必须可选');
+  assert.equal(hint(), '按 F 拾取');
+  p().onKeyDown(event({ code: 'KeyF' }));
+  await turn();
+  assert.equal(p().gameplayState.value.state.inventory.worldFragment, 1, '提示说拾取，F 就必须真的提交 pickupDrop');
+  assert.equal(p().gameplayState.value.state.drop.collected, true);
+});
+
+// 反向：超出射程一样要有提示与动作都要消失（这正是页面算距离、算射程两件事同时错才会漏掉的边界）。
+test('a drop outside the real pickupRange offers neither the prompt nor the F action', async t => {
+  const { config: realConfig, state: realState } = readPythonGameplay(t);
+  if (!realConfig) return;
+  const state = structuredClone(realState);
+  state.boss.hp = 0;
+  state.drop = { id: 'story.boss.world-fragment', position: [realConfig.pickupRange + 1, 0, 0], collected: false };
+  const f = await fixture(t, { gameplay: async (request, activePath) => ({ status: 'ok',
+    role: activePath === MAIN ? 'main' : 'child', config: realConfig, state: structuredClone(state) }) });
+  const page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  p().camera.snapshotPlayer().position = [0, 0, 0];
+  p().updateProximity();
+
+  assert.equal(p().fKeyAction.value.kind, null, '射程外的红球不是候选');
+  assert.equal(p().controlHints.value.find(([key]) => key === 'F'), undefined, '没有动作就没有 F 提示');
+  p().onKeyDown(event({ code: 'KeyF' }));
+  await turn();
+  assert.equal(p().gameplayState.value.state.inventory.worldFragment, 0, '够不着就不许拾取');
+});
+
+// 端到端：这就是玩家真实的拾取动作序列（与盘上 story_world_*\.game\story-gameplay.json 一致：
+// Boss 死在 [0,0,12]，红球落在同一处，玩家站在 z≈11.6）。走到球上，提示必须变成拾取，F 必须真的拾起来。
+test('walking onto the drop the dead boss left turns the F prompt into a real pickup', async t => {
+  const { config: realConfig, state: realState } = readPythonGameplay(t);
+  if (!realConfig) return;
+  const bossPosition = [gameplayModule.FRAGMENT.x, 0, gameplayModule.FRAGMENT.z];
+  const state = structuredClone(realState);
+  const f = await fixture(t, { gameplay: async (request, activePath) => {
+    if (request.action === 'hitBoss' || request.hit) {
+      state.revision += 1;
+      state.boss.hp = Math.max(0, state.boss.hp - realConfig.damage);
+      if (state.boss.hp === 0) {
+        state.drop = { id: 'story.boss.world-fragment', position: [...bossPosition], collected: false };
+      }
+    } else if (request.action === 'pickupDrop') {
+      state.revision += 1;
+      state.drop.collected = true; state.inventory.worldFragment += 1;
+    }
+    return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+      config: realConfig, state: structuredClone(state) };
+  } });
+  const page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  const hint = () => p().controlHints.value.find(([key]) => key === 'F')?.[1];
+
+  // Boss 还活着：没有红球，就没有拾取这一行。
+  assert.equal(hint(), undefined, 'Boss 未死时不该出现拾取提示');
+
+  // 走到 Boss 面前把它打死：红球落在 Boss 倒下的位置。攻击受冷却限制，
+  // 因此把玩法模块读的那个时钟（performance.now）接到本用例手里，而不是忙等。
+  let clock = 0;
+  t.mock.method(performance, 'now', () => clock);
+  // 走到 Boss 面前（用真实的按键移动路径，而不是改一份快照副本）。
+  p().onKeyDown(event({ code: 'KeyW', key: 'w' }));
+  for (let i = 0; i < 200 && p().camera.snapshotPlayer().position[2] < gameplayModule.FRAGMENT.z; i++) f.step(50);
+  p().camera.keyUp(event({ code: 'KeyW', key: 'w' }));
+  assert.ok(p().camera.snapshotPlayer().position[2] >= gameplayModule.FRAGMENT.z, '玩家必须能走到 Boss 脚下');
+  const swings = Math.ceil(realConfig.bossHp / realConfig.damage);
+  for (let i = 0; i < swings; i++) { clock += realConfig.cooldownMs; await p().gameplay.attack(); await turn(); }
+  assert.equal(state.boss.hp, 0, '打满次数后 Boss 必须倒下');
+  assert.ok(state.drop && state.drop.collected === false, 'Boss 死后必须留下未拾取的红球');
+
+  // 玩家就站在红球上：提示与 F 都必须是拾取。
+  p().updateProximity();
+  assert.equal(p().fKeyAction.value.kind, 'pickup', '站在红球上，F 的裁决必须是拾取');
+  assert.equal(hint(), '按 F 拾取', '站在红球上必须给出拾取提示');
+  p().onKeyDown(event({ code: 'KeyF' }));
+  await turn();
+  assert.equal(p().gameplayState.value.state.inventory.worldFragment, 1, '按 F 必须真的把红球捡起来');
+  assert.equal(p().gameplayState.value.state.drop.collected, true);
+});
+
+// 回归（Bug 1）：小世界的陈列是盘上的权威数据，进入世界时必须读回来。它一度一份也没读回来
+// （`load()` 里对兄弟方法的裸调用抛 ReferenceError，被空 catch 吞掉），于是玩家放下的方块全部
+// 回到行囊：离开再回来，物品栏又显示 64。这里走完整的换场景流程断言 64 − 3 = 61。
+test('leaving and re-entering the small world shows the saved block count, not the seed again', async t => {
+  const placements = { version: 1, placements: [0, 1, 2].map(index => ({ propId: 'block', index,
+    siteId: null, position: [index, 0, 0], rotation: [0, 0, 0], scale: 1 })) };
+  const f = await fixture(t, {
+    documents: { loadPlacements: placements },
+    gameplay: async (request, activePath) => ({ status: 'ok',
+      role: activePath === MAIN ? 'main' : 'child', config: gameplayConfig,
+      state: { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null,
+        inventory: { worldFragment: 1, block: 64 } } }),
+  });
+  let page = f.mount(); await page.mount(); await turn();
+  const blockCount = () => page.instance.hotbarSlots.value[0];
+  const countText = () => {
+    const texts = [];
+    const walk = node => {
+      if (!node || typeof node !== 'object') return;
+      if (node.props?.class === 'hotbar__count') texts.push(node.children);
+      for (const child of Array.isArray(node.children) ? node.children : []) walk(child);
+    };
+    walk(renderStory(proxyRefs(page.instance), []));
+    return texts;
+  };
+
+  // 主世界里陈列是空的（主世界只显示空布局），进小世界才读得回来。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  assert.deepEqual(page.instance.placements.value.map(entry => entry.propId), ['block', 'block', 'block']);
+  assert.deepEqual(blockCount(), { slot: 0, id: 'block', name: '方块',
+    description: '主世界带回的方块，可直接在小世界中摆放。',
+    owned: 64, placed: 3, available: 61, empty: false });
+  assert.deepEqual(countText(), ['61'], '物品栏上那个数字必须就是 61');
+
+  // 回到主世界，再进一次：同一份盘上布局，数量不许回到 64。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  assert.deepEqual(f.opens(), [CHILD, MAIN, CHILD]);
+  assert.equal(page.instance.hotbarSlots.value[0].placed, 3);
+  assert.equal(page.instance.hotbarSlots.value[0].available, 61);
+  assert.deepEqual(countText(), ['61']);
+});
+
+// 回归（小世界里无法取回方块）：小世界没有红球可用，唯一能被 F 拿回来的东西就是玩家自己
+// 放下的方块——取回就是摆放的逆操作。这里走完整的玩家动作序列：进小世界、按 B 在身前放一块、
+// 提示变成「按 F 取回方块」、按 F 之后布局少一项、物品栏的可用数回到摆放前，而且场景里的 actor
+// 是由既有的陈列 reconcile 路径退场的（没有第二条撤下路径）。
+test('the small world takes a placed block back: the 取回 prompt, F removes it, and the count returns', async t => {
+  let layout = { version: 1, placements: [] };
+  const saved = [];
+  const state = { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null,
+    inventory: { worldFragment: 1, block: 4 } };
+  const f = await fixture(t, {
+    documents: { loadPlacements: layout },
+    gameplay: async (request, activePath) => {
+      if (request.action === 'savePlacements') {
+        saved.push(structuredClone(request.placements));
+        layout = { version: 1, placements: structuredClone(request.placements) };
+        return { status: 'ok', role: 'child', state: structuredClone(layout) };
+      }
+      return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+        config: gameplayConfig, state: structuredClone(state) };
+    },
+  });
+  let page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  const hint = () => p().controlHints.value.find(([key]) => key === 'F')?.[1];
+  const available = () => p().hotbarSlots.value[0].available;
+
+  // 主世界：读到的是空布局，那里没有可摆放的陈列物，也就没有取回这一行。
+  assert.deepEqual(p().placements.value, []);
+  assert.equal(hint(), undefined, '主世界没有陈列物，F 就没有取回');
+  assert.equal(available(), 4);
+
+  // 进小世界：布局还是盘上那一份（空）。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  assert.equal(p().roleRef.value, 'child');
+  assert.deepEqual(p().placements.value, []);
+  assert.equal(available(), 4);
+  assert.equal(hint(), undefined, '身边什么都没有时没有 F 提示');
+
+  // 按 B 在身前 2 米放下一个方块：玩家站着不动，它就在取回的射程里。
+  p().onKeyDown(event({ code: 'KeyB', key: 'b' }));
+  await turn(); await turn(); await turn();
+  assert.equal(p().gameplayError.value, '', '摆放不能报错');
+  assert.deepEqual(p().placements.value.map(entry => entry.propId), ['block']);
+  assert.deepEqual(saved.at(-1).map(entry => entry.propId), ['block'], '布局必须先落盘');
+  assert.equal(available(), 3, '放下一个方块，可用数就该少一');
+  const guid = storyPropsModule.placementGuid(p().placements.value[0].index);
+  assert.ok(f.actors.get(CHILD).some(actor => actor.actor_guid === guid), '方块必须真的进了场景');
+
+  // 站在方块旁边：F 的裁决与那一行提示一起变成取回。
+  p().updateProximity();
+  assert.equal(p().fKeyAction.value.kind, 'block', '身边自己放下的方块必须是 F 的目标');
+  assert.ok(p().fKeyAction.value.distance <= storyPropsModule.PLACED_BLOCK_REACH, '方块确实在射程内');
+  assert.equal(hint(), '按 F 取回方块');
+
+  // 按 F：布局少一项、可用数回到 4、场景里的 actor 由既有陈列路径退场。
+  p().onKeyDown(event({ code: 'KeyF' }));
+  await turn(); await turn(); await turn();
+  assert.equal(p().gameplayError.value, '', '取回不能报错');
+  assert.deepEqual(p().placements.value, []);
+  assert.deepEqual(saved.at(-1), [], '取回必须把「少了一件」的布局存回去');
+  assert.equal(available(), 4, '取回之后可用数必须回到摆放前的数字');
+  assert.equal(f.calls.filter(call => call[0] === 'remove' && call[3] === guid).length, 1,
+    '撤下走的是 syncPlacementActors 的既有路径');
+  assert.ok(!f.actors.get(CHILD).some(actor => actor.actor_guid === guid), '方块必须从场景里消失');
+  assert.equal(p().fKeyAction.value.kind, null, '方块没了，取回的裁决也随之消失');
+  assert.equal(hint(), undefined, '没有目标就没有 F 提示');
+  assert.equal(p().gameplayState.value.state.inventory.block, 4, '取回不动盘上的持有数');
+  assert.equal(available(), p().hotbarSlots.value[0].owned, '手里的方块又全都能用了');
+});
+
+// 回归（Bug 2）：碎片规则是盘上的数据。它一度在进入世界时一份也没读回来，于是碎片显示未装填、
+// 「调整」子屏只回一句「先装填该碎片再调整」，按 1-4 一个字节都不写盘。这里断言规则随世界回来、
+// 按 1 后新数字既落盘又真的交给了规则引擎（而不是「改了但看不出来」）。
+test('a saved fragment rule comes back with the world, and 1 in 调整 reaches the sway runner', async t => {
+  let rules = { version: 1, rules: [{ fragmentId: 'sway', type: 'sway', axis: 'x', amplitude: 0.25, periodMs: 2400 }] };
+  const saved = [];
+  const f = await fixture(t, {
+    documents: { loadWorldRules: rules },
+    gameplay: async (request, activePath) => {
+      if (request.action === 'saveWorldRules') {
+        saved.push(structuredClone(request.rules));
+        rules = { version: 1, rules: structuredClone(request.rules) };
+        return { status: 'ok', role: 'child', state: structuredClone(rules) };
+      }
+      return { status: 'ok', role: activePath === MAIN ? 'main' : 'child', config: gameplayConfig,
+        state: { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null,
+          inventory: { worldFragment: 1, block: 64 } } };
+    },
+  });
+  let page = f.mount(); await page.mount(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+
+  assert.deepEqual(page.instance.installedRules.value.map(rule => [rule.amplitude, rule.periodMs]),
+    [[0.25, 2400]], '已装填的碎片必须随世界回来');
+  assert.equal(page.instance.worldRuleRunner.isRunning(), true, '规则引擎按保存的数字运行');
+  // 「碎片」屏上的「调整」行：子屏必须认出这块碎片已装填，并显示盘上的数字（而不是退回目录默认值）。
+  page.instance.dialogueOpen.value = true;
+  page.instance.openFragmentAdjust(page.instance.fragmentList.value[0]);
+  assert.equal(page.instance.prophetScreen.value, 'fragment-adjust');
+  assert.equal(page.instance.fragmentAdjust.value.installed, true);
+  assert.match(page.instance.fragmentAdjust.value.amplitudeLabel, /0\.25/);
+
+  // 「调整」子屏上按 1：先落盘，再把新数字交给正在运行的规则引擎。
+  const captured = [];
+  const runner = page.instance.worldRuleRunner;
+  const original = runner.setRules;
+  runner.setRules = list => { captured.push(structuredClone(list)); return original(list); };
+  page.instance.onKeyDown(event({ code: 'Digit1', key: '1' }));
+  await turn(); await turn();
+  assert.deepEqual(saved, [[{ fragmentId: 'sway', type: 'sway', axis: 'x', amplitude: 0.3, periodMs: 2400 }]],
+    '幅度 0.25 + 0.05 必须落盘');
+  assert.deepEqual(captured.at(-1), [{ type: 'sway', axis: 'x', amplitude: 0.3, periodMs: 2400,
+    excludeRoles: ['player'] }], '规则引擎收到的是新幅度');
+  assert.match(page.instance.actionFeedback.value, /0\.30/);
+  assert.equal(page.instance.worldRuleRunner.isRunning(), true);
 });

@@ -37,8 +37,12 @@ class GameplayTests(unittest.TestCase):
     def call(self, data=None, **kwargs):
         result = game.handle_gameplay_request(json.dumps(data or self.request(**kwargs)), api=self.api)
         if result['status'] == 'ok':
-            self.revision = result['state']['revision']
+            self.revision = result['state'].get('revision', self.revision)
         return result
+
+    def document(self, action, **kwargs):
+        """A request against one of the small world's own documents (no combat revision)."""
+        return self.call({'projectPath': self.info['project_path'], 'action': action, **kwargs})
 
     def hit(self):
         result = self.call(action='hitBoss')
@@ -214,6 +218,30 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(self.call(action='hitBoss')['status'], 'error')
         self.assertTrue(lock.exists())
         self.assertFalse((self.root / game.SAVE_PATH).exists())
+
+    def test_child_placements_live_beside_the_link_owner_and_survive_reentry(self):
+        """The layout is stored in the link owner's `.game`, not in the small world copy.
+
+        The path is what decides whether a re-entry sees the blocks the player put down:
+        `<main>/.game/story-placements.json` is owned by the world that keeps the link and
+        is never recreated, while the small world's own `.game` holds only its link.
+        """
+        child = self.child()
+        entry = {'propId': 'block', 'index': 0, 'siteId': None,
+                 'position': [1, 0, 2], 'rotation': [0, 0, 0], 'scale': 1}
+        self.assertEqual(self.document('loadPlacements')['state']['placements'], [])
+        self.assertEqual(self.document('savePlacements', placements=[entry])['status'], 'error')
+        self.info['project_path'] = str(child)
+        saved = self.document('savePlacements', placements=[entry])
+        self.assertEqual(saved['status'], 'ok', saved)
+        self.assertEqual(saved['role'], 'child')
+        self.assertTrue((self.root / '.game/story-placements.json').is_file())
+        self.assertFalse((child / '.game/story-placements.json').exists())
+        self.assertFalse((child / game.SAVE_PATH).exists())
+        # Re-entering the same small world reads the same layout back, block for block.
+        reloaded = self.document('loadPlacements')
+        self.assertEqual(reloaded['state']['placements'], [entry])
+        self.assertEqual(self.document('load')['state']['inventory']['block'], game.BLOCK_SEED)
 
 
 if __name__ == '__main__':

@@ -20,7 +20,6 @@ import { createPlayerSave } from '../../../../game/frontend/playerSave.mjs';
 import { ensureStoryCharacters, syncPlacementActors } from '../../../../game/frontend/storyActors.mjs';
 import { sceneFixture } from '../../../../game/tests/frontend/fixtures.mjs';
 import { registerWorldSessionSave, flushWorldSessionSaves, trackWorldSessionWork } from '../../src/services/worldSessionLifecycle.js';
-import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera } from '../../src/utils/visionRenderModes.js';
 import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera, visionStablePlanesFromCamera } from '../../src/utils/visionRenderModes.js';
 
 const source = fs.readFileSync(new URL('../../src/views/layout/MainPage.vue', import.meta.url), 'utf8');
@@ -378,24 +377,26 @@ test('F talks to a nearby prophet and leaves the pickup path alone', async t => 
   const h = await mountStory(t), p = h.page;
   const prophet = () => h.sceneActors.find(actor => actor.actor_guid === PROPHET_GUID);
   const press = code => p.onKeyDown(input({ code }));
+  const hint = () => p.controlHints.value.find(([key]) => key === 'F');
 
   // The main world has no prophet, so F keeps its original pickup meaning.
   enterWorld(h, 'main');
-  assert.equal(p.prophetNearby.value, false);
+  assert.equal(p.fKeyAction.value.kind, null);
   press('KeyF');
   assert.equal(p.dialogueOpen.value, false);
 
   enterWorld(h, 'child');
   Object.assign(prophet().geometry, { position: [400, 0, 400] });
   p.updateProximity();
-  assert.equal(p.prophetNearby.value, false, 'a distant prophet is not reachable');
+  assert.equal(p.fKeyAction.value.kind, null, 'a distant prophet is not reachable');
+  assert.equal(hint(), undefined, 'no F line is promised when F would do nothing');
   press('KeyF');
   assert.equal(p.dialogueOpen.value, false);
 
   Object.assign(prophet().geometry, { position: [3, 0, 0] });
   p.updateProximity();
-  assert.equal(p.prophetNearby.value, true);
-  assert.equal(p.controlHints.value.find(([key]) => key === 'F')[1], '与先知交谈');
+  assert.equal(p.fKeyAction.value.kind, 'prophet');
+  assert.deepEqual(hint(), ['F', 'F 与先知交谈']);
 
   press('KeyF');
   assert.equal(p.dialogueOpen.value, true);
@@ -411,7 +412,7 @@ test('F talks to a nearby prophet and leaves the pickup path alone', async t => 
   }
   press('Enter');
   assert.equal(p.dialogueOpen.value, false, 'the last Enter ends the talk');
-  assert.equal(p.prophetNearby.value, true, 'reach is re-armed without moving');
+  assert.equal(p.fKeyAction.value.kind, 'prophet', 'reach is re-armed without moving');
   press('KeyF');
   press('Space');
   assert.equal(p.dialogueLine.value, 1);
