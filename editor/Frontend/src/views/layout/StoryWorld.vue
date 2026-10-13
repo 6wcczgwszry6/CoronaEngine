@@ -17,16 +17,21 @@ import './StoryWorld.bag.css';
 import { ensureStoryCharacters, syncPlacementActors } from '../../../../../game/frontend/storyActors.mjs';
 import { createPlayerController, VIEW_LABELS } from '../../../../../game/frontend/playerController.mjs';
 import { createPlayerSave } from '../../../../../game/frontend/playerSave.mjs';
-import { createStoryGameplay, worldBounds, distanceToBounds, pickupDistance } from '../../../../../game/frontend/storyGameplay.mjs';
+import { createStoryGameplay, worldBounds, distanceToBounds, pickupDistance,
+  contextualInteraction } from '../../../../../game/frontend/storyGameplay.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath,
   sceneSnapshot } from '../../../../../game/frontend/storyCharacters.mjs';
-import { PLACEMENT_SITES, exhibitItems as exhibitItemsFor, nextPlacementIndex,
-  placementGuid, sanitizePlacements } from '../../../../../game/frontend/storyProps.mjs';
-import { PROPHET_INTERACTION, canTalkToProphet, normalizeDialogue } from '../../../../../game/frontend/prophetDialogue.mjs';
+import { MAX_PLACEMENTS, PLACED_BLOCK_REACH, blockSpawnTransform, cycleSlot, findProp,
+  hotbarSlots as hotbarSlotsFor, nearestPlacedBlock, nextPlacementIndex, placementGuid,
+  removePlacement, sanitizePlacements } from '../../../../../game/frontend/storyProps.mjs';
+import { PROPHET_INTERACTION, prophetAvailable, prophetDistance,
+  normalizeDialogue } from '../../../../../game/frontend/prophetDialogue.mjs';
 import { ensureStoryCube, cubeTransformOf, playerFacingYaw } from '../../../../../game/frontend/storyCube.mjs';
+import { ensureStoryMap } from '../../../../../game/frontend/storyMap.mjs';
 import { collectSwayTargets, createWorldRuleRunner,
   findFragment } from '../../../../../game/frontend/storyWorldRules.mjs';
-import { ADJUST_ACTIONS, PROPHET_SCREENS, adjustFeedback, fragmentPanel,
+import { ADJUST_ACTIONS, FRAGMENT_ADJUST_ACTIONS, PROPHET_SCREENS, adjustFeedback,
+  adjustFragmentRule, fragmentAdjustPanel, fragmentPanel,
   nextObjectTransform, objectLabel, prophetKeyAction, selectableObjects,
   toggleFragment } from '../../../../../game/frontend/storyProphetActions.mjs';
 
@@ -65,7 +70,8 @@ const viewTick = ref(0);
 // 先知交互
 const dialogueOpen = ref(false);
 const dialogueLine = ref(0);
-const prophetNearby = ref(false);
+// F 的唯一裁决：提示（controlHints）与按键（interact）都读它，两者不可能各说各话。
+const fKeyAction = ref(contextualInteraction());
 const dialogue = normalizeDialogue(null);
 let prophetActor = null;
 // 先知旁的方块与世界规则（李淳珺任务）：方块是玩家可调整的场景道具，不是角色。
@@ -73,8 +79,10 @@ let playerActor = null;
 let cubeActor = null;
 let cubeTransform = null;
 let dialoguePanel = null;
-// 小世界陈列
+// 小世界陈列：布局由 placements 驱动，物品栏（下方）直接在前方落物
 const placements = ref([]);
+// 物品栏选中的格子：只在世界里保留，切换世界会重建组件，因此无需持久化。
+const hotbarIndex = ref(0);
 let visualPlacements = null;
 let disposed = false;
 let cameraReady = false;
@@ -107,12 +115,45 @@ function updateProximity() {
   const data = gameplayState.value, player = camera.snapshotPlayer();
   bossNearby.value = Boolean(data?.role === 'main' && data.state.boss.hp > 0
     && distanceToBounds(player?.position, bossBounds) <= data.config.bossBarRadius);
-  canPickup.value = Boolean(data?.role === 'main' && data.state.drop && !data.state.drop.collected
-    && pickupDistance(player, data.state.drop) <= data.config.pickupRange);
-  // 先知只存在于小世界，且只有真正靠近时才应答。
-  prophetNearby.value = canTalkToProphet({
-    role: data?.role, player, bounds: prophetBounds(), range: PROPHET_INTERACTION.range,
-  }) && !dialogueOpen.value;
+  const reach = reachableDrop(data, player);
+  canPickup.value = Boolean(reach.drop) && reach.distance <= (data?.config?.pickupRange ?? 0);
+  // 提示与 F 键读的是同一个函数、同一份现算的距离；缓存只用于渲染这一行提示。
+  fKeyAction.value = interactionFor(data, player);
+}
+// 今天还剩下的世界碎片：只有主世界会掉落，被拾走之后就不再是候选。
+function reachableDrop(data, player) {
+  const drop = data?.role === 'main' ? data.state.drop : null;
+  return { drop, distance: drop && !drop.collected ? pickupDistance(player, drop) : Infinity };
+}
+// 可被取回的方块：只有小世界有陈列物。主世界读到的是空布局，这里再按角色收一次口，
+// 免得一份还没换掉的旧布局在主世界里悄悄变成候选。
+function reachableBlock(data, player) {
+  const found = data?.role === 'child'
+    ? nearestPlacedBlock(player, placements.value, PLACED_BLOCK_REACH) : null;
+  return { placement: found, distance: found ? found.distance : Infinity };
+}
+/**
+ * F 的唯一裁决，现算现用：提示（controlHints）与按键（interact）都调用它，
+ * 因此两者不可能各说各话——也不会拿上一个世界的旧结论去回答这个世界的 F。
+ */
+function interactionFor(data, player = camera.snapshotPlayer()) {
+  const { drop, distance } = reachableDrop(data, player);
+  const block = reachableBlock(data, player);
+  return contextualInteraction({
+    prophetDistance: data?.role === 'child' && prophetAvailable(data.role)
+      ? prophetDistance(player, prophetBounds()) : Infinity,
+    pickupDistance: drop ? distance : Infinity,
+    blockDistance: block.distance,
+    range: PROPHET_INTERACTION.range,
+    // 没有配置就不许拾取（0 射程），而不是悄悄放宽成无限。
+    pickupRange: data?.config?.pickupRange ?? 0,
+    // 取回的射程由陈列几何自己给出：摆放与取回是同一对数字。
+    blockRange: PLACED_BLOCK_REACH,
+  });
+}
+// F 按下时现算一次：动作永远按玩家此刻真正站的地方判定，而不是最近一次渲染的结论。
+function currentInteraction() {
+  return current() ? interactionFor(gameplayState.value) : contextualInteraction();
 }
 function showFeedback(message) {
   if (!current()) return;
@@ -1150,23 +1191,28 @@ function viewLabel() {
   return (mode && VIEW_LABELS?.[mode]) || '第三人称';
 }
 // 操作提示按世界过滤：先知的 F 与碎片的 F 分属两个世界，天然互斥。
+// F 这一行只由 fKeyAction 决定（同一个裁决也驱动 F 键），因此提示与实际动作不会分歧。
 const controlHints = computed(() => [
   ['WASD', '移动'],
   ['鼠标', '转向 · 滚轮缩放'],
   ['Space', '跳远'],
   ['Shift', '长按跑步 · 点按闪避'],
   ...(showCombatHud.value ? [['左键', '攻击'], ['E / R', '技能']] : []),
-  ...(prophetNearby.value ? [['F', `与${dialogue.name}交谈`]] : []),
-  ...(canPickup.value ? [['F', '拾取 世界碎片']] : []),
+  ...(fKeyAction.value.prompt ? [['F', fKeyAction.value.prompt]] : []),
   ['V', `视角 · ${viewLabel()}`],
   ['Tab', '背包'],
   ['Esc', inSubworld.value ? '保存离开' : '保存退出'],
 ]);
-const exhibitItems = computed(() => {
+const hotbarSlots = computed(() => {
   void viewTick.value;
-  return exhibitItemsFor(gameplayState.value?.state?.inventory, placements.value);
+  return hotbarSlotsFor(gameplayState.value?.state?.inventory, placements.value);
 });
-const siteNames = PLACEMENT_SITES.map(site => site.name).join(' → ');
+// 物品栏固定 8 格：可摆放的物质占前几格，其余是空格子。空格也能像 Minecraft 一样被选中，
+// 只是按下 B 什么都不会放下。物品栏只在「小世界 + 没有任何面板」时存在；滚轮换格与模板
+// v-if 共用这一条，避免两处漂移。
+const hotbarSelected = computed(() => hotbarSlots.value[hotbarIndex.value] || null);
+const hotbarVisible = computed(() => inSubworld.value
+  && !inventoryOpen.value && !dialogueOpen.value && !adjustMode.value);
 // 先知是引擎侧 actor，包围盒每次实时算：缓存会按“曾经站的位置”继续响应。
 const prophetBounds = () => worldBounds(prophetActor);
 
@@ -1178,7 +1224,7 @@ function cycleView() {
   showToast(`视角：${label} → ${viewLabel()}（V 键切换）`);
 }
 function openDialogue() {
-  if (!prophetNearby.value || dialogueOpen.value) return;
+  if (currentInteraction().kind !== 'prophet' || dialogueOpen.value) return;
   camera.resetInput();
   dialogueLine.value = 0;
   dialogueOpen.value = true;
@@ -1186,7 +1232,10 @@ function openDialogue() {
 }
 function closeDialogue() {
   if (!dialogueOpen.value) return;
-  leaveProphetScreen();
+  // 关掉整个面板时不许只退一级：面板再打开时必须回到主选项，而不是停在子屏上。
+  adjustFragmentId.value = null;
+  prophetScreen.value = null;
+  actionFeedback.value = '';
   exitAdjustMode({ reopenDialogue: false });
   dialogueOpen.value = false;
   dialogueLine.value = 0;
@@ -1200,10 +1249,14 @@ function advanceDialogue() {
   if (dialogueLine.value + 1 < dialogue.lines.length) dialogueLine.value++;
   else closeDialogue();
 }
-// F 优先与先知交谈，否则保持原有行为：拾取世界碎片。
+// F 的含义由 interactionFor() 唯一决定，与上面那行操作提示同源（提示读缓存、按键现算，
+// 但两者是同一个函数）。两者都不在范围内时 F 什么都不做——面板打开时提示已消失，
+// 同样落在这里。
 function interact() {
-  if (prophetNearby.value) openDialogue();
-  else void runAction(gameplay.pickup);
+  const { kind } = currentInteraction();
+  if (kind === 'prophet') openDialogue();
+  else if (kind === 'pickup') void runAction(gameplay.pickup);
+  else if (kind === 'block') void retrievePlacedBlock();
 }
 
 // ---- 「先知」旁的物体与世界规则（李淳珺任务）-----------------------------------
@@ -1214,22 +1267,36 @@ function interact() {
 const installedRules = ref([]);
 const actionFeedback = ref('');
 // The saved records only say which fragments are installed; the semantics come from the
-// catalogue, so a rewrite of a rule never invalidates an existing world.
+// catalogue, so a rewrite of a rule never invalidates an existing world. The numbers are the
+// exception:「调整碎片」writes them into the record, and the running rule has to read them back
+// from there — otherwise the saved change would never reach the frame loop.
 const resolvedRules = computed(() => installedRules.value
-  .map(record => findFragment(record?.fragmentId)?.rule).filter(Boolean));
+  .map(record => {
+    const rule = findFragment(record?.fragmentId)?.rule;
+    if (!rule) return null;
+    return { ...rule,
+      amplitude: typeof record.amplitude === 'number' ? record.amplitude : rule.amplitude,
+      periodMs: typeof record.periodMs === 'number' ? record.periodMs : rule.periodMs };
+  }).filter(Boolean));
 // The panel has two main options. «碎片» is a screen inside the panel; «调整物体» leaves the
 // panel for the overhead editing mode, and leaving that mode reopens the panel.
+// «调整碎片» is a sub-screen of «碎片»: it edits one installed fragment's numbers.
 const prophetScreen = ref(null);
 const adjustMode = ref(false);
 const previousViewMode = ref(null);
 const adjustSelection = ref(null);
+// Which fragment the «调整碎片» sub-screen is editing; null whenever that screen is closed.
+const adjustFragmentId = ref(null);
 const fragmentList = computed(() => fragmentPanel(installedRules.value));
+const fragmentAdjust = computed(() => fragmentAdjustPanel(installedRules.value,
+  adjustFragmentId.value));
 const adjustHint = computed(() => (adjustSelection.value
   ? `已选中：${adjustSelection.value.name}`
   : '俯瞰视角：点击物体选中它，再用下面的按钮调整'));
 function enterAdjustMode() {
   actionFeedback.value = '';
   prophetScreen.value = null;
+  adjustFragmentId.value = null;
   adjustSelection.value = null;
   // The overhead view is what makes the arrangement readable; remember where to return.
   previousViewMode.value = camera.viewMode?.() || null;
@@ -1278,9 +1345,25 @@ function exitAdjustMode({ reopenDialogue = true } = {}) {
 function openProphetScreen(id) {
   if (id === 'adjust') { enterAdjustMode(); return; }
   actionFeedback.value = '';
+  adjustFragmentId.value = null;
   prophetScreen.value = id;
 }
+// 「调整」在碎片行上：进子屏，记下改的是哪一块。没装填的碎片也进得去，子屏会说明要先装填，
+// 这样按 1-4 得到的反馈与点击一致，而不是一个没有反应的按钮。
+function openFragmentAdjust(entry) {
+  adjustFragmentId.value = entry?.id || null;
+  prophetScreen.value = 'fragment-adjust';
+  actionFeedback.value = entry?.installed ? '' : '先装填该碎片再调整';
+}
+// Escape 与「返回」都只退一级：调整碎片 → 碎片 → 主选项。
 function leaveProphetScreen() {
+  if (prophetScreen.value === 'fragment-adjust') {
+    adjustFragmentId.value = null;
+    actionFeedback.value = '';
+    prophetScreen.value = 'fragments';
+    return;
+  }
+  adjustFragmentId.value = null;
   prophetScreen.value = null;
   actionFeedback.value = '';
 }
@@ -1299,7 +1382,9 @@ function rememberCube(actor) {
 function applyWorldRules(snapshot) {
   worldRuleRunner.stop();
   if (!snapshot || !inSubworld.value || !resolvedRules.value.length) return false;
-  worldRuleRunner.setTargets(collectSwayTargets(snapshot, resolvedRules.value[0]));
+  // One shared target list for every installed rule: a world may have sway and spin at the
+  // same time, and the runner composes them into a single write per actor per frame.
+  worldRuleRunner.setTargets(collectSwayTargets(snapshot));
   worldRuleRunner.setRules(resolvedRules.value);
   return worldRuleRunner.start();
 }
@@ -1322,6 +1407,27 @@ async function runProphetAction(chosen) {
       installedRules.value = Array.isArray(saved?.rules) ? saved.rules : result.rules;
       actionFeedback.value = result.feedback;
       // A snapshot is what teaches the rule which objects to animate.
+      applyWorldRules(await editorApi.scene.getSnapshot(sceneId));
+    });
+    return;
+  }
+  // 「调整碎片」：改的是已装填记录里的数字，因此与装填/拆下走完全同一条路径——先落盘，
+  // 再用新快照重启规则引擎，改完立刻在场景里看得到。
+  if (chosen.type === 'adjust-fragment') {
+    const fragmentId = chosen.fragmentId || adjustFragmentId.value;
+    // 纯函数先判一次：未装填、已到边界、未知动作都只改提示、一个字节也不写盘。放在
+    // runAction 之外，是为了让这句话不受「必须有焦点」的限制，玩家一定看得到。
+    const preview = adjustFragmentRule(installedRules.value, fragmentId, chosen.id);
+    if (!preview.changed) {
+      actionFeedback.value = preview.feedback;
+      return;
+    }
+    await runAction(async () => {
+      const result = adjustFragmentRule(installedRules.value, fragmentId, chosen.id);
+      if (!result.changed) { actionFeedback.value = result.feedback; return; }
+      const saved = await gameplay.saveWorldRules(result.rules);
+      installedRules.value = Array.isArray(saved?.rules) ? saved.rules : result.rules;
+      actionFeedback.value = result.feedback;
       applyWorldRules(await editorApi.scene.getSnapshot(sceneId));
     });
     return;
@@ -1362,10 +1468,7 @@ async function runProphetAction(chosen) {
       : `${summary}｜引擎未保留，实际缩放 ${Number.isFinite(kept) ? kept.toFixed(2) : '读不到'}`;
   });
 }
-// 陈列物按固定点位顺序布置，序号取最小空位，删一件不会让其它件重编号。
-function nextSite() {
-  return PLACEMENT_SITES[placements.value.length % PLACEMENT_SITES.length];
-}
+// 布局按序号记录，序号取最小空位，删一件不会让其它件重编号。
 const placementSignature = list => JSON.stringify(sanitizePlacements(list)
   .map(entry => [placementGuid(entry.index), entry.propId, ...entry.position, ...entry.rotation, entry.scale]));
 async function placementStep() {
@@ -1375,19 +1478,70 @@ async function placementStep() {
   await gameplay.flush();
   return true;
 }
-async function placeExhibit(propId) {
-  if (!inSubworld.value || !current() || navigation.busy || savingPlayer || actionBusy.value) return;
-  const item = exhibitItems.value.find(entry => entry.id === propId);
-  if (!item?.available) return;
-  const site = nextSite();
-  placements.value = sanitizePlacements([...placements.value, {
-    propId, index: nextPlacementIndex(placements.value), siteId: site.id,
-    position: [...site.position], rotation: [0, 0, 0], scale: 1,
-  }]);
+/** 物品栏选格子：点击与数字键共用；8 格全在可选范围内（空格也可选中），越界一律忽略。 */
+function selectHotbarSlot(index) {
+  if (!Number.isInteger(index) || index < 0 || index >= hotbarSlots.value.length) return false;
+  hotbarIndex.value = index;
+  return true;
+}
+/** 滚轮在小世界里换物品栏格子（含空格）；换格规则由 storyProps.cycleSlot 决定（双向环绕）。 */
+function cycleHotbar(delta) {
+  const next = cycleSlot(hotbarIndex.value, hotbarSlots.value.length, delta);
+  if (next === hotbarIndex.value) return false;
+  hotbarIndex.value = next;
+  return true;
+}
+/**
+ * 视口滚轮只有一个入口：物品栏可见时换格且不缩放相机，其余情况（主世界、任何面板打开）
+ * 仍交给相机缩放。preventDefault 已由模板上的 @wheel.prevent 完成，这里不再重复。
+ */
+function onSurfaceWheel(event) {
+  if (!hotbarVisible.value) return camera.wheel(event);
+  if (focused && !document.hidden) cycleHotbar(event.deltaY);
+  return true;
+}
+/**
+ * 直接摆放：把选中的一件物质放在玩家前方的地面上，不依赖任何固定陈列点。
+ * 成功路径必须经过 sanitizePlacements + nextPlacementIndex + placementStep，
+ * 场景里的 actor 由 reconcile() 的既有 watcher 负责创建。
+ */
+async function placeSelectedItem() {
+  if (!inSubworld.value) { showToast('只能在小世界里摆放方块'); return; }
+  if (!current() || navigation.busy || navigationPending.value || savingPlayer || actionBusy.value
+    || gameplay.busy || gameplay.needsSave) {
+    showToast('当前无法放置，请稍候');
+    return;
+  }
+  const selected = hotbarSelected.value;
+  if (!selected) { showToast('请先在物品栏中选择一件物品'); return; }
+  // 选中的是空格子：与 Minecraft 一样什么也不放下，只说明原因。
+  if (selected.empty || !selected.id) { showToast('这一格是空的'); return; }
+  if (selected.available <= 0) {
+    showToast(selected.id === 'block' ? '方块已用完' : `${selected.name}已用完`);
+    return;
+  }
+  if (nextPlacementIndex(placements.value) >= MAX_PLACEMENTS) {
+    showToast(`小世界已放满 ${MAX_PLACEMENTS} 件，无法继续摆放`);
+    return;
+  }
+  // facingYaw 是逻辑朝向，与先知摆放方块用的是同一个约定。
+  const player = camera.snapshotPlayer();
+  let spawn;
+  try {
+    spawn = blockSpawnTransform(player, player?.facingYaw);
+  } catch (error) {
+    showToast(`无法确定摆放位置：${error.message}`);
+    return;
+  }
+  // 布局的改动放在 runAction 里：它还有自己的输入闸门，被拦下时不能留下没保存的幽灵摆放。
   await runAction(async () => {
+    placements.value = sanitizePlacements([...placements.value, {
+      propId: selected.id, index: nextPlacementIndex(placements.value), siteId: spawn.siteId,
+      position: spawn.position, rotation: spawn.rotation, scale: spawn.scale,
+    }]);
     try {
       await placementStep();
-      showToast(`已陈列 ${item.name} · ${site.name}`);
+      showToast(`已摆放 ${selected.name} · 前方 ${spawn.position[0].toFixed(1)}, ${spawn.position[2].toFixed(1)}`);
     } catch (error) {
       // 后端是权威：失败时重新读取，而不是相信本地的错误猜测。
       placements.value = sanitizePlacements(gameplay.placements?.placements);
@@ -1395,14 +1549,30 @@ async function placeExhibit(propId) {
     }
   });
 }
-async function withdrawExhibit() {
-  if (!inSubworld.value || !current() || !placements.value.length
-    || navigation.busy || savingPlayer || actionBusy.value) return;
-  placements.value = placements.value.slice(0, -1);
+/**
+ * 取回：摆放的逆操作，只能在小世界里做。裁决（interactionFor）已经判定 kind === 'block'，
+ * 这里按同一条规则再算出最近的那一件——判定与动作读的是同一个 nearestPlacedBlock 与同一个
+ * PLACED_BLOCK_REACH，因此不可能出现「提示说取回、F 却去拿另一件」。
+ *
+ * 成功路径必须经过 removePlacement + placementStep：布局是权威来源，删掉一项之后
+ * reconcile() 里既有的陈列 watcher 会走 syncPlacementActors，把对应 guid 的 actor 从场景里移除；
+ * 物品栏的 available 也随之回到摆放前的数字。这里不另开一条撤下路径。
+ */
+async function retrievePlacedBlock() {
+  if (!inSubworld.value) { showToast('只能在小世界里取回方块'); return; }
+  if (!current() || navigation.busy || navigationPending.value || savingPlayer || actionBusy.value
+    || gameplay.busy || gameplay.needsSave) {
+    showToast('当前无法取回，请稍候');
+    return;
+  }
+  const target = nearestPlacedBlock(camera.snapshotPlayer(), placements.value, PLACED_BLOCK_REACH);
+  if (!target) return;
+  const name = findProp(target.propId)?.name || '方块';
   await runAction(async () => {
+    placements.value = removePlacement(placements.value, target.index);
     try {
       await placementStep();
-      showToast('已撤回最后一件陈列');
+      showToast(`已取回 ${name} · 第 ${target.index + 1} 件`);
     } catch (error) {
       placements.value = sanitizePlacements(gameplay.placements?.placements);
       throw error;
@@ -1506,14 +1676,29 @@ function onKeyDown(event) {
       }
       return;
     }
-    // 「碎片」屏里 Enter/Space 不再推进剧本，数字键才是选择键。
+    // 「碎片」屏里 Enter/Space 不再推进剧本，数字键才是选择键。「调整碎片」子屏同理。
     if (!prophetScreen.value && !event.repeat
       && ['Enter', 'Space', 'NumpadEnter'].includes(event.code)) advanceDialogue();
     if (!event.repeat) {
-      const chosen = prophetKeyAction(event.key, prophetScreen.value);
+      const chosen = prophetKeyAction(event.key, prophetScreen.value, adjustFragmentId.value);
       if (chosen) void runProphetAction(chosen);
     }
     return;
+  }
+  // 物品栏：调整模式与对话（上面两个分支）已经吃掉数字键，因此这里只在
+  // 小世界、面板关闭时接管数字键与 B。主世界里这套键完全不生效。
+  if (inSubworld.value && !inventoryOpen.value && !event.ctrlKey && !event.altKey
+    && !event.metaKey && !event.isComposing) {
+    if (/^[1-9]$/.test(event.key || '')) {
+      event.preventDefault(); event.stopPropagation();
+      if (!event.repeat) selectHotbarSlot(Number(event.key) - 1);
+      return;
+    }
+    if (event.code === 'KeyB' || event.key?.toLowerCase() === 'b') {
+      event.preventDefault(); event.stopPropagation();
+      if (!event.repeat) void placeSelectedItem();
+      return;
+    }
   }
   if (event.code === 'Escape' || event.key === 'Escape') {
     event.preventDefault();
@@ -1609,6 +1794,18 @@ onMounted(async () => {
       isCurrent: () => current() && worldModeState.projectPath === projectPath,
     });
     if (!current() || worldModeState.projectPath !== projectPath) return;
+    // 地图是这条故事线的地面：与角色、方块一样在进入世界时由前端确认在位。
+    // 不按角色分叉——主世界要有它，小世界是主场景的副本因此自动继承同一份；
+    // 没有它角色只会站在空气里，所以这里不设 role 门槛。
+    // 与方块同样的处理方式：失败只报告，不阻断进入世界。
+    try {
+      await ensureStoryMap({
+        api: editorApi, sceneId, frontendUrl: window.location.href, resolveAsset: resolveStoryAssetPath,
+      });
+    } catch (error) {
+      actionFeedback.value = `地图未能就位：${error.message}`;
+    }
+    if (!current() || worldModeState.projectPath !== projectPath) return;
     bossActor = snapshot.actors?.find(actor => actor.actor_guid === STORY_CHARACTERS[1].guid) || null;
     bossBounds = worldBounds(bossActor);
     // 先知只在小世界按需生成，主世界里缺失是正常的：交互保持不可用即可。
@@ -1692,7 +1889,7 @@ onUnmounted(() => {
 
 <template>
   <div ref="surface" class="story-world-viewport" tabindex="0" data-story-viewport
-    @pointerdown="onPointerDown" @pointerleave="camera.resetInput" @wheel.prevent="camera.wheel" @contextmenu.prevent>
+    @pointerdown="onPointerDown" @pointerleave="camera.resetInput" @wheel.prevent="onSurfaceWheel" @contextmenu.prevent>
     <svg class="hud-symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg">
       <defs>
         <g id="i-heal"><polygon points="24,4 40,24 24,44 8,24" /><circle cx="24" cy="24" r="6" /></g>
@@ -1828,12 +2025,37 @@ onUnmounted(() => {
 
       <!-- 世界指示与状态层（原型无此项，沿用同一套面板语言） -->
       <div class="world-indicator" role="status" aria-live="polite">{{ worldLabel }}</div>
-      <div v-if="!inventoryOpen" class="story-bottom-stack">
-        <div v-if="gameplayError" class="gameplay-error" role="alert" @pointerdown.stop @wheel.stop @pointermove.stop="camera.resetInput">
-          <span>{{ gameplayError }}</span><button :disabled="actionBusy" @click.stop="runAction(saveRegistration.flush)">重试保存</button>
+      <!-- 底部中央由这一个 flex 列独占：物品栏与状态条是它的子项，靠布局错开，
+           而不是两条各自手算的 bottom 偏移（此前两条的锚点都是 bottom-center，
+           行囊一恢复就在某些视口上叠在一起）。顶部中央归小世界状态条。 -->
+      <div v-if="!inventoryOpen" class="story-bottom-column">
+        <div class="story-bottom-stack">
+          <div v-if="gameplayError" class="gameplay-error" role="alert" @pointerdown.stop @wheel.stop @pointermove.stop="camera.resetInput">
+            <span>{{ gameplayError }}</span><button :disabled="actionBusy" @click.stop="runAction(saveRegistration.flush)">重试保存</button>
+          </div>
+          <div v-if="feedback" class="story-feedback" role="status" aria-live="polite">{{ feedback }}</div>
         </div>
-        <div v-if="feedback" class="story-feedback" role="status" aria-live="polite">{{ feedback }}</div>
+        <section v-if="hotbarVisible" class="hotbar" aria-label="物品栏"
+          @pointerdown.stop @pointermove.stop>
+          <div class="hotbar__slots" role="listbox" aria-label="物品栏格子">
+            <button v-for="entry in hotbarSlots" :key="entry.slot" type="button" class="hotbar__slot"
+              :class="{ 'is-active': entry.slot === hotbarIndex, 'is-empty': entry.empty }"
+              role="option" :aria-selected="entry.slot === hotbarIndex ? 'true' : 'false'"
+              :aria-label="entry.empty ? `${entry.slot + 1} 空格` : `${entry.slot + 1} ${entry.name}，可用 ${entry.available}`"
+              @click="selectHotbarSlot(entry.slot)">
+              <span class="hotbar__key" aria-hidden="true">{{ entry.slot + 1 }}</span>
+              <span v-if="!entry.empty" class="hotbar__name">{{ entry.name }}</span>
+              <span v-if="!entry.empty" class="hotbar__count" aria-hidden="true">{{ entry.available }}</span>
+            </button>
+          </div>
+          <p class="hotbar__hint">
+            <span v-if="hotbarSelected && !hotbarSelected.empty">已选：{{ hotbarSelected.name }}</span>
+            <span v-else>第 {{ (hotbarSelected?.slot ?? 0) + 1 }} 格是空的</span>
+            <span class="hotbar__tip">滚轮换格 · 数字键 1 - {{ hotbarSlots.length }} · B 在身前放置 · F 取回身边的方块 · 共 {{ placements.length }} / {{ MAX_PLACEMENTS }}</span>
+          </p>
+        </section>
       </div>
+      <!-- 小世界状态：顶部中央（顶部中央只在小世界空闲，主世界归 Boss 血条） -->
       <section v-if="!inventoryOpen && inSubworld" class="subworld-notice" aria-label="小世界状态">
         <strong>{{ worldLabel }}</strong>
         <span>此处为沙盒空间 · 无战斗目标</span>
@@ -1864,19 +2086,47 @@ onUnmounted(() => {
             </button>
           </template>
 
+          <!-- 「碎片」屏：点整行装填/拆下，行尾的「调整」进子屏改数字 -->
+          <template v-else-if="prophetScreen === 'fragments'">
+            <div v-for="(entry, index) in fragmentList" :key="entry.id" class="prophet-row"
+              :data-prophet-row="entry.id">
+              <button class="prophet-action prophet-row-main"
+                :data-prophet-fragment="entry.id" :disabled="!entry.owned"
+                @click="runProphetAction({ type: 'toggle-fragment', fragmentId: entry.id })">
+                <span class="prophet-action-key">{{ index + 1 }}</span>
+                <span class="prophet-action-label">{{ entry.name }}</span>
+                <span class="prophet-action-state" :data-state="entry.state">{{ entry.stateLabel }}</span>
+                <span class="prophet-action-detail">{{ entry.description }} · {{ entry.details }}</span>
+              </button>
+              <button class="prophet-action prophet-row-adjust"
+                :data-prophet-adjust="entry.id" @click="openFragmentAdjust(entry)">
+                <span class="prophet-action-label">调整</span>
+              </button>
+            </div>
+          </template>
+
+          <!-- 「调整碎片」子屏：只改选中碎片的幅度与周期，改完即落盘并重启规则 -->
           <template v-else>
-            <button v-for="(entry, index) in fragmentList" :key="entry.id" class="prophet-action"
-              :data-prophet-fragment="entry.id" :disabled="!entry.owned"
-              @click="runProphetAction({ type: 'toggle-fragment', fragmentId: entry.id })">
-              <span class="prophet-action-key">{{ index + 1 }}</span>
-              <span class="prophet-action-label">{{ entry.name }}</span>
-              <span class="prophet-action-state" :data-state="entry.state">{{ entry.stateLabel }}</span>
-              <span class="prophet-action-detail">{{ entry.description }} · {{ entry.details }}</span>
+            <p class="prophet-action-detail" data-fragment-adjust-title>
+              {{ fragmentAdjust.known ? `${fragmentAdjust.name} · ${fragmentAdjust.details}` : fragmentAdjust.name }}
+            </p>
+            <p class="prophet-action-detail" data-fragment-adjust-values>
+              当前：{{ fragmentAdjust.amplitudeLabel }} · {{ fragmentAdjust.periodLabel }}
+            </p>
+            <p v-if="fragmentAdjust.hint" class="prophet-action-detail" data-fragment-adjust-hint>
+              {{ fragmentAdjust.hint }}
+            </p>
+            <button v-for="action in FRAGMENT_ADJUST_ACTIONS" :key="action.id" class="prophet-action"
+              :data-fragment-action="action.id"
+              @click="runProphetAction({ type: 'adjust-fragment', id: action.id, fragmentId: fragmentAdjust.id })">
+              <span class="prophet-action-key">{{ action.key }}</span>
+              <span class="prophet-action-group">{{ action.group }}</span>
+              <span class="prophet-action-label">{{ action.label }}</span>
             </button>
           </template>
 
           <button v-if="prophetScreen" class="prophet-action prophet-action-back"
-            data-prophet-back @click="leaveProphetScreen">
+            :data-prophet-back="prophetScreen" @click="leaveProphetScreen">
             <span class="prophet-action-label">返回</span>
           </button>
           <p v-if="actionFeedback" class="prophet-action-feedback" role="status">{{ actionFeedback }}</p>
@@ -2273,14 +2523,16 @@ onUnmounted(() => {
   clip-path: polygon(8px 0, 100% 0, 100% calc(100% - 8px), calc(100% - 8px) 100%, 0 100%, 0 8px);
   text-shadow: 0 1px 3px #000;
 }
+/* 小世界状态：顶部中央。放到这里的唯一原因是物品栏要占用底部中央（Minecraft 位置），
+   而顶部中央在小世界是空的（图例左上、世界铭牌右上、小世界没有首领血条）。 */
 .subworld-notice {
-  position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%);
-  display: grid; gap: 5px; justify-items: center; padding: 14px 22px; text-align: center;
-  background: rgba(16, 14, 12, .88); border: 1px solid var(--gold-line);
+  position: absolute; top: 18px; left: 50%; transform: translateX(-50%);
+  display: grid; gap: 5px; justify-items: center; padding: 4px 12px; text-align: center; z-index: 3;
+  background: rgba(16, 14, 12, .82); border: 1px solid var(--gold-line);
   clip-path: var(--shape); box-shadow: 0 8px 22px rgba(0, 0, 0, .55);
 }
-.subworld-notice strong { font-size: 14px; font-weight: 500; letter-spacing: 3px; color: var(--c-gold-bright); }
-.subworld-notice span { font-size: 11px; color: var(--c-paper-dim); }
+.subworld-notice strong { font-size: 12px; font-weight: 500; letter-spacing: 3px; color: var(--c-gold-bright); }
+.subworld-notice span { font-size: 10px; color: var(--c-paper-dim); }
 
 .dialogue-overlay {
   pointer-events: auto; position: absolute; inset: 0; z-index: 6;
@@ -2328,27 +2580,51 @@ onUnmounted(() => {
 .prophet-action-state { padding: 0 4px; border: 1px solid var(--c-stone); font-size: 11px; color: var(--c-gold); }
 .prophet-action-state[data-state="installed"] { border-color: #7f9a5c; color: #cbe0a6; }
 .prophet-action-state[data-state="locked"] { opacity: .5; }
+/* 碎片条目：整行点一下装填/拆下，右边单独的「调整」进子屏改数字。
+   两个按钮必须平级——按钮里再嵌按钮是非法的 HTML。 */
+.prophet-row { display: flex; flex-basis: 100%; align-items: stretch; gap: 6px; }
+.prophet-row-main { flex: 1 1 auto; }
+.prophet-row-adjust { flex: 0 0 auto; align-self: flex-start; }
 .prophet-action-back { margin-left: auto; }
 
-.exhibit { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--c-stone); }
-.exhibit__head { display: flex; align-items: center; gap: 8px; }
-.exhibit__total { margin-left: auto; font-size: 11px; color: var(--c-gold-dim); font-variant-numeric: tabular-nums; }
-.exhibit__empty, .exhibit__hint { margin: 10px 0 0; font-size: 11px; line-height: 1.6; color: var(--c-paper-dim); }
-.exhibit__list { list-style: none; margin: 10px 0 0; padding: 0; display: grid; gap: 8px; }
-.exhibit__list li {
-  display: flex; align-items: center; gap: 12px; padding: 9px 11px;
-  background: rgba(11, 17, 15, .6); border: 1px solid var(--c-stone);
+/* 物品栏：小世界底部中央的快捷栏（Minecraft 位置）：滚轮/数字键选格，B 键在身前落物。
+   固定 8 个方形格子（见 storyProps.HOTBAR_SLOTS）：有物的格子显示名字与数量，空格子只留
+   编号并压暗，但仍可被选中。选中的格子边框明显更亮，数量压在格子右下角。
+   它不是自己贴底定位的：位置由 .story-bottom-column 这个 flex 列决定，
+   与状态条按布局上下排开，因此不可能再和它叠在一起。 */
+.hotbar {
+  position: static; display: grid; gap: 4px; justify-items: center;
 }
-.exhibit__list li.is-empty { opacity: .5; }
-.exhibit__info { flex: 1; min-width: 0; display: grid; gap: 3px; }
-.exhibit__info strong { font-size: 13px; font-weight: 500; color: var(--c-paper); }
-.exhibit__count { font-size: 11px; color: var(--c-gold); font-variant-numeric: tabular-nums; }
-.exhibit__desc { font-size: 11px; line-height: 1.5; color: #8a8172; }
-.exhibit__act, .exhibit__back {
-  flex-shrink: 0; padding: 6px 12px; font-size: 12px; cursor: pointer;
-  color: var(--c-gold-bright); background: #343820; border: 1px solid var(--c-gold);
+.hotbar__slots { display: flex; gap: 6px; }
+.hotbar__slot {
+  position: relative; display: grid; place-items: center; gap: 1px;
+  width: clamp(44px, 4.4vw, 54px); height: clamp(44px, 4.4vw, 54px);
+  padding: 3px; box-sizing: border-box; cursor: pointer;
+  background: rgba(11, 17, 15, .78); border: 1px solid var(--c-stone);
+  color: var(--c-paper);
 }
-.exhibit__back { margin-top: 10px; color: var(--c-paper-dim); background: transparent; border-color: var(--c-gold-dim); }
+/* 选中格：边框更亮更粗，并加一层内描边，避免外描边被相邻格子挤掉。 */
+.hotbar__slot.is-active {
+  border-color: var(--c-gold-bright);
+  background: #343820;
+  box-shadow: inset 0 0 0 1px rgba(240, 214, 143, .55), 0 0 10px rgba(200, 166, 89, .35);
+}
+.hotbar__slot.is-empty { opacity: .55; }
+.hotbar__key {
+  position: absolute; top: 1px; left: 3px; font-size: 10px; line-height: 1;
+  color: var(--c-gold-dim); font-variant-numeric: tabular-nums;
+}
+.hotbar__name { font-size: 11px; font-weight: 500; line-height: 1.2; text-align: center; color: var(--c-paper); }
+.hotbar__count {
+  position: absolute; right: 3px; bottom: 1px; font-size: 11px; line-height: 1;
+  color: var(--c-gold-bright); text-shadow: 0 1px 2px #000;
+  font-variant-numeric: tabular-nums;
+}
+.hotbar__hint {
+  display: flex; gap: 10px; margin: 0; padding: 2px 8px; font-size: 10.5px; line-height: 1.5;
+  color: var(--c-paper-dim); background: rgba(11, 17, 15, .6); border: 1px solid var(--c-stone);
+}
+.hotbar__tip { color: var(--c-gold-dim); }
 
 @media (max-width: 800px) {
   .world-indicator { top: 18px; right: 12px; font-size: 11px; letter-spacing: 1px; }

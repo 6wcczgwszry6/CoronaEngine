@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import shutil
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -47,6 +48,8 @@ class StoryAssetTests(unittest.TestCase):
     # Every game-owned art file must be an untouched copy of an engine asset. `cube` is a
     # hand-authored primitive, so it is registered here too: the invariant is "copied, not
     # edited", not "downloaded". `fragment` was missing from this table before.
+    # `scene` is the story world map: its measurements are re-derived from the shipped GLB
+    # below and compared with the placement the page actually runs.
     ART_SOURCES = {
         "player": ROOT / "assets/Maria WProp J J Ong",
         "boss": ROOT / "assets/dragon/dae",
@@ -54,9 +57,189 @@ class StoryAssetTests(unittest.TestCase):
         "prophet": ROOT / "assets/model",
         "fragment": ROOT / "assets/model",
         "cube": ROOT / "assets/model",
+        "scene": ROOT / "assets/model",
     }
     # A character folder carries one rigged model; props are plain meshes with no animation.
     CHARACTER_ART_ROLES = ("player", "boss", "merchant", "prophet")
+
+    # The story world map. `scale` is the model's largest world-AABB axis in metres: the
+    # engine normalises every static model into a unit cube, so that is exactly the
+    # `geometry.scale` an actor needs to appear at its real size. `floorOffset` is where the
+    # walkable courtyard sits relative to the model's own centre, and the placement removes
+    # it so the surface lands on the engine floor y = 0 that the story uses for feet.
+    # Both numbers live in the `map` block of game/data/prophet.json; the tests below
+    # re-derive them from the shipped GLB so neither side can drift away from the art.
+    STORY_WORLD_MAP = "scene/01_山门神殿_优化版.glb"
+    STORY_WORLD_MAP_SPAWN_SITES = (
+        ("player", 0, 0), ("boss", 0, 12), ("merchant", -30, -15), ("prophet", 30, -15),
+    )
+
+    def _map_placement(self) -> dict:
+        """The authoritative `map` block of game/data/prophet.json."""
+        return json.loads((ROOT / "game/data/prophet.json").read_text(encoding="utf-8"))["map"]
+
+    @staticmethod
+    def _glb_json(document: Path) -> tuple[dict, int]:
+        """Return the JSON chunk and the byte offset of the BIN payload that follows it."""
+        with document.open("rb") as stream:
+            magic, version, total = struct.unpack("<4sII", stream.read(12))
+            assert magic == b"glTF" and version == 2 and total == document.stat().st_size
+            header = None
+            while stream.tell() < total:
+                length, kind = struct.unpack("<II", stream.read(8))
+                if kind == 0x4E4F534A:
+                    header = json.loads(stream.read(length).decode("utf-8"))
+                    continue
+                if kind == 0x004E4942 and header is not None:
+                    return header, stream.tell()
+                stream.seek(length, 1)
+        raise AssertionError(f"{document} has no JSON chunk followed by a BIN chunk")
+
+    @staticmethod
+    def _mat4_multiply(lhs: list[float], rhs: list[float]) -> list[float]:
+        """Column-major 4x4 product, matching glTF's matrix layout."""
+        return [sum(lhs[k * 4 + row] * rhs[column * 4 + k] for k in range(4))
+                for column in range(4) for row in range(4)]
+
+    @classmethod
+    def _node_matrices(cls, header: dict) -> dict[int, list[float]]:
+        """World matrix of every node that carries a mesh, as the engine sees it."""
+        identity = [1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0, 0, 0, 0, 0, 1.0]
+        nodes = header.get("nodes", [])
+        local: dict[int, list[float]] = {}
+        for index, node in enumerate(nodes):
+            if "matrix" in node:
+                raw = node["matrix"]
+                local[index] = [raw[column * 4 + row] for column in range(4) for row in range(4)]
+                continue
+            tx, ty, tz = node.get("translation", [0.0, 0.0, 0.0])
+            qx, qy, qz, qw = node.get("rotation", [0.0, 0.0, 0.0, 1.0])
+            sx, sy, sz = node.get("scale", [1.0, 1.0, 1.0])
+            rotation = [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy + qz * qw), 2 * (qx * qz - qy * qw), 0,
+                        2 * (qx * qy - qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz + qx * qw), 0,
+                        2 * (qx * qz + qy * qw), 2 * (qy * qz - qx * qw), 1 - 2 * (qx * qx + qy * qy), 0,
+                        0, 0, 0, 1]
+            # rotation is column-major: column c owns axis c, so scale column c by s[c].
+            scales = (sx, sy, sz)
+            column = [rotation[column_index * 4 + row] * (scales[column_index] if row < 3 and column_index < 3 else 1.0)
+                      for column_index in range(4) for row in range(4)]
+            column[12], column[13], column[14] = tx, ty, tz
+            local[index] = column
+
+        world: dict[int, list[float]] = {}
+        scene = header.get("scenes", [{}])[header.get("scene", 0)]
+        stack = [(index, identity) for index in scene.get("nodes", [])]
+        while stack:
+            index, parent = stack.pop()
+            matrix = cls._mat4_multiply(parent, local[index])
+            if "mesh" in nodes[index]:
+                world[index] = matrix
+            stack.extend((child, matrix) for child in nodes[index].get("children", []))
+        return world
+
+    @classmethod
+    def _map_world_points(cls, document: Path) -> list[tuple[float, float, float]]:
+        """Every vertex of the map in world space, through its full node hierarchy.
+
+        The engine builds each static instance transform from the accumulated node
+        matrix, so this is the geometry the collision mesh is actually built from.
+        """
+        header, binary = cls._glb_json(document)
+        matrices = cls._node_matrices(header)
+        mesh_matrices: dict[int, list[float]] = {}
+        for index, node in enumerate(header.get("nodes", [])):
+            if "mesh" in node and index in matrices:
+                mesh_matrices[node["mesh"]] = matrices[index]
+        points: list[tuple[float, float, float]] = []
+        with document.open("rb") as stream:
+            for mesh_index, mesh in enumerate(header.get("meshes", [])):
+                matrix = mesh_matrices.get(mesh_index)
+                for primitive in mesh.get("primitives", []):
+                    accessor = header["accessors"][primitive["attributes"]["POSITION"]]
+                    view = header["bufferViews"][accessor["bufferView"]]
+                    stride = view.get("byteStride") or 12
+                    start = binary + view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+                    stream.seek(start)
+                    payload = stream.read((accessor["count"] - 1) * stride + 12)
+                    for offset in range(0, len(payload), stride):
+                        x, y, z = struct.unpack_from("<3f", payload, offset)
+                        if matrix is None:
+                            points.append((x, y, z))
+                            continue
+                        points.append(tuple(
+                            matrix[0 * 4 + row] * x + matrix[4 + row] * y
+                            + matrix[8 + row] * z + matrix[12 + row]
+                            for row in range(3)))
+        return points
+
+    def test_story_world_map_measurements_match_what_the_runtime_places(self):
+        """The map ships with the world, so its size and the line it is aligned to are facts
+        the placement writes down: re-derive both from the shipped model here.
+
+        The placement is `game/frontend/storyMap.mjs`, whose two measurements are the two
+        numbers in the `map` block of `game/data/prophet.json`; this is what stops either
+        side from drifting away from the model that is actually deployed.
+        """
+        placement = self._map_placement()
+        document = ART / self.STORY_WORLD_MAP
+        self.assertTrue(document.is_file(), str(document))
+        copied = ART.parents[2] / "assets/model" / document.name
+        self.assertTrue(copied.is_file(), str(copied))
+        with document.open("rb") as current, copied.open("rb") as source:
+            self.assertEqual(hashlib.file_digest(current, "sha256").digest(),
+                             hashlib.file_digest(source, "sha256").digest())
+
+        # The engine normalises every static model into a unit cube, so `geometry.scale`
+        # must equal the model's largest world extent in metres for it to appear life-size.
+        points = self._map_world_points(document)
+        self.assertTrue(points, "the shipped map has no geometry")
+        extent = [max(point[axis] for point in points) - min(point[axis] for point in points)
+                  for axis in range(3)]
+        self.assertAlmostEqual(max(extent), placement["scale"], delta=0.05)
+
+        # The engine floor is y = 0 and the story puts character feet there. Two facts have to
+        # hold: the courtyard really is `courtyardY` metres up in the model file, and the
+        # position the runtime sends puts it exactly on y = 0. The engine moves the model's
+        # AABB centre to the origin and scales the largest axis to 1, so the courtyard's
+        # normalised height is `(courtyardY - centre_y) * scale_factor`, and `position` is in
+        # that normalised frame — not in metres.
+        low = [min(point[axis] for point in points) for axis in range(3)]
+        high = [max(point[axis] for point in points) for axis in range(3)]
+        centre_y = (low[1] + high[1]) / 2
+        surface_y = min(point[1] for point in points if abs(point[0]) <= 3 and abs(point[2]) <= 3)
+        self.assertAlmostEqual(surface_y, placement["courtyardY"], delta=0.05,
+                               msg="courtyardY 必须是可行走庭院在模型文件里的高度")
+        scale_factor = 1 / placement["scale"]
+        position_y = 0.5 - placement["courtyardY"] / placement["scale"]
+        self.assertAlmostEqual(position_y + (surface_y - centre_y) * scale_factor, 0.0, delta=0.05,
+                               msg="摆位必须把可行走庭院压到引擎地面 y = 0")
+        # `scale / 2` here would be a 209-metre error: position lives in the normalised frame.
+        self.assertLess(abs(position_y), 0.01, "position.y 必须是归一化后的量级")
+
+        for role, x, z in self.STORY_WORLD_MAP_SPAWN_SITES:
+            with self.subTest(role=role):
+                footprint = [point[1] for point in points
+                             if abs(point[0] - x) <= 3 and abs(point[2] - z) <= 3]
+                self.assertTrue(footprint, f"{role} spawn has no surface beneath it")
+                self.assertLessEqual(min(footprint), surface_y + 0.2,
+                                     f"{role} spawn floats above the map")
+                self.assertGreaterEqual(min(footprint), surface_y - 1.5,
+                                        f"{role} spawn sinks into the map")
+
+    def test_the_map_actor_is_static_so_the_surface_is_solid(self):
+        """`phantom` would let characters walk straight through the map.
+
+        The map is created by the page on every entry (`game/frontend/storyMap.mjs`), not
+        seeded into new worlds by native creation code, so that is where the body type lives.
+        """
+        source = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
+        self.assertIn("body_type: 'static'", source)
+        self.assertNotIn("'phantom'", source)
+        self.assertNotIn('"phantom"', source)
+        # The map must arrive with the world the player enters, not only with a new world.
+        page = (ROOT / "editor/Frontend/src/views/layout/StoryWorld.vue").read_text(encoding="utf-8")
+        self.assertIn("import { ensureStoryMap } from '../../../../../game/frontend/storyMap.mjs';", page)
+        self.assertIn("await ensureStoryMap({", page)
 
     def test_models_and_supplied_sidecars_are_unchanged_copies_of_engine_assets(self):
         for role, source_root in self.ART_SOURCES.items():
@@ -82,8 +265,10 @@ class StoryAssetTests(unittest.TestCase):
             self.skipTest("Node.js is required to read the runtime projections")
         result = subprocess.run([node, "--input-type=module", "-e",
             "import {CUBE_PLACEMENT} from './game/frontend/storyCube.mjs'; "
+            "import {MAP_PLACEMENT, mapOriginTransform} from './game/frontend/storyMap.mjs'; "
             "import {FRAGMENTS, WORLD_RULE_VERSION} from './game/frontend/storyWorldRules.mjs'; "
-            "console.log(JSON.stringify({cube: CUBE_PLACEMENT, fragments: FRAGMENTS, "
+            "console.log(JSON.stringify({cube: CUBE_PLACEMENT, map: MAP_PLACEMENT, "
+            "mapTransform: mapOriginTransform(), fragments: FRAGMENTS, "
             "ruleVersion: WORLD_RULE_VERSION}));"],
             cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
         projection = json.loads(result.stdout)
@@ -92,6 +277,27 @@ class StoryAssetTests(unittest.TestCase):
         for key, value in projection["cube"].items():
             self.assertIn(key, cube, key)
             self.assertEqual(value, cube[key], key)
+
+        # The map is declared exactly like the cube, so it is mirrored the same way: every
+        # field of the projection must exist in the data file with the same value.
+        story_map = self._map_placement()
+        self.assertEqual(projection["map"], {key: story_map[key] for key in projection["map"]},
+                         "storyMap.mjs 的 MAP_PLACEMENT 必须逐字段等于 prophet.json 的 map 块")
+        for key in ("asset", "guid", "modelRef", "scale", "courtyardY"):
+            self.assertIn(key, story_map, key)
+        # The transform the page sends is derived from those two numbers, never a third copy.
+        transform = projection["mapTransform"]
+        expected_y = 0.5 - story_map["courtyardY"] / story_map["scale"]
+        self.assertAlmostEqual(transform["position"][1], expected_y, places=6)
+        self.assertEqual(transform["position"][0], 0)
+        self.assertEqual(transform["position"][2], 0)
+        self.assertEqual(transform["scale"], [story_map["scale"]] * 3)
+        self.assertEqual(transform["rotation"], [0, 0, 0])
+        # ≈ 0.002: the courtyard sits 209.14 m below the model's AABB centre, and the engine
+        # divides that back out by `scale` because `position` is in the normalised frame.
+        # `scale / 2 - courtyardY` would be ~420 × too large and float the map in the air.
+        self.assertAlmostEqual(expected_y, 0.0020485, places=6)
+        self.assertLess(abs(expected_y), 0.01)
 
         catalogue = json.loads((ROOT / "game/data/fragments.json").read_text(encoding="utf-8"))
         self.assertEqual(projection["ruleVersion"], catalogue["version"])

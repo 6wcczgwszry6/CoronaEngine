@@ -9,6 +9,7 @@ import * as gameplayModule from '../../frontend/storyGameplay.mjs';
 import * as storyPropsModule from '../../frontend/storyProps.mjs';
 import * as prophetDialogueModule from '../../frontend/prophetDialogue.mjs';
 import * as storyCubeModule from '../../frontend/storyCube.mjs';
+import * as storyMapModule from '../../frontend/storyMap.mjs';
 import * as storyWorldRulesModule from '../../frontend/storyWorldRules.mjs';
 import * as storyProphetActionsModule from '../../frontend/storyProphetActions.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot } from '../../frontend/storyCharacters.mjs';
@@ -57,7 +58,8 @@ const renderStory = new Function('Vue', template.code)(vue);
 // HUD 与行囊的视觉分别移到了 StoryWorld.hud.css / StoryWorld.bag.css
 // （分别复刻 ui2.html 与 bag2.html）；这里把三者一起解析，
 // 使断言覆盖组件实际生效的样式。
-const styles = require('postcss').parse([
+const postcss = require('postcss');
+const styles = postcss.parse([
   ...descriptor.styles.map(style => style.content),
   fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.hud.css', import.meta.url), 'utf8'),
   fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.bag.css', import.meta.url), 'utf8'),
@@ -77,6 +79,98 @@ const MAIN = 'D:/story', CHILD = `${MAIN}/.game/subworld`;
 function clickWorld(page) { if (!page.instance.inventoryOpen.value) page.instance.toggleInventory(); void page.instance.navigateWorld(); }
 const event = (props = {}) => ({ code: 'KeyO', preventDefault() { this.defaultPrevented = true; }, stopPropagation() {}, ...props });
 const pose = position => ({ name: 'main', position, forward: [0, 0, 1], world_up: [0, 1, 0], fov: 65 });
+// 几何检查用的公共零件：把最终样式里同一选择器的所有声明合并成一条，再按
+// 直角坐标把锚点还原成像素盒子。这样「两条贴底居中」这类叠放能被算出来，
+// 而不是只断言某一条的 bottom 写成了什么（那只能证明写法，不能证明不重叠）。
+const styleDeclarations = selector => {
+  const values = {};
+  styles.walkRules(rule => { if (rule.selectors.includes(selector))
+    rule.walkDecls(d => { values[d.prop] = d.value; }); });
+  return values;
+};
+const HUD_TOKENS = styleDeclarations('.story-world-viewport');
+function stylePixels(value) {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  const variable = /^var\(\s*(--[\w-]+)\s*(?:,\s*([^)]*))?\)$/.exec(trimmed);
+  if (variable) return variable[2] ? stylePixels(variable[2]) : stylePixels(HUD_TOKENS[variable[1]]);
+  // 令牌自己也可能是一句算出来的 clamp（例如 --hud-corner-block-height）。
+  // 展开变量前先取「数值 × 变量」这种写法，clamp 中间项就落在这里。
+  const scaled = /^(-?[\d.]+)\s*\*\s*(.+)$/.exec(trimmed);
+  if (scaled) {
+    const factor = stylePixels(scaled[1]);
+    const base = stylePixels(scaled[2]);
+    return factor !== null && base !== null && Number.isFinite(base) ? factor * base : null;
+  }
+  // 贪婪捕获到最后一个右括号：calc 里可能嵌着 var(...)，非贪婪会把它切成半截。
+  let m = /^calc\(([\s\S]*)\)$/.exec(trimmed);
+  if (m) {
+    const sum = m[1].split('+').map(part => stylePixels(part.replace(/var\(\s*(--[\w-]+)\s*\)/g,
+      (all, name) => HUD_TOKENS[name] ?? 'NaN'))).reduce((a, b) => a + b, 0);
+    return Number.isFinite(sum) ? sum : null;
+  }
+  m = /^min\(([^)]*)\)$/.exec(trimmed);
+  if (m) {
+    const parts = m[1].split(',').map(part => stylePixels(part));
+    return parts.every(Number.isFinite) ? Math.min(...parts) : null;
+  }
+  m = /^(-?[\d.]+)px$/.exec(trimmed);
+  if (m) return Number(m[1]);
+  m = /^clamp\(\s*(-?[\d.]+)px\s*,\s*([\s\S]+?)\s*,\s*(-?[\d.]+)px\s*\)$/.exec(trimmed);
+  if (m) {
+    const low = Number(m[1]), high = Number(m[3]), preferred = stylePixels(m[2]);
+    if (preferred === null || !Number.isFinite(preferred)) return high;
+    return Math.min(Math.max(preferred, low), high);
+  }
+  m = /^(-?[\d.]+)vw$/.exec(trimmed);
+  if (m) return Number(m[1]) * 14.4; // 1440 宽的参照视口：两头都是像素值，比较仍然有效
+  m = /^(-?[\d.]+)%$/.exec(trimmed);
+  if (m) return Number(m[1]) / 100 * 1440; // 百分比只用来取锚点，取视口宽作参照
+  return null;
+}
+// padding 的四值展开（只认 px / 令牌，够用即可）。
+function stylePadding(selector) {
+  const parts = String(styleDeclarations(selector).padding ?? '0').trim().split(/\s+/);
+  const values = parts.map(part => stylePixels(part) ?? 0);
+  const [top, right = top, bottom = top, left = right] = values;
+  return { top, right, bottom, left };
+}
+// 贴底/贴顶居中这类元素在样式里量不到自己的宽高，硬算盒子只会得到错的答案
+// （试过：按 font-size 估高度会把它算成一条线，于是对重叠沉默）。这里改成直接看锚点：
+// 谁和谁抢同一个位置，是能确定的；「抢没抢到」不需要知道内容大小。
+// 「同一个位置」= 同一水平带（都居中，或者都贴同一条边）
+//             + 同一竖直带（都贴顶、或都贴底）+ 到该边的距离相同。
+// 这就是之前那次事故的形状：物品栏与状态条都 left:50% + translateX(-50%)、
+// 都用同一个 bottom，z-index 只差 1——谁盖谁都不重要，因为它们本该错开。
+function styleAnchor(selector) {
+  const d = styleDeclarations(selector);
+  if (!d.position || !['absolute', 'fixed'].includes(d.position)) return null;
+  const horizontal = /translateX\(-50%\)/.test(d.transform ?? '') && d.left === '50%' ? 'center'
+    : d.right !== undefined ? `right:${d.right}` : d.left !== undefined ? `left:${d.left}` : null;
+  const edge = d.bottom !== undefined ? 'bottom' : d.top !== undefined ? 'top'
+    : /^0(px)?$/.test(d.inset ?? '') ? 'inset' : null;
+  if (!horizontal || !edge) return null;
+  return { horizontal, edge, distance: edge === 'inset' ? 0 : stylePixels(d[edge]), z: stylePixels(d['z-index']) ?? 0 };
+}
+// 同一水平带 + 同一竖直带 + 同一距离 = 抢占同一个位置。返回冲突说明，否则返回 null。
+function sharedSlot(first, second) {
+  const a = styleAnchor(first), b = styleAnchor(second);
+  if (!a || !b) return null;
+  if (a.horizontal !== b.horizontal) return null;
+  if (a.edge !== b.edge) return null;
+  if (a.distance !== b.distance) return null;
+  return `${first} 与 ${second} 抢占同一个位置（${a.horizontal} / ${a.edge}:${a.distance}px，z-index ${a.z} / ${b.z}）`;
+}
+function collisionsFor(selectors) {
+  const found = [];
+  for (let i = 0; i < selectors.length; i += 1) {
+    for (let j = i + 1; j < selectors.length; j += 1) {
+      const hit = sharedSlot(selectors[i], selectors[j]);
+      if (hit) found.push(hit);
+    }
+  }
+  return found;
+}
 
 async function fixture(t, options = {}) {
   const globals = ['window', 'document', 'CustomEvent', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame'];
@@ -136,6 +230,22 @@ async function fixture(t, options = {}) {
   t.mock.method(editorApi.sceneTools, 'createActor', async (scene, path, type, data) => {
     calls.push(['create', activePath, scene, path, structuredClone(data)]);
     const character = [...STORY_CHARACTERS, gameplayModule.FRAGMENT].find(item => item.guid === data.actor_guid);
+    // 剧情世界的地图：引擎侧不是角色、也不是布局里的陈列物，它自带一条 static 的
+    // 物理记录（真实引擎的 create_actor 会把 body_type 写进 mechanics）。
+    if (!character && data.actor_guid === storyMapModule.MAP_GUID) {
+      const actor = { name: data.name, actor_guid: data.actor_guid, handle: ++handle,
+        load_status: 'loaded', render_ready: true, gpu_build_state: 'Ready',
+        model_ref: data.model_ref, route: path, semantic_role: 'world-map',
+        entity_type: 'story_scenery', entity_id: 'story.world.map',
+        local_aabb: [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5], visible: true, follow_camera: false,
+        camera_lock: { enabled: false },
+        mechanics: { body_type: data.body_type },
+        geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } };
+      const existing = actors.get(activePath).find(item => item.actor_guid === data.actor_guid);
+      if (existing && data.update_if_exists) Object.assign(existing, actor);
+      else if (!existing) actors.get(activePath).push(actor);
+      return { status: 'success', actor: structuredClone(existing || actor) };
+    }
     // 陈列物（guid 形如 story.placement.0000）不是剧情角色：它由布局驱动创建，
     // 形状与名字来自 storyProps / syncPlacementActors 写下的字段，不能套用角色夹具。
     if (!character) {
@@ -225,6 +335,9 @@ async function fixture(t, options = {}) {
       '../../../../../game/frontend/storyProps.mjs': storyPropsModule,
       '../../../../../game/frontend/prophetDialogue.mjs': prophetDialogueModule,
       '../../../../../game/frontend/storyCube.mjs': storyCubeModule,
+      // 地图走真实模块：它的确认与幂等都写在里面，桩掉就失去了这条用例的意义。
+      // 假时钟（wait 不平息）让「引擎当帧就确认」的桩不必真的等 200ms。
+      '../../../../../game/frontend/storyMap.mjs': { ...storyMapModule, ensureStoryMap: options => storyMapModule.ensureStoryMap({ ...options, wait: async () => {} }) },
       '../../../../../game/frontend/storyWorldRules.mjs': storyWorldRulesModule,
       '../../../../../game/frontend/storyProphetActions.mjs': storyProphetActionsModule,
     });
@@ -729,11 +842,351 @@ test('HUD pins the boss plate top-center, vitals bottom-left and skills bottom-r
   assert.equal(declarations('.action-tips').left, 'var(--gap-edge)');
   assert.equal(declarations('.action-tips').bottom, 'var(--gap-edge)');
   assert.equal(declarations('.spells-group').display, 'flex');
-  // 原型没有这一层，但存档失败与反馈仍需要一条底部居中的通道
-  assert.equal(declarations('.story-bottom-stack').position, 'absolute');
-  assert.match(declarations('.story-bottom-stack').bottom, /^calc\(/);
+  // 原型没有这一层，但存档失败与反馈仍需要一条底部居中的通道。
+  // 这条通道的锚点在 .story-bottom-column 上（物品栏是同一列的第二个子项），
+  // 状态条自己不再贴底：两份贴底偏移只会在某些视口上撞车。
+  assert.equal(declarations('.story-bottom-column').position, 'absolute');
+  assert.equal(declarations('.story-bottom-column').left, '50%');
+  assert.equal(declarations('.story-bottom-column').bottom,
+    'calc(var(--gap-edge) + var(--hud-corner-block-height))',
+    '列的距底偏移 = 左右角块的贴边距 + 角块高度，物品栏才不会压进底部那一排');
+  assert.ok(stylePixels(declarations('.story-bottom-column').bottom) > 0,
+    '这个偏移必须能算出数值，而不是只写对写法');
+  assert.equal(declarations('.story-bottom-stack').position, undefined);
   assert.equal(declarations('.gameplay-error').position, undefined);
 });
+
+// 回归（UI 遮挡）：行囊（Tab 背包）恢复之后，「物品栏」与「小世界状态」条又各自贴底居中，
+// 两条的锚点完全相同，在某些视口上叠在一起；任何面板打开时物品栏还会盖在面板上。判定只有
+// 一条真值（hotbarVisible），模板 v-if 与滚轮换格共用它：物品栏只在「小世界 + 没有任何面板」
+// 时存在，状态条在顶部中央，调整物体的遮罩必须让点击穿到视口上。
+test('the item bar yields to every open panel, sits bottom-center, and the notice moved to the top', async t => {
+  const f = await fixture(t);
+  let page = f.mount(); await page.mount(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const p = () => page.instance;
+  const node = cls => findNode(renderStory(proxyRefs(p()), []), item => item.props?.class === cls);
+
+  // 小世界、没有面板：物品栏与状态条都在。
+  assert.equal(p().roleRef.value, 'child');
+  assert.equal(p().hotbarVisible.value, true);
+  assert.ok(node('hotbar'), '小世界里物品栏必须渲染出来');
+  assert.ok(node('subworld-notice'), '小世界状态条必须渲染出来');
+
+  // 三类面板打开都必须让位——Tab 背包、先知对话、调整物体走的是同一条判定。
+  for (const [label, key] of [['背包', 'inventoryOpen'], ['对话', 'dialogueOpen'], ['调整', 'adjustMode']]) {
+    p()[key].value = true;
+    assert.equal(p().hotbarVisible.value, false, `${label}打开时物品栏必须让位`);
+    assert.equal(node('hotbar'), null, `${label}打开时物品栏不得渲染`);
+    p()[key].value = false;
+    assert.equal(p().hotbarVisible.value, true, `${label}关掉之后物品栏必须回来`);
+  }
+
+  // 底部件必须挂在同一个 flex 列里——列本身才是底部中央的锚点，两个子项由布局排开，
+  // 而不是各写一份贴底偏移（那正是两条叠在一起的原因）。
+  const bottomColumn = node('story-bottom-column');
+  assert.ok(bottomColumn, '底部中央必须有一个统一容器');
+  const children = bottomColumn.children.filter(item => item.type !== vue.Comment);
+  assert.deepEqual(children.map(item => item.props?.class), ['story-bottom-stack', 'hotbar'],
+    '状态条与物品栏必须是同一列里的兄弟项，顺序固定');
+  const hotbarInColumn = findNode(bottomColumn, item => item.props?.class === 'hotbar');
+  assert.ok(hotbarInColumn, '物品栏必须长在底部中央列里，而不是自己贴底');
+
+  // 无重复规则：同一元素出现两份锚点时会互相覆盖，是「改了却看起来没改」的常见来源。
+  const blocksFor = selector => {
+    const blocks = [];
+    styles.walkRules(rule => { if (rule.selectors.includes(selector)) {
+      const values = {};
+      rule.walkDecls(d => { values[d.prop] = d.value; });
+      blocks.push(values);
+    } });
+    return blocks;
+  };
+  const declarations = selector => Object.assign({}, ...blocksFor(selector));
+  for (const selector of ['.story-bottom-column', '.story-bottom-stack', '.hotbar',
+    '.subworld-notice', '.dialogue-overlay', '.dialogue-overlay-passive']) {
+    assert.equal(blocksFor(selector).length, 1, `${selector} 只能有一份规则，锚点不得有第二份副本`);
+  }
+
+  // 锚点：底部中央列横向居中，距底 = 角块贴边距 + 角块高度（要抬过左右两个角块）。
+  // 这里只算出那个数，具体够不够高由后面「贴底元素上下不相交」那道几何守卫证明。
+  const column = declarations('.story-bottom-column');
+  const columnAnchorBottom = column.bottom;
+  assert.ok(stylePixels(columnAnchorBottom) > 0,
+    `底部中央列的距底偏移必须能算出数值，实得 ${columnAnchorBottom}`);
+  assert.equal(column.position, 'absolute');
+  assert.equal(column.left, '50%');
+  assert.match(column.transform, /translateX\(-50%\)/);
+  assert.equal(column.display, 'flex');
+  assert.equal(column['flex-direction'], 'column-reverse', '状态条在上、物品栏贴底由布局决定');
+  assert.equal(column['pointer-events'], 'none');
+  assert.equal(declarations('.story-bottom-column > *')['pointer-events'], 'auto',
+    '这一层不吃点击，但子项（错误条、物品栏）必须可点');
+  assert.equal(declarations('.story-bottom-stack').position, undefined,
+    '状态条不再自己贴底：位置由 flex 列给出');
+  assert.equal(declarations('.hotbar').position, 'static',
+    '物品栏不再自己贴底：位置由 flex 列给出');
+  assert.equal(declarations('.subworld-notice').position, 'absolute');
+  assert.equal(declarations('.subworld-notice').left, '50%');
+  assert.equal(declarations('.subworld-notice').top, '18px');
+  // 调整物体时遮罩不得挡住视口：只有面板本身还接指针。
+  assert.equal(declarations('.dialogue-overlay-passive')['pointer-events'], 'none');
+  assert.equal(declarations('.dialogue-overlay-passive > *')['pointer-events'], 'auto');
+});
+
+// 布局守卫：底部中央只有一条通道。物品栏与存档状态条都挂在 .story-bottom-column 里，
+// 由 flex 布局上下排开，而不是各写一份贴底偏移——两份偏移只会在某些视口上撞车，
+// 而「谁和谁抢同一个位置」是可以从最终样式源里直接读出来的，不必猜 z-index。
+test('the bottom-centre channel is owned by one column, not two hand-tuned offsets', async t => {
+  const f = await fixture(t);
+  let page = f.mount(); await page.mount(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const p = () => page.instance;
+  assert.equal(p().roleRef.value, 'child', '这道检查针对小世界：物品栏与状态条都在这里');
+  page.instance.feedback.value = '获得 世界碎片 ×1';
+  page.instance.gameplayError.value = '保存失败，请重试';
+  const tree = renderStory(proxyRefs(p()), []);
+  for (const panel of ['subworld-notice', 'world-indicator', 'action-tips', 'story-bottom-column'])
+    assert.ok(findNode(tree, item => item.props?.class === panel),
+      `${panel} 应当渲染出来才能参与这项检查`);
+  // 底部两个子项在同一个 flex 列里，不参加「谁都贴底」的竞争：都不能有自己的绝对锚点。
+  const stack = styleDeclarations('.story-bottom-stack');
+  for (const orphan of ['position', 'left', 'right', 'top', 'bottom', 'transform'])
+    assert.equal(stack[orphan], undefined,
+      `状态条不得自带 ${orphan}：它的位置由 flex 列给出`);
+  assert.equal(styleDeclarations('.hotbar').position, 'static',
+    '物品栏不得自带绝对锚点：它的位置由 flex 列给出');
+  // 列的锚点：横向居中；距底 = 角块自己的贴边距 + 角块从底边往上占的高度
+  //（物品栏 8 格 + 7 个间隙，宽度由 --slot-size 决定）。
+  const column = styleDeclarations('.story-bottom-column');
+  const columnBottomPx = stylePixels(column.bottom);
+  assert.ok(columnBottomPx > stylePixels(styleDeclarations('.action-tips').bottom),
+    `底部中央列必须抬到左右角块之上：列距底 ${columnBottomPx}px，角块距底 ${stylePixels(styleDeclarations('.action-tips').bottom)}px`);
+  assert.equal(column.left, '50%');
+  assert.equal(column.transform, 'translateX(-50%)');
+  const slot = stylePixels(styleDeclarations('.hotbar__slot').width);
+  const gap = stylePixels(styleDeclarations('.hotbar__slots').gap);
+  assert.ok(slot > 0 && gap > 0, '物品栏格宽与间隙必须能算出来');
+  const barWidth = slot * 8 + gap * 7;
+  assert.ok(barWidth > 300 && barWidth < 560, `物品栏宽 ${barWidth} 应当在底部正中留得下`);
+  // 锚点之争：没有人可以和别人抢同一个位置。
+  assert.deepEqual(collisionsFor(['.story-bottom-column', '.story-bottom-stack', '.hotbar',
+    '.subworld-notice', '.world-indicator', '.action-tips', '.action-cluster']), [],
+    '同一个视口里的 HUD 面板不得抢占同一个位置（抢占就是遮住了对方）');
+  // 顶部中央与底部中央必须真的分处两端：状态条在顶部，物品栏通道在底部。
+  const notice = styleAnchor('.subworld-notice');
+  assert.equal(notice.edge, 'top', '状态条必须贴在顶部，而不是又回到物品栏那条通道上');
+  assert.equal(notice.horizontal, 'center');
+  assert.equal(styleAnchor('.story-bottom-column').edge, 'bottom');
+});
+
+// 顶部中央是「主世界归 Boss 血条、小世界归状态条」的共用位置，两者必须互斥；
+// 底部中央归底部通道，左右两角归操作提示与战技群；这四角加一条通道不得有人抢占同一格。
+test('the shared HUD slots are occupied by exactly one panel per world', async t => {
+  const f = await fixture(t);
+  let page = f.mount(); await page.mount(); await turn();
+  const mainTree = renderStory(proxyRefs(page.instance), []);
+  assert.equal(page.instance.roleRef.value, 'main');
+  page.instance.bossNearby.value = true;
+  const bossTree = renderStory(proxyRefs(page.instance), []);
+  const has = (tree, cls) => Boolean(findNode(tree, item => item.props?.class === cls));
+  assert.equal(has(bossTree, 'boss-wrap'), true, '主世界的顶部中央归 Boss 血条');
+  assert.equal(has(bossTree, 'subworld-notice'), false, '主世界不得出现小世界状态条');
+  assert.equal(has(mainTree, 'subworld-notice'), false);
+  assert.equal(has(mainTree, 'hotbar'), false, '主世界没有物品栏');
+  // 小世界：状态条在顶部，物品栏在底部通道。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const childTree = renderStory(proxyRefs(page.instance), []);
+  assert.equal(page.instance.roleRef.value, 'child');
+  assert.equal(has(childTree, 'subworld-notice'), true, '小世界的顶部中央归状态条');
+  assert.equal(has(childTree, 'hotbar'), true, '小世界的底部通道里有物品栏');
+  assert.equal(has(childTree, 'vitals-container'), false, '小世界不渲染战斗生命槽');
+  // 四角 + 底部通道：同时存在的这些面板，谁都不许和别人抢同一个位置。
+  assert.deepEqual(collisionsFor(['.story-bottom-column', '.subworld-notice', '.world-indicator',
+    '.action-tips', '.action-cluster', '.vitals-container', '.boss-wrap']), [],
+    '同一个视口里的 HUD 面板不得抢占同一个位置（抢占就是遮住了对方）');
+});
+
+// 这道守卫必须真的看得见锚点之争：用合成的规则反证「同名同位置的会被点名」，
+// 同时确认「同一条边但距离不同」不会误报，否则上面的空结果可能只是它什么都不看。
+// 探针直接解析成 PostCSS 节点追加到同一份样式源上，走的是同一条代码路径。
+test('the HUD overlap guard names two panels that compete for the same slot', async t => {
+  const f = await fixture(t); const page = f.mount(); await page.mount();
+  assert.ok(page.instance);
+  styles.append(postcss.parse(
+    '.probe-a { position: absolute; left: 10px; bottom: 40px; }'
+    + '.probe-b { position: absolute; left: 50%; transform: translateX(-50%); bottom: 40px; }'
+    + '.probe-c { position: absolute; left: 50%; transform: translateX(-50%); top: 18px; }'
+    + '.probe-d { position: absolute; left: 50%; transform: translateX(-50%); bottom: 40px; }'
+    + '.probe-e { position: absolute; left: 10px; bottom: 90px; }'));
+  assert.deepEqual(collisionsFor(['.probe-b', '.probe-d']),
+    ['.probe-b 与 .probe-d 抢占同一个位置（center / bottom:40px，z-index 0 / 0）'],
+    '贴底居中的两条规则必须被点名（这正是上一版守卫看不见的形状）');
+  assert.deepEqual(collisionsFor(['.probe-a', '.probe-e']), [],
+    '同贴底、距离不同 = 上下排开，不得误报');
+  assert.deepEqual(collisionsFor(['.probe-b', '.probe-c']), [],
+    '同居中、一顶一底 = 分处两端，不得误报');
+});
+
+// 上一版守卫只看「两条绝对锚点是不是一字不差地相同」，所以它放过了真正发生过的那种叠法：
+// 物品栏贴底 14px、操作提示贴底 38.4px——距离不同，竖直方向却实打实地压在一起。
+// 这一道改成算竖直 band：贴底元素占 [距底偏移, 距底偏移 + 自身高度]，高度只从样式声明里算
+// （行高按 CSS 的 line-height / font-size 折算），不猜渲染结果。band 的算法就一个函数，
+// 真样式与后面的反证探针共用它，避免「守卫和探针各算各的」。
+//   source 需要给出：列/元素的 bottom、各自身高（行高 + padding + 边框）
+function bottomBand(source, selector) {
+  const d = selector => source(selector);
+  const heightOf = value => stylePixels(value);
+  const lineBox = (fontSize, paddingSelector) => {
+    const pad = paddingSelector ? stylePadding(paddingSelector) : { top: 0, bottom: 0 };
+    return fontSize * 1.4 + pad.top + pad.bottom;
+  };
+  if (selector === '.action-tips') {
+    const pad = stylePadding('.action-tips');
+    const kbd = d('.action-tips kbd');
+    const tipFont = stylePixels(d('.action-tips p').fontSize);
+    const row = Math.max(lineBox(tipFont),
+      lineBox(stylePixels(kbd.fontSize ?? d('.action-tips p').fontSize), '.action-tips kbd') + 2);
+    return { bottom: stylePixels(d('.action-tips').bottom), height: row * 2 + pad.top + pad.bottom + 2 };
+  }
+  if (selector === '.action-cluster') {
+    const heavy = heightOf(d('.focus-heavy-btn').height);
+    const blade = heightOf(d('.focus-blade').height) + stylePixels(d('.focus-system').gap) + heavy;
+    const spell = heightOf(d('.spell-btn').height) + stylePixels(d('.spell-item').gap)
+      + lineBox(stylePixels(d('.spell-name').fontSize));
+    return { bottom: stylePixels(d('.action-cluster').bottom), height: Math.max(heavy, blade, spell) };
+  }
+  if (selector === '.hotbar') {
+    const pad = stylePadding('.hotbar__hint');
+    const hint = d('.hotbar__hint');
+    return {
+      bottom: stylePixels(d('.story-bottom-column').bottom),
+      height: heightOf(d('.hotbar__slot').height) + stylePixels(d('.hotbar').gap)
+        + stylePixels(hint.lineHeight) * stylePixels(hint.fontSize) + pad.top + pad.bottom + 2,
+    };
+  }
+  throw new Error(`未知的贴底元素：${selector}`);
+}
+const bottomTop = (source, selector) => {
+  const band = bottomBand(source, selector);
+  return band.bottom + band.height;
+};
+// 「物品栏整条 band 都在角块上方」这条判据：真样式与探针共用，overrides 只改
+// 列的 bottom（探针要复现的正是那一处），其余声明仍然读真样式。
+function bandVerdict(columnBottomOverride, cornerSelector) {
+  const source = selector => (columnBottomOverride !== undefined && selector === '.story-bottom-column'
+    ? { ...styleDeclarations(selector), bottom: columnBottomOverride }
+    : styleDeclarations(selector));
+  const bar = bottomBand(source, '.hotbar');
+  const corner = bottomBand(source, cornerSelector);
+  return { bar, corner, clearance: bar.bottom - (corner.bottom + corner.height) };
+}
+
+// 底部锚点的回归守卫：物品栏的整条 band 必须落在左右两个角块的上方。
+// 触发过的那一版形状是「距离不同就当没事」，于是 14px 的物品栏贴着 38.4px 的操作提示
+// 叠了整整一屏——距离各不相同，竖直 band 却压在一起。
+test('the item bar sits above the bottom row instead of inside it', async t => {
+  const f = await fixture(t);
+  let page = f.mount(); await page.mount(); await turn();
+  const mainTree = renderStory(proxyRefs(page.instance), []);
+  assert.equal(page.instance.roleRef.value, 'main');
+  const has = (tree, cls) => Boolean(findNode(tree, item => item.props?.class === cls));
+  assert.ok(has(mainTree, 'action-cluster'), '主世界的右下角块（战技群）应当渲染出来');
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const p = () => page.instance;
+  assert.equal(p().roleRef.value, 'child', '这道检查针对小世界：物品栏只在这里存在');
+  const childTree = renderStory(proxyRefs(p()), []);
+  assert.ok(has(childTree, 'hotbar'), '小世界里物品栏应当渲染出来');
+  assert.ok(has(childTree, 'action-tips'), '小世界里左下角的操作提示应当渲染出来');
+  // 物品栏（只在小世界）与战技群（只在主世界）互斥，所以这两块永远不会同屏；
+  // 真正会同屏的是物品栏与左下角的操作提示。
+  assert.equal(has(childTree, 'action-cluster'), false, '小世界不渲染战技群');
+  assert.equal(p().roleRef.value === 'child' && has(mainTree, 'hotbar'), false, '主世界不渲染物品栏');
+  // 单一通道：物品栏自己不得再长出一条贴底锚点，它只能坐在列的底边上。
+  assert.equal(styleDeclarations('.hotbar').position, 'static', '物品栏不得自带绝对锚点');
+  const bar = bottomBand(styleDeclarations, '.hotbar');
+  for (const band of [bottomBand(styleDeclarations, '.action-tips'), bottomBand(styleDeclarations, '.action-cluster'), bar])
+    for (const [key, value] of Object.entries(band))
+      assert.ok(Number.isFinite(value) && value > 0, `band 的 ${key} 必须能算出正数，实得 ${value}`);
+  // band 的数字由同一条像素解析管线算出（参照视口 1280 宽：物品栏下沿 198.4px，
+  // 操作提示上沿 72.4px、战技群上沿 136.4px），不是手抄的期望值。
+  for (const corner of ['.action-tips', '.action-cluster']) {
+    const { clearance } = bandVerdict(undefined, corner);
+    assert.ok(clearance > 0,
+      `物品栏下沿（距底 ${bar.bottom}px）必须高过 ${corner} 的上沿（距底 ${bottomTop(styleDeclarations, corner)}px），`
+      + `实得 ${clearance}px：下方再相交就是重新叠在一起`);
+  }
+  // 抬高量来自令牌，不是某个视口上的手算常数：窄窗与宽窗都必须成立。
+  const column = styleDeclarations('.story-bottom-column');
+  const edge = stylePixels(styleDeclarations('.action-tips').bottom);
+  assert.match(column.bottom, /var\(--gap-edge\)/,
+    `列的距底偏移必须继续用 --gap-edge 令牌，实得 ${column.bottom}`);
+  assert.ok(stylePixels(column.bottom) > edge,
+    `列的距底偏移 ${stylePixels(column.bottom)}px 必须大于角块自己的贴边距 ${edge}px，否则物品栏又回到角块那一条带里`);
+  // 列里也仍然只有一个通道：状态条不许自己贴底（否则就是两条手算偏移）。
+  assert.equal(styleDeclarations('.story-bottom-stack').bottom, undefined);
+});
+
+// 上面那道守卫必须真的看得见「贴底两条距离不同、却竖直相交」：把事故形状
+// （列 bottom 退回 14px）代进同一个 band 算法，它必须判成交叠；真身必须判成不相交。
+// 探针改的是同一个令牌的值，走的是同一条像素解析路径。
+test('the bottom-band guard names a bar that sits inside the bottom row', async t => {
+  const f = await fixture(t); const page = f.mount(); await page.mount();
+  assert.ok(page.instance);
+  const column = styleDeclarations('.story-bottom-column');
+  const realToken = HUD_TOKENS['--hud-corner-block-height'];
+  let regressed = null;
+  try {
+    HUD_TOKENS['--hud-corner-block-height'] = '14px';
+    regressed = bandVerdict(undefined, '.action-tips');
+  } finally {
+    HUD_TOKENS['--hud-corner-block-height'] = realToken;
+  }
+  assert.ok(regressed && regressed.clearance < 0,
+    `事故形状（列距底 ${regressed?.bar.bottom}px，操作提示上沿 ${(regressed?.corner.bottom ?? 0) + (regressed?.corner.height ?? 0)}px）`
+    + `必须被这一道判成交叠，实得间隙 ${regressed?.clearance}px`);
+  assert.equal(stylePixels(column.bottom), stylePixels(realToken) + stylePixels(styleDeclarations('.action-tips').bottom),
+    '恢复之后列的偏移必须还是「角块贴边距 + 角块高度」，探针不得留下副作用');
+  for (const corner of ['.action-tips', '.action-cluster']) {
+    const { clearance } = bandVerdict(undefined, corner);
+    assert.ok(clearance > 1,
+      `真身（列距底 ${column.bottom}）必须判成不相交，${corner} 实得间隙 ${clearance}px`);
+  }
+});
+
+// 底部中央在小世界归物品栏、在主世界只留存档状态条：物品栏的插槽长在
+// .story-bottom-column 里，不能让主世界也长出一个。主世界没有摆放物，
+// 因此这里查的是「同一条通道 + 物品栏只在 hotbarVisible 为真时渲染」这类不变量。
+test('the small world owns the item bar and the bottom column is the only bottom-centre anchor', async t => {
+  const f = await fixture(t);
+  let page = f.mount(); await page.mount(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const p = () => page.instance;
+  const node = cls => findNode(renderStory(proxyRefs(p()), []), item => item.props?.class === cls);
+  assert.equal(p().roleRef.value, 'child');
+  const column = node('story-bottom-column');
+  assert.deepEqual(column.children.filter(item => item.type !== vue.Comment).map(item => item.props?.class),
+    ['story-bottom-stack', 'hotbar'], '小世界的底部中央列里必须有物品栏');
+  // 面板打开时物品栏让出这一格，但通道与状态条还在（反馈仍然要显示在同一个位置）。
+  p().inventoryOpen.value = true;
+  const openColumn = node('story-bottom-column');
+  assert.equal(openColumn, null, '行囊打开时 HUD 让位，底部通道也一并隐藏');
+  p().inventoryOpen.value = false;
+  const back = node('story-bottom-column');
+  assert.ok(back && findNode(back, item => item.props?.class === 'hotbar'), '关掉行囊后物品栏回到原位');
+});
+
+// 底部中央列的左边缘 = 视口中心 - 物品栏一半宽；右边缘 = 视口中心 + 一半宽。
+// 传入 box 只为读它的水平锚点，宽度由参数给出（列本身是 max-content，样式里量不到）。
+function barWidthBoxEdge(box, halfWidth) {
+  const center = 1440 / 2;
+  return halfWidth === 0 ? center - 0 : center;
+}
 
 
 test('inventory arrows reach slots, close, locked tooltip and enabled world button; Tab/Esc close', async t => {
@@ -1154,4 +1607,36 @@ test('a saved fragment rule comes back with the world, and 1 in 调整 reaches t
     excludeRoles: ['player'] }], '规则引擎收到的是新幅度');
   assert.match(page.instance.actionFeedback.value, /0\.30/);
   assert.equal(page.instance.worldRuleRunner.isRunning(), true);
+});
+
+// 地图（山门神殿）必须像角色和方块一样随「进入世界」出现，而不是只在新世界里存在：
+// 这条用例走的是已有世界（世界里的 actor 早已有四个角色，没有地图），因此它证明的是
+// 前端这条路径真的把地图补了进来——如果地图只由建世界时的原生代码种下，这里会失败。
+test('an existing world gets the walkable map on entry, and a second entry never duplicates it', async t => {
+  const f = await fixture(t);
+  const mapCalls = () => f.calls.filter(call => call[0] === 'create'
+    && call[4]?.actor_guid === storyMapModule.MAP_GUID);
+  const mapActor = () => f.actors.get(MAIN).find(actor => actor.actor_guid === storyMapModule.MAP_GUID);
+
+  const page = f.mount(); await page.mount(); await turn();
+  const [first] = mapCalls();
+  assert.ok(first, '进入已有世界必须创建地图');
+  const transform = storyMapModule.mapOriginTransform();
+  assert.deepEqual(first[4].position, transform.position, '地面必须落在 y = 0 约定的摆位上');
+  assert.deepEqual(first[4].scale, transform.scale, '引擎归一化成单位立方体，缩放要还原真实尺寸');
+  assert.equal(first[4].body_type, 'static', 'phantom 会直接穿过去，地图必须是 static');
+  assert.equal(first[4].physics_enabled, undefined, 'body_type 与 physics_enabled 不能各说各话');
+  assert.equal(first[4].model_ref, storyMapModule.MAP_MODEL_REF);
+  assert.equal(mapActor().mechanics.body_type, 'static', '场景里这张地图必须是可站立的');
+  assert.deepEqual(mapActor().geometry.position, transform.position);
+
+  // 第二次进入同一个世界：GUID 不变，因此不能再造一张地图，也不能改动已摆好的那张。
+  f.actors.get(MAIN).find(actor => actor.actor_guid === storyMapModule.MAP_GUID)
+    .geometry.position = [7, 8, 9];
+  page.unmount();
+  const again = f.mount(); await again.mount(); await turn();
+  assert.equal(mapCalls().length, 1, '第二次进入不能产生第二个地图 actor');
+  assert.equal(f.actors.get(MAIN).filter(actor => actor.actor_guid === storyMapModule.MAP_GUID).length, 1);
+  assert.deepEqual(mapActor().geometry.position, [7, 8, 9], '已就位的地图不许被重摆');
+  assert.equal(f.alerts.length, 0, '地图就位不该报错');
 });
