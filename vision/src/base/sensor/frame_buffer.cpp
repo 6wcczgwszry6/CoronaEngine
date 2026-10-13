@@ -374,6 +374,21 @@ void FrameBuffer::resize(ocarina::uint2 res) noexcept {
     resolution_ = res;
 }
 
+void FrameBuffer::manage_stable_plane_buffers(bool enabled) noexcept {
+    stable_plane_buffers_enabled_ = enabled;
+    uint pixels = enabled ? frame_buffer_size() : 1u;
+    auto resize = [&]<typename T>(RegistrableBuffer<T> &buffer, uint count, const char *name) {
+        if (buffer.size() == count * pixels) { return; }
+        init_buffer_impl(buffer, buffer.has_registered(), name, count, pixels);
+    };
+    resize(stable_planes_, StablePlaneCount, "FrameBuffer::stable_planes");
+    resize(stable_plane_history_, StablePlaneCount, "FrameBuffer::stable_plane_history");
+    resize(stable_direct_, StablePlaneCount, "FrameBuffer::stable_direct");
+    resize(stable_indirect_, StablePlaneCount, "FrameBuffer::stable_indirect");
+    resize(stable_radiance_, 1u, "FrameBuffer::stable_radiance");
+    resize(stable_dominant_, 1u, "FrameBuffer::stable_dominant");
+}
+
 void FrameBuffer::update_resolution(ocarina::uint2 res) noexcept {
     OC_INFO_FORMAT("FrameBuffer::update_resolution input=({}, {}), prev=({}, {}), rt_before=({}, {})",
                    res.x, res.y, resolution_.x, resolution_.y,
@@ -381,6 +396,7 @@ void FrameBuffer::update_resolution(ocarina::uint2 res) noexcept {
     resize(res);
     reset_surfaces();
     reset_surface_exts();
+    if (stable_planes_.has_registered()) { manage_stable_plane_buffers(stable_plane_buffers_enabled_); }
     reset_motion_vectors();
     reset_hit_bsdfs();
     reset_rt_buffer();
