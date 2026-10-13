@@ -33,7 +33,7 @@ public:
     Renderer() = default;
     void pre_init(const RendererDesc &renderer_desc);
     void init(const RendererDesc &renderer_desc, Scene &scene);
-    void prepare(Scene &scene) noexcept;
+    void prepare(Scene &scene, bool prepare_integrator_resources = true) noexcept;
     void update_runtime_object(const vision::IObjectConstructor *constructor) noexcept override;
     void upload_data(Scene &scene) noexcept;
 

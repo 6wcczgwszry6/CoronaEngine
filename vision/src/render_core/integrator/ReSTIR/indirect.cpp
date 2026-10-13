@@ -85,11 +85,19 @@ GISampleVar ReSTIRGI::init_sample(const Interaction &it, const SensorSample &ss,
         sp_it.ng = make_float3(0.f);
         HitContext hit_context{sp_it};
         hit_context.suppress_initial_emission = true;
+        hit_context.complete_terminal_direct = true;
         RayVar ray = it.spawn_ray(hit_bsdf.wi.as_vec3());
         RayState ray_state = RayState::create(ray);
         // Store radiance independent of the source receiver's BSDF/prefix.
         // Dividing a weighted result cannot recover zero throughput channels.
-        Float3 L = integrator()->Li(ray_state, hit_bsdf.pdf, spectrum()->one(), hit_context, *this);
+        auto surface = cur_surfaces().read(dispatch_id());
+        Uint prefix_depth = 0u;
+        $if(surface.is_replaced) { prefix_depth = cur_surface_extends().read(dispatch_id()).prefix_depth; };
+        Uint suffix_depth = integrator()->runtime_suffix_depth();
+        Uint remaining = suffix_depth - min(prefix_depth, suffix_depth);
+        // complete_terminal_direct handles the runtime terminal budget itself.
+        Float3 L = integrator()->Li(ray_state, hit_bsdf.pdf, remaining, spectrum()->one(),
+            false, hit_context, *this);
         sample.sp->set(sp_it);
         sample.Lo.set(ocarina::zero_if_nan_inf(L));
     };

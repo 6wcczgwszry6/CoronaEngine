@@ -4,7 +4,7 @@
 //
 // FK —— 纯函数：给定 SkeletonData + AnimationClip + 时间，算出每根骨骼的最终矩阵
 //   final[id] = global_inverse * global(node) * offset
-// 供 P2 的 CPU 蒙皮使用：skinned[v] = Σ wᵢ · (final[idᵢ] · bind[v])。
+// 供 GPU 蒙皮使用：skinned[v] = Σ wᵢ · (final[idᵢ] · bind[v])。
 //
 // IK —— CCD（循环坐标下降）：给定一条链和目标点，反解出链上关节的新 local 旋转，
 //   经 compute_pose 的 local_overrides 注入 FK，叠加在原动画姿态之上。

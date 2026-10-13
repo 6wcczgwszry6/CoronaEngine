@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "math/basic_types.h"
 #include "dsl/dsl.h"
@@ -13,11 +13,15 @@
 #include "base/using.h"
 
 namespace vision::svgf {
-// Stable-plane guides are optional: other producers retain primary-surface behavior.
+// Keep the legacy single-surface contract available for existing producers.
 template<typename Param>
 inline void bind_stable_planes(Param &param, const RealTimeDenoiseInput &input) {
     param.use_stable_planes = input.use_stable_planes;
-    if (input.use_stable_planes) {
+    param.layered = input.use_stable_planes && input.layer_count > 1u;
+    if (param.layered) {
+        param.stable_planes = input.stable_planes.descriptor();
+        param.prev_stable_planes = input.prev_stable_planes.descriptor();
+    } else if (input.use_stable_planes) {
         param.stable_surfaces = input.stable_surfaces.descriptor();
         param.prev_stable_surfaces = input.prev_stable_surfaces.descriptor();
     }
@@ -25,23 +29,119 @@ inline void bind_stable_planes(Param &param, const RealTimeDenoiseInput &input) 
 
 template<typename Param>
 [[nodiscard]] inline SurfaceDataVar load_stable_surface(const Param &param, Uint index, bool previous = false) {
-    return previous ? param.prev_stable_surfaces.read(index) : param.stable_surfaces.read(index);
+    SurfaceDataVar surface;
+    $if(param.layered != 0u) {
+        if (previous) {
+            auto old = param.prev_stable_planes.read(index);
+            surface.hit = old.surface.hit;
+            surface.virtual_position = old.surface.virtual_position;
+            surface.virtual_geometric_normal = old.surface.virtual_geometric_normal;
+            surface.depth_position = old.depth_position;
+            surface.approximate = old.surface.approximate;
+            surface.stable_branch = old.surface.stable_branch;
+            surface.is_replaced = true;
+        } else { surface = param.stable_planes.read(index).surface; }
+    } $else {
+        surface = previous ? param.prev_stable_surfaces.read(index) : param.stable_surfaces.read(index);
+    };
+    return surface;
+}
+
+template<typename Param>
+[[nodiscard]] inline Float2 stable_motion(const Param &param, Uint index) {
+    Float2 motion;
+    $if(param.layered != 0u) { motion = param.stable_planes.read(index).motion; }
+    $else { motion = param.motion_vectors.read(index); };
+    return motion;
+}
+
+// Physical hits evaluate material data; virtual geometry guides image filtering.
+struct StableGeometryGuide {
+    TriangleHitVar hit;
+    Float3 position{make_float3(0.f)}, normal{make_float3(0.f)}, depth_position{make_float3(0.f)};
+    Uint branch{0u}, sequence{0u}, identity{0u}, depth{0u}, material{InvalidUI32};
+    Bool replaced{false}, valid{true}, layered{false}, approximate{false};
+
+    template<typename Param>
+    StableGeometryGuide(const Param &param, Uint index, TriangleHitVar primary, bool previous = false) : hit(primary) {
+        $if(param.use_stable_planes != 0u) {
+            auto surface = load_stable_surface(param, index, previous);
+            branch = ocarina::select(surface.stable_branch == InvalidUI32, 0u, surface.stable_branch);
+            replaced = surface.is_replaced && surface.stable_branch != InvalidUI32;
+            approximate = surface.approximate != 0u;
+            depth_position = surface.depth_position;
+            $if(param.layered != 0u) {
+                auto read_identity = [&](const auto &plane) {
+                    layered = true;
+                    valid = plane.valid != 0u && plane.surface.hit->is_hit() && plane.surface.hit.inst_id != InvalidUI32;
+                    sequence = plane.branch_sequence; identity = plane.instance_hash;
+                    depth = plane.depth; material = plane.material_id;
+                    depth_position = plane.depth_position;
+                    replaced = true;
+                };
+                if (previous) read_identity(param.prev_stable_planes.read(index));
+                else read_identity(param.stable_planes.read(index));
+            };
+            $if(replaced) {
+                hit = surface.hit;
+                position = surface.virtual_position;
+                normal = surface.virtual_geometric_normal;
+            };
+            $if(!valid) { hit.inst_id = InvalidUI32; };
+        };
+    }
+
+    [[nodiscard]] Bool compatible(const StableGeometryGuide &other) const {
+        return valid && other.valid && branch == other.branch &&
+            (!layered || (sequence == other.sequence && identity == other.identity &&
+             depth == other.depth && material == other.material && hit.inst_id == other.hit.inst_id));
+    }
+    [[nodiscard]] Float3 depth_point(const Float3 &fallback) const {
+        // Preserve the established Euclidean virtual depth of exact mirrors.
+        return ocarina::select(approximate, depth_position, fallback);
+    }
+    void apply(Interaction &it) const {
+        $if(replaced) { it.pos = position; it.ng = normal; };
+    }
+};
+
+// Shared full-precision spatial guide, prepared once per layer.
+
+struct CachedSpatialGuide {
+    TriangleHitVar hit;
+    Float3 position, normal;
+    Uint4 identity, surface;
+    Bool emissive;
+    template<typename Param>
+    CachedSpatialGuide(const Param &param, Uint idx) {
+        auto p = param.guide_position.read(idx), n = param.guide_normal.read(idx);
+        position = p.xyz(); normal = n.xyz(); emissive = n.w != 0.f;
+        identity = param.guide_identity.read(idx); surface = param.guide_surface.read(idx);
+        hit.inst_id = surface.z;
+    }
+    [[nodiscard]] Bool compatible(const CachedSpatialGuide &other) const {
+        return identity.x != 0u && other.identity.x != 0u && identity.y == other.identity.y &&
+            (surface.w == 0u || (identity.z == other.identity.z && identity.w == other.identity.w &&
+             surface.x == other.surface.x && surface.y == other.surface.y && surface.z == other.surface.z));
+    }
+    void apply(Interaction &it) const { it.pos = position; it.ng = normal; }
+};
+template<bool cached, typename Param>
+[[nodiscard]] auto load_spatial_guide(const Param &param, Uint idx) {
+    if constexpr (cached) return CachedSpatialGuide(param, idx);
+    else return StableGeometryGuide(param, idx, param.visibility_buffer.read(idx));
 }
 
 template<typename Param>
 [[nodiscard]] inline TriangleHitVar stable_hit(const Param &param, Uint index, TriangleHitVar hit, bool previous = false) {
-    $if(param.use_stable_planes != 0u) {
-        auto surface = load_stable_surface(param, index, previous);
-        $if(surface.is_replaced && surface.stable_branch != InvalidUI32) { hit = surface.hit; };
-    };
-    return hit;
+    return StableGeometryGuide(param, index, hit, previous).hit;
 }
 
 template<typename Param>
 [[nodiscard]] inline Float3 stable_normal(const Param &param, Uint index, Float3 normal) {
     $if(param.use_stable_planes != 0u) {
         auto surface = load_stable_surface(param, index);
-        $if(surface.is_replaced && surface.stable_branch != InvalidUI32) { normal = surface.virtual_normal; };
+        $if(param.layered != 0u || (surface.is_replaced && surface.stable_branch != InvalidUI32)) { normal = surface.virtual_normal; };
     };
     return normal;
 }
@@ -50,38 +150,73 @@ template<typename Param>
 [[nodiscard]] inline Float3 stable_albedo(const Param &param, Uint index, Float3 albedo) {
     $if(param.use_stable_planes != 0u) {
         auto surface = load_stable_surface(param, index);
-        $if(surface.is_replaced && surface.stable_branch != InvalidUI32) { albedo = surface.denoiser_albedo; };
+        $if(param.layered != 0u || (surface.is_replaced && surface.stable_branch != InvalidUI32)) { albedo = surface.denoiser_albedo; };
     };
     return albedo;
 }
 
-// Cache one geometry/branch lookup per tap in the repeated spatial passes.
-// Keeping only these fields avoids carrying the full SurfaceData through a kernel.
-struct StableGeometryGuide {
-    TriangleHitVar hit;
-    Float3 position;
-    Float3 normal;
-    Uint branch{0u};
-    Bool replaced{false};
-
+// Coverage estimates a complete pixel footprint, unlike path-space illumination.
+// A single exact mirror may keep its virtual guide. Multiple branches or an
+// approximate refraction cannot share one motion vector: use primary silhouettes
+// for reconstruction and reject moving composite temporal reuse conservatively.
+struct CoverageGeometryGuide : StableGeometryGuide {
+    Bool ambiguous{false};
+    Float2 motion;
     template<typename Param>
-    StableGeometryGuide(const Param &param, Uint index, TriangleHitVar primary, bool previous = false) : hit(primary) {
-        $if(param.use_stable_planes != 0u) {
-            auto surface = load_stable_surface(param, index, previous);
-            branch = ocarina::select(surface.stable_branch == InvalidUI32, 0u, surface.stable_branch);
-            replaced = surface.is_replaced && surface.stable_branch != InvalidUI32;
-            $if(replaced) {
-                hit = surface.hit;
-                position = surface.virtual_position;
-                normal = surface.virtual_geometric_normal;
+    CoverageGeometryGuide(const Param &param, Uint index, TriangleHitVar primary, bool previous = false)
+        : StableGeometryGuide(param, index, primary, previous) {
+        motion = stable_motion(param, index);
+        $if(param.composed_coverage != 0u) {
+            Uint count = dispatch_dim().x * dispatch_dim().y;
+            auto read_coverage = [&](const auto &planes) {
+                for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
+                    auto plane = planes.read(layer * count + index);
+                    ambiguous |= plane.valid != 0u && (Bool(layer > 0u) || plane.surface.approximate != 0u ||
+                        plane.surface.hit->is_miss() || plane.surface.hit.inst_id == InvalidUI32);
+                }
+                // Coverage belongs to the path, including deterministic emitters
+                // that have no eligible reservoir endpoint.
+                hit = primary; branch = 0u; replaced = false; approximate = false; valid = true;
+                auto plane = planes.read(index);
+                $if(!ambiguous && plane.valid != 0u) {
+                    hit = plane.surface.hit;
+                    branch = plane.surface.stable_branch;
+                    position = plane.surface.virtual_position;
+                    normal = plane.surface.virtual_geometric_normal;
+                    depth_position = plane.depth_position;
+                    replaced = true;
+                    motion = plane.motion;
+                };
             };
+            if (previous) read_coverage(param.prev_coverage_planes);
+            else read_coverage(param.coverage_planes);
         };
     }
-
-    void apply(Interaction &it) const {
-        $if(replaced) { it.pos = position; it.ng = normal; };
-    }
 };
+
+template<typename Param>
+[[nodiscard]] inline Bool coverage_layer_edge(const Param &param, Uint center, Uint neighbor) {
+    Bool edge = false;
+    $if(param.composed_coverage != 0u) {
+        Uint count = dispatch_dim().x * dispatch_dim().y;
+        for (uint layer = 0u; layer < StablePlaneCount; ++layer) {
+            auto a = param.coverage_planes.read(layer * count + center);
+            auto b = param.coverage_planes.read(layer * count + neighbor);
+            edge |= a.valid != b.valid;
+            $if(a.valid != 0u && b.valid != 0u) {
+                edge |= a.branch_sequence != b.branch_sequence || a.instance_hash != b.instance_hash ||
+                    a.depth != b.depth || a.material_id != b.material_id || a.surface.hit.inst_id != b.surface.hit.inst_id;
+                $if(a.surface.hit->is_hit() && b.surface.hit->is_hit()) {
+                    Float depth = max(length(a.depth_position - param.camera_pos.as_vec3()), 0.1f);
+                    edge |= dot(a.surface.virtual_geometric_normal, b.surface.virtual_geometric_normal) < SVGFConfig::Resolve::kNormalThreshold ||
+                        abs(dot(b.surface.virtual_position - a.surface.virtual_position, a.surface.virtual_geometric_normal)) > SVGFConfig::Resolve::kPlaneThreshold * depth ||
+                        abs(length(b.depth_position - param.camera_pos.as_vec3()) - depth) > SVGFConfig::Temporal::kDepthThreshold * depth;
+                };
+            };
+        }
+    };
+    return edge;
+}
 
 // Raw guides/illumination live at independent per-pixel film samples; resolved
 // colour lives at pixel centres. Call after loading the camera and sampler.
@@ -269,8 +404,8 @@ struct LuminanceWeightUtils {
     [[nodiscard]] static Float compute_phi_l(
         Float l_phi,
         Float variance,
-        Float min_variance = Cfg::Atrous::kMinVariance,
-        Float min_phi = Cfg::Atrous::kMinPhi) noexcept {
+        Float min_variance = Cfg::Poisson::kMinVariance,
+        Float min_phi = Cfg::Poisson::kMinPhi) noexcept {
         return l_phi * sqrt(max(variance, min_variance)) + min_phi;
     }
 };
