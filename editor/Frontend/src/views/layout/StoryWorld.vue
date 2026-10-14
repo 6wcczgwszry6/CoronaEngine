@@ -28,6 +28,8 @@ import { PROPHET_INTERACTION, prophetAvailable, prophetDistance,
   normalizeDialogue } from '../../../../../game/frontend/prophetDialogue.mjs';
 import { ensureStoryCube, cubeTransformOf, playerFacingYaw } from '../../../../../game/frontend/storyCube.mjs';
 import { ensureStoryMap } from '../../../../../game/frontend/storyMap.mjs';
+import { heightAt } from '../../../../../game/frontend/storyMapHeight.mjs';
+import { loadStoryMapHeight, mapHeightUrl } from '../../../../../game/frontend/storyMapHeightLoader.mjs';
 import { collectSwayTargets, createWorldRuleRunner,
   findFragment } from '../../../../../game/frontend/storyWorldRules.mjs';
 import { ADJUST_ACTIONS, FRAGMENT_ADJUST_ACTIONS, PROPHET_SCREENS, adjustFeedback,
@@ -98,6 +100,10 @@ const current = () => !disposed && !leaving && worldModeState.status === 'ready'
   && worldModeState.mode === 'story' && worldModeState.revision === revision;
 const camera = createStoryCameraController({
   createControls: createPlayerController,
+  // 玩家的地面线：地图是 phantom（引擎不为它建碰撞体），脚下多高只能由烘好的高度网格回答。
+  // `heightAt` 在没有网格时返回 null，控制器便退回原来的固定地板——这条绑定必须在
+  // createStoryCameraController 里继续往下传，否则控制器收不到它（这正是之前的原因）。
+  getGroundY: (x, z) => heightAt(x, z),
   onError: error => {
     if (current()) gameplayError.value = error.message;
     notifyWorldError(error);
@@ -1781,6 +1787,15 @@ onMounted(async () => {
     const index = Math.min(Math.max(Number(init?.active_index) || 0, 0), Math.max(0, scenes.length - 1));
     sceneId = scenes[index]?.path || init?.path;
     if (!sceneId) throw new Error('当前世界没有可用场景');
+    // 地图高度网格是这张地图真正的地面线，而角色的脚 y 由它给出：必须在
+    // ensureStoryCharacters 之前读入，否则角色先按固定地板落地，之后才补网格也来不及。
+    // 读不到只报告、不阻断进入世界（`heightAt` 返回 null，摆位与控制器都退回固定地板）。
+    try {
+      await loadStoryMapHeight(mapHeightUrl(window.location.href));
+    } catch (error) {
+      actionFeedback.value = `地图高度网格未能读取：${error.message}`;
+    }
+    if (!current()) return;
     const loadedGameplay = await gameplay.load();
     if (!current()) return;
     lastHitHp = loadedGameplay.state.boss.hp;

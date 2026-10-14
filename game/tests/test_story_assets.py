@@ -62,21 +62,61 @@ class StoryAssetTests(unittest.TestCase):
     # A character folder carries one rigged model; props are plain meshes with no animation.
     CHARACTER_ART_ROLES = ("player", "boss", "merchant", "prophet")
 
-    # The story world map. `scale` is the model's largest world-AABB axis in metres: the
-    # engine normalises every static model into a unit cube, so that is exactly the
-    # `geometry.scale` an actor needs to appear at its real size. `floorOffset` is where the
-    # walkable courtyard sits relative to the model's own centre, and the placement removes
-    # it so the surface lands on the engine floor y = 0 that the story uses for feet.
+    # The story world map. `scale` is the map's largest world axis in metres: the engine
+    # normalises every static model into a unit cube, so that is exactly the `geometry.scale`
+    # an actor needs to appear at the shipped world size. `courtyardY` is where the walkable
+    # courtyard sits in the model file, and the placement removes it so the surface lands on
+    # the engine floor y = 0 that the story uses for feet.
     # Both numbers live in the `map` block of game/data/prophet.json; the tests below
     # re-derive them from the shipped GLB so neither side can drift away from the art.
-    STORY_WORLD_MAP = "scene/01_山门神殿_优化版.glb"
+    # The map was re-exported with a flat floor under this new name ("平地版" = flat-ground
+    # edition), so the shipped route changed with the geometry: the engine keys an imported
+    # bundle by content hash, but a world that already carries the map is repaired by GUID
+    # and never re-imports (`skip_if_exists` returns before the route is read), which means an
+    # existing world would keep serving the old, un-flat bundle under the old name forever.
+    STORY_WORLD_MAP = "scene/01_山门神殿_平地版.glb"
     STORY_WORLD_MAP_SPAWN_SITES = (
-        ("player", 0, 0), ("boss", 0, 12), ("merchant", -30, -15), ("prophet", 30, -15),
+        ("player", 0, 0), ("boss", 2, 5.5), ("merchant", -30, -15), ("prophet", 30, -15),
     )
+    # "Open ground" for the 8 m-wide boss: the radius the dragon actually occupies (its wings
+    # reach 4 m either side of its origin) and the height a surface may reach inside it before
+    # the dragon is standing inside a wall, a step or a roof rather than on the courtyard.
+    SITE_RADIUS = 4.0
+    SITE_ROOF = 0.35
 
     def _map_placement(self) -> dict:
         """The authoritative `map` block of game/data/prophet.json."""
         return json.loads((ROOT / "game/data/prophet.json").read_text(encoding="utf-8"))["map"]
+
+    def _runtime_projection(self, spawn_sites: tuple = ()) -> dict:
+        """The numbers the story frontend actually runs on, read from its modules through Node.
+
+        The page mirrors `game/data/prophet.json` in code, so the only way to check the runtime
+        rather than the data file is to import the module and ask it. `spawn_sites` (world x/z)
+        are also run through the runtime ground lookup `heightAt`, which is the function
+        `playerController` and `characterTransform` call — so the ground line the game uses is
+        measured here rather than re-derived.
+        """
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to read the runtime projections")
+        sites = json.dumps([{"role": role, "x": x, "z": z} for role, x, z in spawn_sites])
+        script = (
+            "import fs from 'node:fs'; "
+            "import {CUBE_PLACEMENT} from './game/frontend/storyCube.mjs'; "
+            "import {MAP_PLACEMENT, MAP_MAX_AXIS, MAP_SURFACE_LIFT, mapOriginTransform} from './game/frontend/storyMap.mjs'; "
+            "import {MODEL_TO_WORLD, setHeightGrid, heightAt, heightGridInfo} from './game/frontend/storyMapHeight.mjs'; "
+            "import {FRAGMENTS, WORLD_RULE_VERSION} from './game/frontend/storyWorldRules.mjs'; "
+            "setHeightGrid(JSON.parse(fs.readFileSync('./game/data/story-map-height.json', 'utf8'))); "
+            f"const sites = {sites}; "
+            "console.log(JSON.stringify({cube: CUBE_PLACEMENT, map: MAP_PLACEMENT, "
+            "mapTransform: mapOriginTransform(), maxAxis: MAP_MAX_AXIS, modelToWorld: MODEL_TO_WORLD, "
+            "surfaceLift: MAP_SURFACE_LIFT, fragments: FRAGMENTS, "
+            "ruleVersion: WORLD_RULE_VERSION, grid: heightGridInfo(), "
+            "spawnGround: sites.map(site => ({...site, y: heightAt(site.x, site.z)}))}));")
+        result = subprocess.run([node, "--input-type=module", "-e", script],
+                                cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True, timeout=30)
+        return json.loads(result.stdout)
 
     @staticmethod
     def _glb_json(document: Path) -> tuple[dict, int]:
@@ -181,6 +221,7 @@ class StoryAssetTests(unittest.TestCase):
         side from drifting away from the model that is actually deployed.
         """
         placement = self._map_placement()
+        projection = self._runtime_projection()
         document = ART / self.STORY_WORLD_MAP
         self.assertTrue(document.is_file(), str(document))
         copied = ART.parents[2] / "assets/model" / document.name
@@ -195,51 +236,260 @@ class StoryAssetTests(unittest.TestCase):
         self.assertTrue(points, "the shipped map has no geometry")
         extent = [max(point[axis] for point in points) - min(point[axis] for point in points)
                   for axis in range(3)]
-        self.assertAlmostEqual(max(extent), placement["scale"], delta=0.05)
+        # `scale` is the map's world depth in metres (z is this model's largest axis). It is
+        # deliberately NOT "life size": at 1680 m the third-person camera sits inside the
+        # building and the walkable area is far outside the engine's 50 m preload radius. What
+        # still has to hold is the courtyard alignment below, plus the four spawn sites landing
+        # on the map: the engine puts the model AABB centre on the world origin, so
+        # `(high - centre) * scale / max_axis` is exactly `extent / 2 * scale / max_axis` and this
+        # one half-width guard covers all four of them. The stronger statement — that there is
+        # *surface* under each site — is measured through the runtime ground lookup in
+        # `test_the_baked_height_grid_covers_the_shipped_map`.
+        self.assertGreater(placement["scale"], 0)
+        self.assertLessEqual(placement["scale"], 2000)
+        self.assertGreaterEqual(placement["scale"] * extent[0] / max(extent) / 2, 30,
+                                "地图世界半宽必须容得下站在 ±30 m 的先知与商人")
 
         # The engine floor is y = 0 and the story puts character feet there. Two facts have to
         # hold: the courtyard really is `courtyardY` metres up in the model file, and the
         # position the runtime sends puts it exactly on y = 0. The engine moves the model's
-        # AABB centre to the origin and scales the largest axis to 1, so the courtyard's
-        # normalised height is `(courtyardY - centre_y) * scale_factor`, and `position` is in
-        # that normalised frame — not in metres.
+        # AABB centre to the origin and scales the *largest axis* to 1
+        # (`finalize_normalization_params`, parse_common.h:53), so a model point at height y
+        # lands at `position.y + (y - centre_y) * scale / max_axis`, with `position` in world
+        # metres (`native_actor_world_aabb` is `position + local * scale`). `scale / max_axis` is
+        # therefore the one factor that turns model metres into world metres, and the map is
+        # 64.8 x 14.7 x 90 m at the shipped `scale = 90` exactly because of it.
         low = [min(point[axis] for point in points) for axis in range(3)]
         high = [max(point[axis] for point in points) for axis in range(3)]
         centre_y = (low[1] + high[1]) / 2
-        surface_y = min(point[1] for point in points if abs(point[0]) <= 3 and abs(point[2]) <= 3)
+        # The AABB mid height is a measurement too, and the placement is derived from it; a
+        # drifted copy here would move the map vertically with nothing else to notice.
+        self.assertAlmostEqual(centre_y, placement["centreY"], delta=0.05,
+                               msg="centreY 必须是模型世界包围盒的中高")
+        # The walkable courtyard: the lowest surface inside a window around the model origin,
+        # which is where the story authors its spawn sites. The window is 40 model metres wide
+        # because this model's flat floor is a coarse plane (the mesh is authored at 4x the
+        # previous unit scale, so its vertices are ~8 m apart and the old +/-3 m window can hold
+        # no vertex at all); 20 m is still small enough to stay clear of the sunken pit at
+        # (77, -58) and the walls, both of which sit further out.
+        window = [point for point in points if abs(point[0]) <= 20 and abs(point[2]) <= 20]
+        self.assertTrue(window, "庭院取样窗口里没有顶点")
+        surface_y = min(point[1] for point in window)
         self.assertAlmostEqual(surface_y, placement["courtyardY"], delta=0.05,
                                msg="courtyardY 必须是可行走庭院在模型文件里的高度")
-        scale_factor = 1 / placement["scale"]
-        position_y = 0.5 - placement["courtyardY"] / placement["scale"]
+        # The runtime's own factor has to be this one, or the map and the baked height grid are
+        # read through two different frames (that was the ~5 m float: dividing by `scale`).
+        max_axis = max(extent)
+        self.assertAlmostEqual(projection["maxAxis"], max_axis, delta=0.01,
+                               msg="MAP_MAX_AXIS 必须是模型真实的最大轴")
+        self.assertAlmostEqual(projection["modelToWorld"], placement["scale"] / max_axis, delta=1e-6,
+                               msg="MODEL_TO_WORLD 必须是 scale / max_axis（MAP_MAX_AXIS 只写到小数点后四位）")
+        scale_factor = placement["scale"] / max_axis
+        position_y = (centre_y - placement["courtyardY"]) * scale_factor
         self.assertAlmostEqual(position_y + (surface_y - centre_y) * scale_factor, 0.0, delta=0.05,
                                msg="摆位必须把可行走庭院压到引擎地面 y = 0")
-        # `scale / 2` here would be a 209-metre error: position lives in the normalised frame.
-        self.assertLess(abs(position_y), 0.01, "position.y 必须是归一化后的量级")
+        # The transform the page actually sends must be that measurement, with no hand-tuned
+        # lift on top: the ground line is the baked height grid now, and a lift would only push
+        # the map (and the floor the props and spawn sites are authored on) off y = 0.
+        self.assertAlmostEqual(projection["mapTransform"]["position"][1], position_y, delta=0.01)
+        self.assertEqual(projection["surfaceLift"], 0.0,
+                         "MAP_SURFACE_LIFT 必须回到 0：它不是手感旋钮，地面由高度网格给出")
+        # Writing the metre offset itself (124.09) would be off by hundreds of metres;
+        # `max_axis / 2` (840 m) mistakes the map's depth for its height.
+        self.assertGreater(position_y, 0)
+        self.assertLess(position_y, max_axis)
 
-        for role, x, z in self.STORY_WORLD_MAP_SPAWN_SITES:
-            with self.subTest(role=role):
-                footprint = [point[1] for point in points
-                             if abs(point[0] - x) <= 3 and abs(point[2] - z) <= 3]
-                self.assertTrue(footprint, f"{role} spawn has no surface beneath it")
-                self.assertLessEqual(min(footprint), surface_y + 0.2,
-                                     f"{role} spawn floats above the map")
-                self.assertGreaterEqual(min(footprint), surface_y - 1.5,
-                                        f"{role} spawn sinks into the map")
-
-    def test_the_map_actor_is_static_so_the_surface_is_solid(self):
-        """`phantom` would let characters walk straight through the map.
+    def test_the_map_actor_is_phantom_so_it_builds_no_collision_mesh(self):
+        """A solid body would make the engine build a triangle octree over ~1.64M triangles
+        on every world. The map is scenery: characters stand on the courtyard because it is
+        aligned to y = 0 and the world floor is `[physics] floor_y = 0`.
 
         The map is created by the page on every entry (`game/frontend/storyMap.mjs`), not
         seeded into new worlds by native creation code, so that is where the body type lives.
         """
         source = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
-        self.assertIn("body_type: 'static'", source)
-        self.assertNotIn("'phantom'", source)
-        self.assertNotIn('"phantom"', source)
+        self.assertIn("body_type: 'phantom'", source)
+        self.assertNotIn("body_type: 'static'", source)
         # The map must arrive with the world the player enters, not only with a new world.
         page = (ROOT / "editor/Frontend/src/views/layout/StoryWorld.vue").read_text(encoding="utf-8")
         self.assertIn("import { ensureStoryMap } from '../../../../../game/frontend/storyMap.mjs';", page)
         self.assertIn("await ensureStoryMap({", page)
+
+    def test_the_story_page_reads_the_height_grid_and_hands_it_to_the_player(self):
+        """The map's ground line is the baked grid, and the page is the only place that can read it.
+
+        This shipped half-wired once with zero coverage: the loader existed, `playerController`
+        already accepted `getGroundY`, and nothing ever called either — so the player stood on the
+        engine floor while the terrain varied by metres, and no test noticed. These are the links
+        that have to be present, checked in the files that own them. Both story worlds (主世界
+        role `main` and 小世界 role `child`) enter through this one component
+        (`WorldEntry.vue` mounts it for any `mode === 'story'` world), so the wiring below is not
+        role-specific: `ensureStoryMap` and this read carry no `role` gate at all.
+        """
+        page = (ROOT / "editor/Frontend/src/views/layout/StoryWorld.vue").read_text(encoding="utf-8")
+        self.assertIn("import { heightAt } from '../../../../../game/frontend/storyMapHeight.mjs';", page)
+        self.assertIn(
+            "import { loadStoryMapHeight, mapHeightUrl } from '../../../../../game/frontend/storyMapHeightLoader.mjs';",
+            page)
+        self.assertIn("await loadStoryMapHeight(mapHeightUrl(window.location.href));", page)
+        # The grid has to be read before any character is placed: their feet y comes from it.
+        self.assertLess(page.index("await loadStoryMapHeight("),
+                        page.index("const { snapshot, player, targetOffset } = await ensureStoryCharacters({"),
+                        "高度网格必须在角色落地之前读入")
+        self.assertIn("getGroundY: (x, z) => heightAt(x, z),", page)
+        # The option has to survive the camera binding, which is where it was dropped.
+        camera = (ROOT / "editor/Frontend/src/utils/viewportStoryCamera.js").read_text(encoding="utf-8")
+        self.assertIn("getGroundY = null,", camera)
+        self.assertIn("getBridge, onError, getGroundY,", camera)
+        # ... and be read by the controller on every ground write, with the constant as fallback.
+        controller = (ROOT / "game/frontend/playerController.mjs").read_text(encoding="utf-8")
+        self.assertIn("getGroundY = null,", controller)
+        self.assertIn("const value = getGroundY(x, z);", controller)
+        self.assertIn("if (next === null) { groundY = null; return fallback; }", controller)
+        # The characters' feet come from the same grid, or they float over the terrain the player
+        # walks on (the placement module and the grid must agree on the frame).
+        actors = (ROOT / "game/frontend/storyActors.mjs").read_text(encoding="utf-8")
+        self.assertIn("characterTransform(character, actor.local_aabb, savedGeometry, heightAt)", actors)
+        characters = (ROOT / "game/frontend/storyCharacters.mjs").read_text(encoding="utf-8")
+        self.assertIn("groundYAt = null)", characters)
+        self.assertIn("const ground = typeof groundYAt === 'function' ? groundYAt(x, z) : null;", characters)
+
+    def test_the_baked_height_grid_covers_the_shipped_map(self):
+        """The grid is a build artifact of the model: its frame has to be that model's own.
+
+        `game/data/story-map-height.json` is read at runtime through `storyMapHeight.mjs`; these
+        numbers are what make `world = position + (model - centre) * scale / max_axis` true for it.
+        The grid is also where the ground line comes from, so the flat-floor re-export is checked
+        here the way the game reads it: through `heightAt` at the four story spawn sites.
+        """
+        document = ROOT / "game/data/story-map-height.json"
+        self.assertTrue(document.is_file(), str(document))
+        grid = json.loads(document.read_text(encoding="utf-8"))
+        self.assertEqual(grid["version"], 1)
+        self.assertEqual(grid["unit"], "cm")
+        nx, nz = grid["res"]
+        self.assertGreaterEqual(min(nx, nz), 32, "网格太粗，走上去会是台阶")
+        self.assertEqual(len(grid["heights"]), nx * nz)
+        self.assertTrue(all(isinstance(value, int) and 0 <= value <= 32767 for value in grid["heights"]),
+                        "格值必须是 int16 厘米（空洞/越界值会被运行时拒绝）")
+
+        points = self._map_world_points(ART / self.STORY_WORLD_MAP)
+        low = [min(point[axis] for point in points) for axis in range(3)]
+        high = [max(point[axis] for point in points) for axis in range(3)]
+        centre = [(low[axis] + high[axis]) / 2 for axis in range(3)]
+        self.assertAlmostEqual(grid["minY"], low[1], delta=0.001,
+                               msg="minY 必须是模型包围盒的最低点（格值是相对它的厘米）")
+        for axis, index in ((0, 0), (0, 1), (2, 2), (2, 3)):
+            expected = (low[axis] if index % 2 == 0 else high[axis]) - centre[axis]
+            self.assertAlmostEqual(grid["bounds"][index], expected, delta=0.001,
+                                   msg=f"bounds[{index}] 必须是模型 x/z 足迹（相对 AABB 中心）")
+        # The grid is walkable *ground*, not the topmost surface. It used to store the maximum y
+        # per cell, so every cell a building or a wall stands on reported the wall top / eave —
+        # 261 m of roof on a map whose courtyard is at 0 — and the player's ground lookup rode it
+        # onto the roof ("每靠近一个建筑物就会像爬楼梯那样人物突然飞起来"). The band the bake
+        # used is the invariant: no cell may rise above it, so a cell that contains a building can
+        # never lift the character. A maximum-y bake fails this by 259 m.
+        band = grid["band"]
+        self.assertAlmostEqual(grid["courtyardY"], self._map_placement()["courtyardY"], delta=0.001,
+                               msg="烘焙用的庭院高度必须就是摆位里的 courtyardY")
+        ceiling = grid["courtyardY"] + band
+        worst = grid["minY"] + max(grid["heights"]) / 100
+        # The 1 cm of slack over the band's upper edge is the int16 centimetre quantisation of
+        # the file itself (a band vertex at 2.0019 m is stored as 200 cm and read back at most
+        # 2.005 m), not a licence for a cell to sit above the band.
+        self.assertLessEqual(worst, ceiling + 0.01,
+                             f"网格最高采样 {worst:.4f} m 高过可行走带上沿 {ceiling:.4f} m："
+                             "建筑/墙顶又变成地面了")
+        # Non-vacuity: the model really does have geometry far above the band, so the assertion
+        # above is a statement about the grid and not about a flat model.
+        self.assertGreater(high[1], ceiling + 100.0,
+                           "模型本身必须远高于可行走带，否则上面那条断言是空转的")
+
+        # The flat floor is the point of this re-export: the four story spawn sites have to read
+        # the same world height through the runtime lookup the game actually calls (`heightAt`,
+        # handed to `playerController` as `getGroundY`), or the characters are back on a slope.
+        # `modelToWorld` is applied inside the module, so this is the world-metre ground line,
+        # not a model-frame re-derivation of it.
+        projection = self._runtime_projection(self.STORY_WORLD_MAP_SPAWN_SITES)
+        ground = {item["role"]: item["y"] for item in projection["spawnGround"]}
+        self.assertEqual(sorted(ground), ["boss", "merchant", "player", "prophet"])
+        for role, value in ground.items():
+            with self.subTest(role=role):
+                self.assertIsNotNone(value, f"{role} 出生点没有地面")
+                self.assertAlmostEqual(value, 0.0, delta=0.05,
+                                       msg=f"{role} 出生点的地面必须落在引擎地面 y = 0 上")
+        spread = max(ground.values()) - min(ground.values())
+        self.assertLessEqual(spread, 0.05,
+                             f"四个出生点的地面必须在 5 厘米以内齐平（实测 {spread:.4f} m）")
+
+    def test_no_map_geometry_stands_over_the_boss_spawn_site(self):
+        """The boss's site has to be open ground, in the placement the page actually runs.
+
+        The dragon is 8 m of wingspan with its belly on the ground, so "is anything above it"
+        is asked with the shipped model: every map vertex inside `SITE_RADIUS` world metres of
+        the site is counted, and the highest of them must stay under `SITE_ROOF`. This is the
+        reading that was missing when the boss was authored at (0, 12): the temple's main hall
+        front bay rises 3.088 m within 4 m of that point, so the dragon stood inside the
+        building and was invisible from the courtyard.
+
+        World x/z and world y are the engine's own placement — the model AABB centre becomes
+        the origin, the largest axis becomes 1 (`MAP_MAX_AXIS`), then the actor's transform is
+        applied (`native_actor_world_aabb` is `position + local * scale`), so
+        `world = position + (model - centre) * scale / max_axis` per axis. The radius is
+        filtered in world space: 4 world metres is 74.7 model metres on this map, not 4.
+
+        Non-vacuity: the same 40 m window is asserted to really hold a building metres above the
+        ceiling, and the old (0, 12) site is measured inside the same 4 m radius and must fail
+        it — so the ceiling below is a statement about this site, not about a flat map.
+        """
+        placement = self._map_placement()
+        projection = self._runtime_projection(self.STORY_WORLD_MAP_SPAWN_SITES)
+        document = ART / self.STORY_WORLD_MAP
+        points = self._map_world_points(document)
+        self.assertTrue(points, "the shipped map has no geometry")
+        low = [min(point[axis] for point in points) for axis in range(3)]
+        high = [max(point[axis] for point in points) for axis in range(3)]
+        scale_factor = projection["modelToWorld"]
+        centre_x = (low[0] + high[0]) / 2
+        centre_z = (low[2] + high[2]) / 2
+        origin_y = projection["mapTransform"]["position"][1]
+        # The engine drops each vertex's y through `centreY`, not through the z/x centre.
+        centre_y = placement["centreY"]
+        world = [((point[0] - centre_x) * scale_factor,
+                  origin_y + (point[1] - centre_y) * scale_factor,
+                  (point[2] - centre_z) * scale_factor) for point in points]
+        boss = [item for item in projection["spawnGround"] if item["role"] == "boss"]
+        self.assertEqual(len(boss), 1, "STORY_WORLD_MAP_SPAWN_SITES 必须正好有一个 boss 出生点")
+        site_x, site_z = boss[0]["x"], boss[0]["z"]
+
+        def highest_within(x: float, z: float, radius: float) -> float:
+            limit = radius ** 2
+            return max((point[1] for point in world
+                        if (point[0] - x) ** 2 + (point[2] - z) ** 2 <= limit), default=float("-inf"))
+
+        # Non-vacuity of the measurement itself: the temple really does rise far above the
+        # ceiling right where the boss stands, so "clear within 4 m" is a statement about this
+        # site and not about a map with nothing on it. The window is 40 world metres — the
+        # courtyard is only 64.8 x 90 m, so that covers the whole forecourt and the hall.
+        self.assertGreater(highest_within(site_x, site_z, 40.0), self.SITE_ROOF + 2.0,
+                           f"({site_x:g}, {site_z:g}) 40 m 内必须有远高于 {self.SITE_ROOF} m 的建筑，"
+                           "否则「4 m 内净空」是空转的")
+        # The measured site, not a second copy of it: this test is about the shipped coordinate.
+        # The clearance below is asserted first on purpose: a site that fails it must say *that*,
+        # not "the pin changed", or a moved-and-buried boss reads as a stale test constant.
+        self.assertIsNotNone(boss[0]["y"], "boss 出生点没有地面")
+        self.assertAlmostEqual(boss[0]["y"], placement["courtyardY"], delta=0.05,
+                               msg="boss 出生点的地面必须就是可行走庭院的高度")
+        roof = highest_within(site_x, site_z, self.SITE_RADIUS)
+        self.assertLess(roof, self.SITE_ROOF,
+                        f"({site_x:g}, {site_z:g}) 周围 {self.SITE_RADIUS:g} m 内有地图几何高达 "
+                        f"{roof:.3f} m，龙会被埋在里面")
+        self.assertAlmostEqual(site_x, 2.0, delta=0.001, msg="boss 出生点 x 变了就要重新量净空")
+        self.assertAlmostEqual(site_z, 5.5, delta=0.001, msg="boss 出生点 z 变了就要重新量净空")
+        # Non-vacuity: the same measurement at the old site has to break the ceiling.
+        old_roof = highest_within(0.0, 12.0, self.SITE_RADIUS)
+        self.assertGreater(old_roof, self.SITE_ROOF,
+                           "旧出生点 (0, 12) 必须真的被寺庙埋住，否则这条守卫什么都没证明")
 
     def test_models_and_supplied_sidecars_are_unchanged_copies_of_engine_assets(self):
         for role, source_root in self.ART_SOURCES.items():
@@ -260,18 +510,7 @@ class StoryAssetTests(unittest.TestCase):
 
     def test_cube_placement_and_fragment_catalogue_match_their_data_files(self):
         """The JSON is authoritative; the runtime projections must mirror it exactly."""
-        node = shutil.which("node")
-        if not node:
-            self.skipTest("Node.js is required to read the runtime projections")
-        result = subprocess.run([node, "--input-type=module", "-e",
-            "import {CUBE_PLACEMENT} from './game/frontend/storyCube.mjs'; "
-            "import {MAP_PLACEMENT, mapOriginTransform} from './game/frontend/storyMap.mjs'; "
-            "import {FRAGMENTS, WORLD_RULE_VERSION} from './game/frontend/storyWorldRules.mjs'; "
-            "console.log(JSON.stringify({cube: CUBE_PLACEMENT, map: MAP_PLACEMENT, "
-            "mapTransform: mapOriginTransform(), fragments: FRAGMENTS, "
-            "ruleVersion: WORLD_RULE_VERSION}));"],
-            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
-        projection = json.loads(result.stdout)
+        projection = self._runtime_projection()
 
         cube = json.loads((ROOT / "game/data/prophet.json").read_text(encoding="utf-8"))["cube"]
         for key, value in projection["cube"].items():
@@ -283,21 +522,39 @@ class StoryAssetTests(unittest.TestCase):
         story_map = self._map_placement()
         self.assertEqual(projection["map"], {key: story_map[key] for key in projection["map"]},
                          "storyMap.mjs 的 MAP_PLACEMENT 必须逐字段等于 prophet.json 的 map 块")
-        for key in ("asset", "guid", "modelRef", "scale", "courtyardY"):
+        for key in ("asset", "guid", "modelRef", "scale", "courtyardY", "centreY"):
             self.assertIn(key, story_map, key)
-        # The transform the page sends is derived from those two numbers, never a third copy.
+        # The transform the page sends is derived from those measurements: the courtyard's
+        # offset below the AABB mid height, converted into world metres by `scale / max_axis`,
+        # with `MAP_SURFACE_LIFT` at 0 (the ground line is the baked height grid, so a lift has
+        # nothing left to compensate). The frame itself is re-derived from the shipped GLB above.
         transform = projection["mapTransform"]
-        expected_y = 0.5 - story_map["courtyardY"] / story_map["scale"]
-        self.assertAlmostEqual(transform["position"][1], expected_y, places=6)
+        expected_y = (story_map["centreY"] - story_map["courtyardY"]) \
+            * story_map["scale"] / projection["maxAxis"]
+        self.assertAlmostEqual(transform["position"][1], expected_y, delta=0.01)
         self.assertEqual(transform["position"][0], 0)
         self.assertEqual(transform["position"][2], 0)
         self.assertEqual(transform["scale"], [story_map["scale"]] * 3)
         self.assertEqual(transform["rotation"], [0, 0, 0])
-        # ≈ 0.002: the courtyard sits 209.14 m below the model's AABB centre, and the engine
-        # divides that back out by `scale` because `position` is in the normalised frame.
-        # `scale / 2 - courtyardY` would be ~420 × too large and float the map in the air.
-        self.assertAlmostEqual(expected_y, 0.0020485, places=6)
-        self.assertLess(abs(expected_y), 0.01)
+        # Two classic slips are what the value guards: taking `max_axis / 2` as the mid height
+        # (840 m instead of the measured 124.09 m) puts the map in orbit, and writing the metre
+        # offset itself (124.09 m) misses by more than a hundred metres. `scale / max_axis` is the
+        # only factor that agrees with the 64.8 x 14.7 x 90 m world size the placement documents.
+        self.assertGreater(expected_y, 0.0)
+        self.assertLess(expected_y, story_map["centreY"] - story_map["courtyardY"])
+
+        # `follow_camera` is what decides world vs UI space in the engine
+        # (`render_space = follow_camera ? "ui" : "scene"`,
+        # cef_editor_native_api_handlers.cpp:2785): a map that followed the camera would be
+        # drawn in UI space and appear to move with the player. `body_type: static` is what
+        # builds the collision mesh the characters stand on. Both live on the map's actor data.
+        module = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
+        declaration = module.split("MAP_ACTOR_DATA = Object.freeze({", 1)
+        self.assertEqual(len(declaration), 2, "MAP_ACTOR_DATA 必须存在，地图的 actor 数据要能检查")
+        actor_data = declaration[1].split("});", 1)[0]
+        self.assertIn("follow_camera: false", actor_data)
+        self.assertNotIn("follow_camera: true", module)
+        self.assertIn("body_type: 'phantom'", actor_data)
 
         catalogue = json.loads((ROOT / "game/data/fragments.json").read_text(encoding="utf-8"))
         self.assertEqual(projection["ruleVersion"], catalogue["version"])

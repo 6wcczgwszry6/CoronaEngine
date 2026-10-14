@@ -27,12 +27,18 @@ const editing = event => (event.composedPath?.() || [event.target]).some(target 
 
 export function createPlayerController({ getPose, setPose, submitPose, getBridge,
   isCurrent = () => true, isInputLocked = () => false, onError = () => {},
-  getRect = () => null, onPlayerChanged = () => {},
+  getRect = () => null, onPlayerChanged = () => {}, getGroundY = null,
   requestFrame = callback => requestAnimationFrame(callback), cancelFrame = id => cancelAnimationFrame(id),
   now = () => globalThis.performance.now(), config = PLAYER_CONTROLS }) {
   let player = null, targetOffset = 0, yaw = 0, pitch = config.pitch, distance = config.distance;
   let frame = null, epoch = 0, lastTime = null, pointer = null, disposed = false;
   let jump = null, spaceHeld = false, landingPending = false;
+  // The story map's height field (`game/frontend/storyMapHeight.mjs`), when the page supplies
+  // one: the player then walks on the terrain instead of the constant engine floor. `null`
+  // everywhere means "no grid", and every path below keeps the flat-floor behaviour exactly.
+  // The actor origin is not the feet, so the ground is followed by the *change* in height —
+  // `groundOffset` is the origin-minus-ground distance captured where the player was placed.
+  let groundY = null, groundOffset = 0;
   let view = PLAYER_VIEWS.includes(config.view) ? config.view : 'third';
   let hiddenPlayer = false;
   const keys = new Set(), shifts = new Set();
@@ -59,6 +65,28 @@ export function createPlayerController({ getPose, setPose, submitPose, getBridge
       hiddenPlayer = hidden;
     } catch (error) { onError(error); }
   }
+  // One terrain sample, or `null` when the page has no height field (or the sample is not a
+  // number): a grid-less world must behave exactly as it did on the flat floor.
+  const groundYAt = (x, z) => {
+    if (typeof getGroundY !== 'function') return null;
+    const value = getGroundY(x, z);
+    return Number.isFinite(value) ? value : null;
+  };
+  // Remember the ground the player is currently standing on, so horizontal movement can carry
+  // the origin's own offset (feet are below the origin) along with the terrain.
+  function bindGround(x, z) {
+    groundY = groundYAt(x, z);
+    groundOffset = groundY === null || !player ? 0 : player.position[1] - groundY;
+  }
+  // The origin y for standing at (x, z): the ground line plus that offset. `fallback` is
+  // returned untouched when there is no grid, which is what keeps the constant floor intact.
+  function groundLine(x, z, fallback) {
+    const next = groundYAt(x, z);
+    if (next === null) { groundY = null; return fallback; }
+    if (groundY === null) groundOffset = fallback - next;
+    groundY = next;
+    return next + groundOffset;
+  }
   function resetInput() {
     epoch++;
     if (frame !== null) cancelFrame(frame);
@@ -66,7 +94,7 @@ export function createPlayerController({ getPose, setPose, submitPose, getBridge
     if (!jump) return;
     // This is a desired *ground* pose, even if the old world's handles have
     // already expired. Its dirty version must survive until the save barrier.
-    player = { ...player, position: [player.position[0], jump.groundY, player.position[2]],
+    player = { ...player, position: [player.position[0], groundLine(player.position[0], player.position[2], jump.groundY), player.position[2]],
       grounded: false, version: player.version + 1 };
     jump = null; landingPending = true;
     if (!landingPending || disposed || !isCurrent()) return;
@@ -171,16 +199,20 @@ export function createPlayerController({ getPose, setPose, submitPose, getBridge
         if (config.dodgeDuration - dodge.elapsed < 1e-9) dodge.elapsed = config.dodgeDuration;
         const progress = dodge.elapsed / config.dodgeDuration;
         const distance = config.dodgeDistance * (1 - (1 - progress) ** 2);
-        movePlayer([dodge.x + dodge.dx * distance, dodge.y, dodge.z + dodge.dz * distance]);
+        const nextX = dodge.x + dodge.dx * distance, nextZ = dodge.z + dodge.dz * distance;
+        movePlayer([nextX, groundLine(nextX, nextZ, dodge.y), nextZ]);
         if (progress === 1) dodge = null;
         onPlayerChanged();
       } else if (jump && delta > 0) {
         let elapsed = Math.min(jump.elapsed + delta, config.jumpDuration);
         if (config.jumpDuration - elapsed < 1e-9) elapsed = config.jumpDuration;
         const t = elapsed / config.jumpDuration;
-        movePlayer([jump.x + jump.dx * config.jumpDistance * t,
-          jump.groundY + 4 * config.jumpHeight * t * (1 - t),
-          jump.z + jump.dz * config.jumpDistance * t]);
+        const nextX = jump.x + jump.dx * config.jumpDistance * t;
+        const nextZ = jump.z + jump.dz * config.jumpDistance * t;
+        // The arc is measured from the take-off ground line; landing hands the player back to
+        // the terrain, so a jump over rising ground still ends with the feet on the surface.
+        const arc = jump.groundY + 4 * config.jumpHeight * t * (1 - t);
+        movePlayer([nextX, t === 1 ? groundLine(nextX, nextZ, jump.groundY) : arc, nextZ]);
         jump.elapsed = elapsed;
         if (t === 1) { jump = null; player = { ...player, grounded: true }; }
         onPlayerChanged();
@@ -191,8 +223,11 @@ export function createPlayerController({ getPose, setPose, submitPose, getBridge
           const sprintSeconds = shiftSince === null ? 0
             : Math.max(0, time - Math.max(time - delta * 1000, shiftSince + config.sprintThresholdMs)) / 1000;
           const travel = config.speed * (delta + (config.sprintMultiplier - 1) * sprintSeconds);
-          movePlayer([player.position[0] + dx * travel, player.position[1],
-            player.position[2] + dz * travel]);
+          const nextX = player.position[0] + dx * travel;
+          const nextZ = player.position[2] + dz * travel;
+          // Walking follows the map's surface when the page has one: `player.position[1]` is
+          // the ground line here, otherwise it is carried over unchanged as before.
+          movePlayer([nextX, groundLine(nextX, nextZ, player.position[1]), nextZ]);
           facePlayer(Math.atan2(dx, dz));
           onPlayerChanged();
         }
@@ -222,6 +257,9 @@ export function createPlayerController({ getPose, setPose, submitPose, getBridge
         position: [...actor.geometry.position], rotation: [...actor.geometry.rotation], facingYaw: actor.geometry.rotation[1] - PLAYER_MODEL_YAW_OFFSET,
         grounded: true, version: 0 };
       landingPending = false;
+      // The actor was placed on the map's surface by `storyActors` before this bind; capture the
+      // ground under it so walking carries the feet offset along with the terrain.
+      bindGround(player.position[0], player.position[2]);
       targetOffset = offset; yaw = player.facingYaw; pitch = config.pitch; distance = config.distance;
       // Every bind starts in third person: a first-person eye or a top-down orbit must
       // never be written into the scene camera that the next world restores.

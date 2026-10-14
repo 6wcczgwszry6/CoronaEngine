@@ -28,13 +28,42 @@ const COORD_LIMIT = 1e6;
 const finiteNumber = value => typeof value === 'number' && Number.isFinite(value);
 const positiveNumber = value => finiteNumber(value) && value > 0 && value <= COORD_LIMIT;
 
+/** The model's real largest world axis in metres: what the engine divides the model by. */
+export const MAP_MAX_AXIS = 1680.0027;
+
+/**
+ * Extra world metres on top of the derived placement. Zero by construction, and not a knob.
+ *
+ * `mapOriginTransform` already lands the courtyard on the engine floor y = 0: `position.y` is
+ * the courtyard's offset below the model's AABB mid height, converted from model metres into
+ * world metres by `scale / MAP_MAX_AXIS` — the same factor the baked height grid is read
+ * through (`storyMapHeight.MODEL_TO_WORLD`), so the map and the ground line move together.
+ *
+ * This used to be 2.5, hand-tuned to fight "the characters float above the map". That float was
+ * never terrain: it was the missing `scale / MAP_MAX_AXIS` factor, and no constant can fix a
+ * surface that varies by metres (the grid here spans −0.60 m .. 13.99 m). A non-zero value now
+ * only lifts the map off the plane the world floor (`[physics] floor_y = 0`), the authored spawn
+ * sites and every placed prop live on. Re-measure `courtyardY` when the art changes; leave this.
+ */
+export const MAP_SURFACE_LIFT = 0;
+
 /** Mirrors the `map` block of game/data/prophet.json, field for field. */
 export const MAP_PLACEMENT = Object.freeze({
-  asset: 'scene/01_山门神殿_优化版.glb',
+  asset: 'scene/01_山门神殿_平地版.glb',
   guid: MAP_GUID,
   modelRef: MAP_MODEL_REF,
-  scale: 420.0007,
-  courtyardY: 0.8615,
+  // The map's world depth in metres, NOT life size. At the model's real 1680 m the third-person
+  // camera (~4.5 m back, ~2 m up) sits inside the building and all you can see is a wall, and
+  // the walkable area is far outside the engine's 50 m preload radius. 90 m makes it a level
+  // you can survey: 64.8 x 14.7 x 90 m. The engine puts the model's AABB centre on the world
+  // origin (`position.x` = `position.z` = 0 below), so the world footprint is the symmetric
+  // +/-32.4 x +/-45 m: wide enough for the characters authored at +/-30 m.
+  scale: 90,
+  // The walkable courtyard of the flat-ground re-export sits on the model's own y = 0 plane:
+  // the floor is one flat surface spanning the whole x/z footprint, which is what makes the four
+  // story spawn sites agree to the centimetre instead of sitting on a hillside.
+  courtyardY: 0,
+  centreY: 124.091286,
 });
 
 /** Strict validation, so a bad edit in the JSON table fails loudly instead of drifting. */
@@ -44,15 +73,19 @@ export function validateMapPlacement(raw) {
   if (typeof source.guid !== 'string' || !source.guid.trim()) throw new Error('地图标识无效');
   if (typeof source.modelRef !== 'string' || !source.modelRef.trim()) throw new Error('地图版本标记无效');
   if (!positiveNumber(source.scale)) throw new Error('地图参数无效：scale');
-  // The courtyard may sit exactly on the model's own y = 0, so 0 is legal here; a negative
-  // height or one at/above the model's AABB centre would mean the map is not a ground.
+  // The courtyard may sit exactly on the model's own y = 0, so 0 is legal here.
   if (!finiteNumber(source.courtyardY) || source.courtyardY < 0 || source.courtyardY > COORD_LIMIT) {
     throw new Error('地图参数无效：courtyardY');
   }
-  if (source.courtyardY >= source.scale / 2) throw new Error('地图庭院高度超出模型高度');
+  // The AABB mid-height the courtyard is measured against. It must sit inside the model's own
+  // height, or `position.y` would be nonsense (a sign or axis error caught here, not on screen).
+  if (!finiteNumber(source.centreY) || source.centreY <= 0 || source.centreY > COORD_LIMIT) {
+    throw new Error('地图参数无效：centreY');
+  }
+  if (source.centreY <= source.courtyardY) throw new Error('地图庭院不在模型包围盒中心之下');
   return Object.freeze({
     asset: source.asset.trim(), guid: source.guid.trim(), modelRef: source.modelRef.trim(),
-    scale: source.scale, courtyardY: source.courtyardY,
+    scale: source.scale, courtyardY: source.courtyardY, centreY: source.centreY,
   });
 }
 
@@ -66,29 +99,43 @@ validateMapPlacement(MAP_PLACEMENT);
  * (`scale_factor = 1 / max_axis` in
  * `modules/corona_resource/src/resource/types/parse_common.h`, applied at
  * `parse_assimp.h`). An actor's `position` and `scale` are then applied to that normalised
- * geometry (`world_aabb_from_local_bounds` in `src/systems/mechanics/mechanics_system.cpp`),
- * and a model point at height `y` lands at:
+ * geometry (`world_aabb_from_local_bounds` in `src/systems/mechanics/mechanics_system.cpp`;
+ * `native_actor_world_aabb` reports `position + local * scale`), and a model point at height `y`
+ * lands at:
  *
  *   world_y = position.y + (y - centre_y) * scale_factor * scale
  *
  * with `scale_factor * scale = 1` when `scale` is the model's real largest axis. So:
  *
  *   - `scale = scale` puts the map back at its real size in metres;
- *   - the courtyard (`courtyardY`, measured 0.8615 m) sits `scale / 2 - courtyardY` metres
- *     below the AABB centre — 209.14 m below for this 79.2 m-tall map whose centre is
- *     ~38.6 m above the courtyard. Because the engine works in the normalised frame, that
- *     becomes `(scale / 2 - courtyardY) / scale` — about 0.002, not 209. Writing the metre
- *     value here would lift the map 209 metres into the air.
- *   - `position.y = (scale / 2 - courtyardY) / scale` therefore puts the courtyard exactly
- *     on y = 0, which is the engine floor and the line
- *     `storyCharacters.characterTransform` puts character feet on.
+ *   - `position.y = (centre_y - courtyardY) * scale / max_axis` puts the courtyard (measured at
+ *     `courtyardY`, 0 on the flat-ground re-export) exactly on y = 0, which is the engine floor
+ *     and the line `storyCharacters.characterTransform` puts character feet on.
+ *
+ * `MAP_MAX_AXIS` (1680.0027 m) is the factor that turns model metres into world metres: z is this
+ * map's largest axis (1680 m deep) while the map is only 274 m tall, so `centre_y` is 124.091286 m
+ * and NOT `max_axis / 2` (840.0 m) or `scale / 2` (45.0 m). The courtyard sits
+ * `124.091286 - 0 = 124.091286` m below the AABB centre, which is 6.6477 world metres at the
+ * shipped `scale = 90`. Dividing that offset by `scale` instead (1.3788) leaves the map ~5 m below
+ * the floor — the "characters float above the map" that a hand-tuned `MAP_SURFACE_LIFT` used to
+ * paper over, and that the baked height grid now answers for real. Writing the metre value itself
+ * (124.09) would be off by more than a hundred metres.
+ *
+ * `position.x`/`position.z` stay 0 on purpose: the model's courtyard is within centimetres of
+ * its own origin (AABB centre x = -5.16 m), and the story's spawn sites are authored in
+ * courtyard coordinates, so the courtyard origin must be the world origin.
  *
  * Returns a fresh object every call: the engine call and its read-back confirmation must
  * never share a mutable value.
  */
 export function mapOriginTransform(placement = MAP_PLACEMENT) {
+  // Model metres -> world metres. Deliberately the same expression as
+  // `storyMapHeight.MODEL_TO_WORLD`: the map and the ground grid read out of it must go through
+  // one factor, or the feet land on a surface the map does not have.
+  const modelToWorld = placement.scale / MAP_MAX_AXIS;
   return {
-    position: [0, (placement.scale / 2 - placement.courtyardY) * (1 / placement.scale), 0],
+    position: [0, (placement.centreY - placement.courtyardY) * modelToWorld
+      + MAP_SURFACE_LIFT, 0],
     rotation: [0, 0, 0],
     scale: [placement.scale, placement.scale, placement.scale],
   };
@@ -106,11 +153,19 @@ const sameVector = (a, b) => Array.isArray(a) && a.length === b.length
  * A map the world already carries and this version owns: nothing may be written for it.
  * An actor without this version's marker (an older entry, or a world made by the removed
  * native seeder) is not "ready" and is repaired in place instead.
+ *
+ * The transform is part of "ready", not just the scale. A world that already carries the map
+ * at an older `position.y` (the map was sunk 40 cm before this was derived from the AABB mid
+ * height) must be repaired rather than adopted, or the world would keep the wrong height
+ * forever: a scale-only check made exactly that mistake.
  */
 export function isMapReady(actor, placement = MAP_PLACEMENT) {
-  return Number(actor?.handle) > 0 && actor?.load_status === 'loaded'
-    && actor?.model_ref === placement.modelRef
-    && sameVector(actor?.geometry?.scale, mapOriginTransform(placement).scale);
+  if (!(Number(actor?.handle) > 0) || actor?.load_status !== 'loaded') return false;
+  if (actor?.model_ref !== placement.modelRef) return false;
+  const transform = mapOriginTransform(placement);
+  return sameVector(actor?.geometry?.scale, transform.scale)
+    && sameVector(actor?.geometry?.position, transform.position)
+    && sameVector(actor?.geometry?.rotation, transform.rotation);
 }
 
 /** `static` is what builds the collision mesh; anything else can be walked through. */
@@ -129,17 +184,43 @@ async function call(operation, invoke) {
 
 /**
  * Bring the world in line with the map table: create it when the world does not have it,
- * repair the transform in place when it carries an older one, switch it to a static body
- * when it is not walkable yet, and otherwise touch nothing at all.
+ * repair the transform in place when it carries an older one, and otherwise touch nothing.
  *
- * `static`, never a pass-through body: a static model gets a real triangle mesh and triangle
- * octree built over it (`src/systems/mechanics/mechanics_system.cpp`), which is what lets the
- * characters and monsters walk and collide on the surface. A pass-through body means falling
- * through, and a map you fall through is worse than no map.
+ * The map is **scenery with no collision** (`body_type: 'phantom'`): the ground line comes from
+ * the baked height grid (`game/data/story-map-height.json`, read by `storyMapHeight.heightAt`),
+ * which is mapped through this same placement, while a solid body would make the engine build a
+ * triangle octree over ~1.64M triangles on every world. Wall collision, if it is wanted, belongs
+ * in a few cheap collision boxes.
  *
- * Idempotent: the world's own map is identified by its GUID and version marker, so a second
- * entry neither appends a second actor nor reshuffles the one that is already placed.
+ * `follow_camera: false` is the other half of "world object": the engine derives
+ * `render_space = follow_camera ? "ui" : "scene"`
+ * (`src/systems/ui/cef/cef_editor_native_api_handlers.cpp:2785`), so a map that followed the
+ * camera would be drawn in UI space and appear to move with the player instead of standing
+ * still under them.
+ *
+ * Idempotent, and deliberately quiet on the common path: an intact map is returned without a
+ * single write. `update_if_exists` is only ever sent when the map is genuinely not ready — the
+ * engine answers it by rewriting the whole scene manifest
+ * (`persist_native_scene_actors`, `cef_editor_native_api_handlers.cpp:3417-3419`), so sending
+ * it on every entry would rewrite the world every time for nothing (`storyCube.mjs` is the
+ * precedent for "reuse untouched").
  */
+export const MAP_ACTOR_DATA = Object.freeze({
+  name: '剧情世界地图',
+  semantic_role: 'world-map',
+  entity_id: 'story.world.map',
+  entity_type: 'story_scenery',
+  follow_camera: false,
+  // Phantom on purpose. `static` makes the engine build a full triangle mesh + triangle
+  // octree over every triangle of the map (~1.64M for this model,
+  // `src/systems/mechanics/mechanics_system.cpp`), which is by far the largest cost of having
+  // the map in a world, and it is rebuilt per world. Characters still walk on the terrain: the
+  // page follows the baked height grid (`storyMapHeight.heightAt`) instead of asking the engine
+  // to collide with 1.64M render triangles. What is given up is wall collision — that is better
+  // restored by a handful of simple collision boxes than by making the whole map solid.
+  body_type: 'phantom',
+});
+
 export async function ensureStoryMap({ api, sceneId, frontendUrl, resolveAsset = null,
   placement = MAP_PLACEMENT, wait = ms => new Promise(resolve => setTimeout(resolve, ms)),
   confirmAttempts = 30 }) {
@@ -150,40 +231,33 @@ export async function ensureStoryMap({ api, sceneId, frontendUrl, resolveAsset =
     const route = typeof resolveAsset === 'function' ? resolveAsset(frontendUrl, placement.asset) : null;
     if (!route) throw new Error('地图资源路径不可用');
     const created = await call('创建地图', () => api.sceneTools.createActor(sceneId, route, 'model', {
-      name: '剧情世界地图', actor_guid: placement.guid, semantic_role: 'world-map',
-      entity_id: 'story.world.map', entity_type: 'story_scenery',
-      model_ref: placement.modelRef, follow_camera: false,
-      // body_type, not physics_enabled: `create_actor` treats a missing body type as a
-      // pass-through body, and one is walked straight through.
-      body_type: 'static',
+      ...MAP_ACTOR_DATA, actor_guid: placement.guid, model_ref: placement.modelRef,
       ...mapOriginTransform(placement),
     }));
     map = created.actor;
   } else if (!isMapReady(map, placement)) {
     // The world already has this actor (an existing world, or one whose first creation was
     // interrupted): the same GUID plus `skip_if_exists` makes the engine move it instead of
-    // appending a second map over the top of the first.
-    const route = map.route || (typeof resolveAsset === 'function'
-      ? resolveAsset(frontendUrl, placement.asset) : null);
+    // appending a second map over the top of the first. The route this build ships wins over
+    // the actor's own `route`, and the engine's `skip_if_exists` resolves the existing actor by
+    // GUID before it looks at any path, so a repair imports nothing.
+    const route = (typeof resolveAsset === 'function' ? resolveAsset(frontendUrl, placement.asset) : null)
+      || map.route;
     if (!route) throw new Error('地图资源路径不可用');
     const updated = await call('校正地图摆位', () => api.sceneTools.createActor(sceneId, route, 'model', {
-      name: '剧情世界地图', actor_guid: placement.guid, semantic_role: 'world-map',
-      entity_id: 'story.world.map', entity_type: 'story_scenery',
-      model_ref: placement.modelRef, follow_camera: false, body_type: 'static',
+      ...MAP_ACTOR_DATA, actor_guid: placement.guid, model_ref: placement.modelRef,
       skip_if_exists: true, update_if_exists: true,
       ...mapOriginTransform(placement),
     }));
     map = updated.actor;
   }
+  // A map that is already in place is returned below without computing a route or sending a
+  // single write: this is the path every ordinary entry takes.
 
   if (!map) throw new Error('引擎未返回地图');
-  if (!isMapStatic(map)) {
-    // A record restored from an older world can still be phantom; the map must be solid.
-    const solidified = await call('设置地图碰撞', () => api.sceneTools.setActorPhysics(sceneId,
-      placement.guid, { body_type: 'static' }));
-    map = solidified.actor;
-    if (!isMapStatic(map)) throw new Error('地图未被引擎确认为可站立（static）');
-  }
+  // No collision is requested and none is forced: the map is scenery the characters stand on
+  // through the aligned courtyard plus the world floor. See `MAP_ACTOR_DATA` for the cost of
+  // making it solid instead.
   // Confirm on read-back that the engine really accepted the map, instead of trusting the
   // create call's reply: a world whose map never landed must say so rather than drop the
   // player onto nothing. The handle is acknowledged before the asynchronous import fills

@@ -10,9 +10,12 @@ import * as storyPropsModule from '../../frontend/storyProps.mjs';
 import * as prophetDialogueModule from '../../frontend/prophetDialogue.mjs';
 import * as storyCubeModule from '../../frontend/storyCube.mjs';
 import * as storyMapModule from '../../frontend/storyMap.mjs';
+import * as storyMapHeightModule from '../../frontend/storyMapHeight.mjs';
+import * as storyMapHeightLoaderModule from '../../frontend/storyMapHeightLoader.mjs';
 import * as storyWorldRulesModule from '../../frontend/storyWorldRules.mjs';
 import * as storyProphetActionsModule from '../../frontend/storyProphetActions.mjs';
-import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot } from '../../frontend/storyCharacters.mjs';
+import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot,
+  characterTransform } from '../../frontend/storyCharacters.mjs';
 import { actorFixture } from './fixtures.mjs';
 import { createStoryNavigationController } from '../../frontend/storyNavigation.mjs';
 import { createStoryCameraController } from '../../../editor/Frontend/src/utils/viewportStoryCamera.js';
@@ -89,6 +92,22 @@ const styleDeclarations = selector => {
   return values;
 };
 const HUD_TOKENS = styleDeclarations('.story-world-viewport');
+/**
+ * Hold a movement key until `done()` is true, then release it.
+ *
+ * The Boss's own site decides how far the player has to walk, so tests must not hard-code a
+ * frame count: they stop on the real predicate (line up on x, or "the swing would land").
+ * `done()` is checked before each step and the key is always released, even when the budget
+ * runs out, so a stuck key can never leak into the next assertion.
+ */
+async function walkTo(page, f, code, steps, done) {
+  page.instance.onKeyDown(event({ code }));
+  try {
+    for (let i = 0; i < steps && !done(); i++) f.step(50);
+  } finally {
+    page.instance.camera.keyUp(event({ code }));
+  }
+}
 function stylePixels(value) {
   if (typeof value !== 'string') return null;
   const trimmed = value.trim();
@@ -175,6 +194,9 @@ function collisionsFor(selectors) {
 async function fixture(t, options = {}) {
   const globals = ['window', 'document', 'CustomEvent', 'ResizeObserver', 'requestAnimationFrame', 'cancelAnimationFrame'];
   const previous = Object.fromEntries(globals.map(key => [key, globalThis[key]]));
+  // 高度网格是模块级状态：每个夹具都从「没有网格」开始，用例再按需装载，
+  // 否则上一个用例的地面会悄悄留给下一个。
+  storyMapHeightModule.clearHeightGrid();
   const calls = [], alerts = [], frames = new Map(), pages = [];
   let frameTime = performance.now();
   let activePath = MAIN, route = '/', frameId = 0, page = null, handle = 10;
@@ -338,6 +360,15 @@ async function fixture(t, options = {}) {
       // 地图走真实模块：它的确认与幂等都写在里面，桩掉就失去了这条用例的意义。
       // 假时钟（wait 不平息）让「引擎当帧就确认」的桩不必真的等 200ms。
       '../../../../../game/frontend/storyMap.mjs': { ...storyMapModule, ensureStoryMap: options => storyMapModule.ensureStoryMap({ ...options, wait: async () => {} }) },
+      // 高度网格走真实模块；读盘这一步由用例注入（真实加载器在 file:// 页面上用 XHR，
+      // 这里要断言的是「页面读没读、读到的东西有没有真的变成地面」）。
+      '../../../../../game/frontend/storyMapHeight.mjs': storyMapHeightModule,
+      '../../../../../game/frontend/storyMapHeightLoader.mjs': { ...storyMapHeightLoaderModule,
+        loadStoryMapHeight: async url => {
+          calls.push(['mapHeight', url]);
+          if (!options.mapHeight) { storyMapHeightModule.clearHeightGrid(); return null; }
+          return options.mapHeight(url);
+        } },
       '../../../../../game/frontend/storyWorldRules.mjs': storyWorldRulesModule,
       '../../../../../game/frontend/storyProphetActions.mjs': storyProphetActionsModule,
     });
@@ -354,6 +385,7 @@ async function fixture(t, options = {}) {
     await lifecycle.drainWorldSession();
     await lifecycle.flushWorldSessionSaves();
     worldMode.worldModeService.invalidate();
+    storyMapHeightModule.clearHeightGrid();
     Object.assign(globalThis, previous);
   });
   return { mount, calls, alerts, frames, poses, actors, get route() { return route; },
@@ -649,9 +681,21 @@ test('unacknowledged combat blocks native replacement; retry does not change ope
     return { status: 'ok', role: 'main', state: structuredClone(state), config };
   } });
   const page = f.mount(); await page.mount();
-  page.instance.onKeyDown(event({ code: 'KeyW' }));
-  for (let i = 0; i < 60; i++) f.step(50);
-  page.instance.camera.keyUp(event({ code: 'KeyW' }));
+  // The attack is aimed along `facingYaw`, and the player turns to face wherever they walk, so
+  // the approach is: line up with the Boss on x, then walk straight in (+z) and stop as soon as
+  // the swing would really land — `canHitBoss` is the same predicate the page's attack uses.
+  // The Boss is not authored on the player's own x = 0 path, so the initial approach is diagonal
+  // and the final one is head-on; that is exactly why the walk may not run a fixed number of frames.
+  await walkTo(page, f, 'KeyD', 60, () => page.instance.camera.snapshotPlayer().position[0]
+    < STORY_CHARACTERS.find(character => character.role === 'boss').x - 0.1);
+  await walkTo(page, f, 'KeyW', 60, () => {
+    const player = page.instance.camera.snapshotPlayer();
+    const boss = f.actors.get(MAIN).find(a => a.actor_guid === STORY_CHARACTERS[1].guid);
+    return gameplayModule.canHitBoss(player, gameplayModule.worldBounds(boss), config);
+  });
+  assert.equal(gameplayModule.canHitBoss(page.instance.camera.snapshotPlayer(),
+    gameplayModule.worldBounds(f.actors.get(MAIN).find(a => a.actor_guid === STORY_CHARACTERS[1].guid)),
+    config), true, '走到 Boss 面前后必须真的能打中');
   assert.equal(page.instance.bossNearby.value, true);
   page.instance.onPointerDown(event({ button: 0 })); await turn();
   assert.match(page.instance.gameplayError.value, /combat disk full/);
@@ -1246,10 +1290,16 @@ test('the bag travel entry appears only after the world fragment is collected, t
 
   // 走到 Boss 身前击败它，再拾起红色球（世界碎片）：一览里随即辟出第二界
   page.instance.inventoryOpen.value = false;
-  page.instance.onKeyDown(event({ code: 'KeyW', key: 'w' }));
-  for (let i = 0; i < 100 && page.instance.camera.snapshotPlayer().position[2] < 7.6; i++) f.step(50);
-  page.instance.camera.keyUp(event({ code: 'KeyW', key: 'w' }));
-  assert.ok(page.instance.camera.snapshotPlayer().position[2] >= 7.6, 'the player can reach the Boss');
+  // 攻击沿 facingYaw 判定，而玩家会转向自己走的方向，所以先在 x 上对准 Boss（它不在玩家
+  // 出生点正前方），再直着走进去，直到这一刀真的能落上——用的是页面攻击自己那条判据。
+  const bagBoss = STORY_CHARACTERS.find(character => character.role === 'boss');
+  const bagBossActor = () => f.actors.get(MAIN).find(a => a.actor_guid === bagBoss.guid);
+  await walkTo(page, f, 'KeyD', 100, () => page.instance.camera.snapshotPlayer().position[0]
+    < bagBoss.x - 0.1);
+  await walkTo(page, f, 'KeyW', 100, () => gameplayModule.canHitBoss(
+    page.instance.camera.snapshotPlayer(), gameplayModule.worldBounds(bagBossActor()), gameplayConfig));
+  assert.equal(gameplayModule.canHitBoss(page.instance.camera.snapshotPlayer(),
+    gameplayModule.worldBounds(bagBossActor()), gameplayConfig), true, 'the player can reach the Boss');
   await page.instance.gameplay.attack();
   assert.equal(page.instance.gameplay.data.state.boss.hp, 0);
   await page.instance.gameplay.pickup();
@@ -1397,7 +1447,9 @@ test('a drop outside the real pickupRange offers neither the prompt nor the F ac
 test('walking onto the drop the dead boss left turns the F prompt into a real pickup', async t => {
   const { config: realConfig, state: realState } = readPythonGameplay(t);
   if (!realConfig) return;
-  const bossPosition = [gameplayModule.FRAGMENT.x, 0, gameplayModule.FRAGMENT.z];
+  // 红球落在龙倒下的地方：这里用 Boss 自己的出生点，而不是再抄一份位置。
+  const boss = STORY_CHARACTERS.find(item => item.role === 'boss');
+  const bossPosition = [boss.x, 0, boss.z];
   const state = structuredClone(realState);
   const f = await fixture(t, { gameplay: async (request, activePath) => {
     if (request.action === 'hitBoss' || request.hit) {
@@ -1424,11 +1476,16 @@ test('walking onto the drop the dead boss left turns the F prompt into a real pi
   // 因此把玩法模块读的那个时钟（performance.now）接到本用例手里，而不是忙等。
   let clock = 0;
   t.mock.method(performance, 'now', () => clock);
-  // 走到 Boss 面前（用真实的按键移动路径，而不是改一份快照副本）。
+  // 走到 Boss 面前（用真实的按键移动路径，而不是改一份快照副本）。攻击沿 facingYaw 判定，
+  // 所以先在 x 上对准 Boss（它不在玩家出生点的正前方），再往里走到模型边缘之内——
+  // `meleeRange` 量的是到包围盒的距离，小世界里这个夹具的包围盒只有 0.214 m 深。
+  p().onKeyDown(event({ code: 'KeyD', key: 'd' }));
+  for (let i = 0; i < 200 && p().camera.snapshotPlayer().position[0] < boss.x - 0.1; i++) f.step(50);
+  p().camera.keyUp(event({ code: 'KeyD', key: 'd' }));
   p().onKeyDown(event({ code: 'KeyW', key: 'w' }));
-  for (let i = 0; i < 200 && p().camera.snapshotPlayer().position[2] < gameplayModule.FRAGMENT.z; i++) f.step(50);
+  for (let i = 0; i < 200 && p().camera.snapshotPlayer().position[2] < boss.z - 0.5; i++) f.step(50);
   p().camera.keyUp(event({ code: 'KeyW', key: 'w' }));
-  assert.ok(p().camera.snapshotPlayer().position[2] >= gameplayModule.FRAGMENT.z, '玩家必须能走到 Boss 脚下');
+  assert.ok(p().camera.snapshotPlayer().position[2] >= boss.z - 0.5, '玩家必须能走到 Boss 脚下');
   const swings = Math.ceil(realConfig.bossHp / realConfig.damage);
   for (let i = 0; i < swings; i++) { clock += realConfig.cooldownMs; await p().gameplay.attack(); await turn(); }
   assert.equal(state.boss.hp, 0, '打满次数后 Boss 必须倒下');
@@ -1624,19 +1681,175 @@ test('an existing world gets the walkable map on entry, and a second entry never
   const transform = storyMapModule.mapOriginTransform();
   assert.deepEqual(first[4].position, transform.position, '地面必须落在 y = 0 约定的摆位上');
   assert.deepEqual(first[4].scale, transform.scale, '引擎归一化成单位立方体，缩放要还原真实尺寸');
-  assert.equal(first[4].body_type, 'static', 'phantom 会直接穿过去，地图必须是 static');
+  assert.equal(first[4].body_type, 'phantom',
+    '地图是布景：站立由对齐后的庭院与世界地板提供，不为 164 万面建 octree');
   assert.equal(first[4].physics_enabled, undefined, 'body_type 与 physics_enabled 不能各说各话');
   assert.equal(first[4].model_ref, storyMapModule.MAP_MODEL_REF);
-  assert.equal(mapActor().mechanics.body_type, 'static', '场景里这张地图必须是可站立的');
+  assert.equal(mapActor().mechanics.body_type, 'phantom',
+    '地图不参与碰撞：靠庭院对齐 y = 0 与世界地板站立');
   assert.deepEqual(mapActor().geometry.position, transform.position);
 
-  // 第二次进入同一个世界：GUID 不变，因此不能再造一张地图，也不能改动已摆好的那张。
-  f.actors.get(MAIN).find(actor => actor.actor_guid === storyMapModule.MAP_GUID)
-    .geometry.position = [7, 8, 9];
+  // 第二次进入同一个世界：GUID 不变，而且摆位与数据表一致，因此不能再造一张地图、
+  // 不能重摆，也不能写场景（update_if_exists 会让引擎重写整个清单）。
   page.unmount();
   const again = f.mount(); await again.mount(); await turn();
   assert.equal(mapCalls().length, 1, '第二次进入不能产生第二个地图 actor');
   assert.equal(f.actors.get(MAIN).filter(actor => actor.actor_guid === storyMapModule.MAP_GUID).length, 1);
-  assert.deepEqual(mapActor().geometry.position, [7, 8, 9], '已就位的地图不许被重摆');
+  assert.deepEqual(mapActor().geometry.position, transform.position, '已就位的地图不许被重摆');
   assert.equal(f.alerts.length, 0, '地图就位不该报错');
+});
+
+// 地图的 actor 数据本身：follow_camera 决定引擎把它画在场景空间还是 UI 空间
+// （render_space = follow_camera ? "ui" : "scene"），写成 true 地图就会跟着人物动；
+// 资源必须是工程内路由而不是仓库源路径，否则每次进入世界都要重新导入 87MB 的 GLB。
+test('the map is created as a world object from an in-project route, never as UI space', async t => {
+  const f = await fixture(t);
+  const page = f.mount(); await page.mount(); await turn();
+  const [first] = f.calls.filter(call => call[0] === 'create'
+    && call[4]?.actor_guid === storyMapModule.MAP_GUID);
+  assert.ok(first, '进入已有世界必须创建地图');
+  assert.equal(first[4].follow_camera, false, 'follow_camera 为 true 时引擎把地图画进 UI 空间');
+  assert.equal(first[4].body_type, 'phantom');
+
+  const route = first[3];
+  assert.equal(typeof route, 'string');
+  // storyActors.mjs 的角色模式：先把资产解析成工程内路由再交给引擎（storyCharacters
+  // 的 resolveStoryAssetPath 把 game/art/models 下的源资产解析成工程内路径），
+  // 引擎据此按 GUID 复用已导入的那一份，而不是每次都重新导入 87MB 的 GLB。
+  const resolved = resolveStoryAssetPath(window.location.href, storyMapModule.MAP_PLACEMENT.asset);
+  assert.equal(route, resolved, '地图必须走与角色相同的工程内路由');
+  // 路由指向仓库里真实存在的源资产（上面的绝对前缀只是 file:// 页面的所在盘）。
+  const tail = resolved.replace(/^.*?\/(?=game\/art\/)/, '');
+  assert.ok(fs.existsSync(new URL(`../../../${tail}`, import.meta.url)),
+    `工程内路由必须真的存在：${resolved}`);
+  assert.ok(!/^file:/i.test(route), '不能把 file:// 源路径交给引擎');
+  assert.ok(!/^\/\//.test(route), '不能把 UNC 源路径交给引擎');
+  assert.ok(!/\.asset-stage|Assets[\\/]Models/i.test(route), '前端不能自己拼引擎的导入目录');
+  // 地图已经带 model_ref：第二次进入不进入 update_if_exists 的写入路径。
+  assert.equal(first[4].update_if_exists, undefined, '首次创建不该带 update_if_exists');
+});
+
+// 世界里的地图摆位是旧公式算出来的（沉了 40.8cm）：它必须被就地校正，而不是因为
+// 「scale 对得上」就被当成已就位——只比 scale 的检查正是让错误高度永久留下来的原因。
+test('a map left at an older transform is repaired in place instead of adopted', async t => {
+  const f = await fixture(t);
+  const first = f.mount(); await first.mount(); await turn();
+  const transform = storyMapModule.mapOriginTransform();
+  const stale = f.actors.get(MAIN).find(actor => actor.actor_guid === storyMapModule.MAP_GUID);
+  assert.deepEqual(stale.geometry.position, transform.position);
+  // 一个明确错误的历史值：把米制偏移直接当归一化量写下（Python 侧点名的同一个错误）。
+  // 原来用 `scale/2` 当 AABB 中高的旧公式，在地图缩到 90 后误差只剩 7 厘米、不再可观测，
+  // 所以这里换一个与 scale 无关、且必然明显的历史值。
+  const legacy = storyMapModule.MAP_PLACEMENT.centreY - storyMapModule.MAP_PLACEMENT.courtyardY;
+  assert.ok(Math.abs(legacy - transform.position[1]) > 0.4, '旧值与正确值的差必须可观测');
+  stale.geometry.position = [0, legacy, 0];
+  first.unmount();
+
+  const again = f.mount(); await again.mount(); await turn();
+  const repairs = f.calls.filter(call => call[0] === 'create'
+    && call[4]?.actor_guid === storyMapModule.MAP_GUID);
+  assert.equal(repairs.length, 2, '第二次进入必须走一次校正调用');
+  assert.equal(repairs[1][4].skip_if_exists, true, '校正必须复用同一个 actor');
+  assert.equal(repairs[1][4].update_if_exists, true, '校正必须真的写回摆位');
+  assert.deepEqual(repairs[1][4].position, transform.position);
+  const repaired = f.actors.get(MAIN).filter(actor => actor.actor_guid === storyMapModule.MAP_GUID);
+  assert.equal(repaired.length, 1, '校正不能追加第二张地图');
+  assert.deepEqual(repaired[0].geometry.position, transform.position, '地图必须回到 y = 0 的摆位');
+  assert.equal(f.alerts.length, 0, '校正不该报错');
+});
+
+/**
+ * 一张 4x4 的合成网格：世界高度 = 1 + 0.5 × 世界 x（沿 +x 上坡）。
+ *
+ * 网格以 `minY` 为基准存厘米，因此 `minY` 取整张网里最低的那一格，格值才都是非负的；
+ * 这样断言用的是闭式数字（世界 (0,0) 处的地面恰好 1 m），而不是把模块的换算再抄一遍。
+ */
+function rampGrid() {
+  // z 方向铺得够宽（±80 模型米 ≈ ±17 世界米），主世界的 Boss（z = 5.5）才落在网内而不是被夹到边上；
+  // 高度只随 x 变化，所以每一行的值相同。
+  const bounds = [-10, 10, -80, 80], res = 4;
+  const originY = storyMapModule.mapOriginTransform().position[1];
+  const centreY = storyMapModule.MAP_PLACEMENT.centreY;
+  const modelToWorld = storyMapHeightModule.MODEL_TO_WORLD;
+  const cellX = (bounds[1] - bounds[0]) / res;
+  const worldY = [];
+  for (let i = 0; i < res; i++) worldY.push(1 + 0.5 * (bounds[0] + (i + 0.5) * cellX) * modelToWorld);
+  const minY = centreY + (Math.min(...worldY) - originY) / modelToWorld;
+  const heights = [];
+  for (let j = 0; j < res; j++) {
+    for (let i = 0; i < res; i++) {
+      heights.push(Math.round((centreY + (worldY[i] - originY) / modelToWorld - minY) * 100));
+    }
+  }
+  return { version: 1, res: [res, res], bounds, minY, unit: 'cm', heights };
+}
+
+// 上一次这条功能「改了却什么都没变」的断点有两处，这条用例把两处都按在测试里：
+// 页面根本没读 `story-map-height.json`（loader 无人调用），以及读到了也没交给控制器
+// （createStoryCameraController 不转发 getGroundY）。因此这里断言的是端到端的结果：
+// 玩家的 y 必须等于 heightAt(x, z) + 该模型的原点离地高度，而不是固定地板。
+test('the player walks on the baked map grid once it is loaded', async t => {
+  const f = await fixture(t, {
+    mapHeight: async () => storyMapHeightModule.setHeightGrid(rampGrid()),
+    // 主世界且 Boss 还活着：Boss 与玩家同一次进入被摆到地面上（血条为 0 时不会摆它）。
+    gameplay: () => ({ status: 'ok', role: 'main',
+      state: { version: 2, revision: 0, rage: 0, boss: { hp: 200 }, drop: null, inventory: { worldFragment: 0 } },
+      config: gameplayConfig }),
+  });
+  const page = f.mount(); await page.mount();
+  // 1) 页面真的去读部署包里那一份数据（相对 dist/index.html 往上三级）。
+  const read = f.calls.find(call => call[0] === 'mapHeight');
+  assert.ok(read, '进入世界必须读入地图高度网格');
+  assert.match(read[1], /^file:/, '页面在 file:// 下读盘（fetch 读不了 file:，走 XHR）');
+  assert.match(read[1], /\/game\/data\/story-map-height\.json$/);
+  assert.equal(storyMapHeightModule.hasHeightGrid(), true, '读到的网格必须真的装进模块');
+
+  // 2) 玩家的地面跟着网格：1 m 的地面 + 模型原点离地 0.9 m ≈ 1.9 m，而不是 0.9 m 的固定地板。
+  const localAabb = f.actors.get(MAIN).find(a => a.actor_guid === STORY_CHARACTERS[0].guid).local_aabb;
+  const flat = characterTransform(STORY_CHARACTERS[0], localAabb).position[1];
+  const player = f.actors.get(MAIN).find(a => a.actor_guid === STORY_CHARACTERS[0].guid);
+  const standing = page.instance.camera.snapshotPlayer();
+  assert.ok(Math.abs(player.geometry.position[1] - (1 + flat)) < 0.02,
+    `玩家的脚必须在网格给出的地面上（期望 ${1 + flat}，实际 ${player.geometry.position[1]}）`);
+  assert.ok(Math.abs(standing.position[1] - (1 + flat)) < 0.02);
+  assert.ok(Math.abs(standing.position[1] - flat) > 0.5, '不是固定地板：固定地板会低整整 1 m');
+
+  // 3) 走动时高度跟着地形变：yaw = 0 下 D 走向 +x，而网格沿 +x 上坡。
+  page.instance.onKeyDown(event({ code: 'KeyD' }));
+  f.step(50);
+  const walked = page.instance.camera.snapshotPlayer();
+  assert.ok(walked.position[0] > standing.position[0], 'D 必须真的往前走了');
+  assert.ok(walked.position[1] > standing.position[1], '上坡时玩家必须跟着地面升高');
+  assert.ok(Math.abs(walked.position[1]
+    - (storyMapHeightModule.heightAt(walked.position[0], walked.position[2]) + flat)) < 1e-9,
+  'player.position[1] 就是 heightAt(x, z) 加上原点离地高度');
+  page.instance.camera.keyUp(event({ code: 'KeyD' }));
+
+  // 4) 同一次进入里摆下的角色也吃同一份地面（Boss 在这里被放在 z = 5.5 的空地上）。
+  const boss = f.actors.get(MAIN).find(a => a.actor_guid === STORY_CHARACTERS[1].guid);
+  const bossFlat = characterTransform(STORY_CHARACTERS[1], boss.local_aabb).position[1];
+  const ground = storyMapHeightModule.heightAt(boss.geometry.position[0], boss.geometry.position[2]);
+  assert.ok(Math.abs(boss.geometry.position[1] - (ground + bossFlat)) < 1e-9,
+    `Boss 的脚也要落在网格上（期望 ${ground + bossFlat}，实际 ${boss.geometry.position[1]}）`);
+});
+
+// 数据文件读不到不是进入世界的失败：地面退回原来的固定地板，其他一切照旧。
+test('a missing height grid keeps the constant floor and never blocks the world', async t => {
+  const f = await fixture(t, { mapHeight: async () => { throw new Error('读取失败（404）'); } });
+  const page = f.mount(); await page.mount();
+  assert.ok(f.calls.some(call => call[0] === 'mapHeight'), '页面必须尝试读取网格');
+  assert.deepEqual(f.alerts, [], '网格读不到不能阻止进入世界');
+  assert.match(page.instance.actionFeedback.value, /地图高度网格未能读取/);
+  assert.equal(storyMapHeightModule.hasHeightGrid(), false);
+
+  const player = f.actors.get(MAIN).find(a => a.actor_guid === STORY_CHARACTERS[0].guid);
+  const flat = characterTransform(STORY_CHARACTERS[0], player.local_aabb).position[1];
+  assert.ok(Math.abs(player.geometry.position[1] - flat) < 1e-9, '没有网格就还是固定地板');
+  assert.ok(Math.abs(page.instance.camera.snapshotPlayer().position[1] - flat) < 1e-9);
+  page.instance.onKeyDown(event({ code: 'KeyD' }));
+  f.step(50);
+  const walked = page.instance.camera.snapshotPlayer();
+  assert.ok(walked.position[0] > 0, '没有网格也要走');
+  assert.ok(Math.abs(walked.position[1] - flat) < 1e-9, '固定地板下走动不改高度');
+  page.instance.camera.keyUp(event({ code: 'KeyD' }));
 });

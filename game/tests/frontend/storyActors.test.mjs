@@ -49,7 +49,7 @@ test('unrelated names are untouched; fixed NPCs and disabled physics are enforce
   assert.deepEqual(f.state.actors[0], unrelated);
   assert.equal(boss.mechanics.physics_enabled, false);
   assert.equal(boss.follow_camera, false); assert.equal(boss.camera_lock.enabled, false);
-  assert.equal(boss.geometry.position[2], 12);
+  assert.equal(boss.geometry.position[2], 5.5);
 });
 test('partial failure preserves successful actors; retry repairs incomplete placement without duplication', async () => {
   const f = apiFixture(); const original = f.api.scene.setActorTransform;

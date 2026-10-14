@@ -9,6 +9,9 @@ import { actorFixture, apiFixture, deferred, url, gameplayConfig } from './fixtu
 import { ensureStoryCharacters } from '../../frontend/storyActors.mjs';
 
 const config = gameplayConfig;
+// 龙在主世界里被摆在哪儿，就从授权数据里读，而不是在用例里再抄一份坐标：
+// 它一挪动，「红球落在龙倒下的地方」和「走到龙脚下」这类断言就得跟着走。
+const bossSite = STORY_CHARACTERS.find(character => character.role === 'boss');
 function fixture() {
   let state = { version: 2, revision: 0, rage: 0, boss: { hp: 200 }, drop: null, inventory: { worldFragment: 0 } };
   let role = 'main', time = 0, id = 0, fail = false, lostReply = false, visualFail = false, gate = null, replyGate = null;
@@ -74,11 +77,14 @@ test('world bounds include scale and rotation; range uses the model edge, not it
       .map((v, a) => v + boss.geometry.position[a]);
     p.forEach((v, a) => assert.ok(v >= bounds[a] - 1e-9 && v <= bounds[a + 3] + 1e-9));
   }
-  const ground = [0, 0, bounds[2] - 2];
+  // The ground point is 2 m in front of the bounds' own -z face: the enemy's authored site sits
+  // on one side of the model's pivot (the dragon is not centred on it), so the point has to be
+  // derived from the bounds rather than written down.
+  const ground = [(bounds[0] + bounds[3]) / 2, 0, bounds[2] - 2];
   assert.equal(distanceToBounds(ground, bounds), 2);
   assert.ok(canHitBoss({ position: ground, rotation: [0, Math.PI, 0], facingYaw: 0, grounded: true }, bounds, config));
   assert.equal(canHitBoss({ position: ground, rotation: [0, 0, 0], facingYaw: Math.PI, grounded: true }, bounds, config), false);
-  assert.equal(canHitBoss({ position: [0, 0, bounds[2] - 2.51], rotation: [0, Math.PI, 0], facingYaw: 0, grounded: true }, bounds, config), false);
+  assert.equal(canHitBoss({ position: [ground[0], 0, bounds[2] - 2.51], rotation: [0, Math.PI, 0], facingYaw: 0, grounded: true }, bounds, config), false);
   assert.equal(canHitBoss(null, null, config), false);
 });
 
@@ -89,9 +95,9 @@ test('ten acknowledged hits, cooldown, one drop and one pickup', async () => {
     assert.equal(f.state.boss.hp, 200 - (i + 1) * 20);
   }
   await f.game.attack(); assert.equal(f.state.revision, 10);
-  assert.deepEqual(f.state.drop.position, [0, 0, 12]);
+  assert.deepEqual(f.state.drop.position, [bossSite.x, 0, bossSite.z]);
   await f.game.pickup(); assert.equal(f.state.inventory.worldFragment, 0);
-  f.player.position = [0, 0, 12];
+  f.player.position = [bossSite.x, 0, bossSite.z];
   await f.game.pickup(); await f.game.pickup();
   assert.equal(f.state.inventory.worldFragment, 1);
   assert.equal(f.state.revision, 11);
@@ -264,7 +270,7 @@ test('airborne attacks and pickups never mutate progress or consume the next gro
   assert.equal(f.requests.length, 1); assert.equal(f.state.boss.hp, 200);
   f.player.grounded = true; await f.game.attack(); assert.equal(f.state.boss.hp, 180);
   for (let i = 0; i < 9; i++) { f.tick(); await f.game.attack(); }
-  f.player.position = [0, 1.2, 12]; f.player.grounded = false;
+  f.player.position = [bossSite.x, 1.2, bossSite.z]; f.player.grounded = false;
   await f.game.pickup(); assert.equal(f.state.inventory.worldFragment, 0);
   f.player.position[1] = 0; f.player.grounded = true;
   await f.game.pickup(); assert.equal(f.state.inventory.worldFragment, 1);
