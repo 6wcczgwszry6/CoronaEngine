@@ -117,6 +117,22 @@ class ResourceManager final {
     }
 
     /**
+     * @brief 有界等待地尝试获取资源写入句柄（不会无限阻塞）
+     *
+     * 见 ResourceCache::try_acquire_write_for。适合"可延后"的后台任务：
+     * 拿不到锁就本周期跳过，而不是把调用线程（常常是某个系统的帧循环）冻住。
+     *
+     * @param rid 资源ID
+     * @param timeout 最长等待时间
+     * @return ResourceWriteHandle<T> 句柄；超时返回无效句柄
+     */
+    template <typename T = IResource>
+    WriteHandle<T> try_acquire_write_for(
+        TResourceID rid, std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
+        return resource_cache_.try_acquire_write_for<T>(rid, timeout);
+    }
+
+    /**
      * @brief 移除资源缓存
      *
      * @param rid 资源ID
