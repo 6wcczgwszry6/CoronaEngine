@@ -336,7 +336,18 @@ class StoryAssetTests(unittest.TestCase):
         self.assertLess(page.index("await loadStoryMapHeight("),
                         page.index("const { snapshot, player, targetOffset } = await ensureStoryCharacters({"),
                         "高度网格必须在角色落地之前读入")
-        self.assertIn("getGroundY: (x, z) => heightAt(x, z),", page)
+        # One binding for every grounded thing the page owns: the player, the objects the
+        # player places, the boss's drop and the prophet's cube all read this one function,
+        # so none of them can end up standing on a different surface.
+        self.assertIn("const groundYAt = (x, z) => heightAt(x, z);", page)
+        for binding in ("getGroundY: groundYAt,", "readBoss: () => bossActor,",
+                        "spawn = blockSpawnTransform(player, player?.facingYaw, PLACEMENT_DISTANCE, groundYAt);",
+                        "role: loadedGameplay?.role, prophetActor, playerActor, resolveAsset: resolveStoryAssetPath,"):
+            self.assertIn(binding, page)
+        gameplay_call = page[page.index("const gameplay = createStoryGameplay({"):]
+        self.assertIn("groundYAt,", gameplay_call[:gameplay_call.index("});")],
+                      "玩法模块（掉落的碎片）必须拿到同一条地面线")
+        self.assertIn("groundYAt,", page[page.index("await ensureStoryCube({"):])
         # The option has to survive the camera binding, which is where it was dropped.
         camera = (ROOT / "editor/Frontend/src/utils/viewportStoryCamera.js").read_text(encoding="utf-8")
         self.assertIn("getGroundY = null,", camera)

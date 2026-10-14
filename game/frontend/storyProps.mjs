@@ -67,23 +67,42 @@ export const PLACEMENT_DISTANCE = 2.0;
  * Where the block the player is holding lands: `distance` metres straight ahead on the
  * ground, turned to face the same way the player does.
  *
+ * **The y is the ground line, not the object's origin world y.** The engine normalises a
+ * static model into a unit cube (the AABB centre becomes the origin), so a placed actor's
+ * origin sits `-bounds[1] * scale` above the surface — `storyActors.syncPlacementActors`
+ * performs exactly that sink when it consumes this row (`position[1] - bounds[1] * scale`),
+ * and `storyCharacters.characterTransform` lands the characters on `heightAt(x, z)` in the
+ * same shape. Storing the ground line therefore keeps this row in the one convention every
+ * other grounded object on the page already uses, and the existing sink is what makes the
+ * block visually touch the surface.
+ *
  * The forward vector is `(sin, cos)` of the yaw — the same convention
  * `storyCube.screenAxes`/`cubeSpawnTransform` uses — duplicated here on purpose rather than
  * imported, so this module keeps its promise of importing nothing and a geometry change in
  * the cube can never silently move where a player's own block goes.
  *
- * `y` is taken from the player, so the block stands on whatever ground the player is on;
+ * `y` comes from the same baked grid the characters use: `groundYAt(x, z)` is
+ * `storyMapHeight.heightAt`, which answers `null` when no grid is loaded or the sample is
+ * junk. Then the old constant is kept — the player's own `position[1]`, the value this
+ * landed on before the grid existed — so a world without the data file behaves exactly as it
+ * did. Taking the player's y with a grid loaded is what made a block placed on rising
+ * terrain hover by the height difference; taking the ground at the target cell is what makes
+ * it rest on the surface.
+ *
  * `siteId` stays null because the spot is derived from the player, not chosen from a list.
  */
-export function blockSpawnTransform(player, yaw, distance = PLACEMENT_DISTANCE) {
+export function blockSpawnTransform(player, yaw, distance = PLACEMENT_DISTANCE, groundYAt = null) {
   const position = player?.position;
   if (!vectors(position) || !inRange(position)) throw new Error('玩家位置未就绪');
   if (!Number.isFinite(yaw)) throw new Error('玩家朝向未就绪');
   if (!positive(distance)) throw new Error('摆放距离无效');
+  const x = position[0] + Math.sin(yaw) * distance;
+  const z = position[2] + Math.cos(yaw) * distance;
+  // `null` (no grid, junk sample, no provider) keeps the pre-grid constant: the player's y.
+  const ground = typeof groundYAt === 'function' ? groundYAt(x, z) : null;
   return {
     siteId: null,
-    position: [position[0] + Math.sin(yaw) * distance, position[1],
-      position[2] + Math.cos(yaw) * distance],
+    position: [x, Number.isFinite(ground) ? ground : position[1], z],
     rotation: [0, yaw, 0],
     scale: 1,
   };

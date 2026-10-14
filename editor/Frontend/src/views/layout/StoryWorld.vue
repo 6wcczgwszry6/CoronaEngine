@@ -21,7 +21,7 @@ import { createStoryGameplay, worldBounds, distanceToBounds, pickupDistance,
   contextualInteraction } from '../../../../../game/frontend/storyGameplay.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath,
   sceneSnapshot } from '../../../../../game/frontend/storyCharacters.mjs';
-import { MAX_PLACEMENTS, PLACED_BLOCK_REACH, blockSpawnTransform, cycleSlot, findProp,
+import { MAX_PLACEMENTS, PLACED_BLOCK_REACH, PLACEMENT_DISTANCE, blockSpawnTransform, cycleSlot, findProp,
   hotbarSlots as hotbarSlotsFor, nearestPlacedBlock, nextPlacementIndex, placementGuid,
   removePlacement, sanitizePlacements } from '../../../../../game/frontend/storyProps.mjs';
 import { PROPHET_INTERACTION, prophetAvailable, prophetDistance,
@@ -98,12 +98,18 @@ let dpiQuery = null;
 let focused = document.hasFocus();
 const current = () => !disposed && !leaving && worldModeState.status === 'ready'
   && worldModeState.mode === 'story' && worldModeState.revision === revision;
+/**
+ * 物体的地面线：与角色、玩家控制器同一个来源——烘好的地图高度网格。
+ * 摆放、掉落和先知方块都读这一个函数（`heightAt` 在没有网格时返回 null，各调用点便退回
+ * 它们原来的常量高度），因此世界上所有东西站的是同一条地面，而不是三套各自算的 y。
+ */
+const groundYAt = (x, z) => heightAt(x, z);
 const camera = createStoryCameraController({
   createControls: createPlayerController,
   // 玩家的地面线：地图是 phantom（引擎不为它建碰撞体），脚下多高只能由烘好的高度网格回答。
   // `heightAt` 在没有网格时返回 null，控制器便退回原来的固定地板——这条绑定必须在
   // createStoryCameraController 里继续往下传，否则控制器收不到它（这正是之前的原因）。
-  getGroundY: (x, z) => heightAt(x, z),
+  getGroundY: groundYAt,
   onError: error => {
     if (current()) gameplayError.value = error.message;
     notifyWorldError(error);
@@ -222,6 +228,8 @@ async function assertSource() {
 const signature = data => JSON.stringify([data.role, data.state.boss.hp === 0, data.state.drop]);
 const gameplay = createStoryGameplay({
   api: editorApi, projectPath, readPlayer: camera.snapshotPlayer, readBoss: () => bossActor,
+  // 掉落的碎片和角色、方块读同一个地面：地图的烘好高度网格（没有网格时退回原来的常量）。
+  groundYAt,
   trackWork: trackWorldSessionWork,
   onState: data => {
     // 即使 current() 为假也镜像已确认的世界角色：HUD 要跟随引擎真正确认的世界，
@@ -1534,7 +1542,7 @@ async function placeSelectedItem() {
   const player = camera.snapshotPlayer();
   let spawn;
   try {
-    spawn = blockSpawnTransform(player, player?.facingYaw);
+    spawn = blockSpawnTransform(player, player?.facingYaw, PLACEMENT_DISTANCE, groundYAt);
   } catch (error) {
     showToast(`无法确定摆放位置：${error.message}`);
     return;
@@ -1833,6 +1841,8 @@ onMounted(async () => {
       rememberCube(prophetActor && playerActor ? await ensureStoryCube({
         api: editorApi, sceneId, frontendUrl: window.location.href,
         role: loadedGameplay?.role, prophetActor, playerActor, resolveAsset: resolveStoryAssetPath,
+        // 方块与角色同一个地面来源：地图的烘好高度网格（没有网格时退回原来的高度）。
+        groundYAt,
       }) : null);
     } catch (error) {
       rememberCube(null);

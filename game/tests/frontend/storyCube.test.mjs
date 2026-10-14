@@ -56,6 +56,20 @@ test('the cube spawns beside the prophet, scaled from the table', () => {
   assert.throws(() => cubeSpawnTransform({ geometry: { position: null } }, 0), /先知位置未就绪/);
 });
 
+test('the cube also spawns onto the ground grid when the page supplies one', () => {
+  const ground = (x, z) => 3 + 0.5 * x + 0.25 * z;
+  const spawn = cubeSpawnTransform(prophet([0, 4, -4]), 0, CUBE_PLACEMENT, ground);
+  assert.equal(spawn.position[1], ground(spawn.position[0], spawn.position[2]),
+    '有网格时方块的原点按它自己那一格的地面来（贴地由既有的原点离地偏移负责）');
+  assert.ok(Math.abs(spawn.position[1] - 4) > 0.5, '与先知自己的 y 必须差得可观测，否则这条断言是空转的');
+  // 没有网格（没给 / 采样不是有限数）时仍然是先知自己的高度，旧行为一步不变。
+  for (const none of [undefined, null, 0, () => null, () => NaN]) {
+    assert.deepEqual(cubeSpawnTransform(prophet([0, 0, -4]), 0, CUBE_PLACEMENT, none).position,
+      [CUBE_PLACEMENT.sideDistance, 0, -4 + CUBE_PLACEMENT.forwardDistance],
+      `没有可用地面时必须退回旧行为（${String(none)}）`);
+  }
+});
+
 test('scaling steps are bounded, proportional, and never disturb the position', () => {
   const factor = CUBE_PLACEMENT.scaleFactor;
   assert.ok(factor >= 1.3, 'a step must be big enough to see on screen');

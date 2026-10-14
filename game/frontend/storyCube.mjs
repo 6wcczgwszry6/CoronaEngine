@@ -83,19 +83,28 @@ export function screenAxes(yaw) {
   return { forward: [Math.sin(yaw), Math.cos(yaw)], right: [Math.cos(yaw), 0 - Math.sin(yaw)] };
 }
 
-/** Where the cube first appears: beside the prophet, on the player's right, slightly ahead. */
-export function cubeSpawnTransform(prophet, facingYaw, placement = CUBE_PLACEMENT) {
+/**
+ * Where the cube first appears: beside the prophet, on the player's right, slightly ahead.
+ *
+ * `y` comes from the same baked ground grid the characters stand on (`groundYAt`, i.e.
+ * `storyMapHeight.heightAt`) sampled at the cube's **own** (x, z), so a cube dropped beside a
+ * prophet standing on a slope still rests on the surface instead of inheriting the prophet's
+ * exact height. Without a grid — or with an unusable sample — the prophet's own y is kept, which
+ * is the pre-grid behaviour exactly. The returned position is the actor origin: `syncPlacementActors`
+ * and `characterTransform` subtract the model's own `-bounds[1] * scale` elsewhere, so the cube
+ * itself touches the ground through that existing foot offset, not by adding one here.
+ */
+export function cubeSpawnTransform(prophet, facingYaw, placement = CUBE_PLACEMENT, groundYAt = null) {
   const position = prophet?.geometry?.position;
   if (!Array.isArray(position) || position.length !== 3 || !position.every(finiteNumber)) {
     throw new Error('先知位置未就绪');
   }
   const { forward, right } = screenAxes(facingYaw);
+  const x = position[0] + right[0] * placement.sideDistance + forward[0] * placement.forwardDistance;
+  const z = position[2] + right[1] * placement.sideDistance + forward[1] * placement.forwardDistance;
+  const ground = typeof groundYAt === 'function' ? groundYAt(x, z) : null;
   return {
-    position: [
-      position[0] + right[0] * placement.sideDistance + forward[0] * placement.forwardDistance,
-      position[1],
-      position[2] + right[1] * placement.sideDistance + forward[1] * placement.forwardDistance,
-    ],
+    position: [x, Number.isFinite(ground) ? ground : position[1], z],
     rotation: [0, facingYaw + Math.PI, 0],
     scale: [placement.scale, placement.scale, placement.scale],
   };
@@ -168,7 +177,7 @@ export function cubeTransformOf(actor) {
  * player's own adjustments: an already-marked cube keeps its saved transform.
  */
 export async function ensureStoryCube({ api, sceneId, frontendUrl, role, prophetActor, playerActor,
-  resolveAsset = null, placement = CUBE_PLACEMENT }) {
+  resolveAsset = null, placement = CUBE_PLACEMENT, groundYAt = null }) {
   const actors = sceneSnapshot(await api.scene.getSnapshot(sceneId))?.actors;
   const cube = (Array.isArray(actors) ? actors : []).find(isCubeActor) || null;
 
@@ -186,7 +195,7 @@ export async function ensureStoryCube({ api, sceneId, frontendUrl, role, prophet
   if (cube && cube.model_ref === placement.modelRef) return cube;
 
   const facingYaw = playerFacingYaw(playerActor);
-  const spawn = cube ? null : cubeSpawnTransform(prophetActor, facingYaw, placement);
+  const spawn = cube ? null : cubeSpawnTransform(prophetActor, facingYaw, placement, groundYAt);
   const route = cube?.route || (typeof resolveAsset === 'function'
     ? resolveAsset(frontendUrl, placement.asset) : null);
   if (!route) throw new Error('正方体资源路径不可用');

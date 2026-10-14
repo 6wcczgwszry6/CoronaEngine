@@ -1764,10 +1764,10 @@ test('a map left at an older transform is repaired in place instead of adopted',
  * 网格以 `minY` 为基准存厘米，因此 `minY` 取整张网里最低的那一格，格值才都是非负的；
  * 这样断言用的是闭式数字（世界 (0,0) 处的地面恰好 1 m），而不是把模块的换算再抄一遍。
  */
-function rampGrid() {
+function rampGrid(zHalf = 80) {
   // z 方向铺得够宽（±80 模型米 ≈ ±17 世界米），主世界的 Boss（z = 5.5）才落在网内而不是被夹到边上；
-  // 高度只随 x 变化，所以每一行的值相同。
-  const bounds = [-10, 10, -80, 80], res = 4;
+  // 高度只随 x 变化，所以每一行的值相同。需要覆盖更远的 z 时用参数（例如红球落点的用例）。
+  const bounds = [-10, 10, -zHalf, zHalf], res = 4;
   const originY = storyMapModule.mapOriginTransform().position[1];
   const centreY = storyMapModule.MAP_PLACEMENT.centreY;
   const modelToWorld = storyMapHeightModule.MODEL_TO_WORLD;
@@ -1852,4 +1852,139 @@ test('a missing height grid keeps the constant floor and never blocks the world'
   assert.ok(walked.position[0] > 0, '没有网格也要走');
   assert.ok(Math.abs(walked.position[1] - flat) < 1e-9, '固定地板下走动不改高度');
   page.instance.camera.keyUp(event({ code: 'KeyD' }));
+});
+
+// 物体摆放也必须站在地面上：布局里存的 y 是**落点那一格**的地面线（和角色同一个来源），
+// 而不是把玩家自己的 y 抄下来——玩家站在上坡上时，抄下来就会浮在地面上方。
+test('a placed block stores the ground height at its own spot, not the player height', async t => {
+  let layout = { version: 1, placements: [] };
+  const saved = [];
+  const state = { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null,
+    inventory: { worldFragment: 1, block: 4 } };
+  const f = await fixture(t, {
+    documents: { loadPlacements: layout },
+    mapHeight: async () => storyMapHeightModule.setHeightGrid(rampGrid()),
+    gameplay: async (request, activePath) => {
+      if (request.action === 'savePlacements') {
+        saved.push(structuredClone(request.placements));
+        layout = { version: 1, placements: structuredClone(request.placements) };
+        return { status: 'ok', role: 'child', state: structuredClone(layout) };
+      }
+      return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+        config: gameplayConfig, state: structuredClone(state) };
+    },
+  });
+  let page = f.mount(); await page.mount(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const p = () => page.instance;
+  assert.equal(p().roleRef.value, 'child');
+
+  // 先算出「方块自己那一格」的地面，再去摆放：断言不抄模块的换算，用的是被断言的同一个函数。
+  const player = p().camera.snapshotPlayer();
+  const x = player.position[0] + Math.sin(player.facingYaw) * storyPropsModule.PLACEMENT_DISTANCE;
+  const z = player.position[2] + Math.cos(player.facingYaw) * storyPropsModule.PLACEMENT_DISTANCE;
+  const ground = storyMapHeightModule.heightAt(x, z);
+  assert.ok(Number.isFinite(ground), '这条用例必须先真的装上网格');
+
+  p().onKeyDown(event({ code: 'KeyB', key: 'b' }));
+  await turn(); await turn(); await turn();
+  assert.equal(p().gameplayError.value, '', '摆放不能报错');
+  const entry = saved.at(-1)?.[0];
+  assert.ok(entry, '摆放必须先落盘');
+  assert.equal(entry.propId, 'block');
+  assert.ok(Math.abs(entry.position[0] - x) < 1e-9, '落点的 x 仍是玩家前方 2 米');
+  assert.ok(Math.abs(entry.position[2] - z) < 1e-9, '落点的 z 仍是玩家前方 2 米');
+  assert.ok(Math.abs(entry.position[1] - ground) < 1e-9,
+    `存下来的 y 必须是落点的地面高度（期望 ${ground}，实际 ${entry.position[1]}）`);
+  assert.ok(Math.abs(entry.position[1] - player.position[1]) > 0.5,
+    '与「抄玩家自己的 y」必须差得可观测，否则这条断言是空转的');
+});
+
+// 没有网格时退回旧常量：方块仍然落在玩家所在的那条地面上（固定地板），一步都不许变。
+test('without a grid a placed block keeps the old constant height', async t => {
+  let layout = { version: 1, placements: [] };
+  const saved = [];
+  const state = { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null,
+    inventory: { worldFragment: 1, block: 4 } };
+  const f = await fixture(t, {
+    documents: { loadPlacements: layout },
+    gameplay: async (request, activePath) => {
+      if (request.action === 'savePlacements') {
+        saved.push(structuredClone(request.placements));
+        layout = { version: 1, placements: structuredClone(request.placements) };
+        return { status: 'ok', role: 'child', state: structuredClone(layout) };
+      }
+      return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+        config: gameplayConfig, state: structuredClone(state) };
+    },
+  });
+  let page = f.mount(); await page.mount(); await turn();
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  const p = () => page.instance;
+  assert.equal(storyMapHeightModule.hasHeightGrid(), false, '这条用例必须没有网格');
+
+  const player = p().camera.snapshotPlayer();
+  p().onKeyDown(event({ code: 'KeyB', key: 'b' }));
+  await turn(); await turn(); await turn();
+  assert.equal(p().gameplayError.value, '', '摆放不能报错');
+  const entry = saved.at(-1)?.[0];
+  assert.ok(entry, '摆放必须先落盘');
+  assert.ok(Math.abs(entry.position[1] - player.position[1]) < 1e-9,
+    `没有网格时 y 必须还是旧的常量（期望 ${player.position[1]}，实际 ${entry.position[1]}）`);
+});
+
+// 掉落的红球也必须落在它自己那一格的地面上：这里走完整的主世界路径（走到龙面前打死它），
+// 断言碎裂后碎片 actor 的落点就是 heightAt(落点)，而不是写死的 0 或玩家/龙的原点。
+test('the dropped fragment rests on the grid, not on the constant floor', async t => {
+  const { config: realConfig, state: realState } = readPythonGameplay(t);
+  if (!realConfig) return;
+  const boss = STORY_CHARACTERS.find(item => item.role === 'boss');
+  const state = structuredClone(realState);
+  const f = await fixture(t, {
+    // z 也要铺够宽：龙在 z = 5.5，网格夹边会让断言量到边缘值而不是它脚下的地面。
+    mapHeight: async () => storyMapHeightModule.setHeightGrid(rampGrid(160)),
+    gameplay: async (request, activePath) => {
+      if (request.action === 'hitBoss' || request.hit) {
+        state.revision += 1;
+        state.boss.hp = Math.max(0, state.boss.hp - realConfig.damage);
+        if (state.boss.hp === 0) {
+          state.drop = { id: 'story.boss.world-fragment', position: [...request.bossPosition], collected: false };
+        }
+      }
+      return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+        config: realConfig, state: structuredClone(state) };
+    },
+  });
+  const page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  assert.equal(p().roleRef.value, 'main');
+  assert.ok(f.calls.some(call => call[0] === 'mapHeight'), '主世界也必须读入高度网格');
+
+  let clock = 0;
+  t.mock.method(performance, 'now', () => clock);
+  p().onKeyDown(event({ code: 'KeyD', key: 'd' }));
+  for (let i = 0; i < 200 && p().camera.snapshotPlayer().position[0] < boss.x - 0.1; i++) f.step(50);
+  p().camera.keyUp(event({ code: 'KeyD', key: 'd' }));
+  p().onKeyDown(event({ code: 'KeyW', key: 'w' }));
+  for (let i = 0; i < 200 && p().camera.snapshotPlayer().position[2] < boss.z - 0.5; i++) f.step(50);
+  p().camera.keyUp(event({ code: 'KeyW', key: 'w' }));
+  const swings = Math.ceil(realConfig.bossHp / realConfig.damage);
+  for (let i = 0; i < swings; i++) { clock += realConfig.cooldownMs; await p().gameplay.attack(); await turn(); }
+  assert.equal(state.boss.hp, 0, '打满次数后 Boss 必须倒下');
+  assert.ok(state.drop && state.drop.collected === false, 'Boss 死后必须留下未拾取的红球');
+
+  const ground = storyMapHeightModule.heightAt(state.drop.position[0], state.drop.position[2]);
+  assert.ok(Number.isFinite(ground), '这条用例必须先真的装上网格');
+  assert.ok(Math.abs(state.drop.position[1] - ground) < 1e-9,
+    `掉落的 y 必须是落点的地面高度（期望 ${ground}，实际 ${state.drop.position[1]}）`);
+  assert.ok(Math.abs(state.drop.position[1]) > 0.5, '与写死的 0 必须差得可观测');
+
+  // 碎片模型自己也吃这条地面：地板被抹平时红球会各沉一半进退。
+  const fragment = f.actors.get(MAIN).find(actor => actor.actor_guid === gameplayModule.FRAGMENT_GUID);
+  assert.ok(fragment, '主世界必须真的摆出碎片');
+  const flat = characterTransform(gameplayModule.FRAGMENT, fragment.local_aabb).position[1];
+  assert.ok(Math.abs(fragment.geometry.position[1] - (ground + flat)) < 1e-9,
+    `红球必须站在网格给出的地面上：期望 ${ground + flat}，实际 ${fragment.geometry.position[1]}`);
 });

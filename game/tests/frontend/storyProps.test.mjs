@@ -35,6 +35,31 @@ test('a spawn that cannot be trusted is refused instead of guessed', () => {
   assert.throws(() => blockSpawnTransform({ position: [0, 0, 0] }, 0, 0), /摆放距离无效/);
 });
 
+// 物体必须站在地面上：地面线由烘好的高度网格回答（与角色同一个来源），
+// 读不到网格时才退回摆放前的常量（玩家自己的 y）。
+test('the block lands on the ground grid at its own spot, and on the old constant without one', () => {
+  const player = { position: [0, 2.6, 0] };
+  const ground = (x, z) => 1 + 0.5 * x + 0.25 * z;
+  const onGrid = blockSpawnTransform(player, 0, FORWARD_DISTANCE, ground);
+  close(onGrid.position[0], 0, 'x 不变');
+  close(onGrid.position[2], FORWARD_DISTANCE, 'z 不变');
+  // 落点是方块自己那一格的地面，不是玩家脚下的高度（1.9 是玩家原点的世界 y）。
+  close(onGrid.position[1], ground(onGrid.position[0], onGrid.position[2]),
+    '有网格时 y 必须是落点自己的地面高度');
+  assert.ok(Math.abs(onGrid.position[1] - player.position[1]) > 0.5,
+    '与旧常量必须差得可观测，否则这条断言是空转的');
+
+  // 玩家站在上坡上、前方更高：仍然取前方那一点的地面，而不是把玩家抬起来。
+  const uphill = blockSpawnTransform({ position: [0, 5, 0] }, 0, FORWARD_DISTANCE, () => 2);
+  close(uphill.position[1], 2, '地面比玩家低也必须按地面来');
+
+  // 没有网格（null / 未给 / 不是函数 / 采样不是有限数）时，就是旧行为。
+  for (const none of [undefined, null, 0, [], () => null, () => NaN, () => '1']) {
+    close(blockSpawnTransform(player, 0, FORWARD_DISTANCE, none).position[1], player.position[1],
+      `没有可用地面时必须退回旧常量（${String(none)}）`);
+  }
+});
+
 test('what a spawn produces is exactly what the placement layer accepts', () => {
   const spawn = blockSpawnTransform({ position: [1, 0, 2] }, Math.PI / 4);
   const entry = { propId: findProp('block').id, index: 0, ...spawn };

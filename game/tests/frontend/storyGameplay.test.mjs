@@ -12,7 +12,7 @@ const config = gameplayConfig;
 // 龙在主世界里被摆在哪儿，就从授权数据里读，而不是在用例里再抄一份坐标：
 // 它一挪动，「红球落在龙倒下的地方」和「走到龙脚下」这类断言就得跟着走。
 const bossSite = STORY_CHARACTERS.find(character => character.role === 'boss');
-function fixture() {
+function fixture(options = {}) {
   let state = { version: 2, revision: 0, rage: 0, boss: { hp: 200 }, drop: null, inventory: { worldFragment: 0 } };
   let role = 'main', time = 0, id = 0, fail = false, lostReply = false, visualFail = false, gate = null, replyGate = null;
   const boss = actorFixture(STORY_CHARACTERS[1]), bounds = worldBounds(boss);
@@ -26,6 +26,8 @@ function fixture() {
   const response = () => ({ status: 'ok', role, state: structuredClone(state), config });
   const document_ = (payload) => ({ status: 'ok', role, state: structuredClone(payload) });
   const game = createStoryGameplay({ projectPath: 'D:/story', readPlayer: () => player, readBoss: () => boss,
+    // 地面网格与页面同一个传法：给了就按它落脚，没给（undefined）就是旧行为。
+    groundYAt: options.groundYAt,
     now: () => time, newId: () => `operation-${++id}`, onFeedback: v => feedback.push(v), onState: v => states.push(v),
     reconcile: async data => { visuals.push(structuredClone(data)); if (visualFail) throw new Error('model failed'); },
     api: { scratch: { sendKeyEvent: async (key, mods, json) => {
@@ -102,6 +104,19 @@ test('ten acknowledged hits, cooldown, one drop and one pickup', async () => {
   assert.equal(f.state.inventory.worldFragment, 1);
   assert.equal(f.state.revision, 11);
   assert.equal(f.feedback.filter(v => v.startsWith('获得')).length, 1);
+});
+
+// 掉落也必须落在地面上：碎片落点读的是同一份烘好高度网格，而不是写死的 0（旧常量）。
+// 没有网格时（这条文件里的其它用例）就还是 0，所以旧断言原样保留在上面那条用例里。
+test('the dropped fragment lands on the grid at the boss site, and on the old constant without one', async () => {
+  const ground = (x, z) => 2 + 0.5 * x - 0.25 * z;
+  const f = fixture({ groundYAt: ground }); await f.game.load();
+  for (let i = 0; i < 10; i++) { await f.game.attack(); f.tick(); }
+  assert.equal(f.state.drop.collected, false, 'Boss 倒下时必须掉一件');
+  const [x, y, z] = f.state.drop.position;
+  assert.deepEqual([x, z], [bossSite.x, bossSite.z], '掉落的 x/z 仍是 Boss 倒下的地方');
+  assert.equal(y, ground(x, z), '碎片必须落在 Boss 脚下那一格的地面上');
+  assert.ok(Math.abs(y - 0) > 0.5, '与旧常量 0 必须差得可观测，否则这条断言是空转的');
 });
 
 test('out of range, behind and child world never dispatch damage', async () => {

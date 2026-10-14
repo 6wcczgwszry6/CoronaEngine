@@ -93,7 +93,7 @@ export function unwrapGameplay(value) {
 export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
   reconcile = async () => {}, onState = () => {}, onFeedback = () => {},
   trackWork = promise => promise, now = () => performance.now(), newId = () => crypto.randomUUID(),
-  requestTimeoutMs = 15_000 }) {
+  requestTimeoutMs = 15_000, groundYAt = null }) {
   let data = null, pending = null, inFlight = null, visualDirty = false, lastAttack = -Infinity;
   // The small world's exhibit layout is its own document: it is not part of the
   // combat state, so it is cached separately and never merged into `data.state`.
@@ -248,6 +248,17 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
     rosterCache = response.state;
     return rosterCache;
   }
+  // Where the fragment the boss leaves behind rests: the ground **at the boss's own (x, z)**
+  // from the same baked grid the characters stand on (`storyMapHeight.heightAt`, handed in by
+  // the page). The boss's own origin is not a ground line (it is scaled from its own AABB), so
+  // it is never used; with no grid — or a junk sample — the old constant 0 (the flat engine
+  // floor this drop landed on before the grid existed) is kept. `storyActors` re-derives the
+  // model's own foot offset from `heightAt`, so storing the ground line here is what makes the
+  // red ball sit on the terrain instead of sinking half into it.
+  function dropGroundY(x, z) {
+    const ground = typeof groundYAt === 'function' ? groundYAt(x, z) : null;
+    return Number.isFinite(ground) ? ground : 0;
+  }
   return {
     get data() { return data; },
     get busy() { return Boolean(inFlight); },
@@ -275,7 +286,8 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
       if (!canHitBoss(readPlayer(), bounds, data.config)) {
         onFeedback('靠近并面向 Boss 后攻击'); return Promise.resolve(false);
       }
-      return commit('hitBoss', { bossPosition: [boss.geometry.position[0], 0, boss.geometry.position[2]] });
+      return commit('hitBoss', { bossPosition: [boss.geometry.position[0],
+        dropGroundY(boss.geometry.position[0], boss.geometry.position[2]), boss.geometry.position[2]] });
     },
     skillStatus(skillId) {
       const skill = data?.config.skills?.[skillId];
@@ -300,7 +312,8 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
       lastAttack = time;
       skillUntil[skillId] = time + skill.cooldownMs;
       return commit('castSkill', { skillId, hit,
-        ...(hit ? { bossPosition: [boss.geometry.position[0], 0, boss.geometry.position[2]] } : {}) });
+        ...(hit ? { bossPosition: [boss.geometry.position[0],
+          dropGroundY(boss.geometry.position[0], boss.geometry.position[2]), boss.geometry.position[2]] } : {}) });
     },
     pickup() {
       if (inFlight) return inFlight;
