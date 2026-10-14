@@ -4,6 +4,7 @@ import { CUBE_GUID, CUBE_MODEL_REF, CUBE_PLACEMENT, cubeMoveTransform, cubeScale
   cubeSpawnTransform, cubeTransformOf, ensureStoryCube, isCubeActor, isCubeReady, playerFacingYaw,
   screenAxes, validateCubePlacement } from '../../frontend/storyCube.mjs';
 import { PLAYER_MODEL_YAW_OFFSET } from '../../frontend/storyCharacters.mjs';
+import { MAP_ENTITY_ID, MAP_ENTITY_TYPE, MAP_GUID, MAP_MODEL_REF } from '../../frontend/storyMap.mjs';
 import { ADJUST_ACTIONS, FRAGMENT_ADJUST_ACTIONS, FRAGMENT_RULE_BOUNDS, PROPHET_SCREENS,
   adjustActionForKey, adjustFeedback, adjustFragmentRule, fragmentAdjustActionForKey,
   fragmentAdjustPanel, fragmentForKey, fragmentPanel, fragmentRuleOf, isAdjustAction,
@@ -522,11 +523,34 @@ test('the adjust screen lists the scene objects so a name can be clicked instead
     { actor_guid: 'placed-block', name: '方块1', handle: 16, semantic_role: 'placement',
       entity_type: 'story_prop', entity_id: 'story.placement.block',
       geometry: { position: [2, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1] } },
+    // 地图：handle 与几何都和上面的方块一样齐全，唯一不同的是身份。它必须被身份挡掉，
+    // 而不是碰巧因为缺字段缺席——否则这条守卫什么都没证明。
+    { actor_guid: MAP_GUID, name: '剧情世界地图', handle: 18, semantic_role: 'world-map',
+      entity_type: MAP_ENTITY_TYPE, entity_id: MAP_ENTITY_ID, model_ref: MAP_MODEL_REF,
+      geometry: { position: [0, 6.6477, 0], rotation: [0, 0, 0], scale: [90, 90, 90] } },
   ] } } };
   const list = selectableObjects(snapshot);
   assert.deepEqual(list.map(entry => entry.guid), ['placed-block', 'cube'],
     'only small-world objects; never a character (player/prophet/boss/merchant), '
     + 'never a world fragment — but a block the player placed IS a small-world object');
+  assert.ok(!list.some(entry => entry.guid === MAP_GUID), '地图不算物体：调整列表里没有它');
+  assert.ok(!list.some(entry => entry.transform?.scale?.[0] === 90), '地图的 90 倍缩放不可调');
+  // Non-vacuity: the same actor with the map's identity fields removed IS listed, so it is the
+  // identity guard that excludes it — not a missing handle, name, role or transform.
+  const anonymousMap = { actor_guid: 'scenery-1', name: '布景', handle: 19, semantic_role: 'scenery',
+    model_ref: '', entity_id: '', entity_type: '',
+    geometry: { position: [0, 6.6477, 0], rotation: [0, 0, 0], scale: [90, 90, 90] } };
+  assert.deepEqual(selectableObjects({ data: { scene: { actors: [anonymousMap] } } })
+    .map(entry => entry.guid), ['scenery-1'],
+  '去掉地图身份后同一个 actor 会被列出，证明挡住它的是 isMapActor');
+  // Each identity field has to be enough on its own: a world whose record lost its guid (or its
+  // version marker) must still keep the map out of the list instead of offering it for resizing.
+  for (const identity of [{ actor_guid: MAP_GUID }, { model_ref: MAP_MODEL_REF },
+    { entity_id: MAP_ENTITY_ID }, { entity_type: MAP_ENTITY_TYPE }]) {
+    const partial = { ...anonymousMap, ...identity };
+    assert.deepEqual(selectableObjects({ data: { scene: { actors: [partial] } } }), [],
+      `身份字段 ${Object.keys(identity)[0]} 单独出现也必须挡住地图`);
+  }
   assert.deepEqual(list.find(entry => entry.guid === 'cube').transform.position, [1, 0, 1]);
   assert.deepEqual(list.find(entry => entry.guid === 'placed-block').transform.position, [2, 0, 0]);
   assert.equal(objectLabel(list.find(entry => entry.guid === 'cube')), '先知方块（prophet-cube）');

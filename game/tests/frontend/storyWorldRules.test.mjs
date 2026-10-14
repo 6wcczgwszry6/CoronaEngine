@@ -4,6 +4,7 @@ import { DEGREES_TO_RADIANS, FRAGMENTS, WORLD_RULE_VERSION, collectSwayTargets,
   createWorldRuleRunner, findFragment, initialFragmentIds, ownedFragmentIds, ruleOffset,
   ruleRotationOffset, totalOffset, totalRotationOffset, validateRule }
   from '../../frontend/storyWorldRules.mjs';
+import { MAP_ENTITY_ID, MAP_ENTITY_TYPE, MAP_GUID, MAP_MODEL_REF } from '../../frontend/storyMap.mjs';
 
 const SWAY = findFragment('sway').rule;
 const SPIN = findFragment('spin').rule;
@@ -161,6 +162,26 @@ test('collectSwayTargets keeps only movable world objects and copies their base 
   const tilted = collectSwayTargets(snapshotWith([
     actor('t', 21, [0, 1, 0], { geometry: { position: [0, 1, 0], rotation: [0, 0.5, 0] } })]));
   assert.deepEqual(tilted[0].baseRotation, [0, 0.5, 0]);
+
+  // 地图不算物体：它是所有东西站着的面，摆位只有一个作者，规则不许写它的 handle。它有
+  // handle、有几何、角色也不是被排除的那几个，所以挡住它的只能是身份——每个身份字段都
+  // 必须单独够用，否则一个丢了 guid 的老世界就会把地图交回给规则。
+  const movable = actor('movable', 31, [1, 0, 1]);
+  for (const identity of [{ actor_guid: MAP_GUID }, { model_ref: MAP_MODEL_REF },
+    { entity_id: MAP_ENTITY_ID }, { entity_type: MAP_ENTITY_TYPE }]) {
+    const map = actor('map-ish', 91, [0, 6.6477, 0],
+      { semantic_role: 'world-map', geometry: { position: [0, 6.6477, 0], rotation: [0, 0, 0],
+        scale: [90, 90, 90] }, ...identity });
+    assert.deepEqual(collectSwayTargets(snapshotWith([map, movable]), SWAY).map(target => target.guid),
+      ['movable'], `身份字段 ${Object.keys(identity)[0]} 单独出现也必须让地图退出规则目标`);
+  }
+  // Non-vacuity: with the identity fields blanked out the very same actor IS a target, so it is
+  // the identity guard that keeps the map out — not a missing handle, role or transform.
+  const anonymous = actor('anonymous', 91, [0, 6.6477, 0], { semantic_role: 'scenery',
+    model_ref: '', entity_id: '', entity_type: '' });
+  assert.deepEqual(collectSwayTargets(snapshotWith([anonymous, movable]), SWAY)
+    .map(target => target.guid), ['anonymous', 'movable'],
+  '去掉地图身份后同一个 actor 会进入规则目标，证明挡住的它的是 isMapActor');
 });
 
 test('the runner sways every target on its own frame loop and restores the base on stop', () => {
@@ -263,6 +284,59 @@ test('sway and spin are composed into exactly one position and one rotation writ
   assert.deepEqual(lastWrite(bridge, 11, 1), [0, 1.5, 0]);
   assert.equal(runner.refreshBase('a', [9, 0, 9], 'nope'), true, 'a bad rotation is ignored');
   assert.deepEqual(lastWrite(bridge, 11, 1), [0, 1.5, 0]);
+});
+
+/**
+ * The map must be refused by the runner itself, not only by the snapshot reader: the animated
+ * set is where a frame loop, `refreshBase` and `restore` all get their handles, so a target
+ * list that names the map — an older rule that outlived this guard, a list captured before the
+ * map existed, a hand-edited record — has to lose it on ingest.
+ */
+test('a rule set that names the map writes nothing to its handle, while a normal target still does', () => {
+  const MAP_HANDLE = 91;
+  const mapTarget = { guid: MAP_GUID, role: 'world-map', handle: MAP_HANDLE,
+    base: [0, 6.6477, 0], baseRotation: [0, 0, 0],
+    modelRef: MAP_MODEL_REF, entityId: MAP_ENTITY_ID, entityType: MAP_ENTITY_TYPE };
+  const normalTarget = { guid: 'a', role: 'prophet', handle: 11, base: [1, 0, 2],
+    baseRotation: [0, 0, 0] };
+  const scheduler = manualScheduler();
+  const bridge = recordingBridge();
+  const runner = createWorldRuleRunner({
+    bridge: () => bridge, rules: [SWAY, SPIN],
+    targets: [normalTarget, mapTarget],
+    requestFrame: scheduler.requestFrame, cancelFrame: scheduler.cancelFrame,
+  });
+
+  assert.equal(runner.targetCount(), 1, '初始目标表里的地图在装入时就被拒绝');
+  assert.equal(runner.ruleCount(), 2, '规则本身照常装填：拒绝的是目标，不是碎片');
+  assert.equal(runner.start(), true);
+  for (let i = 0; i <= 12; i++) scheduler.fire(1000 + i * 50);
+  assert.equal(countWrites(bridge, MAP_HANDLE, 0), 0, '一个位置写入都不许落到地图上');
+  assert.equal(countWrites(bridge, MAP_HANDLE, 1), 0, '一个旋转写入都不许落到地图上');
+  assert.ok(countWrites(bridge, 11, 0) > 0, '普通目标照常被写：否则这条用例证明不了什么');
+  assert.ok(countWrites(bridge, 11, 1) > 0);
+
+  // A stale list handed in later — before entering the world again, say — is refused the same way.
+  runner.setTargets([mapTarget, normalTarget]);
+  assert.equal(runner.targetCount(), 1);
+  assert.equal(runner.refreshBase(MAP_GUID, [5, 5, 5]), false, '地图连手工重锚都找不到');
+  assert.equal(runner.stop(), true);
+  assert.equal(countWrites(bridge, MAP_HANDLE, 0), 0, '停下的回位也不许写地图');
+  assert.equal(countWrites(bridge, MAP_HANDLE, 1), 0);
+
+  // Non-vacuity: the same list without the identity fields DOES animate handle 91, so it is the
+  // identity guard that keeps the map still — not a missing base, handle or rule.
+  const anonymous = recordingBridge();
+  const blind = createWorldRuleRunner({
+    bridge: () => anonymous, rules: [SWAY],
+    targets: [{ ...mapTarget, guid: 'anonymous', modelRef: '', entityId: '', entityType: '' }],
+    requestFrame: scheduler.requestFrame, cancelFrame: scheduler.cancelFrame,
+  });
+  assert.equal(blind.targetCount(), 1);
+  blind.start();
+  scheduler.fire(1000);
+  assert.ok(countWrites(anonymous, MAP_HANDLE, 0) > 0, '去掉身份后同一个 handle 会被写');
+  blind.stop();
 });
 
 test('the runner refuses to run without rules or targets, and stops on a dead bridge', () => {

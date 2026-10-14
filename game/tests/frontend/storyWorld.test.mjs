@@ -16,7 +16,7 @@ import * as storyWorldRulesModule from '../../frontend/storyWorldRules.mjs';
 import * as storyProphetActionsModule from '../../frontend/storyProphetActions.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot,
   characterTransform } from '../../frontend/storyCharacters.mjs';
-import { actorFixture } from './fixtures.mjs';
+import { actorFixture, apiFixture } from './fixtures.mjs';
 import { createStoryNavigationController } from '../../frontend/storyNavigation.mjs';
 import { createStoryCameraController } from '../../../editor/Frontend/src/utils/viewportStoryCamera.js';
 import { editorApi } from '../../../editor/Frontend/src/api/editorApi.js';
@@ -1697,6 +1697,8 @@ test('an existing world gets the walkable map on entry, and a second entry never
   assert.equal(f.actors.get(MAIN).filter(actor => actor.actor_guid === storyMapModule.MAP_GUID).length, 1);
   assert.deepEqual(mapActor().geometry.position, transform.position, '已就位的地图不许被重摆');
   assert.equal(f.alerts.length, 0, '地图就位不该报错');
+  // 零写入：既不能再造、也不能删掉再建（delete + create 会重新导入 87MB 的 GLB）。
+  assert.deepEqual(f.calls.filter(call => call[0] === 'remove'), [], '已就位的地图不许被删除');
 });
 
 // 地图的 actor 数据本身：follow_camera 决定引擎把它画在场景空间还是 UI 空间
@@ -1756,6 +1758,97 @@ test('a map left at an older transform is repaired in place instead of adopted',
   assert.equal(repaired.length, 1, '校正不能追加第二张地图');
   assert.deepEqual(repaired[0].geometry.position, transform.position, '地图必须回到 y = 0 的摆位');
   assert.equal(f.alerts.length, 0, '校正不该报错');
+  // 代次没变时只许就地校正：单纯摆位过期就删了重建，等于每次进入都重新导入模型。
+  assert.deepEqual(f.calls.filter(call => call[0] === 'remove'), [], '摆位过期不能走删除重建');
+});
+
+/**
+ * 一个「旧世界」里那张旧世代的地图 actor：代次标记与路线都指向换图之前的资产。
+ *
+ * 这正是 01_山门神殿_优化版.glb → 01_山门神殿_平地版.glb 这次换图留下的世界形状：
+ * guid/entity 身份不变（否则已有世界会认不出自己的地图而再叠一张），只有路线与代次是旧的。
+ * `route` 用引擎写回快照的形式（导入后的 Assets/Models/<hash>/<文件>），而不是前端送进去的源路径，
+ * 因为要验证的判断读的就是引擎报告的那条路线。
+ */
+function legacyMapActor() {
+  return { name: '剧情世界地图', actor_guid: storyMapModule.MAP_GUID, handle: 900,
+    load_status: 'loaded', render_ready: true, gpu_build_state: 'Ready',
+    model_ref: 'corona.story.world-map.v1', route: 'Assets/Models/5f63c8834b9d/01_山门神殿_优化版.glb',
+    semantic_role: 'world-map', entity_type: storyMapModule.MAP_ENTITY_TYPE,
+    entity_id: storyMapModule.MAP_ENTITY_ID,
+    local_aabb: [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5], visible: true, follow_camera: false,
+    camera_lock: { enabled: false }, mechanics: { body_type: 'phantom' },
+    geometry: storyMapModule.mapOriginTransform() };
+}
+
+// 换图之后，已被旧世界收养的那张地图必须被删掉重建：引擎的 skip_if_exists 修复分支只写摆位、
+// 从不改写 actor.route（cef_editor_native_api_handlers.cpp:3410-3424），所以旧 actor 永远渲染旧 GLB。
+// 这条用例证明的是「进入即自愈」：不需要玩家手动删除 actor，也不需要重开一个世界。
+test('a world carrying the previous map generation is healed on entry, not left on the old model', async t => {
+  const f = await fixture(t);
+  const before = f.actors.get(MAIN).length;
+  f.actors.get(MAIN).push(legacyMapActor(f));
+
+  const page = f.mount(); await page.mount(); await turn();
+  const removes = f.calls.filter(call => call[0] === 'remove');
+  assert.equal(removes.length, 1, '旧代次的地图必须被删除一次');
+  assert.ok(removes[0].includes(storyMapModule.MAP_GUID), '删除的目标必须是地图自己（按 GUID，不靠名字）');
+  const creates = f.calls.filter(call => call[0] === 'create'
+    && call[4]?.actor_guid === storyMapModule.MAP_GUID);
+  assert.equal(creates.length, 1, '删除之后必须恰好创建一次——重建是唯一会重新导入模型的路径');
+  assert.equal(creates[0][4].model_ref, storyMapModule.MAP_MODEL_REF, '新 actor 必须带当前代次');
+  assert.equal(creates[0][4].skip_if_exists, undefined, '重建不能带 skip_if_exists，否则引擎又会复用旧 actor');
+  // 位置在删除与创建之间：删除必须先发生，否则 create 会按 GUID 复用旧 actor。
+  assert.ok(f.calls.findIndex(call => call[0] === 'remove') < f.calls.findIndex(call => call[0] === 'create'
+    && call[4]?.actor_guid === storyMapModule.MAP_GUID), '必须先删除再创建');
+
+  const maps = f.actors.get(MAIN).filter(actor => actor.actor_guid === storyMapModule.MAP_GUID);
+  assert.equal(maps.length, 1, '自愈之后世界里只能有一张地图');
+  assert.equal(maps[0].model_ref, storyMapModule.MAP_MODEL_REF);
+  assert.equal(storyMapModule.assetName(maps[0].route), storyMapModule.assetName(storyMapModule.MAP_PLACEMENT.asset),
+    '自愈之后路线必须指向当前那张 GLB，而不是上次导入的那一份');
+  assert.deepEqual(maps[0].geometry.position, storyMapModule.mapOriginTransform().position);
+  assert.equal(f.alerts.length, 0, '自愈不该报错');
+  assert.equal(f.actors.get(MAIN).length, before + 1, '自愈不能顺带动别的 actor');
+});
+
+// 只换了图、没换 guid：已有的地图不能被当成「身份不明」而叠加第二张，反复进入也必须幂等。
+test('a stale map generation is replaced once, and repeated entries never duplicate it', async t => {
+  const f = await fixture(t);
+  f.actors.get(MAIN).push(legacyMapActor(f));
+  let page = f.mount(); await page.mount(); await turn();
+  page.unmount();
+  for (let entry = 0; entry < 2; entry++) {
+    page = f.mount(); await page.mount(); await turn();
+    page.unmount();
+  }
+  const creates = f.calls.filter(call => call[0] === 'create'
+    && call[4]?.actor_guid === storyMapModule.MAP_GUID);
+  assert.equal(creates.length, 1, '只在第一次进入时重建一次，之后必须安静');
+  assert.equal(f.calls.filter(call => call[0] === 'remove').length, 1, '只许删除一次');
+  assert.equal(f.actors.get(MAIN).filter(actor => actor.actor_guid === storyMapModule.MAP_GUID).length, 1);
+  assert.equal(f.alerts.length, 0);
+});
+
+// 反例守卫（非空性）：把「代次」判断去掉只留摆位判断，上面那条用例必须失败。
+// 这里直接演示那个错误实现的后果：actor 的路线仍是旧的，而 skip_if_exists 修复分支不碰路线，
+// 于是世界继续渲染上一版几何——这正是本次要修的 bug。
+test('repairing a stale generation in place would leave the old asset on the actor', async t => {
+  const { api, state } = apiFixture({ actors: [] });
+  const legacy = legacyMapActor({});
+  state.actors.push(legacy);
+  const repaired = await api.sceneTools.createActor('scene.ini', 'D:/game/art/models/scene/01_山门神殿_平地版.glb',
+    'model', { ...storyMapModule.MAP_ACTOR_DATA, actor_guid: storyMapModule.MAP_GUID,
+      model_ref: storyMapModule.MAP_MODEL_REF, skip_if_exists: true, update_if_exists: true,
+      ...storyMapModule.mapOriginTransform() });
+  assert.equal(storyMapModule.assetName(repaired.data.actor.route), '01_山门神殿_优化版.glb',
+    '就地修复不会改写 route：这条断言就是「只修摆位」为什么治不好换图的证据');
+  assert.notEqual(storyMapModule.assetName(repaired.data.actor.route),
+    storyMapModule.assetName(storyMapModule.MAP_PLACEMENT.asset));
+  // 同一个 actor 现在带着「当前代次」的标记却仍指向旧资产——只有路线这一项能识破它。
+  assert.equal(repaired.data.actor.model_ref, storyMapModule.MAP_MODEL_REF);
+  assert.equal(storyMapModule.isMapGenerationCurrent(repaired.data.actor), false,
+    '标记是新的、路线是旧的：代次判断必须同时看路线，否则这个世界会永远渲染旧几何');
 });
 
 /**

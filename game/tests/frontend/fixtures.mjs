@@ -33,9 +33,14 @@ export function apiFixture({ actors = [], wrapped = true } = {}) {
         calls.push(['create', data.actor_guid, path, type, data]);
         if (data.skip_if_exists && get(data.actor_guid)) {
           const actor = get(data.actor_guid);
+          // Mirrors the engine's repair branch (create_actor, skip_if_exists + update_if_exists,
+          // cef_editor_native_api_handlers.cpp:3410-3424): it rewrites the transform and the
+          // runtime metadata and NOTHING else — in particular it never rewrites `actor.route`,
+          // which is why a stale asset generation cannot be repaired in place.
           if (data.update_if_exists) {
             for (const key of ['position', 'rotation', 'scale']) if (data[key]) actor.geometry[key] = [...data[key]];
             if (data.model_ref) actor.model_ref = data.model_ref;
+            if (data.body_type) actor.mechanics = { ...actor.mechanics, body_type: data.body_type };
           }
           return wrap({ status: 'success', actor: structuredClone(actor), existed: true });
         }
@@ -44,6 +49,13 @@ export function apiFixture({ actors = [], wrapped = true } = {}) {
           geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } };
         state.actors.push(actor);
         return wrap({ status: 'success', actor: structuredClone(actor) });
+      },
+      removeActor: async (scene, guid) => {
+        calls.push(['remove', guid]);
+        const index = state.actors.findIndex(actor => actor.actor_guid === guid || actor.name === guid);
+        if (index < 0) return wrap({ status: 'error', message: `Actor not found: ${guid}` });
+        state.actors.splice(index, 1);
+        return wrap({ status: 'success', actor_guid: guid });
       },
       rebindActorResource: async (scene, guid, path) => mutate('rebind', guid, a => {
         a.load_status = 'loaded'; a.handle = 101; a.route = path;

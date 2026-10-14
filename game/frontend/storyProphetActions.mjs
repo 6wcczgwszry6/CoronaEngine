@@ -11,6 +11,7 @@
 
 import { CUBE_PLACEMENT, cubeMoveTransform, cubeScaleTransform, cubeTransformOf } from './storyCube.mjs';
 import { sceneSnapshot } from './storyCharacters.mjs';
+import { isMapActor } from './storyMap.mjs';
 import { FRAGMENTS, findFragment, ownedFragmentIds } from './storyWorldRules.mjs';
 
 /** The two main options. Keys are live in the chooser only. */
@@ -115,7 +116,9 @@ const UNPLACEABLE_PROP_IDS = Object.freeze(['world-fragment']);
  * The objects the adjust screen offers as a click-to-select list: only what lives inside the
  * small world. Listing names sidesteps viewport ray picking entirely, which is why it exists;
  * the player and the other characters are excluded, and so are the world fragments — but not
- * the blocks a player placed.
+ * the blocks a player placed. The map is excluded too: 地图不算物体, so nothing in this screen
+ * may resize or move it (`isMapActor` is the single owner of that decision, and the world-rule
+ * target list asks the same function).
  */
 export function selectableObjects(snapshot) {
   const actors = sceneSnapshot(snapshot)?.actors;
@@ -126,6 +129,8 @@ export function selectableObjects(snapshot) {
     const entityId = String(actor?.entity_id || actor?.runtime?.entity_id || '');
     if (CHARACTER_ROLES.includes(role) || entityType === CHARACTER_ENTITY_TYPE) continue;
     if (UNPLACEABLE_PROP_IDS.some(id => entityId === `${PLACEMENT_ENTITY_PREFIX}${id}`)) continue;
+    // 地图是世界的立足面，不是可调物体：不出现在列表里，就没有任何一条调整动作能写到它。
+    if (isMapActor(actor)) continue;
     const handle = Number(actor?.handle);
     const transform = cubeTransformOf(actor);
     if (!Number.isInteger(handle) || handle <= 0 || !transform) continue;

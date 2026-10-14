@@ -20,6 +20,14 @@ def spin_rule(**overrides):
     return rule
 
 
+def map_identity():
+    """地图的身份，取自权威数据文件：与 game/frontend/storyMap.mjs 的 MAP_PLACEMENT 同源。"""
+    root = Path(__file__).resolve().parents[3]
+    block = json.loads((root / 'game/data/prophet.json').read_text(encoding='utf-8'))['map']
+    assert block['guid'] and block['modelRef'], '地图身份必须能在数据文件里读到'
+    return block
+
+
 class WorldRuleValidationTests(unittest.TestCase):
     def test_initial_state_is_an_empty_versioned_rule_set(self):
         self.assertEqual(world_rules.initial_state(), {'version': 1, 'rules': []})
@@ -113,6 +121,26 @@ class WorldRuleStorageTests(unittest.TestCase):
         world_rules.save(self.root, [sway_rule(fragmentId='浮动')])
         self.assertIn('浮动', self.save_path().read_text(encoding='utf-8'))
         self.assertEqual(world_rules.load(self.root)['rules'][0]['fragmentId'], '浮动')
+
+    def test_a_saved_rule_that_names_the_map_is_ignored_rather_than_honoured(self):
+        """地图不是物体，任何规则都不许写到它身上——而运行时里没有「规则目标」这种东西。
+
+        规则的目标由前端按场景快照解析（storyWorldRules.mjs 的 collectSwayTargets，地图在那里
+        就被 isMapActor 挡掉），运行时只存碎片与数字，因此「拒绝一条指向地图的规则」这件事本身
+        不在这里：这里能保证的是更硬的一条——存档里写下的地图身份根本活不过校验，被丢弃而不是
+        被交给任何消费者。非真空：把 validate_rule 的返回值换回 `dict(entry)` 会让这些键留下，
+        这条用例就会失败。
+        """
+        identity = map_identity()
+        named = sway_rule(guid=identity['guid'], modelRef=identity['modelRef'],
+                          model_ref=identity['modelRef'], entity_id='story.world.map',
+                          entity_type='story_scenery', target=identity['guid'],
+                          targets=[identity['guid']], actor_guid=identity['guid'])
+        self.assertEqual(world_rules.validate_rule(named), sway_rule(), '地图身份在校验时就被丢掉')
+        world_rules.save(self.root, [named])
+        self.assertEqual(world_rules.load(self.root), {'version': 1, 'rules': [sway_rule()]})
+        self.assertEqual(json.loads(self.save_path().read_text(encoding='utf-8')),
+                         {'version': 1, 'rules': [sway_rule()]}, '盘上也不留任何地图身份')
 
     def test_a_world_may_keep_a_sway_and_a_spin_at_the_same_time(self):
         world_rules.save(self.root, [sway_rule(), spin_rule()])

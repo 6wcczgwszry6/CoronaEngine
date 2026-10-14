@@ -70,10 +70,13 @@ class StoryAssetTests(unittest.TestCase):
     # Both numbers live in the `map` block of game/data/prophet.json; the tests below
     # re-derive them from the shipped GLB so neither side can drift away from the art.
     # The map was re-exported with a flat floor under this new name ("平地版" = flat-ground
-    # edition), so the shipped route changed with the geometry: the engine keys an imported
-    # bundle by content hash, but a world that already carries the map is repaired by GUID
-    # and never re-imports (`skip_if_exists` returns before the route is read), which means an
-    # existing world would keep serving the old, un-flat bundle under the old name forever.
+    # edition), so the shipped route changed with the geometry, and the engine keys an imported
+    # bundle by content hash. A world that already carries the map is *not* re-imported by the
+    # engine's `skip_if_exists` repair branch (it returns before the route is read —
+    # cef_editor_native_api_handlers.cpp:3410-3424 — and only rewrites the transform), so the
+    # asset generation is bumped in the data instead: `modelRef` is the migration key, and the
+    # page deletes and re-creates an actor whose generation is stale.
+    # `test_a_stale_map_actor_is_replaced_not_repaired` guards that this stays wired.
     STORY_WORLD_MAP = "scene/01_山门神殿_平地版.glb"
     STORY_WORLD_MAP_SPAWN_SITES = (
         ("player", 0, 0), ("boss", 2, 5.5), ("merchant", -30, -15), ("prophet", 30, -15),
@@ -314,6 +317,42 @@ class StoryAssetTests(unittest.TestCase):
         page = (ROOT / "editor/Frontend/src/views/layout/StoryWorld.vue").read_text(encoding="utf-8")
         self.assertIn("import { ensureStoryMap } from '../../../../../game/frontend/storyMap.mjs';", page)
         self.assertIn("await ensureStoryMap({", page)
+
+    def test_a_stale_map_actor_is_replaced_not_repaired(self):
+        """A swapped map asset must reach a world that already has the map.
+
+        The engine imports a model only when the actor is created: `create_actor`'s
+        `skip_if_exists` branch (cef_editor_native_api_handlers.cpp:3410-3424) returns as soon
+        as it matched the guid and only rewrites position/rotation/scale/follow_camera/body_type,
+        never `actor.route`. So the map's asset generation has to be a data field the page can
+        compare, and a stale actor has to be deleted and created again — repairing it in place
+        would leave the old bundle on screen forever, exactly the bug this fixes.
+        """
+        source = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
+        # The migration key exists in the data and in the projection, so it can be compared.
+        story_map = self._map_placement()
+        self.assertIn("modelRef", story_map)
+        # The shipped placement really carries the current generation (not the pre-swap one).
+        marker = story_map["modelRef"]
+        self.assertIn(marker, source, "storyMap.mjs 的 MAP_MODEL_REF 必须等于 prophet.json 的 modelRef")
+        self.assertGreater(int(marker.rsplit(".v", 1)[1]), 1,
+                           "换了地图资产就必须升版 modelRef，否则已有世界不会重建地图")
+        # The page must delete the stale actor and create the current one, in that order.
+        self.assertIn("api.sceneTools.removeActor(", source,
+                      "旧代次的地图必须被删除后重建，否则引擎永远不会重新导入模型")
+        removal = source.index("await removeMapActor(")
+        # The delete-and-recreate branch is the one that follows the removal; the creation before
+        # it is the "world has no map yet" branch, so the comparison has to start after the removal.
+        self.assertIn("api.sceneTools.createActor(sceneId, route, 'model'", source[removal:],
+                      "删除之后必须紧接着创建，否则旧 actor 会被 skip_if_exists 复用")
+        # A current-generation actor with a stale transform is still repaired in place: that path
+        # must stay `update_if_exists` and must not delete anything.
+        self.assertIn("update_if_exists: true", source)
+        # The generation marker is documented as the thing a future asset swap must bump.
+        self.assertIn("MUST bump this string", source)
+        self.assertTrue(marker.endswith(".v2"), "modelRef 必须落在换图之后的代次上")
+        # The pre-swap GLB must not be the shipped asset either.
+        self.assertNotIn("优化版", story_map["asset"])
 
     def test_the_story_page_reads_the_height_grid_and_hands_it_to_the_player(self):
         """The map's ground line is the baked grid, and the page is the only place that can read it.

@@ -23,6 +23,7 @@
  */
 
 import { sceneSnapshot } from './storyCharacters.mjs';
+import { isMapActor } from './storyMap.mjs';
 
 export const WORLD_RULE_VERSION = 1;
 
@@ -195,6 +196,13 @@ function excludedRoles(rawRule) {
  * the base rotation the spin is measured from. Captured once from a snapshot: reading the
  * scene is an asynchronous CEF round-trip and must never happen inside the frame loop.
  * Called with no rule it returns the shared list for a world with several rules installed.
+ *
+ * The map is never a target: 地图不算物体, it is the surface everything else stands on, and its
+ * transform has exactly one author (`storyMap.ensureStoryMap`). A rule that swayed it would
+ * write a position and a rotation every frame and undo — or fight — that owner. The exclusion
+ * is by identity (`isMapActor`), so it holds for a rule the player installed before this guard
+ * existed and for a hand-edited rule record alike: a rule never names its targets, so the only
+ * place a map-targeted rule can be refused is here, where the targets are resolved.
  */
 export function collectSwayTargets(snapshot, rawRule = null) {
   const excluded = excludedRoles(rawRule);
@@ -205,16 +213,26 @@ export function collectSwayTargets(snapshot, rawRule = null) {
     const role = actor?.semantic_role || actor?.runtime?.semantic_role || '';
     if (excluded.includes(role)) continue;
     if (actor?.visible === false) continue;
+    if (isMapActor(actor)) continue;
     const handle = handleOf(actor);
     const base = positionOf(actor);
     if (!Number.isInteger(handle) || handle <= 0 || !base) continue;
     // A missing rotation is not fatal: yaw 0 is a usable base to spin around, and every
     // actor the engine places has one. A missing position is fatal, as before.
     const baseRotation = vectorOf(actor?.geometry?.rotation) || [...SAVED_ZERO];
-    targets.push({ guid: actor.actor_guid, role, handle, base, baseRotation });
+    // The identity travels with the handle so the runner can re-ask `isMapActor` on its own
+    // ingest path and refuse a map that a stale or hand-built target list smuggled in.
+    targets.push({ guid: actor.actor_guid, role, handle, base, baseRotation,
+      modelRef: actor?.model_ref || actor?.runtime?.model_ref,
+      entityId: actor?.entity_id || actor?.runtime?.entity_id,
+      entityType: actor?.entity_type || actor?.runtime?.entity_type });
   }
   return targets;
 }
+
+/** One rule target as `isMapActor` reads it: the same identity fields, under target names. */
+const mapIdentityOf = target => ({ actor_guid: target?.guid, model_ref: target?.modelRef,
+  entity_id: target?.entityId, entity_type: target?.entityType });
 
 /** A tab that was hidden for a while must not make objects jump. */
 const MAX_DELTA_MS = 100;
@@ -231,7 +249,6 @@ export function createWorldRuleRunner({ bridge = null, rules = [], targets = [],
     ? id => cancelAnimationFrame(id) : null);
   const getBridge = typeof bridge === 'function' ? bridge : () => bridge;
 
-  let currentTargets = [...targets];
   let installedRules = [...rules];
   let frame = null;
   let lastTimestamp = null;
@@ -243,6 +260,23 @@ export function createWorldRuleRunner({ bridge = null, rules = [], targets = [],
     ? target.baseRotation : ZERO);
   const savedPosition = target => target.base;
 
+  /**
+   * The animated set, with the map refused — the one place a target list is accepted.
+   *
+   * Dropping it here as well as in `collectSwayTargets` is what makes a map-targeted rule
+   * harmless rather than merely unlikely: whatever a caller hands in — the initial list, an
+   * old rule that outlived this build, a list captured before the map existed, a hand-edited
+   * record — the map never enters `currentTargets`, so not one frame, not `refreshBase` and
+   * not `restore` can write its transform (which `storyMap.ensureStoryMap` alone owns).
+   */
+  const animateTargets = list => (Array.isArray(list)
+    ? list.filter(target => !isMapActor(mapIdentityOf(target))).map(target => ({
+      ...target, base: [...target.base],
+      baseRotation: Array.isArray(target.baseRotation) ? [...target.baseRotation] : [...ZERO],
+    })) : []);
+
+  let currentTargets = animateTargets(targets);
+
   function writeBase(target) {
     const bridge = getBridge();
     if (bridge?.actorTransform?.(target.handle, 0, [...savedPosition(target)]) !== true
@@ -253,10 +287,7 @@ export function createWorldRuleRunner({ bridge = null, rules = [], targets = [],
 
   /** Replace the animated set (after entering a world, installing, or moving a prop). */
   function setTargets(next) {
-    currentTargets = Array.isArray(next) ? next.map(target => ({
-      ...target, base: [...target.base],
-      baseRotation: Array.isArray(target.baseRotation) ? [...target.baseRotation] : [...ZERO],
-    })) : [];
+    currentTargets = animateTargets(next);
   }
 
   /**
