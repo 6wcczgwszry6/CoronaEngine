@@ -3,7 +3,7 @@
  *
  * The map is scenery with no collision (`body_type: 'phantom'`): the engine builds no triangle
  * octree for it, so no engine query can answer "what is under the character's feet?". The
- * answer is baked offline instead (`game/tools/bake_story_map_height.py`, output
+ * answer is baked offline instead (`editor/game/tools/bake_story_map_height.py`, output
  * `game/data/story-map-height.json`) and read here as a plain lookup table, which is why
  * standing on the terrain costs nothing per frame.
  *

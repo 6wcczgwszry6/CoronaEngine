@@ -13,9 +13,9 @@ const CHILD_ROLES = ['player', 'prophet'];
 const CHILD_ACTOR_COUNT = CHILD_ROLES.length;
 
 test('source/deployed/UNC asset resolution handles encoded Chinese and spaces', () => {
-  assert.equal(resolveStoryAssetPath(url, STORY_CHARACTERS[0].asset), 'D:/Corona Engine/game/art/models/player/Maria WProp J J Ong.dae');
-  assert.equal(resolveStoryAssetPath('file:///E:/游戏/CabbageEditor/Frontend/dist/index.html#/world', 'model/a #%.dae'), 'E:/游戏/game/art/models/model/a #%.dae');
-  assert.equal(resolveStoryAssetPath('file://server/share/CabbageEditor/Frontend/dist/index.html', 'model/a.dae'), '//server/share/game/art/models/model/a.dae');
+  assert.equal(resolveStoryAssetPath(url, STORY_CHARACTERS[0].asset), 'D:/Corona Engine/editor/game/art/models/player/Maria WProp J J Ong.dae');
+  assert.equal(resolveStoryAssetPath('file:///E:/游戏/CabbageEditor/Frontend/dist/index.html#/world', 'model/a #%.dae'), 'E:/游戏/CabbageEditor/game/art/models/model/a #%.dae');
+  assert.equal(resolveStoryAssetPath('file://server/share/CabbageEditor/Frontend/dist/index.html', 'model/a.dae'), '//server/share/CabbageEditor/game/art/models/model/a.dae');
   assert.throws(() => resolveStoryAssetPath('http://localhost/index.html', 'a.dae'), /引擎文件页面/);
 });
 test('rotated normalized bounds determine scale and contact with y=0', () => {

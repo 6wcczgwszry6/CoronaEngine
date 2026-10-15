@@ -1,15 +1,15 @@
-import { NAVIGATION_KEY } from '../../../../game/frontend/storyNavigation.mjs';
-import { actorFixture, gameplayConfig, projectReady } from '../../../../game/tests/frontend/fixtures.mjs';
-import * as gameplayModule from '../../../../game/frontend/storyGameplay.mjs';
-import * as storyPropsModule from '../../../../game/frontend/storyProps.mjs';
-import * as prophetDialogueModule from '../../../../game/frontend/prophetDialogue.mjs';
-import * as storyCubeModule from '../../../../game/frontend/storyCube.mjs';
-import * as storyWorldRulesModule from '../../../../game/frontend/storyWorldRules.mjs';
-import * as storyProphetActionsModule from '../../../../game/frontend/storyProphetActions.mjs';
-import * as storyMapModule from '../../../../game/frontend/storyMap.mjs';
-import * as storyMapHeightModule from '../../../../game/frontend/storyMapHeight.mjs';
-import { mapHeightUrl } from '../../../../game/frontend/storyMapHeightLoader.mjs';
-import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot } from '../../../../game/frontend/storyCharacters.mjs';
+import { NAVIGATION_KEY } from '../../../game/frontend/storyNavigation.mjs';
+import { actorFixture, gameplayConfig, projectReady } from '../../../game/tests/frontend/fixtures.mjs';
+import * as gameplayModule from '../../../game/frontend/storyGameplay.mjs';
+import * as storyPropsModule from '../../../game/frontend/storyProps.mjs';
+import * as prophetDialogueModule from '../../../game/frontend/prophetDialogue.mjs';
+import * as storyCubeModule from '../../../game/frontend/storyCube.mjs';
+import * as storyWorldRulesModule from '../../../game/frontend/storyWorldRules.mjs';
+import * as storyProphetActionsModule from '../../../game/frontend/storyProphetActions.mjs';
+import * as storyMapModule from '../../../game/frontend/storyMap.mjs';
+import * as storyMapHeightModule from '../../../game/frontend/storyMapHeight.mjs';
+import { mapHeightUrl } from '../../../game/frontend/storyMapHeightLoader.mjs';
+import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot } from '../../../game/frontend/storyCharacters.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import test from 'node:test';
@@ -17,11 +17,11 @@ import { ref, reactive, nextTick, watch, computed } from 'vue';
 import { babelParse, compileScript, parse } from 'vue/compiler-sfc';
 import { cameraMovementKey, createViewportCameraController } from '../../src/utils/viewportCameraController.js';
 import { createStoryCameraController } from '../../src/utils/viewportStoryCamera.js';
-import { createStoryNavigationController } from '../../../../game/frontend/storyNavigation.mjs';
-import { createPlayerController, VIEW_LABELS } from '../../../../game/frontend/playerController.mjs';
-import { createPlayerSave } from '../../../../game/frontend/playerSave.mjs';
-import { ensureStoryCharacters, syncPlacementActors } from '../../../../game/frontend/storyActors.mjs';
-import { sceneFixture } from '../../../../game/tests/frontend/fixtures.mjs';
+import { createStoryNavigationController } from '../../../game/frontend/storyNavigation.mjs';
+import { createPlayerController, VIEW_LABELS } from '../../../game/frontend/playerController.mjs';
+import { createPlayerSave } from '../../../game/frontend/playerSave.mjs';
+import { ensureStoryCharacters, syncPlacementActors } from '../../../game/frontend/storyActors.mjs';
+import { sceneFixture } from '../../../game/tests/frontend/fixtures.mjs';
 import { registerWorldSessionSave, flushWorldSessionSaves, trackWorldSessionWork } from '../../src/services/worldSessionLifecycle.js';
 import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera, visionStablePlanesFromCamera } from '../../src/utils/visionRenderModes.js';
 
@@ -276,28 +276,28 @@ async function mountStory(t, { pendingInit = null, sceneSnapshot = { data: snaps
     '@/assets/hero-figure.png': { default: 'hero-figure.png' },
     '@/services/projectLauncherService.js': { projectLauncherService: {}, cancelPendingProjectOpen() {}, getProjectSelectionVersion: () => 0 },
     '@/services/worldSessionLifecycle.js': { registerWorldSessionSave, trackWorldSessionWork, notifyWorldError: error => window.alert(error.message) },
-    '../../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
-    '../../../../../game/frontend/storyActors.mjs': { ensureStoryCharacters, syncPlacementActors },
-    '../../../../../game/frontend/storyProps.mjs': storyPropsModule,
-    '../../../../../game/frontend/prophetDialogue.mjs': prophetDialogueModule,
-    '../../../../../game/frontend/storyCube.mjs': storyCubeModule,
-    '../../../../../game/frontend/storyWorldRules.mjs': storyWorldRulesModule,
-    '../../../../../game/frontend/storyProphetActions.mjs': storyProphetActionsModule,
-    '../../../../../game/frontend/playerController.mjs': { createPlayerController, VIEW_LABELS },
-    '../../../../../game/frontend/playerSave.mjs': { createPlayerSave },
-    '../../../../../game/frontend/storyGameplay.mjs': {
+    '../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
+    '../../../../game/frontend/storyActors.mjs': { ensureStoryCharacters, syncPlacementActors },
+    '../../../../game/frontend/storyProps.mjs': storyPropsModule,
+    '../../../../game/frontend/prophetDialogue.mjs': prophetDialogueModule,
+    '../../../../game/frontend/storyCube.mjs': storyCubeModule,
+    '../../../../game/frontend/storyWorldRules.mjs': storyWorldRulesModule,
+    '../../../../game/frontend/storyProphetActions.mjs': storyProphetActionsModule,
+    '../../../../game/frontend/playerController.mjs': { createPlayerController, VIEW_LABELS },
+    '../../../../game/frontend/playerSave.mjs': { createPlayerSave },
+    '../../../../game/frontend/storyGameplay.mjs': {
       ...gameplayModule,
       // Observing the real controller keeps the page's own wiring under test.
       createStoryGameplay: options => { gameplayOptions = options; return gameplayModule.createStoryGameplay(options); },
     },
     // 地图走真实模块（与 storyWorld.test.mjs 同一套桩：假时钟让「当帧确认」不必真的等 200ms）。
-    '../../../../../game/frontend/storyMap.mjs': { ...storyMapModule,
+    '../../../../game/frontend/storyMap.mjs': { ...storyMapModule,
       ensureStoryMap: options => storyMapModule.ensureStoryMap({ ...options, wait: async () => {} }) },
-    '../../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot },
+    '../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot },
     // 这个夹具测的是页面/相机绑定：网格按「读不到」处理（清空并返回 null），
     // 因此玩家地面仍是固定地板；「有图贴地」那条链路由 game/tests/frontend/storyWorld.test.mjs 覆盖。
-    '../../../../../game/frontend/storyMapHeight.mjs': storyMapHeightModule,
-    '../../../../../game/frontend/storyMapHeightLoader.mjs': { mapHeightUrl,
+    '../../../../game/frontend/storyMapHeight.mjs': storyMapHeightModule,
+    '../../../../game/frontend/storyMapHeightLoader.mjs': { mapHeightUrl,
       loadStoryMapHeight: async () => { storyMapHeightModule.clearHeightGrid(); return null; } },
     '@/utils/viewportStoryCamera.js': { createStoryCameraController: options => createStoryCameraController({
       ...options, now: () => time,

@@ -1,6 +1,6 @@
-"""Bake the story map's walkable height grid into ``game/data/story-map-height.json``.
+"""Bake the story map's walkable height grid into ``editor/game/data/story-map-height.json``.
 
-The map (``game/art/models/scene/01_山门神殿_平地版.glb``) ships as scenery with no collision
+The map (``editor/game/art/models/scene/01_山门神殿_平地版.glb``) ships as scenery with no collision
 (``body_type: 'phantom'``): the engine builds no triangle octree for it, so nothing in the
 engine can answer "how high is the ground here?". This script answers that question offline
 and once: it decodes every ``POSITION`` accessor of the GLB, rasterises the ~2M vertices onto a
@@ -28,10 +28,10 @@ The invariant this buys: **no cell rises above the courtyard band**, so a cell t
 building can never lift the character — the bug this rewrite exists for.
 
 ``COURTYARD_Y`` is the walkable courtyard's height in the model frame, the same number
-``game/data/prophet.json`` calls ``map.courtyardY`` (0 for this flat re-export); the runtime
+``editor/game/data/prophet.json`` calls ``map.courtyardY`` (0 for this flat re-export); the runtime
 removes it from every sample (``storyMap.mjs``), so the grid and the placement stay in one frame.
 
-Frame (see ``game/frontend/storyMapHeight.mjs``, the only reader):
+Frame (see ``editor/game/frontend/storyMapHeight.mjs``, the only reader):
 
 * ``bounds`` is the model's x/z footprint **translated so the model AABB centre is the origin**,
   in model metres — that is the frame the engine puts the mesh in before the actor's
@@ -46,7 +46,7 @@ file is a build artifact of the model, not hand-authored content.
 
 Usage::
 
-    conda run -n coronaengine-dev python -B game/tools/bake_story_map_height.py
+    conda run -n coronaengine-dev python -B editor/game/tools/bake_story_map_height.py
 """
 
 from __future__ import annotations
@@ -57,16 +57,16 @@ import sys
 from collections import deque
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
-SOURCE = ROOT / "game/art/models/scene/01_山门神殿_平地版.glb"
-OUTPUT = ROOT / "game/data/story-map-height.json"
+ROOT = Path(__file__).resolve().parents[3]
+SOURCE = ROOT / "editor/game/art/models/scene/01_山门神殿_平地版.glb"
+OUTPUT = ROOT / "editor/game/data/story-map-height.json"
 
 # 256x256 over the 64.8 x 90 m footprint is ~25 x 35 cm per cell: fine enough for a walkable
 # surface, small enough (int16) to stay well under the ~600 KB the page is willing to parse.
 RESOLUTION = 256
 
 # The walkable ground, in the model frame. `COURTYARD_Y` is `map.courtyardY` from
-# `game/data/prophet.json` (0 on the flat-ground re-export); `COURTYARD_BAND` is how far either
+# `editor/game/data/prophet.json` (0 on the flat-ground re-export); `COURTYARD_BAND` is how far either
 # side of it still counts as ground rather than as a wall, a roof or scenery. Two metres covers
 # this map's floor slabs and their coarse slopes while ignoring everything a character would
 # have to climb onto. `PIT_FLOOR` is the deepest y that is still "ground": below it is a hole in

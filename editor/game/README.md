@@ -6,7 +6,7 @@
 ## 目录
 
 ```text
-game/
+editor/game/
 ├── __init__.py          # 稳定的公共入口
 ├── core/
 │   ├── config.py        # 玩法配置和校验
@@ -57,7 +57,8 @@ game/
 
 ## 使用示例
 
-从仓库根目录运行。以下示例推进到第一晚、拾取 Boss 奖励，再通过小球进入和返回创作世界：
+先从仓库根目录执行 `cd editor`，使 `game` 包位于 Python 导入路径。
+以下示例推进到第一晚、拾取 Boss 奖励，再通过小球进入和返回创作世界：
 
 ```python
 from game import BossPhase, GameSession
@@ -96,27 +97,28 @@ assert clock.state.phase is DayPhase.NIGHT
 
 ## 地图高度烘焙
 
-地图高度烘焙脚本位于 `game/tools/bake_story_map_height.py`。从仓库根目录运行：
+地图高度烘焙脚本位于 `editor/game/tools/bake_story_map_height.py`。从仓库根目录运行：
 
 ```sh
-python -B game/tools/bake_story_map_height.py
+python -B editor/game/tools/bake_story_map_height.py
 ```
 
-脚本读取 `game/art/models/scene/01_山门神殿_平地版.glb`，生成
-`game/data/story-map-height.json`。资源路径按脚本位置解析，不依赖当前工作目录。
+脚本读取 `editor/game/art/models/scene/01_山门神殿_平地版.glb`，生成
+`editor/game/data/story-map-height.json`。资源路径按脚本位置解析，不依赖当前工作目录。
 
 ## 测试
 
 从仓库根目录运行全部测试，无需安装第三方测试框架：
 
 ```sh
-python -m unittest discover -s game/tests -t . -v
+python -m unittest discover -s editor/game/tests -t editor -v
 ```
 
 只运行某个职责目录或模块：
 
 ```sh
-python -m unittest discover -s game/tests/world -t . -v
+python -m unittest discover -s editor/game/tests/world -t editor -v
+cd editor
 python -m unittest game.tests.systems.test_boss -v
 ```
 
@@ -189,14 +191,14 @@ python -m unittest game.tests.systems.test_boss -v
 
 ### 部署与验证
 
-发布脚本会把 Python `game` 包和 `game/frontend` 模块放在 `CabbageEditor` 的同级目录，
+发布脚本将 `editor/game` 中的运行时、前端模块、美术和数据部署到 `CabbageEditor/game`，
 因此安装后的程序不依赖源码工作区。沿用现有发布流程同步脚本和前端产物，不需要为本功能修改或重编 C++。
 
 从仓库根目录运行：
 
 ```powershell
-python -B -m unittest discover -s game/tests -t . -v
-node --test "game/tests/frontend/*.test.mjs" "editor/Frontend/tests/js/*.test.mjs"
+python -B -m unittest discover -s editor/game/tests -t editor -v
+node --test "editor/game/tests/frontend/*.test.mjs" "editor/Frontend/tests/js/*.test.mjs"
 npm --prefix editor/Frontend run build
 ```
 

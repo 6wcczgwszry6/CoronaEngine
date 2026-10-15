@@ -14,8 +14,8 @@ from unittest import mock
 from urllib.parse import unquote, urlparse
 import xml.etree.ElementTree as ET
 
-ROOT = Path(__file__).resolve().parents[2]
-ART = ROOT / "game/art/models"
+ROOT = Path(__file__).resolve().parents[3]
+ART = ROOT / "editor/game/art/models"
 NS = {"c": "http://www.collada.org/2005/11/COLLADASchema"}
 
 
@@ -76,7 +76,7 @@ class StoryAssetTests(unittest.TestCase):
         if not node:
             self.skipTest("Node.js is required to read the shared character configuration")
         result = subprocess.run([node, "--input-type=module", "-e",
-            "import {STORY_CHARACTERS} from './game/frontend/storyCharacters.mjs'; "
+            "import {STORY_CHARACTERS} from './editor/game/frontend/storyCharacters.mjs'; "
             "console.log(JSON.stringify(STORY_CHARACTERS));"], cwd=ROOT,
             capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
         characters = json.loads(result.stdout)
@@ -155,7 +155,7 @@ class StoryAssetTests(unittest.TestCase):
 
     def _map_placement(self) -> dict:
         """The authoritative `map` block of game/data/prophet.json."""
-        return json.loads((ROOT / "game/data/prophet.json").read_text(encoding="utf-8"))["map"]
+        return json.loads((ROOT / "editor/game/data/prophet.json").read_text(encoding="utf-8"))["map"]
 
     def _runtime_projection(self, spawn_sites: tuple = ()) -> dict:
         """The numbers the story frontend actually runs on, read from its modules through Node.
@@ -172,11 +172,11 @@ class StoryAssetTests(unittest.TestCase):
         sites = json.dumps([{"role": role, "x": x, "z": z} for role, x, z in spawn_sites])
         script = (
             "import fs from 'node:fs'; "
-            "import {CUBE_PLACEMENT} from './game/frontend/storyCube.mjs'; "
-            "import {MAP_PLACEMENT, MAP_MAX_AXIS, MAP_SURFACE_LIFT, mapOriginTransform} from './game/frontend/storyMap.mjs'; "
-            "import {MODEL_TO_WORLD, setHeightGrid, heightAt, heightGridInfo} from './game/frontend/storyMapHeight.mjs'; "
-            "import {FRAGMENTS, WORLD_RULE_VERSION} from './game/frontend/storyWorldRules.mjs'; "
-            "setHeightGrid(JSON.parse(fs.readFileSync('./game/data/story-map-height.json', 'utf8'))); "
+            "import {CUBE_PLACEMENT} from './editor/game/frontend/storyCube.mjs'; "
+            "import {MAP_PLACEMENT, MAP_MAX_AXIS, MAP_SURFACE_LIFT, mapOriginTransform} from './editor/game/frontend/storyMap.mjs'; "
+            "import {MODEL_TO_WORLD, setHeightGrid, heightAt, heightGridInfo} from './editor/game/frontend/storyMapHeight.mjs'; "
+            "import {FRAGMENTS, WORLD_RULE_VERSION} from './editor/game/frontend/storyWorldRules.mjs'; "
+            "setHeightGrid(JSON.parse(fs.readFileSync('./editor/game/data/story-map-height.json', 'utf8'))); "
             f"const sites = {sites}; "
             "console.log(JSON.stringify({cube: CUBE_PLACEMENT, map: MAP_PLACEMENT, "
             "mapTransform: mapOriginTransform(), maxAxis: MAP_MAX_AXIS, modelToWorld: MODEL_TO_WORLD, "
@@ -293,7 +293,7 @@ class StoryAssetTests(unittest.TestCase):
         projection = self._runtime_projection()
         document = ART / self.STORY_WORLD_MAP
         self.assertTrue(document.is_file(), str(document))
-        copied = ART.parents[2] / "assets/model" / document.name
+        copied = ROOT / "assets/model" / document.name
         self.assertTrue(copied.is_file(), str(copied))
         with document.open("rb") as current, copied.open("rb") as source:
             self.assertEqual(hashlib.file_digest(current, "sha256").digest(),
@@ -376,12 +376,12 @@ class StoryAssetTests(unittest.TestCase):
         The map is created by the page on every entry (`game/frontend/storyMap.mjs`), not
         seeded into new worlds by native creation code, so that is where the body type lives.
         """
-        source = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
+        source = (ROOT / "editor/game/frontend/storyMap.mjs").read_text(encoding="utf-8")
         self.assertIn("body_type: 'phantom'", source)
         self.assertNotIn("body_type: 'static'", source)
         # The map must arrive with the world the player enters, not only with a new world.
         page = (ROOT / "editor/Frontend/src/views/layout/StoryWorld.vue").read_text(encoding="utf-8")
-        self.assertIn("import { ensureStoryMap } from '../../../../../game/frontend/storyMap.mjs';", page)
+        self.assertIn("import { ensureStoryMap } from '../../../../game/frontend/storyMap.mjs';", page)
         self.assertIn("await ensureStoryMap({", page)
 
     def test_a_stale_map_actor_is_replaced_not_repaired(self):
@@ -394,7 +394,7 @@ class StoryAssetTests(unittest.TestCase):
         compare, and a stale actor has to be deleted and created again — repairing it in place
         would leave the old bundle on screen forever, exactly the bug this fixes.
         """
-        source = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
+        source = (ROOT / "editor/game/frontend/storyMap.mjs").read_text(encoding="utf-8")
         # The migration key exists in the data and in the projection, so it can be compared.
         story_map = self._map_placement()
         self.assertIn("modelRef", story_map)
@@ -432,9 +432,9 @@ class StoryAssetTests(unittest.TestCase):
         role-specific: `ensureStoryMap` and this read carry no `role` gate at all.
         """
         page = (ROOT / "editor/Frontend/src/views/layout/StoryWorld.vue").read_text(encoding="utf-8")
-        self.assertIn("import { heightAt } from '../../../../../game/frontend/storyMapHeight.mjs';", page)
+        self.assertIn("import { heightAt } from '../../../../game/frontend/storyMapHeight.mjs';", page)
         self.assertIn(
-            "import { loadStoryMapHeight, mapHeightUrl } from '../../../../../game/frontend/storyMapHeightLoader.mjs';",
+            "import { loadStoryMapHeight, mapHeightUrl } from '../../../../game/frontend/storyMapHeightLoader.mjs';",
             page)
         self.assertIn("await loadStoryMapHeight(mapHeightUrl(window.location.href));", page)
         # The grid has to be read before any character is placed: their feet y comes from it.
@@ -458,15 +458,15 @@ class StoryAssetTests(unittest.TestCase):
         self.assertIn("getGroundY = null,", camera)
         self.assertIn("getBridge, onError, getGroundY,", camera)
         # ... and be read by the controller on every ground write, with the constant as fallback.
-        controller = (ROOT / "game/frontend/playerController.mjs").read_text(encoding="utf-8")
+        controller = (ROOT / "editor/game/frontend/playerController.mjs").read_text(encoding="utf-8")
         self.assertIn("getGroundY = null,", controller)
         self.assertIn("const value = getGroundY(x, z);", controller)
         self.assertIn("if (next === null) { groundY = null; return fallback; }", controller)
         # The characters' feet come from the same grid, or they float over the terrain the player
         # walks on (the placement module and the grid must agree on the frame).
-        actors = (ROOT / "game/frontend/storyActors.mjs").read_text(encoding="utf-8")
+        actors = (ROOT / "editor/game/frontend/storyActors.mjs").read_text(encoding="utf-8")
         self.assertIn("characterTransform(character, actor.local_aabb, savedGeometry, heightAt)", actors)
-        characters = (ROOT / "game/frontend/storyCharacters.mjs").read_text(encoding="utf-8")
+        characters = (ROOT / "editor/game/frontend/storyCharacters.mjs").read_text(encoding="utf-8")
         self.assertIn("groundYAt = null)", characters)
         self.assertIn("const ground = typeof groundYAt === 'function' ? groundYAt(x, z) : null;", characters)
 
@@ -478,7 +478,7 @@ class StoryAssetTests(unittest.TestCase):
         The grid is also where the ground line comes from, so the flat-floor re-export is checked
         here the way the game reads it: through `heightAt` at the four story spawn sites.
         """
-        document = ROOT / "game/data/story-map-height.json"
+        document = ROOT / "editor/game/data/story-map-height.json"
         self.assertTrue(document.is_file(), str(document))
         grid = json.loads(document.read_text(encoding="utf-8"))
         self.assertEqual(grid["version"], 1)
@@ -649,7 +649,7 @@ class StoryAssetTests(unittest.TestCase):
         """The JSON is authoritative; the runtime projections must mirror it exactly."""
         projection = self._runtime_projection()
 
-        cube = json.loads((ROOT / "game/data/prophet.json").read_text(encoding="utf-8"))["cube"]
+        cube = json.loads((ROOT / "editor/game/data/prophet.json").read_text(encoding="utf-8"))["cube"]
         for key, value in projection["cube"].items():
             self.assertIn(key, cube, key)
             self.assertEqual(value, cube[key], key)
@@ -685,7 +685,7 @@ class StoryAssetTests(unittest.TestCase):
         # cef_editor_native_api_handlers.cpp:2785): a map that followed the camera would be
         # drawn in UI space and appear to move with the player. `body_type: static` is what
         # builds the collision mesh the characters stand on. Both live on the map's actor data.
-        module = (ROOT / "game/frontend/storyMap.mjs").read_text(encoding="utf-8")
+        module = (ROOT / "editor/game/frontend/storyMap.mjs").read_text(encoding="utf-8")
         declaration = module.split("MAP_ACTOR_DATA = Object.freeze({", 1)
         self.assertEqual(len(declaration), 2, "MAP_ACTOR_DATA 必须存在，地图的 actor 数据要能检查")
         actor_data = declaration[1].split("});", 1)[0]
@@ -693,7 +693,7 @@ class StoryAssetTests(unittest.TestCase):
         self.assertNotIn("follow_camera: true", module)
         self.assertIn("body_type: 'phantom'", actor_data)
 
-        catalogue = json.loads((ROOT / "game/data/fragments.json").read_text(encoding="utf-8"))
+        catalogue = json.loads((ROOT / "editor/game/data/fragments.json").read_text(encoding="utf-8"))
         self.assertEqual(projection["ruleVersion"], catalogue["version"])
         self.assertEqual(len(projection["fragments"]), len(catalogue["fragments"]))
         for projected, declared in zip(projection["fragments"], catalogue["fragments"]):
@@ -724,15 +724,15 @@ class StoryAssetTests(unittest.TestCase):
         spec.loader.exec_module(deployment)
         with tempfile.TemporaryDirectory(prefix="story assets ") as temporary:
             root = Path(temporary)
-            stale = root / "game/frontend/stale.mjs"
+            stale = root / "CabbageEditor/game/frontend/stale.mjs"
             stale.parent.mkdir(parents=True)
             stale.write_text("obsolete", encoding="utf-8")
             with contextlib.redirect_stdout(io.StringIO()):
                 deployment.copy_game_frontend(root / "CabbageEditor", ROOT)
             self.assertFalse(stale.exists())
-            for source in (ROOT / "game/frontend").glob("*.mjs"):
-                self.assertEqual(source.read_bytes(), (root / "game/frontend" / source.name).read_bytes())
-            self.assertFalse((root / "game/tests").exists())
+            for source in (ROOT / "editor/game/frontend").glob("*.mjs"):
+                self.assertEqual(source.read_bytes(), (root / "CabbageEditor/game/frontend" / source.name).read_bytes())
+            self.assertFalse((root / "CabbageEditor/game/tests").exists())
 
 
     def test_art_deployment_preserves_models_textures_and_attribution(self):
@@ -745,14 +745,14 @@ class StoryAssetTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 deployment.copy_game_art(dest, ROOT)
                 deployment.copy_game_art(dest, ROOT)  # Incremental deployment is repeatable.
-            expected = {p.relative_to(ROOT / "game/art") for p in (ROOT / "game/art").rglob("*") if p.is_file()}
-            actual = {p.relative_to(root / "game/art") for p in (root / "game/art").rglob("*") if p.is_file()}
+            expected = {p.relative_to(ROOT / "editor/game/art") for p in (ROOT / "editor/game/art").rglob("*") if p.is_file()}
+            actual = {p.relative_to(root / "CabbageEditor/game/art") for p in (root / "CabbageEditor/game/art").rglob("*") if p.is_file()}
             self.assertEqual(actual, expected)
             for relative in expected:
-                self.assertEqual((ROOT / "game/art" / relative).read_bytes(),
-                                 (root / "game/art" / relative).read_bytes(), str(relative))
+                self.assertEqual((ROOT / "editor/game/art" / relative).read_bytes(),
+                                 (root / "CabbageEditor/game/art" / relative).read_bytes(), str(relative))
             self.assertFalse((root / "assets").exists())
-            self.assertFalse((root / "game/tests").exists())
+            self.assertFalse((root / "CabbageEditor/game/tests").exists())
             with self.assertRaises(FileNotFoundError):
                 deployment.copy_game_art(dest, root / "missing repository")
             with mock.patch.object(deployment.shutil, "copytree", side_effect=OSError("disk full")):
@@ -761,7 +761,7 @@ class StoryAssetTests(unittest.TestCase):
 
 
     def _prophet_data(self) -> dict:
-        return json.loads((ROOT / "game/data/prophet.json").read_text(encoding="utf-8"))
+        return json.loads((ROOT / "editor/game/data/prophet.json").read_text(encoding="utf-8"))
 
     def _prophet_projection(self) -> dict:
         node = shutil.which("node")
@@ -769,7 +769,7 @@ class StoryAssetTests(unittest.TestCase):
             self.skipTest("Node.js is required to read the story dialogue projection")
         result = subprocess.run([node, "--input-type=module", "-e",
             "import {PROPHET_SCRIPT, PROPHET_PLACEMENT, describeProphetContract} "
-            "from './game/frontend/storyDialogue.mjs'; "
+            "from './editor/game/frontend/storyDialogue.mjs'; "
             "console.log(JSON.stringify({script: PROPHET_SCRIPT, placement: PROPHET_PLACEMENT, "
             "contract: describeProphetContract()}));"],
             cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
@@ -812,7 +812,7 @@ class StoryAssetTests(unittest.TestCase):
         if not node:
             self.skipTest("Node.js is required to read the shared character configuration")
         result = subprocess.run([node, "--input-type=module", "-e",
-            "import {STORY_CHARACTERS} from './game/frontend/storyCharacters.mjs'; "
+            "import {STORY_CHARACTERS} from './editor/game/frontend/storyCharacters.mjs'; "
             "console.log(JSON.stringify(STORY_CHARACTERS));"], cwd=ROOT,
             capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
         prophet = next(c for c in json.loads(result.stdout) if c["role"] == "prophet")
@@ -830,15 +830,15 @@ class StoryAssetTests(unittest.TestCase):
             with contextlib.redirect_stdout(io.StringIO()):
                 deployment.copy_game_data(dest, ROOT)
                 deployment.copy_game_data(dest, ROOT)  # Incremental deployment is repeatable.
-            expected = {path.relative_to(ROOT / "game/data")
-                        for path in (ROOT / "game/data").rglob("*") if path.is_file()}
-            actual = {path.relative_to(root / "game/data")
-                      for path in (root / "game/data").rglob("*") if path.is_file()}
+            expected = {path.relative_to(ROOT / "editor/game/data")
+                        for path in (ROOT / "editor/game/data").rglob("*") if path.is_file()}
+            actual = {path.relative_to(root / "CabbageEditor/game/data")
+                      for path in (root / "CabbageEditor/game/data").rglob("*") if path.is_file()}
             self.assertEqual(actual, expected)
             self.assertIn(Path("prophet.json"), expected)
             for relative in expected:
-                self.assertEqual((ROOT / "game/data" / relative).read_bytes(),
-                                 (root / "game/data" / relative).read_bytes(), str(relative))
+                self.assertEqual((ROOT / "editor/game/data" / relative).read_bytes(),
+                                 (root / "CabbageEditor/game/data" / relative).read_bytes(), str(relative))
             with self.assertRaises(FileNotFoundError):
                 deployment.copy_game_data(dest, root / "missing repository")
 

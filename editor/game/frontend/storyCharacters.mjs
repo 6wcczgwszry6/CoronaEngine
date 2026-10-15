@@ -71,7 +71,7 @@ export const vector3 = value => Array.isArray(value) && value.length === 3 && va
 export function resolveStoryAssetPath(frontendUrl, asset) {
   const base = new URL(frontendUrl);
   if (base.protocol !== 'file:') throw new Error('剧情模型需要在引擎文件页面中加载');
-  const url = new URL(`../../../game/art/models/${asset.split('/').map(encodeURIComponent).join('/')}`, base);
+  const url = new URL(`../../game/art/models/${asset.split('/').map(encodeURIComponent).join('/')}`, base);
   const path = decodeURIComponent(url.pathname);
   if (url.hostname) return `//${url.hostname}${path}`;
   return /^\/[a-z]:\//i.test(path) ? path.slice(1) : path;

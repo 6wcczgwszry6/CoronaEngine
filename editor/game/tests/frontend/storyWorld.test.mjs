@@ -18,20 +18,20 @@ import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot,
   characterTransform } from '../../frontend/storyCharacters.mjs';
 import { actorFixture, apiFixture, CHARACTER_BY_GUID } from './fixtures.mjs';
 import { createStoryNavigationController } from '../../frontend/storyNavigation.mjs';
-import { createStoryCameraController } from '../../../editor/Frontend/src/utils/viewportStoryCamera.js';
-import { editorApi } from '../../../editor/Frontend/src/api/editorApi.js';
-import * as launcher from '../../../editor/Frontend/src/services/projectLauncherService.js';
-import * as worldMode from '../../../editor/Frontend/src/services/worldModeService.js';
+import { createStoryCameraController } from '../../../Frontend/src/utils/viewportStoryCamera.js';
+import { editorApi } from '../../../Frontend/src/api/editorApi.js';
+import * as launcher from '../../../Frontend/src/services/projectLauncherService.js';
+import * as worldMode from '../../../Frontend/src/services/worldModeService.js';
 import { NAVIGATION_KEY } from '../../frontend/storyNavigation.mjs';
 import { gameplayConfig, projectReady } from './fixtures.mjs';
-import * as lifecycle from '../../../editor/Frontend/src/services/worldSessionLifecycle.js';
-import lanchat from '../../../editor/Frontend/src/stores/lanchat.js';
+import * as lifecycle from '../../../Frontend/src/services/worldSessionLifecycle.js';
+import lanchat from '../../../Frontend/src/stores/lanchat.js';
 
-const require = createRequire(new URL('../../../editor/Frontend/package.json', import.meta.url));
+const require = createRequire(new URL('../../../Frontend/package.json', import.meta.url));
 const vue = require('vue');
 const { ref, proxyRefs, nextTick, watch, reactive, computed, withDirectives } = vue;
 const { parse, compileScript, compileTemplate, babelParse } = require('vue/compiler-sfc');
-const { descriptor } = parse(fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.vue', import.meta.url), 'utf8'));
+const { descriptor } = parse(fs.readFileSync(new URL('../../../Frontend/src/views/layout/StoryWorld.vue', import.meta.url), 'utf8'));
 const compiled = compileScript(descriptor, { id: 'story-navigation-test', genDefaultAs: 'StoryWorld' });
 let setupSource = compiled.content;
 for (const node of babelParse(compiled.content, { sourceType: 'module' }).program.body
@@ -64,8 +64,8 @@ const renderStory = new Function('Vue', template.code)(vue);
 const postcss = require('postcss');
 const styles = postcss.parse([
   ...descriptor.styles.map(style => style.content),
-  fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.hud.css', import.meta.url), 'utf8'),
-  fs.readFileSync(new URL('../../../editor/Frontend/src/views/layout/StoryWorld.bag.css', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../../Frontend/src/views/layout/StoryWorld.hud.css', import.meta.url), 'utf8'),
+  fs.readFileSync(new URL('../../../Frontend/src/views/layout/StoryWorld.bag.css', import.meta.url), 'utf8'),
 ].join('\n'));
 function findNode(node, predicate) {
   if (!node || typeof node !== 'object') return null;
@@ -350,29 +350,29 @@ async function fixture(t, options = {}) {
       '@/utils/viewportStoryCamera.js': { createStoryCameraController },
       // 图片资源：测试里只当作一个 URL 字符串
       '@/assets/hero-figure.png': { default: 'hero-figure.png' },
-      '../../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
-      '../../../../../game/frontend/storyActors.mjs': { ensureStoryCharacters, syncPlacementActors },
-      '../../../../../game/frontend/playerController.mjs': { createPlayerController, VIEW_LABELS },
-      '../../../../../game/frontend/playerSave.mjs': { createPlayerSave },
-      '../../../../../game/frontend/storyGameplay.mjs': gameplayModule,
-      '../../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot },
-      '../../../../../game/frontend/storyProps.mjs': storyPropsModule,
-      '../../../../../game/frontend/prophetDialogue.mjs': prophetDialogueModule,
-      '../../../../../game/frontend/storyCube.mjs': storyCubeModule,
+      '../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
+      '../../../../game/frontend/storyActors.mjs': { ensureStoryCharacters, syncPlacementActors },
+      '../../../../game/frontend/playerController.mjs': { createPlayerController, VIEW_LABELS },
+      '../../../../game/frontend/playerSave.mjs': { createPlayerSave },
+      '../../../../game/frontend/storyGameplay.mjs': gameplayModule,
+      '../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot },
+      '../../../../game/frontend/storyProps.mjs': storyPropsModule,
+      '../../../../game/frontend/prophetDialogue.mjs': prophetDialogueModule,
+      '../../../../game/frontend/storyCube.mjs': storyCubeModule,
       // 地图走真实模块：它的确认与幂等都写在里面，桩掉就失去了这条用例的意义。
       // 假时钟（wait 不平息）让「引擎当帧就确认」的桩不必真的等 200ms。
-      '../../../../../game/frontend/storyMap.mjs': { ...storyMapModule, ensureStoryMap: options => storyMapModule.ensureStoryMap({ ...options, wait: async () => {} }) },
+      '../../../../game/frontend/storyMap.mjs': { ...storyMapModule, ensureStoryMap: options => storyMapModule.ensureStoryMap({ ...options, wait: async () => {} }) },
       // 高度网格走真实模块；读盘这一步由用例注入（真实加载器在 file:// 页面上用 XHR，
       // 这里要断言的是「页面读没读、读到的东西有没有真的变成地面」）。
-      '../../../../../game/frontend/storyMapHeight.mjs': storyMapHeightModule,
-      '../../../../../game/frontend/storyMapHeightLoader.mjs': { ...storyMapHeightLoaderModule,
+      '../../../../game/frontend/storyMapHeight.mjs': storyMapHeightModule,
+      '../../../../game/frontend/storyMapHeightLoader.mjs': { ...storyMapHeightLoaderModule,
         loadStoryMapHeight: async url => {
           calls.push(['mapHeight', url]);
           if (!options.mapHeight) { storyMapHeightModule.clearHeightGrid(); return null; }
           return options.mapHeight(url);
         } },
-      '../../../../../game/frontend/storyWorldRules.mjs': storyWorldRulesModule,
-      '../../../../../game/frontend/storyProphetActions.mjs': storyProphetActionsModule,
+      '../../../../game/frontend/storyWorldRules.mjs': storyWorldRulesModule,
+      '../../../../game/frontend/storyProphetActions.mjs': storyProphetActionsModule,
     });
     const instance = component.setup({}, { expose() {} });
     instance.surface.value = { focus() {}, getBoundingClientRect: () => ({ left: 0, top: 0, width: 800, height: 600 }) };

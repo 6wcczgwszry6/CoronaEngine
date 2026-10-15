@@ -110,7 +110,7 @@ class StoryNavigationTests(unittest.TestCase):
 class ScratchNavigationBridgeTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        cls.editor_path = str(Path(__file__).resolve().parents[3] / 'editor')
+        cls.editor_path = str(Path(__file__).resolve().parents[3])
         sys.path.insert(0, cls.editor_path)
         from script_runtime.blockly.main import ScratchTool
         from script_runtime.engine import corona_engine

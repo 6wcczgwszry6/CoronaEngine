@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { registerWorldSessionSave, flushWorldSessionSaves, trackWorldSessionWork, drainWorldSession, withWorldTimeout }
-  from '../../../editor/Frontend/src/services/worldSessionLifecycle.js';
+  from '../../../Frontend/src/services/worldSessionLifecycle.js';
 import { deferred } from './fixtures.mjs';
 
 test('retired old-world save survives unmount and blocks replacement until confirmed', async () => {

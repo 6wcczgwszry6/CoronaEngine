@@ -21,10 +21,10 @@
 import { setHeightGrid } from './storyMapHeight.mjs';
 
 /**
- * Relative to the page (`CabbageEditor/Frontend/dist/index.html`), which is the same three
+ * Relative to the page (`CabbageEditor/Frontend/dist/index.html`), which is the same two
  * levels up that `resolveStoryAssetPath` walks for `game/art/models`.
  */
-export const HEIGHT_GRID_PATH = '../../../game/data/story-map-height.json';
+export const HEIGHT_GRID_PATH = '../../game/data/story-map-height.json';
 
 /** Absolute URL of the deployed grid for a page URL. */
 export function mapHeightUrl(frontendUrl, path = HEIGHT_GRID_PATH) {
