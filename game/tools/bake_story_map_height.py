@@ -46,7 +46,7 @@ file is a build artifact of the model, not hand-authored content.
 
 Usage::
 
-    conda run -n coronaengine-dev python -B tools/bake_story_map_height.py
+    conda run -n coronaengine-dev python -B game/tools/bake_story_map_height.py
 """
 
 from __future__ import annotations
@@ -57,7 +57,7 @@ import sys
 from collections import deque
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 SOURCE = ROOT / "game/art/models/scene/01_山门神殿_平地版.glb"
 OUTPUT = ROOT / "game/data/story-map-height.json"
 

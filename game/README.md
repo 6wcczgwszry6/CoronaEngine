@@ -94,6 +94,17 @@ assert clock.advance_ns(3 * NS_PER_SECOND).ok
 assert clock.state.phase is DayPhase.NIGHT
 ```
 
+## 地图高度烘焙
+
+地图高度烘焙脚本位于 `game/tools/bake_story_map_height.py`。从仓库根目录运行：
+
+```sh
+python -B game/tools/bake_story_map_height.py
+```
+
+脚本读取 `game/art/models/scene/01_山门神殿_平地版.glb`，生成
+`game/data/story-map-height.json`。资源路径按脚本位置解析，不依赖当前工作目录。
+
 ## 测试
 
 从仓库根目录运行全部测试，无需安装第三方测试框架：

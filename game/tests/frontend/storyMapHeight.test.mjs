@@ -115,7 +115,7 @@ test('a cell whose footprint is full of building still answers with the ground l
   // The map's walls, eaves and roofs put vertices hundreds of metres above the courtyard, and
   // the first bake kept the *maximum* y per cell — so the ground a cell reported was the roof
   // over it and the player rode it upwards as soon as they came near a building. The shipped
-  // grid is baked from `tools/bake_story_map_height.py`, which now keeps only vertices inside a
+  // grid is baked from `game/tools/bake_story_map_height.py`, which now keeps only vertices inside a
   // couple of metres of the courtyard: a cell that contains a building reports the ground the
   // building stands on. A grid built the old way is the control below.
   // One cell of the profile is a building: the ground the characters walk on at 1 m, the roof
