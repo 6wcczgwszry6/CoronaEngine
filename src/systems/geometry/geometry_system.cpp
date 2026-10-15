@@ -50,6 +50,15 @@ std::unordered_set<std::string> g_invalid_mesh_slot_logs;
     return enabled;
 }
 
+/// 单调时间戳（毫秒）。用于 LOD 级的"真实时间"释放宽限：帧计数在几何线程与渲染线程
+/// 节拍不一致时表达不了真实时长（见 Impl::kSharedLodFreeGraceMs）。
+[[nodiscard]] std::uint64_t steady_now_ms() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
 template <typename T>
 Horizon::HardwareBuffer make_geometry_buffer(const std::vector<T>& data,
                                              Horizon::BufferUsageFlags usage,
@@ -3122,6 +3131,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
             // 若不在上传时写入当前帧号，新建条目会在第一次 reconcile 就被判定"超期未需求"
             // 而立即释放（实测导入完成 1ms 内 131 个 mesh 的 LOD0 被整批驱逐）。
             lod0.last_demand_frame = impl_->lod_frame_counter;
+            lod0.last_demand_ms    = steady_now_ms();
             entry.levels.push_back(std::move(lod0));
 
             // LOD 1..N：仅登记元数据，**不**在此创建 GPU 缓冲 / BVH（Step 3a 按需驻留）。
@@ -3152,6 +3162,7 @@ void GeometrySystem::upload_lod_from_scene_data() {
                 lod_buf.source_lod_index = static_cast<std::uint32_t>(lod_idx);
                 // 同上：宽限期从创建帧起算，避免新建级刚登记就被判超期。
                 lod_buf.last_demand_frame = impl_->lod_frame_counter;
+                lod_buf.last_demand_ms    = steady_now_ms();
 
                 entry.levels.push_back(std::move(lod_buf));
             }
@@ -3268,8 +3279,34 @@ void GeometrySystem::reconcile_lod_residency() {
             auto cit = impl_->lod_cache.find(lod_key);
             if (cit == impl_->lod_cache.end() || cit->second.model_id != model_id) return;
             auto& entry = cit->second;
-            demand_mask = entry.frame_demand_mask.take();
-            entry.demanded_mask = demand_mask;
+            const std::uint64_t fresh_mask = entry.frame_demand_mask.take();
+            // ---- 空快照 ≠ 无需求 ----
+            // 渲染线程的登记是稀疏且突发式的（只在真正走选级查询时才写，节拍低于几何
+            // 线程的 60Hz，卡顿时还有数百毫秒空档），而本函数每帧都 take()。若把空快照
+            // 当"没有任何实例需要任何级"，下面按几何帧计数的释放宽限会在每次渲染卡顿时
+            // 到期，把整场 mesh 的级——含 LOD0 基础几何——成批释放，渲染端只能回退到最粗级
+            // 或整帧丢失该 mesh。故：
+            //   · 非空快照 = 新消息 → 写入 sticky 并刷新时间戳；
+            //   · 空快照   = 没有新消息 → 沿用上一次 sticky；
+            //   · 连续 kSharedLodDemandStaleMs 没有非空快照 → 才认定真的无需求。
+            if (fresh_mask != 0) {
+                entry.sticky_demand_mask  = fresh_mask;
+                entry.sticky_demand_stamp = std::chrono::steady_clock::now();
+                entry.sticky_demand_valid = true;
+            }
+            const bool demand_stale = !entry.sticky_demand_valid ||
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - entry.sticky_demand_stamp).count()
+                    >= Impl::kSharedLodDemandStaleMs;
+            demand_mask = demand_stale ? 0 : entry.sticky_demand_mask;
+            // 注意：demanded_mask 保持原有语义——"本拍原始快照"，仅供
+            // reconcile_cpu_residency 决定 CPU 驻留窗口（demanded_src）使用。
+            // 不能写入上面的 demand_mask（粘性并集）：粘性并集几乎每拍都非空且常常是
+            // 宽并集（实测 0xff），会让 CPU 窗口退化成"保留全部级"→ 再也没有任何级
+            // 落在窗口外 → reconcile_cpu_residency 永不把 LOD 级移交写盘 →
+            // LOD 磁盘缓存形同虚设、CPU 侧 LOD 内存永不回收（实测 [LOD-CPU] 与
+            // [LOD-Disk] 已写入 从此类帧起全部为 0）。
+            entry.demanded_mask = fresh_mask;
             spatially_evicted = entry.lod_spatially_evicted;
             level_count = entry.levels.size();
         }
@@ -3340,7 +3377,15 @@ void GeometrySystem::reconcile_lod_residency() {
                                              const char* label_vertex,
                                              const char* label_index) {
                         if (verts.empty() || inds.empty()) return;
-                        if (impl_->pending_lod_builds.size() >= Impl::kMaxInflightLodBuilds) return;
+                        // ---- LOD0 重建优先：独立在途额度 ----
+                        // LOD0 是渲染端在其它级都没就绪时唯一的兜底。若与简化级共享同一个
+                        // 在途上限，成批的粗级构建会把 LOD0 重建一直挤在队尾，该 mesh 长期
+                        // 只剩最粗级，表现为"叶子一块块慢慢回来"。给 LOD0 独立额度，两类互不阻塞。
+                        if (level == 0) {
+                            if (impl_->inflight_lod0_builds() >= Impl::kMaxInflightLod0Builds) return;
+                        } else if (impl_->pending_lod_builds.size() >= Impl::kMaxInflightLodBuilds) {
+                            return;
+                        }
                         std::uint64_t epoch = 0;
                         {
                             std::shared_lock lk(impl_->lod_cache_mutex);
@@ -3435,16 +3480,29 @@ void GeometrySystem::reconcile_lod_residency() {
             for (const auto& lvl : entry.levels) {
                 if (lvl.ready) ++ready_count;
             }
+            const std::uint64_t now_ms = steady_now_ms();
             for (std::size_t i = 0; i < entry.levels.size(); ++i) {
                 auto& lvl = entry.levels[i];
                 const bool demanded = ((demand_mask >> i) & 1u) != 0u;
                 if (demanded) {
                     lvl.last_demand_frame = this_frame;
+                    lvl.last_demand_ms    = now_ms;
                     continue;
                 }
                 if (!lvl.ready) continue;
                 if (ready_count <= 1) continue;  // 最后一个 ready 级不释放
+                // LOD0 是 mesh_dev 基础几何的引用副本（upload 时 lod0.* = mesh_dev.*），
+                // 释放它会让渲染端在其它级都没就绪时整帧丢掉该 mesh（叶子整片消失）。
+                // 因此只有"确实收到过非空需求快照、且该快照不含 LOD0"时才允许释放它；
+                // 需求信息陈旧（demand_mask==0，说明这一拍没拿到渲染侧消息）时只回收
+                // 简化级，保住基础几何。
+                if (i == 0 && demand_mask == 0) continue;
+                // 双重宽限：帧数（防抖）+ 真实时间（跨节拍）。
+                // 只按帧计时是不够的——几何线程 60Hz、渲染侧发表只有约 15Hz，5 帧 = 83ms
+                // 短于一个发表周期，一次跨阈值的选级变化就会把该级拆掉，而重建代价
+                // （CPU→GPU 上传 + 排队）远高于多留 kSharedLodFreeGraceMs。两者都过期才释放。
                 if (this_frame < lvl.last_demand_frame + Impl::kSharedLodFreeGraceFrames) continue;
+                if (now_ms < lvl.last_demand_ms + Impl::kSharedLodFreeGraceMs) continue;
                 lvl.ready          = false;
                 lvl.vertex_buffer  = Horizon::HardwareBuffer{};
                 lvl.index_buffer   = Horizon::HardwareBuffer{};
@@ -3932,9 +3990,13 @@ void GeometrySystem::reconcile_lod_residency() {
                                        && pit->second.model_id == model_id
                                        && pit->second.residency_epoch == entry_epoch
                                        && pit->second.future.valid());
-                            if (!already) impl_->pending_lod_builds.erase(pit);
                         }
-                        if (!already && impl_->pending_lod_builds.size() < Impl::kMaxInflightLodBuilds) {
+                        // LOD0 重建优先：走独立在途额度，不被简化级构建挤掉（与共享实例
+                        // 路径的 enqueue_build 同一策略）。
+                        // 注意：额度判定必须在 erase 之前——否则额度不足时会先把在途任务
+                        // 丢掉（连同 future，那一级的 GPU 缓冲白建且永远不就绪）却又不补发。
+                        if (!already && impl_->inflight_lod0_builds() < Impl::kMaxInflightLod0Builds) {
+                            impl_->pending_lod_builds.erase(lod_key);  // 丢弃该 key 上的非 LOD0 在途任务
                             auto verts = mesh.vertices;  // 从 mesh 本体，非 lod_levels
                             auto inds  = mesh.indices;
                             const std::size_t gpu_bytes =
@@ -4288,6 +4350,7 @@ void GeometrySystem::process_pending_lod_builds() {
         lvl.mesh_mem       = std::move(tok);
         lvl.ready          = true;
         lvl.last_demand_frame = impl_->lod_frame_counter;
+        lvl.last_demand_ms    = steady_now_ms();
         ++impl_->diag_lod_builds;
 
         // ---- 变更 H：swap 完成检测 ----
@@ -4361,6 +4424,11 @@ namespace Corona::Systems {
 void GeometrySystem::reconcile_cpu_residency() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
 
+    // Scene 写锁的最长等待时间。本函数每 kCpuWindowEvalInterval(120 帧 ≈ 2.2s) 才跑一次，
+    // 属于**可延后**的后台任务；拿不到写锁就应该把这一轮留给下一个周期，绝不能把
+    // 几何线程的帧循环冻住。详见下面取锁处的说明。
+    constexpr int kSceneWriteLockWaitMs = 100;
+
     // 1. 按 model_id 收集所有实例的 committed_demand + LOD元数据
     struct ModelInfo {
         std::vector<int> demands;   // 各实例 committed_demand
@@ -4424,13 +4492,23 @@ void GeometrySystem::reconcile_cpu_residency() {
             impl_->model_cpu_windows[model_id] = {0, demand_lod_src, mi.coarsest_src};
         }
 
-        // 4. acquire_write<Scene>，对每个 mesh 的每个 lod_level 做双向处理：
+        // 4. 有界等待地取 Scene 写锁，对每个 mesh 的每个 lod_level 做双向处理：
         //    窗口内 + 数据缺失 → 查磁盘缓存恢复（反序列化回填，供 GPU 侧重建该级）
         //    窗口外 + 数据仍在 → std::move 移交异步写盘队列（几何线程不做序列化/IO）
         // 写锁持有期间的开销：evict 侧仅移动指针 + 入队（微秒级）；restore 侧
         // 命中内存级缓存为一次 memcpy，仅在数据已被内存级 LRU 刷盘时才同步读盘
         // （小概率路径，128MB 内存级容量足以覆盖正常的换出→换入时间窗口）。
-        auto scene_write = resource_manager.acquire_write<Resource::Scene>(model_id);
+        //
+        // 必须用有界等待，不能裸 acquire_write：全引擎唯一的 Scene 写者就是这里，
+        // 而 Scene 读者有 15 处（Mechanics 每帧、CEF/Python/Vision 线程，以及本文件的
+        // rebuild/构建路径）。per-resource 的 shared_mutex 不保证公平，实测存在某个
+        // 读者连续持有同一 Scene 读锁十几秒的情形：
+        //   MechanicsInternal::ensure_collision_mesh（mechanics_internal.h:496）曾持锁
+        //   17054ms，同期 [UI/Frame] system=Geometry max=15839.72ms——裸 acquire_write
+        //   把整个几何帧冻了 15.8 秒。拿不到锁就跳过本周期（回收延后 2.2s 无副作用），
+        //   下一次评估周期再试。
+        auto scene_write = resource_manager.try_acquire_write_for<Resource::Scene>(
+            model_id, std::chrono::milliseconds(kSceneWriteLockWaitMs));
         if (!scene_write.valid()) continue;
 
         int freed_count    = 0;  // 本周期移交写盘队列的级数1
