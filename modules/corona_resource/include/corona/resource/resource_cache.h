@@ -5,8 +5,10 @@
 #include <chrono>
 #include <condition_variable>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <thread>
 
 namespace Corona::Resource {
 
@@ -285,6 +287,45 @@ class ResourceCache {
         entry->ref_count++;
         entry->last_access = std::chrono::system_clock::now();
         return WriteHandle<T>(std::move(entry), std::move(lock));
+    }
+
+    /**
+     * @brief 有界等待地尝试获取独占写句柄
+     *
+     * 与 acquire_write 的唯一差别：**不会无限等待**。在 timeout 内反复 try_lock，
+     * 超时则返回无效句柄（调用方应当把这一轮工作延后到下一个周期）。
+     *
+     * 动机：per-resource 的 std::shared_mutex 只保证互斥、不保证公平。实测存在
+     * 某个读者连续持有同一 Scene 读锁 15.8 秒的情形（[UI/Frame] system=Geometry
+     * max=15839.72ms），而 acquire_write 是裸 unique_lock，导致调用线程整帧被冻结。
+     * 对"可延后"的后台任务（如 LOD 的 CPU 驻留回收）必须用本接口。
+     *
+     * @param rid 资源ID
+     * @param timeout 最长等待时间
+     * @return WriteHandle<T> 句柄；超时/资源未就绪/资源不存在时 valid()==false
+     */
+    template <typename T = IResource>
+    WriteHandle<T> try_acquire_write_for(
+        TResourceID rid, std::chrono::milliseconds timeout = std::chrono::milliseconds(100)) {
+        const auto deadline = std::chrono::steady_clock::now() + timeout;
+        for (;;) {
+            auto entry = get_entry(rid);
+            if (!entry) return {};
+
+            std::unique_lock lock(entry->mutex, std::try_to_lock);
+            if (lock.owns_lock()) {
+                if (entry->state != LoadState::Ready || !entry->resource) {
+                    return {};
+                }
+                entry->ref_count++;
+                entry->last_access = std::chrono::system_clock::now();
+                return WriteHandle<T>(std::move(entry), std::move(lock));
+            }
+            if (std::chrono::steady_clock::now() >= deadline) {
+                return {};  // 超时：把工作留给下一个周期，绝不冻结调用线程
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
     }
 
     // ========================================
