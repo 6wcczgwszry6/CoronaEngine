@@ -36,9 +36,14 @@ CONFIG = {
 _lock = threading.RLock()
 
 
+# The art a world yields starts in the bag: the block stack the player may place inside a
+# small world. Kept next to the state it seeds so the two can never drift apart.
+BLOCK_SEED = 64
+
+
 def initial_state():
     return {'version': 2, 'revision': 0, 'legacyRevision': 0, 'rage': 0, 'boss': {'hp': CONFIG['bossHp']},
-            'drop': None, 'inventory': {'worldFragment': 0}, 'operations': []}
+            'drop': None, 'inventory': {'worldFragment': 0, 'block': BLOCK_SEED}, 'operations': []}
 
 
 def _vector(value):
@@ -144,10 +149,17 @@ def _validate(state):
     if state['version'] != 2:
         raise ValueError('不支持的玩法存档版本')
     revision, boundary, operations = state['revision'], state['legacyRevision'], state['operations']
+    # A world saved before the block counter existed lacks it. Seeding it here keeps the
+    # replayed inventory equal to the stored one; without this an earned save is rejected as
+    # inconsistent with its own operation log.
+    if isinstance(state.get('inventory'), dict):
+        state['inventory'].setdefault('block', BLOCK_SEED)
     if (type(revision) is not int or revision < 0 or type(boundary) is not int
             or not 0 <= boundary <= min(revision, 11) or not isinstance(operations, list)
             or len(operations) != revision or type(state['rage']) is not int
-            or type(state['boss']['hp']) is not int or type(state['inventory']['worldFragment']) is not int):
+            or type(state['boss']['hp']) is not int
+            or type(state['inventory'].get('worldFragment')) is not int
+            or type(state['inventory'].get('block')) is not int):
         raise ValueError('玩法状态或存档版本号无效')
     replay, seen = initial_state(), set()
     for i, operation in enumerate(operations):

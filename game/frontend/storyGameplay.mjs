@@ -1,5 +1,12 @@
 /** Pure geometry + acknowledged gameplay commands. No per-frame native queries. */
 import { hasUsableBounds, rotatePoint, vector3 } from './storyCharacters.mjs';
+// The pickup range lives here, the prophet range in `prophetDialogue`; this module owns the
+// arithmetic that imports both, so the F key's one decision never re-derives a distance.
+import { PROPHET_INTERACTION, prophetAvailable, prophetDistance } from './prophetDialogue.mjs';
+// The block's reach belongs to the placement geometry, not to the combat config: the resolver
+// reads it from the module that owns where a block lands, so placing and retrieving stay one
+// pair of numbers and no caller has to re-state the reach.
+import { PLACED_BLOCK_REACH } from './storyProps.mjs';
 
 export const GAMEPLAY_KEY = '__corona_story_gameplay_v1__';
 export const FRAGMENT_GUID = 'f9f5c8b0-7324-4b6c-a011-000000000005';
@@ -36,6 +43,39 @@ export function pickupDistance(player, drop) {
   return canAct(player) && vector3(drop?.position)
     ? Math.hypot(player.position[0] - drop.position[0], player.position[2] - drop.position[2]) : Infinity;
 }
+/**
+ * The one rule the F key follows, shared by the on-screen prompt and the key handler.
+ *
+ * Each candidate carries its own configured range as a distance: the prophet's comes from
+ * `PROPHET_INTERACTION.range` (defaulted here so a caller cannot forget it), the pickup's
+ * from `config.pickupRange`, and the placed block's from `PLACED_BLOCK_REACH` (the reach the
+ * placement geometry itself owns, so retrieving is the mirror of placing). The prompt text is
+ * produced beside the decision, so a prompt can never describe a different action than the one
+ * F performs. The nearer target wins; an exact tie keeps the earlier candidate — the prophet
+ * first, as it always was, which is what stops a block lying next to the prophet from stealing
+ * the conversation. Pure: no engine, no DOM.
+ */
+export const INTERACTION_PROMPTS = Object.freeze({
+  prophet: 'F 与先知交谈',
+  pickup: '按 F 拾取',
+  block: '按 F 取回方块',
+});
+export function contextualInteraction({ prophetDistance: toProphet = Infinity,
+  pickupDistance: toPickup = Infinity, blockDistance: toBlock = Infinity,
+  range = PROPHET_INTERACTION.range, pickupRange = Infinity,
+  blockRange = PLACED_BLOCK_REACH } = {}) {
+  const candidates = [
+    { kind: 'prophet', distance: toProphet, limit: range },
+    { kind: 'pickup', distance: toPickup, limit: pickupRange },
+    { kind: 'block', distance: toBlock, limit: blockRange },
+  ].filter(candidate => Number.isFinite(candidate.distance)
+    && Number.isFinite(candidate.limit) && candidate.distance <= candidate.limit);
+  if (!candidates.length) return { kind: null, distance: null, prompt: null };
+  const nearest = candidates.reduce((best, candidate) =>
+    candidate.distance < best.distance ? candidate : best);
+  return { kind: nearest.kind, distance: nearest.distance, prompt: INTERACTION_PROMPTS[nearest.kind] };
+}
+
 export function unwrapGameplay(value) {
   for (let i = 0; i < 3 && value?.data; i++) value = value.data;
   // The CEF scratch bridge answers a key event with `{ response: '<json string>' }`,
@@ -53,7 +93,7 @@ export function unwrapGameplay(value) {
 export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
   reconcile = async () => {}, onState = () => {}, onFeedback = () => {},
   trackWork = promise => promise, now = () => performance.now(), newId = () => crypto.randomUUID(),
-  requestTimeoutMs = 15_000 }) {
+  requestTimeoutMs = 15_000, groundYAt = null }) {
   let data = null, pending = null, inFlight = null, visualDirty = false, lastAttack = -Infinity;
   // The small world's exhibit layout is its own document: it is not part of the
   // combat state, so it is cached separately and never merged into `data.state`.
@@ -62,6 +102,12 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
   // The roster (named small worlds the player owns) is likewise its own document,
   // cached separately so a rename never rides on a combat revision.
   let rosterCache = null;
+  // Why a side document could not be read. These documents are independent of the combat
+  // revision, so a broken one must not block entry — but it must not disappear either.
+  // An empty `catch` once hid a ReferenceError that left all three unread on every entry,
+  // which is exactly how a reopening small world came back with an empty layout and no
+  // installed fragment. Recording the reason is what keeps such a failure visible.
+  const loadFailures = [];
   const skillUntil = { heavy: -Infinity, sweep: -Infinity };
   async function request(payload) {
     let timer;
@@ -119,84 +165,117 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
     pending = { action, operationId: newId(), expectedRevision: data.state.revision, ...fields };
     return flush();
   }
+  // The side documents are declared as functions of this factory, not only as methods of the
+  // returned object: `load()` calls them by name, and an object literal's methods are *not*
+  // in scope inside their siblings. Written as methods, each of these three calls was a
+  // ReferenceError that the empty catches below swallowed, so a world that reopened showed an
+  // empty layout (every placed block back in the bag) and no installed fragment.
+  async function load() {
+    const response = unwrapGameplay(await request({ action: 'load' }));
+    if (response?.status !== 'ok') throw new Error(response?.message || '读取玩法进度失败');
+    accept(response);
+    loadFailures.length = 0;
+    // A main world reports an empty layout, so one await covers both worlds.
+    try { await loadPlacements(); } catch (error) {
+      placementCache = null; loadFailures.push(error.message);
+    }
+    try { await loadWorldRules(); } catch (error) {
+      ruleCache = null; loadFailures.push(error.message);
+    }
+    try { await loadSubworlds(); } catch (error) {
+      rosterCache = null; loadFailures.push(error.message);
+    }
+    return data;
+  }
+  // Exhibits are authored one write at a time and never share the combat revision,
+  // so a rejected layout can never corrupt a boss or drop reward.
+  async function loadPlacements() {
+    const response = unwrapGameplay(await request({ action: 'loadPlacements' }));
+    if (response?.status !== 'ok' || !response.state?.placements) {
+      throw new Error(response?.message || '读取小世界陈列失败');
+    }
+    return (placementCache = response.state);
+  }
+  async function savePlacements(placed) {
+    const response = unwrapGameplay(await request({ action: 'savePlacements', placements: placed }));
+    if (response?.status !== 'ok' || !response.state?.placements) {
+      throw new Error(response?.message || '保存小世界陈列失败');
+    }
+    // The scene must follow the confirmed layout, so mark the visuals dirty and let
+    // the same reconcile path that handles combat redraw the exhibits.
+    placementCache = response.state;
+    visualDirty = true;
+    return placementCache;
+  }
+  // World rules a small world was given by installing a fragment. They change no scene
+  // membership, so unlike exhibits they never mark the visuals dirty: the rule engine
+  // animates actors that already exist.
+  async function loadWorldRules() {
+    const response = unwrapGameplay(await request({ action: 'loadWorldRules' }));
+    if (response?.status !== 'ok' || !Array.isArray(response.state?.rules)) {
+      throw new Error(response?.message || '读取世界规则失败');
+    }
+    return (ruleCache = response.state);
+  }
+  async function saveWorldRules(rules) {
+    const response = unwrapGameplay(await request({ action: 'saveWorldRules', rules }));
+    if (response?.status !== 'ok' || !Array.isArray(response.state?.rules)) {
+      throw new Error(response?.message || '保存世界规则失败');
+    }
+    return (ruleCache = response.state);
+  }
+  async function loadSubworlds() {
+    const response = unwrapGameplay(await request({ action: 'loadSubworlds' }));
+    if (response?.status !== 'ok' || !response.state?.subworlds) {
+      throw new Error(response?.message || '读取小世界名册失败');
+    }
+    return (rosterCache = response.state);
+  }
+  // One entry at a time, like placements; the backend stays authoritative.
+  async function addSubworld() {
+    const response = unwrapGameplay(await request({ action: 'addSubworld' }));
+    if (response?.status !== 'ok' || !response.state?.subworlds) {
+      throw new Error(response?.message || '新增小世界失败');
+    }
+    rosterCache = response.state;
+    return rosterCache;
+  }
+  async function renameSubworld(subworldId, name) {
+    const response = unwrapGameplay(await request({ action: 'renameSubworld', subworldId, name }));
+    if (response?.status !== 'ok' || !response.state?.subworlds) {
+      throw new Error(response?.message || '重命名小世界失败');
+    }
+    rosterCache = response.state;
+    return rosterCache;
+  }
+  // Where the fragment the boss leaves behind rests: the ground **at the boss's own (x, z)**
+  // from the same baked grid the characters stand on (`storyMapHeight.heightAt`, handed in by
+  // the page). The boss's own origin is not a ground line (it is scaled from its own AABB), so
+  // it is never used; with no grid — or a junk sample — the old constant 0 (the flat engine
+  // floor this drop landed on before the grid existed) is kept. `storyActors` re-derives the
+  // model's own foot offset from `heightAt`, so storing the ground line here is what makes the
+  // red ball sit on the terrain instead of sinking half into it.
+  function dropGroundY(x, z) {
+    const ground = typeof groundYAt === 'function' ? groundYAt(x, z) : null;
+    return Number.isFinite(ground) ? ground : 0;
+  }
   return {
     get data() { return data; },
     get busy() { return Boolean(inFlight); },
     get needsSave() { return Boolean(pending || visualDirty); },
-    async load() {
-      const response = unwrapGameplay(await request({ action: 'load' }));
-      if (response?.status !== 'ok') throw new Error(response?.message || '读取玩法进度失败');
-      accept(response);
-      // A main world reports an empty layout, so one await covers both worlds.
-      try { await loadPlacements(); } catch { placementCache = null; }
-      try { await loadWorldRules(); } catch { ruleCache = null; }
-      try { await loadSubworlds(); } catch { rosterCache = null; }
-      return data;
-    },
-    // Exhibits are authored one write at a time and never share the combat revision,
-    // so a rejected layout can never corrupt a boss or drop reward.
-    async loadPlacements() {
-      const response = unwrapGameplay(await request({ action: 'loadPlacements' }));
-      if (response?.status !== 'ok' || !response.state?.placements) {
-        throw new Error(response?.message || '读取小世界陈列失败');
-      }
-      return (placementCache = response.state);
-    },
-    async savePlacements(placed) {
-      const response = unwrapGameplay(await request({ action: 'savePlacements', placements: placed }));
-      if (response?.status !== 'ok' || !response.state?.placements) {
-        throw new Error(response?.message || '保存小世界陈列失败');
-      }
-      // The scene must follow the confirmed layout, so mark the visuals dirty and let
-      // the same reconcile path that handles combat redraw the exhibits.
-      placementCache = response.state;
-      visualDirty = true;
-      return placementCache;
-    },
+    load,
+    loadPlacements,
+    savePlacements,
     get placements() { return placementCache; },
-    // World rules a small world was given by installing a fragment. They change no scene
-    // membership, so unlike exhibits they never mark the visuals dirty: the rule engine
-    // animates actors that already exist.
-    async loadWorldRules() {
-      const response = unwrapGameplay(await request({ action: 'loadWorldRules' }));
-      if (response?.status !== 'ok' || !Array.isArray(response.state?.rules)) {
-        throw new Error(response?.message || '读取世界规则失败');
-      }
-      return (ruleCache = response.state);
-    },
-    async saveWorldRules(rules) {
-      const response = unwrapGameplay(await request({ action: 'saveWorldRules', rules }));
-      if (response?.status !== 'ok' || !Array.isArray(response.state?.rules)) {
-        throw new Error(response?.message || '保存世界规则失败');
-      }
-      return (ruleCache = response.state);
-    },
+    loadWorldRules,
+    saveWorldRules,
     get worldRules() { return ruleCache; },
-    async loadSubworlds() {
-      const response = unwrapGameplay(await request({ action: 'loadSubworlds' }));
-      if (response?.status !== 'ok' || !response.state?.subworlds) {
-        throw new Error(response?.message || '读取小世界名册失败');
-      }
-      return (rosterCache = response.state);
-    },
-    // One entry at a time, like placements; the backend stays authoritative.
-    async addSubworld() {
-      const response = unwrapGameplay(await request({ action: 'addSubworld' }));
-      if (response?.status !== 'ok' || !response.state?.subworlds) {
-        throw new Error(response?.message || '新增小世界失败');
-      }
-      rosterCache = response.state;
-      return rosterCache;
-    },
-    async renameSubworld(subworldId, name) {
-      const response = unwrapGameplay(await request({ action: 'renameSubworld', subworldId, name }));
-      if (response?.status !== 'ok' || !response.state?.subworlds) {
-        throw new Error(response?.message || '重命名小世界失败');
-      }
-      rosterCache = response.state;
-      return rosterCache;
-    },
+    loadSubworlds,
+    addSubworld,
+    renameSubworld,
     get subworlds() { return rosterCache; },
+    // Why a side document could not be read; empty means every document was read back.
+    get loadFailures() { return [...loadFailures]; },
     attack() {
       if (inFlight) return inFlight;
       if (pending || visualDirty) return flush();
@@ -207,7 +286,8 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
       if (!canHitBoss(readPlayer(), bounds, data.config)) {
         onFeedback('靠近并面向 Boss 后攻击'); return Promise.resolve(false);
       }
-      return commit('hitBoss', { bossPosition: [boss.geometry.position[0], 0, boss.geometry.position[2]] });
+      return commit('hitBoss', { bossPosition: [boss.geometry.position[0],
+        dropGroundY(boss.geometry.position[0], boss.geometry.position[2]), boss.geometry.position[2]] });
     },
     skillStatus(skillId) {
       const skill = data?.config.skills?.[skillId];
@@ -232,7 +312,8 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss,
       lastAttack = time;
       skillUntil[skillId] = time + skill.cooldownMs;
       return commit('castSkill', { skillId, hit,
-        ...(hit ? { bossPosition: [boss.geometry.position[0], 0, boss.geometry.position[2]] } : {}) });
+        ...(hit ? { bossPosition: [boss.geometry.position[0],
+          dropGroundY(boss.geometry.position[0], boss.geometry.position[2]), boss.geometry.position[2]] } : {}) });
     },
     pickup() {
       if (inFlight) return inFlight;

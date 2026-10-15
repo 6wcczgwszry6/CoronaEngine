@@ -6,6 +6,9 @@ import * as prophetDialogueModule from '../../../../game/frontend/prophetDialogu
 import * as storyCubeModule from '../../../../game/frontend/storyCube.mjs';
 import * as storyWorldRulesModule from '../../../../game/frontend/storyWorldRules.mjs';
 import * as storyProphetActionsModule from '../../../../game/frontend/storyProphetActions.mjs';
+import * as storyMapModule from '../../../../game/frontend/storyMap.mjs';
+import * as storyMapHeightModule from '../../../../game/frontend/storyMapHeight.mjs';
+import { mapHeightUrl } from '../../../../game/frontend/storyMapHeightLoader.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot } from '../../../../game/frontend/storyCharacters.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -20,7 +23,6 @@ import { createPlayerSave } from '../../../../game/frontend/playerSave.mjs';
 import { ensureStoryCharacters, syncPlacementActors } from '../../../../game/frontend/storyActors.mjs';
 import { sceneFixture } from '../../../../game/tests/frontend/fixtures.mjs';
 import { registerWorldSessionSave, flushWorldSessionSaves, trackWorldSessionWork } from '../../src/services/worldSessionLifecycle.js';
-import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera } from '../../src/utils/visionRenderModes.js';
 import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera, visionStablePlanesFromCamera } from '../../src/utils/visionRenderModes.js';
 
 const source = fs.readFileSync(new URL('../../src/views/layout/MainPage.vue', import.meta.url), 'utf8');
@@ -193,8 +195,20 @@ const imports = babelParse(setupSource, { sourceType: 'module' }).program.body.f
 for (const node of [...imports].reverse()) {
   // 样式副作用导入在测试里无需执行，直接摘除
   if (/\.css$/.test(node.source.value)) { setupSource = setupSource.slice(0, node.start) + setupSource.slice(node.end); continue; }
-  const bindings = node.specifiers.map(specifier => `${specifier.imported.name}: ${specifier.local.name}`).join(', ');
-  setupSource = setupSource.slice(0, node.start) + `const { ${bindings} } = modules[${JSON.stringify(node.source.value)}];` + setupSource.slice(node.end);
+  // 具名导入与默认导入都要改写：`specifier.imported` 只存在于具名导入上，
+  // 直接把两者都当具名导入会在 HERO_FIGURE（图片默认导入）上崩掉整个文件。
+  const named = node.specifiers.filter(specifier => specifier.type === 'ImportSpecifier');
+  const defaults = node.specifiers.filter(specifier => specifier.type === 'ImportDefaultSpecifier');
+  const parts = [];
+  if (named.length) {
+    const bindings = named.map(specifier => `${JSON.stringify(specifier.imported.name)}: ${specifier.local.name}`).join(', ');
+    parts.push(`const { ${bindings} } = modules[${JSON.stringify(node.source.value)}];`);
+  }
+  for (const specifier of defaults) {
+    parts.push(`const ${specifier.local.name} = modules[${JSON.stringify(node.source.value)}].default;`);
+  }
+  setupSource = setupSource.slice(0, node.start) + parts.join(' ')
+    + setupSource.slice(node.end);
 }
 const makeStory = new Function('modules', 'window', 'document', `${setupSource}; return StoryWorld;`);
 const deferred = () => { let resolve; const promise = new Promise(done => { resolve = done; }); return { promise, resolve }; };
@@ -258,6 +272,8 @@ async function mountStory(t, { pendingInit = null, sceneSnapshot = { data: snaps
           return { status: 'success', actor }; } },
     } },
     '@/services/worldModeService.js': { worldModeState, normalizeProjectPath: value => String(value).toLowerCase() },
+    // 图片资源：测试里只当作一个 URL 字符串（默认导入经上面的改写走 .default）。
+    '@/assets/hero-figure.png': { default: 'hero-figure.png' },
     '@/services/projectLauncherService.js': { projectLauncherService: {}, cancelPendingProjectOpen() {}, getProjectSelectionVersion: () => 0 },
     '@/services/worldSessionLifecycle.js': { registerWorldSessionSave, trackWorldSessionWork, notifyWorldError: error => window.alert(error.message) },
     '../../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
@@ -274,7 +290,15 @@ async function mountStory(t, { pendingInit = null, sceneSnapshot = { data: snaps
       // Observing the real controller keeps the page's own wiring under test.
       createStoryGameplay: options => { gameplayOptions = options; return gameplayModule.createStoryGameplay(options); },
     },
+    // 地图走真实模块（与 storyWorld.test.mjs 同一套桩：假时钟让「当帧确认」不必真的等 200ms）。
+    '../../../../../game/frontend/storyMap.mjs': { ...storyMapModule,
+      ensureStoryMap: options => storyMapModule.ensureStoryMap({ ...options, wait: async () => {} }) },
     '../../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot },
+    // 这个夹具测的是页面/相机绑定：网格按「读不到」处理（清空并返回 null），
+    // 因此玩家地面仍是固定地板；「有图贴地」那条链路由 game/tests/frontend/storyWorld.test.mjs 覆盖。
+    '../../../../../game/frontend/storyMapHeight.mjs': storyMapHeightModule,
+    '../../../../../game/frontend/storyMapHeightLoader.mjs': { mapHeightUrl,
+      loadStoryMapHeight: async () => { storyMapHeightModule.clearHeightGrid(); return null; } },
     '@/utils/viewportStoryCamera.js': { createStoryCameraController: options => createStoryCameraController({
       ...options, now: () => time,
       requestFrame: callback => { frames.set(++id, callback); return id; }, cancelFrame: id => frames.delete(id),
@@ -378,24 +402,26 @@ test('F talks to a nearby prophet and leaves the pickup path alone', async t => 
   const h = await mountStory(t), p = h.page;
   const prophet = () => h.sceneActors.find(actor => actor.actor_guid === PROPHET_GUID);
   const press = code => p.onKeyDown(input({ code }));
+  const hint = () => p.controlHints.value.find(([key]) => key === 'F');
 
   // The main world has no prophet, so F keeps its original pickup meaning.
   enterWorld(h, 'main');
-  assert.equal(p.prophetNearby.value, false);
+  assert.equal(p.fKeyAction.value.kind, null);
   press('KeyF');
   assert.equal(p.dialogueOpen.value, false);
 
   enterWorld(h, 'child');
   Object.assign(prophet().geometry, { position: [400, 0, 400] });
   p.updateProximity();
-  assert.equal(p.prophetNearby.value, false, 'a distant prophet is not reachable');
+  assert.equal(p.fKeyAction.value.kind, null, 'a distant prophet is not reachable');
+  assert.equal(hint(), undefined, 'no F line is promised when F would do nothing');
   press('KeyF');
   assert.equal(p.dialogueOpen.value, false);
 
   Object.assign(prophet().geometry, { position: [3, 0, 0] });
   p.updateProximity();
-  assert.equal(p.prophetNearby.value, true);
-  assert.equal(p.controlHints.value.find(([key]) => key === 'F')[1], '与先知交谈');
+  assert.equal(p.fKeyAction.value.kind, 'prophet');
+  assert.deepEqual(hint(), ['F', 'F 与先知交谈']);
 
   press('KeyF');
   assert.equal(p.dialogueOpen.value, true);
@@ -411,7 +437,7 @@ test('F talks to a nearby prophet and leaves the pickup path alone', async t => 
   }
   press('Enter');
   assert.equal(p.dialogueOpen.value, false, 'the last Enter ends the talk');
-  assert.equal(p.prophetNearby.value, true, 'reach is re-armed without moving');
+  assert.equal(p.fKeyAction.value.kind, 'prophet', 'reach is re-armed without moving');
   press('KeyF');
   press('Space');
   assert.equal(p.dialogueLine.value, 1);

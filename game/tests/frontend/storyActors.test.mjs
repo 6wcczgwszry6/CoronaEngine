@@ -1,9 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { STORY_CHARACTERS, PLAYER_GUID, PLAYER_MODEL_REF, PROPHET_MODEL_REF, resolveStoryAssetPath, characterTransform, rotatedBounds } from '../../frontend/storyCharacters.mjs';
+import { STORY_CHARACTERS, PLAYER_GUID, BOSS_MODEL_REF, PLAYER_MODEL_REF, PROPHET_MODEL_REF, resolveStoryAssetPath, characterTransform, rotatedBounds } from '../../frontend/storyCharacters.mjs';
 import { ensureStoryCharacters } from '../../frontend/storyActors.mjs';
 import { actorFixture, apiFixture, url, deferred, projectReady } from './fixtures.mjs';
 const load = (f, extra = {}) => ensureStoryCharacters({ api: f.api, sceneId: 'scene.ini', frontendUrl: url, wait: async () => {}, ...extra });
+// Derived from the story table, never a literal: a hard-coded count turns every content
+// addition into a pile of unrelated failures. With no `gameplay` the world's role is unknown,
+// so only the four inhabitants are created — that is the invariant these tests assert.
+const INHABITANTS = STORY_CHARACTERS;
+const INHABITANT_COUNT = INHABITANTS.length;
+const CHILD_ROLES = ['player', 'prophet'];
+const CHILD_ACTOR_COUNT = CHILD_ROLES.length;
 
 test('source/deployed/UNC asset resolution handles encoded Chinese and spaces', () => {
   assert.equal(resolveStoryAssetPath(url, STORY_CHARACTERS[0].asset), 'D:/Corona Engine/game/art/models/player/Maria WProp J J Ong.dae');
@@ -22,12 +29,12 @@ test('rotated normalized bounds determine scale and contact with y=0', () => {
   }
   assert.throws(() => rotatedBounds([0,0,0,0,0,0], [0,0,0]), /包围盒/);
 });
-test('first load imports exactly four models; reopen is idempotent and keeps saved player pose', async () => {
+test('first load imports exactly the four inhabitants; reopen is idempotent and keeps saved player pose', async () => {
   for (const wrapped of [false, true]) {
     const f = apiFixture({ wrapped });
     const first = await load(f);
     assert.equal(first.player.actor_guid, PLAYER_GUID);
-    assert.equal(f.calls.filter(c => c[0] === 'create').length, 4);
+    assert.equal(f.calls.filter(c => c[0] === 'create').length, INHABITANT_COUNT);
     assert.ok(first.targetOffset > 0);
     f.get(PLAYER_GUID).geometry.position = [7, 0.9, -2];
     f.get(PLAYER_GUID).geometry.rotation = [0, 0.7, 0];
@@ -40,16 +47,18 @@ test('first load imports exactly four models; reopen is idempotent and keeps sav
 });
 test('unrelated names are untouched; fixed NPCs and disabled physics are enforced', async () => {
   const unrelated = { ...actorFixture(), actor_guid: 'someone-else' };
-  const f = apiFixture({ actors: [unrelated, ...STORY_CHARACTERS.slice(1).map(c => actorFixture(c))] });
+  const f = apiFixture({ actors: [unrelated, ...INHABITANTS.slice(1).map(c => actorFixture(c))] });
   const boss = f.get(STORY_CHARACTERS[1].guid);
   boss.geometry.position = [999,999,999]; boss.mechanics.physics_enabled = true;
   boss.follow_camera = true; boss.visible = false; boss.camera_lock.enabled = true;
   await load(f);
-  assert.equal(f.state.actors.length, 5);
+  // The authored scenery plus the inhabitants the fixture engine started with; with no
+  // `gameplay` no small-world creature is created, so this is the pre-monster world.
+  assert.equal(f.state.actors.length, INHABITANT_COUNT + 1);
   assert.deepEqual(f.state.actors[0], unrelated);
   assert.equal(boss.mechanics.physics_enabled, false);
   assert.equal(boss.follow_camera, false); assert.equal(boss.camera_lock.enabled, false);
-  assert.equal(boss.geometry.position[2], 12);
+  assert.equal(boss.geometry.position[2], 5.5);
 });
 test('partial failure preserves successful actors; retry repairs incomplete placement without duplication', async () => {
   const f = apiFixture(); const original = f.api.scene.setActorTransform;
@@ -121,9 +130,11 @@ test('asynchronous imports wait for native bounds before scaling each character'
       }
     } });
     assert.equal(polls, 8);
-    assert.equal(f.calls.filter(c => c[0] === 'create').length, 4);
+    assert.equal(f.calls.filter(c => c[0] === 'create').length, INHABITANT_COUNT);
     assert.ok(result.targetOffset > 0);
-    for (const character of STORY_CHARACTERS) {
+    // Only the inhabitants exist: with no `gameplay` the small-world creatures are not
+    // created, so iterating the whole table here would read undefined actors.
+    for (const character of INHABITANTS) {
       const actor = f.get(character.guid);
       assert.deepEqual(actor.geometry, characterTransform(character, actor.local_aabb));
     }
@@ -190,7 +201,7 @@ test('legacy player facing is migrated with its marker in one write, preserving 
   const player = actorFixture(); delete player.model_ref;
   player.route = 'Assets/Models/maria.dae';
   player.geometry.position = [7, 0.9, -9]; player.geometry.rotation = [0, 0.42, 0];
-  const f = apiFixture({ actors: [player, ...STORY_CHARACTERS.slice(1).map(c => actorFixture(c))] });
+  const f = apiFixture({ actors: [player, ...INHABITANTS.slice(1).map(c => actorFixture(c))] });
   const result = await load(f, { frontendUrl: 'http://source-art-unavailable' });
   assert.deepEqual(result.player.geometry.position, player.geometry.position);
   assert.deepEqual(result.player.geometry.rotation, [0, 0.42 + Math.PI, 0]);
@@ -201,8 +212,31 @@ test('legacy player facing is migrated with its marker in one write, preserving 
   assert.equal(f.calls[0][4].skip_if_exists, true); assert.equal(f.calls[0][4].update_if_exists, true);
   assert.equal(f.calls[0][4].model_ref, PLAYER_MODEL_REF);
   for (let i = 0; i < 3; i++) await load(f);
-  assert.equal(f.calls.length, 1); assert.equal(f.state.actors.length, 4);
+  assert.equal(f.calls.length, 1); assert.equal(f.state.actors.length, INHABITANT_COUNT);
 });
+test('a legacy boss is replaced, not repaired, so the engine imports the new model', async () => {
+  // The dragon is already in the world with no generation marker. `skip_if_exists` alone can
+  // never swap a model — the repair branch never rewrites actor.route — so the actor must be
+  // removed and created again, and the rebuild must keep the guid (exactly one boss).
+  const boss = actorFixture(STORY_CHARACTERS[1]);
+  delete boss.model_ref;
+  boss.route = 'Assets/Models/Dragon 2.5_dae.dae';
+  const f = apiFixture({ actors: [actorFixture(), boss, ...INHABITANTS.slice(2).map(c => actorFixture(c))] });
+  await load(f);
+  const ops = f.calls.map(call => call[0]);
+  assert.deepEqual(ops.slice(0, 2), ['remove', 'create']);
+  assert.equal(f.calls[0][1], STORY_CHARACTERS[1].guid);
+  const created = f.calls[1][4];
+  assert.equal(created.actor_guid, STORY_CHARACTERS[1].guid);
+  assert.equal(created.model_ref, BOSS_MODEL_REF);
+  assert.equal(created.semantic_role, 'boss');
+  assert.equal(f.get(STORY_CHARACTERS[1].guid).model_ref, BOSS_MODEL_REF);
+  assert.equal(f.state.actors.length, INHABITANT_COUNT, 'the rebuilt boss must not duplicate the old one');
+  for (let i = 0; i < 3; i++) await load(f);
+  assert.equal(f.get(STORY_CHARACTERS[1].guid).model_ref, BOSS_MODEL_REF);
+  assert.equal(f.state.actors.length, INHABITANT_COUNT);
+});
+
 test('migration retries before/after commit never rotate twice or duplicate a player', async () => {
   for (const committed of [false, true]) {
     const player = actorFixture(); delete player.model_ref; player.geometry.rotation = [0, -0.8, 0];
@@ -253,12 +287,18 @@ test('main hides NPCs; child reuses only prophet; corrected dragon bounds stay g
     assert.deepEqual(f.get(STORY_CHARACTERS[2].guid).geometry.position.filter((_, i) => i !== 1), [-4, 4]);
     assert.deepEqual(f.get(STORY_CHARACTERS[3].guid).geometry.position.filter((_, i) => i !== 1), [4, 4]);
     assert.equal(f.calls.filter(call => call[0] === 'create').length, 0);
-    assert.equal(f.state.actors.length, 4);
+    // Every character exists in both worlds; the role decides which are visible, not which
+    // are created (a world keeps the whole cast so a swap of world never re-imports art).
+    assert.equal(f.state.actors.length, STORY_CHARACTERS.length);
     assert.equal(f.get(STORY_CHARACTERS[2].guid).visible, false);
     assert.equal(f.get(STORY_CHARACTERS[3].guid).visible, role === 'child');
     const boss = f.get(STORY_CHARACTERS[1].guid);
     if (role === 'main') {
-      assert.deepEqual(boss.geometry.rotation, [Math.PI / 2, 0, 0]);
+      // Asserted against the table, not a literal: the boss's rotation is a property of the
+      // shipped model (the dragon's was [pi/2, 0, 0] because its own AABB is x/y-flat), so a
+      // hard-coded value here turns every future art swap into a test failure that says
+      // nothing about the code. What must hold regardless of the model is the grounding.
+      assert.deepEqual(boss.geometry.rotation, [...STORY_CHARACTERS[1].rotation]);
       const bounds = rotatedBounds(boss.local_aabb, boss.geometry.rotation);
       assert.ok(Math.abs(bounds[1] * boss.geometry.scale[1] + boss.geometry.position[1]) < 1e-9);
     } else assert.equal(boss.visible, false);
@@ -283,7 +323,7 @@ test('each character reaches real render readiness before the next character is 
   f.get(PLAYER_GUID).render_ready = true;
   gate.resolve();
   await loading;
-  assert.deepEqual(f.calls.filter(c => c[0] === 'create').map(c => c[1]), STORY_CHARACTERS.map(c => c.guid));
+  assert.deepEqual(f.calls.filter(c => c[0] === 'create').map(c => c[1]), INHABITANTS.map(c => c.guid));
 });
 
 test('gameplay visibility leaves unrelated scene models untouched', async () => {
@@ -326,10 +366,17 @@ test('interrupted prophet creation is grounded on retry and then preserved', asy
   // load: the prophet is placed on demand, so a second entry never comes to fix it.
   const expected = characterTransform(prophet, f.get(prophet.guid).local_aabb);
   assert.deepEqual(f.get(prophet.guid).geometry, expected);
+  // The prophet keeps the x/z it already had: "4 m ahead of the player" is a *first creation*
+  // placement (`initializeStoryCharacters` computes it only while `!actor`), so an existing
+  // actor is never relocated here. What this load must prove is that the raw unit-scale
+  // placeholder from the interrupted first attempt is normalized and grounded to the engine
+  // floor — hence y = 0.9, the player's origin, and x/z = the table's authored site.
   assert.deepEqual(expected.position.slice(0, 3), [prophet.x, 0.9, prophet.z]);
   assert.deepEqual(expected.rotation, [...prophet.rotation]);
   assert.equal(f.get(prophet.guid).model_ref, PROPHET_MODEL_REF);
-  assert.equal(f.state.actors.length, 2);
+  // The child world also creates the small-world creatures, so the cast is the player, the
+  // prophet and the roster — derived, so adding a creature does not silently pass here.
+  assert.equal(f.state.actors.length, CHILD_ACTOR_COUNT);
 
   // Once the committed pose matches, re-entering is a no-op that preserves it.
   const writes = f.calls.length;

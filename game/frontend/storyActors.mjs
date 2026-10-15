@@ -1,7 +1,8 @@
 import { FRAGMENT, FRAGMENT_GUID } from './storyGameplay.mjs';
 import { PLACEMENT_PREFIX, placementScene } from './storyProps.mjs';
-import { STORY_CHARACTERS, PLAYER_GUID, PLAYER_MODEL_REF, PROPHET_MODEL_REF, PLAYER_MODEL_YAW_OFFSET, unwrap, sceneSnapshot, resolveStoryAssetPath,
+import { STORY_CHARACTERS, PLAYER_GUID, BOSS_MODEL_REF, PLAYER_MODEL_REF, PROPHET_MODEL_REF, PLAYER_MODEL_YAW_OFFSET, unwrap, sceneSnapshot, resolveStoryAssetPath,
   characterTransform, rotatedBounds, hasUsableBounds } from './storyCharacters.mjs';
+import { heightAt } from './storyMapHeight.mjs';
 import { PROPHET_PLACEMENT } from './storyDialogue.mjs';
 
 const canceled = () => Object.assign(new Error('剧情世界初始化已取消'), { name: 'AbortError' });
@@ -13,6 +14,28 @@ const success = (response, operation) => {
   return data;
 };
 const loaded = actor => actor?.load_status === 'loaded' && Number(actor?.handle) > 0;
+/**
+ * Delete an actor so the next `createActor` really imports the current route.
+ *
+ * Mirrors `storyMap.removeMapActor`: a `skip_if_exists` repair never rewrites `actor.route`,
+ * so replacing a model is removal + creation and nothing else. Identity is still the actor's
+ * own guid — no other actor is ever a candidate — but the snapshot can hold the record under
+ * different keys depending on which path created it, so every key it offers is tried in turn.
+ */
+async function removeActorForRebuild(api, sceneId, actor, operation, submit) {
+  const keys = [actor.actor_guid, actor.name, Number(actor.handle) > 0 ? String(actor.handle) : '']
+    .filter(key => typeof key === 'string' && key.trim());
+  let last = null;
+  for (const key of [...new Set(keys)]) {
+    try {
+      return await submit(operation, () => api.sceneTools.removeActor(sceneId, key));
+    } catch (error) {
+      last = error;
+    }
+  }
+  throw last || new Error(`${operation}：引擎未确认成功`);
+}
+
 const sameVector = (a, b) => Array.isArray(a) && a.length === b.length
   && a.every((value, i) => Math.abs(value - b[i]) < 1e-5);
 
@@ -96,7 +119,8 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
           // the prophet's marker made every entry take the legacy repair path, and that
           // path never persisted the marker, so the world failed to load forever.
           ...(character.role === 'player' ? { model_ref: PLAYER_MODEL_REF }
-            : character.role === 'prophet' ? { model_ref: PROPHET_MODEL_REF } : {}),
+            : character.role === 'prophet' ? { model_ref: PROPHET_MODEL_REF }
+            : character.role === 'boss' ? { model_ref: BOSS_MODEL_REF } : {}),
           position: [character.x, 0, character.z], rotation: character.rotation, scale: [1, 1, 1],
           follow_camera: false, physics_enabled: false,
         }));
@@ -141,12 +165,21 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
         && !sameVector(actor.geometry?.scale, placement.scale);
       const legacyProphet = gameplay?.role === 'child' && character.role === 'prophet'
         && (actor.model_ref !== PROPHET_MODEL_REF || unplacedProphet);
+      // The boss's pose is authored, not derived, so unlike the player it needs no saved
+      // geometry: only its model generation is tracked. An actor without this generation's
+      // marker is a dragon (or an older em001 build) that no repair can re-import.
+      const initializedBoss = wasPresent && character.role === 'boss'
+        && actor.model_ref === BOSS_MODEL_REF;
+      const legacyBoss = character.role === 'boss' && actor.model_ref !== BOSS_MODEL_REF;
       let savedGeometry = initializedPlayer || initializedProphet ? actor.geometry : null;
       if (legacyPlayer && savedGeometry) {
         savedGeometry = { ...savedGeometry, rotation: [...savedGeometry.rotation] };
         savedGeometry.rotation[1] += PLAYER_MODEL_YAW_OFFSET;
       }
-      const transform = characterTransform(character, actor.local_aabb, savedGeometry);
+      // The map's ground line, not the engine floor: `heightAt` answers with the baked grid's
+      // world y at the character's (x, z) and `null` when no grid is loaded, in which case the
+      // feet stay on the flat engine floor exactly as before.
+      const transform = characterTransform(character, actor.local_aabb, savedGeometry, heightAt);
       if (legacyPlayer || legacyProphet) {
         const modelRef = legacyPlayer ? PLAYER_MODEL_REF : PROPHET_MODEL_REF;
         // Commit placement and its marker together, not while the new actor is still unscaled.
@@ -162,6 +195,24 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
         if (actor?.model_ref !== modelRef || !sameVector(actor.geometry?.rotation, transform.rotation)) {
           const unconfirmed = actor?.model_ref !== modelRef ? `摆位标记 ${modelRef}` : '朝向';
           throw new Error(`${character.name}摆位未被引擎确认（${unconfirmed}），请重试进入世界`);
+        }
+      } else if (legacyBoss) {
+        // Replacement, not repair: this is the one path on which the engine imports a route.
+        // The guid is stamped on the creation below, so the rebuilt actor keeps its identity
+        // and no second boss can appear.
+        const route = source || resolveStoryAssetPath(frontendUrl, character.asset);
+        await removeActorForRebuild(api, sceneId, actor, `替换${character.name}模型`, call);
+        check();
+        const created = await call(`创建${character.name}`, () => api.sceneTools.createActor(sceneId, route, 'model', {
+          name: character.name, actor_guid: character.guid, semantic_role: character.role,
+          entity_id: `story.${character.role}`, entity_type: 'story_character',
+          model_ref: BOSS_MODEL_REF,
+          position: [character.x, 0, character.z], rotation: character.rotation, scale: [1, 1, 1],
+          follow_camera: false, physics_enabled: false,
+        }));
+        actor = created.actor;
+        if (actor?.model_ref !== BOSS_MODEL_REF || !sameVector(actor.geometry?.rotation, character.rotation)) {
+          throw new Error(`${character.name}模型未被引擎确认，请重试进入世界`);
         }
       } else if (Object.entries(transform).some(([key, value]) => !sameVector(actor.geometry?.[key], value))) {
         actor = (await call('设置模型位置', () => api.scene.setActorTransform(sceneId, character.guid, transform))).actor;
