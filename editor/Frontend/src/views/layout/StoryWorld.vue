@@ -1829,7 +1829,10 @@ onMounted(async () => {
       actionFeedback.value = `地图未能就位：${error.message}`;
     }
     if (!current() || worldModeState.projectPath !== projectPath) return;
-    bossActor = snapshot.actors?.find(actor => actor.actor_guid === STORY_CHARACTERS[1].guid) || null;
+    // Look the boss up by role: array position is not an identity, and inserting a
+    // character would otherwise silently point this at whoever slid into slot 1.
+    bossActor = snapshot.actors?.find(actor =>
+      actor.actor_guid === STORY_CHARACTERS.find(character => character.role === 'boss').guid) || null;
     bossBounds = worldBounds(bossActor);
     // 先知只在小世界按需生成，主世界里缺失是正常的：交互保持不可用即可。
     prophetActor = snapshot.actors?.find(actor => actor.actor_guid === PROPHET_GUID) || null;

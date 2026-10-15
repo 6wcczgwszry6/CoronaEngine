@@ -16,7 +16,7 @@ import * as storyWorldRulesModule from '../../frontend/storyWorldRules.mjs';
 import * as storyProphetActionsModule from '../../frontend/storyProphetActions.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath, sceneSnapshot,
   characterTransform } from '../../frontend/storyCharacters.mjs';
-import { actorFixture, apiFixture } from './fixtures.mjs';
+import { actorFixture, apiFixture, CHARACTER_BY_GUID } from './fixtures.mjs';
 import { createStoryNavigationController } from '../../frontend/storyNavigation.mjs';
 import { createStoryCameraController } from '../../../editor/Frontend/src/utils/viewportStoryCamera.js';
 import { editorApi } from '../../../editor/Frontend/src/api/editorApi.js';
@@ -201,7 +201,9 @@ async function fixture(t, options = {}) {
   let frameTime = performance.now();
   let activePath = MAIN, route = '/', frameId = 0, page = null, handle = 10;
   const poses = new Map([[MAIN, pose([1, 2, 3])], [CHILD, pose([5, 6, 7])]]);
-  const actors = new Map([MAIN, CHILD].map(path => [path, STORY_CHARACTERS.map(character => actorFixture(character))]));
+  // Built from the fixture's table, which is where the boss's shipped placement lives:
+  // this page defines it locally, so a literal list here drifts the moment the art moves.
+  const actors = new Map([MAIN, CHILD].map(path => [path, [...CHARACTER_BY_GUID.values()].map(actorFixture)]));
   function surface() {
     const listeners = new Map();
     return {

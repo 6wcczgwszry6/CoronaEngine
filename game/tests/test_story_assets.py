@@ -20,6 +20,57 @@ NS = {"c": "http://www.collada.org/2005/11/COLLADASchema"}
 
 
 class StoryAssetTests(unittest.TestCase):
+    @staticmethod
+    def _glb_json(document: Path) -> tuple[dict, int]:
+        """The JSON chunk of a GLB and the byte offset of its BIN chunk.
+
+        A `.glb` is a 12-byte header (magic, version, total) followed by length-prefixed
+        chunks; JSON is 0x4E4F534A and BIN is 0x004E4942. The engine parses the whole file
+        through Assimp, so this reads the same document it does, without a native build.
+        """
+        with document.open("rb") as stream:
+            magic, version, total = struct.unpack("<4sII", stream.read(12))
+            assert magic == b"glTF" and version == 2 and total == document.stat().st_size
+            header = None
+            while stream.tell() < total:
+                length, kind = struct.unpack("<II", stream.read(8))
+                if kind == 0x4E4F534A:
+                    header = json.loads(stream.read(length).decode("utf-8"))
+                    continue
+                if kind == 0x004E4942 and header is not None:
+                    return header, stream.tell()
+                stream.seek(length, 1)
+        raise AssertionError(f"{document} has no JSON chunk followed by a BIN chunk")
+
+    def _assert_glb_character_art(self, model: Path):
+        """A model the engine can animate, whose textures travel inside the file.
+
+        Characters are imported through the same Assimp path as the map, so the
+        requirements are the ones that path actually needs: a skin plus at least one
+        animation clip (`read_animations` runs only when the scene has skinning, and the
+        engine loops `animations[0]`), and every image embedded rather than referenced —
+        the deployed CabbageEditor has no sidecar directory to resolve them against.
+        """
+        header, _binary = self._glb_json(model)
+        self.assertTrue(header.get("animations"), "GLB character art must carry an animation")
+        self.assertTrue(header.get("skins"), "GLB character art must be skinned")
+        for index, image in enumerate(header.get("images", [])):
+            self.assertNotIn("uri", image, f"image[{index}] must be embedded, not referenced")
+            self.assertIn("bufferView", image, f"image[{index}] must carry a bufferView")
+        names = [animation.get("name") for animation in header["animations"]]
+        self.assertTrue(any(name for name in names), f"{model.name} needs a named clip: {names}")
+
+    def _assert_dae_character_art(self, model: Path):
+        """COLLADA: the rig carries animations and every image resolves next to the model."""
+        document = ET.parse(model).getroot()
+        self.assertTrue(document.findall("c:library_animations/c:animation", NS))
+        for image in document.findall("c:library_images/c:image/c:init_from", NS):
+            image_uri = urlparse(image.text)
+            self.assertEqual(image_uri.scheme, "", image.text)
+            texture = (model.parent / unquote(image_uri.path)).resolve()
+            self.assertTrue(texture.is_relative_to(model.parent), str(texture))
+            self.assertTrue(texture.is_file(), str(texture))
+
     def test_role_sources_are_animated_and_all_external_images_are_local(self):
         node = shutil.which("node")
         if not node:
@@ -29,21 +80,28 @@ class StoryAssetTests(unittest.TestCase):
             "console.log(JSON.stringify(STORY_CHARACTERS));"], cwd=ROOT,
             capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
         characters = json.loads(result.stdout)
-        self.assertEqual([c["role"] for c in characters], ["player", "boss", "merchant", "prophet"])
-        self.assertEqual(len({c["guid"] for c in characters}), 4)
+        roles = [c["role"] for c in characters]
+        # The four inhabitants keep their positions: other modules address them by index.
+        self.assertEqual(roles[:4], ["player", "boss", "merchant", "prophet"])
+        self.assertEqual(len({c["guid"] for c in characters}), len(characters),
+                         "every character needs its own stable actor identity")
+        # The boss's generation marker lives on the table entry itself, because the replacement
+        # path reads it straight off the character. The player and the prophet carry theirs as
+        # module constants (`PLAYER_MODEL_REF` / `PROPHET_MODEL_REF`), which is why only one
+        # entry declares `model_ref` here — this pins that, so a future role cannot quietly
+        # adopt a second, competing source for the same key.
+        markers = [c["model_ref"] for c in characters if c.get("model_ref")]
+        self.assertEqual(markers, ["story.boss.em001.v1"],
+                         "the boss alone declares its generation on the entry")
         for character in characters:
             with self.subTest(role=character["role"]):
                 model = (ART / character["asset"]).resolve()
                 self.assertTrue(model.is_relative_to(ART))
                 self.assertTrue(model.is_file(), str(model))
-                document = ET.parse(model).getroot()
-                self.assertTrue(document.findall("c:library_animations/c:animation", NS))
-                for image in document.findall("c:library_images/c:image/c:init_from", NS):
-                    image_uri = urlparse(image.text)
-                    self.assertEqual(image_uri.scheme, "", image.text)
-                    texture = (model.parent / unquote(image_uri.path)).resolve()
-                    self.assertTrue(texture.is_relative_to(model.parent), str(texture))
-                    self.assertTrue(texture.is_file(), str(texture))
+                if model.suffix.lower() == ".glb":
+                    self._assert_glb_character_art(model)
+                else:
+                    self._assert_dae_character_art(model)
 
     # Every game-owned art file must be an untouched copy of an engine asset. `cube` is a
     # hand-authored primitive, so it is registered here too: the invariant is "copied, not
@@ -52,7 +110,10 @@ class StoryAssetTests(unittest.TestCase):
     # below and compared with the placement the page actually runs.
     ART_SOURCES = {
         "player": ROOT / "assets/Maria WProp J J Ong",
-        "boss": ROOT / "assets/dragon/dae",
+        # The boss is the em001 lineage, shipped as one self-contained GLB: its textures
+        # are the embedded PNGs Blender wrote, so there is no source directory to diff
+        # against — `_assert_glb_character_art` is what stands in for that comparison.
+        "boss": None,
         "merchant": ROOT / "assets/Maw J Laygo",
         "prophet": ROOT / "assets/model",
         "fragment": ROOT / "assets/model",
@@ -61,6 +122,11 @@ class StoryAssetTests(unittest.TestCase):
     }
     # A character folder carries one rigged model; props are plain meshes with no animation.
     CHARACTER_ART_ROLES = ("player", "boss", "merchant", "prophet")
+    # Retired art that is still on disk. `boss/Dragon 2.5_dae.dae` was the boss until the
+    # em001_04 swap; it is kept so that swap can be reverted without a rebuild, and it is named
+    # by exact path so this exemption can never widen into "the boss folder is unchecked".
+    # Delete that file (and this entry) to reclaim ~9 MB.
+    RETIRED_CHARACTER_ART = frozenset({"boss/Dragon 2.5_dae.dae"})
 
     # The story world map. `scale` is the map's largest world axis in metres: the engine
     # normalises every static model into a unit cube, so that is exactly the `geometry.scale`
@@ -524,6 +590,16 @@ class StoryAssetTests(unittest.TestCase):
         self.assertGreater(highest_within(site_x, site_z, 40.0), self.SITE_ROOF + 2.0,
                            f"({site_x:g}, {site_z:g}) 40 m 内必须有远高于 {self.SITE_ROOF} m 的建筑，"
                            "否则「4 m 内净空」是空转的")
+        # The 4 m radius is the boss's own half-width (its 8 m `size`), and it is also the
+        # edge of the flat forecourt: at 5 m the temple front is already 1.825 m high and at
+        # 6 m 2.141 m, so a larger boss would stand inside the hall. Pin the measured growth
+        # rate here — raising `size` past 8 must fail loudly rather than quietly bury it.
+        self.assertGreater(highest_within(site_x, site_z, 5.0), 1.5,
+                           "5 m 处的寺庙前檐必须真的存在，否则「4 m 内净空」量的是平地")
+        self.assertGreater(highest_within(site_x, site_z, 6.0), 2.0,
+                           "6 m 处的寺庙前檐必须真的存在")
+        self.assertGreater(highest_within(site_x, site_z, 10.0), 3.0,
+                           "10 m 处的大殿必须真的存在")
         # The measured site, not a second copy of it: this test is about the shipped coordinate.
         # The clearance below is asserted first on purpose: a site that fails it must say *that*,
         # not "the pin changed", or a moved-and-buried boss reads as a stale test constant.
@@ -546,7 +622,18 @@ class StoryAssetTests(unittest.TestCase):
             copied = [path for path in (ART / role).rglob("*") if path.is_file()]
             self.assertTrue(copied, role)
             if role in self.CHARACTER_ART_ROLES:
-                self.assertEqual(len([path for path in copied if path.suffix == ".dae"]), 1, role)
+                # One rigged model per character folder, in whichever format it ships.
+                # Retired generations are excluded by exact path and are still hash-checked
+                # by the provenance loop below, so this cannot hide unverified art.
+                # `as_posix` on both sides: on Windows `str(Path)` yields `boss\\x.dae`, so a
+                # plain string comparison against a forward-slash literal passes on Linux and
+                # fails here — exactly the kind of platform split this test exists to avoid.
+                rigs = [path for path in copied
+                        if path.suffix.lower() in (".dae", ".glb", ".fbx")
+                        and path.relative_to(ART).as_posix() not in self.RETIRED_CHARACTER_ART]
+                self.assertEqual(len(rigs), 1, f"{role}: {[str(p) for p in rigs]}")
+            if source_root is None:
+                continue
             for path in copied:
                 with self.subTest(file=str(path.relative_to(ART))):
                     original = source_root / path.relative_to(ART / role)

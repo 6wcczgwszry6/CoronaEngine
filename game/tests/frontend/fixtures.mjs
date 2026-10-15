@@ -1,11 +1,26 @@
 import { FRAGMENT } from '../../frontend/storyGameplay.mjs';
-import { STORY_CHARACTERS, PLAYER_MODEL_REF, PROPHET_MODEL_REF, characterTransform } from '../../frontend/storyCharacters.mjs';
+import { STORY_CHARACTERS, BOSS_MODEL_REF, PLAYER_MODEL_REF, PROPHET_MODEL_REF, characterTransform } from '../../frontend/storyCharacters.mjs';
 export const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 export const url = 'file:///D:/Corona%20Engine/editor/Frontend/dist/index.html#/world';
+/** Characters the fake engine can materialise, keyed by guid. The story table carries the
+ * four inhabitants and the boss, so this is a straight projection of it; kept exported so a
+ * test that adds a view module can reuse one character definition. */
+export const CHARACTER_BY_GUID = new Map(STORY_CHARACTERS.map(character => [character.guid, character]));
+
 export function actorFixture(character = STORY_CHARACTERS[0]) {
   const local_aabb = character.role === 'boss' ? [-0.5, -0.325, -0.107, 0.5, 0.325, 0.107]
     : [-0.5, -0.4, -0.25, 0.5, 0.4, 0.25];
-  return { ...(character.role === 'player' ? { model_ref: PLAYER_MODEL_REF } : character.role === 'prophet' ? { model_ref: PROPHET_MODEL_REF } : {}), name: character.name, actor_guid: character.guid, handle: 100 + STORY_CHARACTERS.indexOf(character),
+  // The boss ships at the current generation, so a fixture world is "already in place" and the
+  // ordinary entry path touches nothing. A test that wants the stale-dragon migration deletes
+  // this marker explicitly, which is what `a legacy boss is replaced...` does.
+  const marker = character.role === 'player' ? PLAYER_MODEL_REF
+    : character.role === 'prophet' ? PROPHET_MODEL_REF
+      : character.role === 'boss' ? BOSS_MODEL_REF : null;
+  // A stable positive handle derived from the guid, never the table index: a character a
+  // test builds by hand is not in the table (`indexOf` answers -1), and `loaded()` in
+  // storyActors.mjs only trusts a positive handle.
+  const handle = 100 + [...character.guid].reduce((sum, ch) => sum + ch.charCodeAt(0), 0) % 900;
+  return { ...(marker ? { model_ref: marker } : {}), name: character.name, actor_guid: character.guid, handle,
     load_status: 'loaded', render_ready: true, gpu_build_state: 'Ready',
     local_aabb, geometry: characterTransform(character, local_aabb),
     mechanics: { physics_enabled: false }, visible: true, follow_camera: false, camera_lock: { enabled: false } };
@@ -44,7 +59,8 @@ export function apiFixture({ actors = [], wrapped = true } = {}) {
           }
           return wrap({ status: 'success', actor: structuredClone(actor), existed: true });
         }
-        const character = [...STORY_CHARACTERS, FRAGMENT].find(c => c.guid === data.actor_guid);
+        const character = CHARACTER_BY_GUID.get(data.actor_guid)
+          || [FRAGMENT].find(c => c.guid === data.actor_guid);
         const actor = { ...actorFixture(character), model_ref: data.model_ref || '', route: `Assets/${path.split('/').at(-1)}`,
           geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } };
         state.actors.push(actor);
