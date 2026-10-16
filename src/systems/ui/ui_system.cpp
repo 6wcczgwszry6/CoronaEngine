@@ -19,6 +19,7 @@
 
 #include "cef/browser_manager.h"
 #include "cef/cef_client.h"
+#include "cef/cef_editor_native_api_registry.h"
 #include "collaborative_editor_runtime.h"
 
 namespace Corona::Systems {
@@ -186,6 +187,11 @@ void UiSystem::update() {
     }
 
     const auto frame_start = std::chrono::steady_clock::now();
+
+    // The CEF UI thread runs every editor API request and paints the editor. If one
+    // of those requests never returns, that thread stops reporting anything at all,
+    // while this main loop keeps running - so the watchdog is driven from here.
+    UI::report_stuck_native_api_request();
 
     // Collaborative scene mutations must run on the UI/engine main thread and
     // must not depend on the lifetime of a particular Vue network page.
