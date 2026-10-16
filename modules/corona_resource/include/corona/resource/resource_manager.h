@@ -104,6 +104,16 @@ class ResourceManager final {
     }
 
     /**
+     * @brief 尽力而为的读取句柄：不等待被占用的条目锁
+     *
+     * 供绘制/输入线程等"必须保持响应"的调用者使用；拿不到就当作本次没有数据。
+     */
+    template <typename T = IResource>
+    ReadHandle<T> try_acquire_read_nowait(TResourceID rid) {
+        return resource_cache_.try_acquire_read_nowait<T>(rid);
+    }
+
+    /**
      * @brief 获取资源写入句柄
      *
      * 尝试获取资源的独占锁。如果资源未就绪，返回无效句柄。

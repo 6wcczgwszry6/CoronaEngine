@@ -266,6 +266,30 @@ class ResourceCache {
     }
 
     /**
+     * @brief 尽力而为的读取句柄：条目锁被占用时立即返回无效句柄
+     *
+     * 与 acquire_read() 的差别只有一个：**不等待**。加载线程会在整个解析期间
+     * （大模型是秒级）独占条目锁，而绘制编辑器、派发输入的线程绝不能被它挡住，
+     * 否则整个编辑器 UI 会冻死。这类调用者应当接受"这次拿不到、下次再试"。
+     *
+     * @param rid 资源ID
+     * @return ReadHandle<T> 锁被占用、资源未就绪或不存在时返回无效句柄
+     */
+    template <typename T = IResource>
+    ReadHandle<T> try_acquire_read_nowait(TResourceID rid) {
+        auto entry = get_entry(rid);
+        if (!entry) return {};
+
+        std::shared_lock lock(entry->mutex, std::try_to_lock);
+        if (!lock.owns_lock() || entry->state != LoadState::Ready || !entry->resource) {
+            return {};
+        }
+        entry->ref_count++;
+        entry->last_access = std::chrono::system_clock::now();
+        return ReadHandle<T>(std::move(entry), std::move(lock));
+    }
+
+    /**
      * @brief 获取资源的写入句柄
      *
      * 尝试获取资源的独占锁。如果资源未就绪，返回无效句柄。
