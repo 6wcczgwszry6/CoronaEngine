@@ -1430,14 +1430,20 @@ void include_shadow_bounds(
 }
 
 template <typename T>
-[[nodiscard]] Corona::Horizon::HardwareBuffer make_storage_buffer(uint64_t count,
-                                                                  std::string_view name) {
+[[nodiscard]] Corona::Horizon::HardwareBuffer make_storage_buffer(
+    uint64_t count,
+    std::string_view name,
+    Corona::Horizon::CpuAccessMode cpu_access = Corona::Horizon::CpuAccessMode::Write) {
     Corona::Horizon::HardwareBufferDesc desc;
     desc.element_count = count;
     desc.element_size = static_cast<uint32_t>(sizeof(T));
     desc.usage = Corona::Horizon::BufferUsage_TransferSrc |
                  Corona::Horizon::BufferUsage_TransferDst |
                  Corona::Horizon::BufferUsage_Storage;
+    // Read-back buffers must declare host read access: HardwareBuffer::read_bytes
+    // refuses a buffer that is host-write-only, and it is the call that invalidates
+    // non-coherent host memory before the CPU reads GPU results.
+    desc.cpu_access = cpu_access;
     desc.debug_name = std::string(name);
     (void)desc.byte_size();
     return Corona::Horizon::HardwareBuffer(desc);
@@ -3645,6 +3651,46 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
     return true;
 }
 
+bool OpticsSystem::ensure_native_frame_slot() {
+    if (!hardware_) {
+        return true;
+    }
+    auto& throttle = hardware_->native_frame_throttle;
+    if (throttle.try_acquire_slot()) {
+        return true;
+    }
+
+    // Full. Display never acknowledged these submissions (it only publishes for
+    // surfaces that were presented with an optics layer), so retire the oldest by
+    // waiting for its own GPU completion: the work was submitted long ago, so this
+    // returns as soon as the GPU has finished it, and rendering continues instead
+    // of stopping for every camera until the engine is restarted.
+    throttle.note_saturated_frame();
+    const auto now = PerfClock::now();
+    const bool report_due = last_native_throttle_report_.time_since_epoch().count() == 0 ||
+                            now - last_native_throttle_report_ >= std::chrono::seconds(1);
+    if (report_due) {
+        last_native_throttle_report_ = now;
+        CFW_LOG_WARNING(
+            "[OpticsThrottle] saturated: in_flight={} oldest_serial={} oldest_age_ms={} "
+            "saturated_frames={} retired_without_ack={} forgotten={} — Display did not "
+            "acknowledge consumed frames; retiring the oldest by GPU completion",
+            throttle.in_flight_count(), throttle.oldest_serial(), throttle.oldest_age_ms(now),
+            throttle.saturated_frames(), throttle.released_without_ack(),
+            throttle.forgotten_for_capacity());
+    }
+
+    const auto wait_start = PerfClock::now();
+    const bool retired = throttle.retire_oldest([this](const Horizon::SubmitReceipt& receipt) {
+        hardware_->executor.wait_completed(receipt);
+    });
+    pending_native_throttle_wait_ms_ += elapsed_ms(wait_start, PerfClock::now());
+    if (!retired) {
+        return throttle.try_acquire_slot();
+    }
+    return throttle.try_acquire_slot();
+}
+
 void OpticsSystem::update() {
     // This thread owns the GPU submit path; when it blocks everything that waits
     // on it (Scene/geometry holders included) blocks too, silently.
@@ -3655,10 +3701,10 @@ void OpticsSystem::update() {
         if (consumed_serial != 0) {
             hardware_->native_frame_throttle.acknowledge_consumed(consumed_serial);
         }
-        // Never block the Optics update thread on an in-flight native receipt.
-        // The display/driver may retire it later; skipping this frame keeps the
-        // UI and event loop responsive when the GPU queue is stalled.
-        if (!hardware_->native_frame_throttle.try_acquire_slot()) {
+        // Capacity must always be available before recording: returning here
+        // without it would stop native rendering for every camera until restart
+        // (see ensure_native_frame_slot).
+        if (!ensure_native_frame_slot()) {
             return;
         }
     }
@@ -3776,10 +3822,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 if (offscreen_screenshot && !has_pending_screenshot(cam_handle)) {
                     continue;
                 }
-                if (hardware_) {
-                    if (!hardware_->native_frame_throttle.try_acquire_slot()) {
-                        continue;
-                    }
+                if (!ensure_native_frame_slot()) {
+                    continue;
                 }
                 const double native_throttle_wait_ms =
                     std::exchange(pending_native_throttle_wait_ms_, 0.0);
@@ -4819,7 +4863,9 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     } else {
                         try {
                             actor_pick_result_buffer.emplace(
-                                make_storage_buffer<std::uint32_t>(1, "optics.actor_pick.request"));
+                                make_storage_buffer<std::uint32_t>(
+                                    1, "optics.actor_pick.request",
+                                    Horizon::CpuAccessMode::ReadWrite));
                             auto& actorPick = *hardware_->actorPickPipeline;
                             actorPick.pushConsts.pixel = upload_value(
                                 ktm::uvec2{actor_pick_request->x, actor_pick_request->y});
@@ -5696,11 +5742,17 @@ void OpticsSystem::enqueue_actor_pick_readback(
             std::uint32_t instance_id = 0;
             bool read_ok = false;
             try {
-                hardware_->executor.wait(receipt);
-                // 新版 Horizon: 使用 get_mapped_data() 读取 buffer
-                void* mapped = result_buffer.get_mapped_data();
-                if (mapped) {
-                    instance_id = *static_cast<std::uint32_t*>(mapped);
+                // executor.wait() only queues the receipt's tokens for the *next*
+                // commit on the render thread; the host must instead wait for this
+                // submission's own timeline value, otherwise the read below can
+                // observe the previous frame's instance id (wrong actor picked) and
+                // the worker mutates the render thread's executor from a foreign
+                // thread for no reason.
+                hardware_->executor.wait_completed(receipt);
+                std::uint32_t value = 0;
+                if (result_buffer.read_bytes(std::span<std::byte>(
+                        reinterpret_cast<std::byte*>(&value), sizeof(value)))) {
+                    instance_id = value;
                     read_ok = true;
                 } else {
                     CFW_LOG_ERROR("OpticsSystem: Failed to read actor pick result from GPU");
@@ -5718,7 +5770,7 @@ void OpticsSystem::enqueue_actor_pick_readback(
         // This is only expected during an abnormal lifecycle race. Preserve the
         // GPU buffer until its receipt completes before reporting the failure.
         try {
-            hardware_->executor.wait(receipt);
+            hardware_->executor.wait_completed(receipt);
             (void)fallback_buffer;
         } catch (...) {
         }
@@ -5750,7 +5802,9 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
     std::optional<Horizon::HardwareBuffer> actor_pick_result_buffer;
     try {
         actor_pick_result_buffer.emplace(
-            make_storage_buffer<std::uint32_t>(1, "optics.actor_pick.vision_request"));
+            make_storage_buffer<std::uint32_t>(
+                1, "optics.actor_pick.vision_request",
+                Horizon::CpuAccessMode::ReadWrite));
     } catch (const std::exception& error) {
         CFW_LOG_ERROR("OpticsSystem: Failed to create Vision actor pick result buffer: {}",
                       error.what());
@@ -5986,6 +6040,11 @@ void OpticsSystem::shutdown() {
     }
 
     if (hardware_) {
+        // Note: executor.wait() enqueues the receipt's tokens for the *next*
+        // commit, so this drain does not block on the GPU. That is intentional
+        // here: Horizon resources are reference counted and the device retires
+        // in-flight work on its own, while a blocking wait_idle() during shutdown
+        // would hang the engine whenever the queue is wedged (device lost).
         hardware_->native_frame_throttle.drain([this](const Horizon::SubmitReceipt& receipt) {
             hardware_->executor.wait(receipt);
         });
