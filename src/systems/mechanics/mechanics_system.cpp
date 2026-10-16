@@ -1,4 +1,5 @@
 #include <corona/events/engine_events.h>
+#include <corona/diagnostics/thread_phase.h>
 #include <corona/events/mechanics_system_events.h>
 #include <horizon/core/logging.h>
 #include <corona/kernel/event/i_event_bus.h>
@@ -1431,7 +1432,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
     // last_skin_update_time 保留但不再用于计算 dt，仅供外部诊断查询。
     impl_->last_skin_update_time = std::chrono::steady_clock::now();
 
-    // 先收集所有 geometry handle，避免在迭代 storage 期间持锁做重计算
+    Corona::Diagnostics::mark_thread_phase("Mechanics", "skinned:collect_handles");
     std::vector<std::uintptr_t> geom_handles;
     bool needs_ground_queries = false;
     for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
@@ -1440,7 +1441,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         for (const auto& chain : geom_dev.ik_chains)
             needs_ground_queries |= chain.mode == Resource::IkChain::Mode::FootPlant && chain.enabled && chain.weight > 0;
     }
-    if (needs_ground_queries) refresh_foot_ground_cache();
+    Corona::Diagnostics::mark_thread_phase("Mechanics", "skinned:ground_cache");
     // Retain the latest physics sample across animation frames with zero fixed
     // steps. Reproject its world targets using the current actor transform below.
     // The next physics step replaces it (also discarding earlier catch-up samples).
@@ -1544,6 +1545,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         if (model_id == 0 || !geometry_ready) continue;
 
         // ---- 第 3 步：取 Scene，判断是否蒙皮（非蒙皮直接跳过）----
+        Corona::Diagnostics::PhaseScope loop_phase{"Mechanics", "skinned:scene_lookup"};
         auto scene_entry = frame_scenes.find(model_id);
         if (scene_entry == frame_scenes.end()) {
             auto scene_read = resource_manager.acquire_read<Resource::Scene>(model_id);
@@ -1686,7 +1688,8 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         const auto& skeleton = *frame_scenes.at(job.model)->data.skeleton;
         foot_poses.push_back({job.geometry, &skeleton, &job.locals, &job.chains});
     }
-    update_foot_targets(foot_poses, dt);
+    Corona::Diagnostics::mark_thread_phase("Mechanics", "skinned:foot_targets");
+    Corona::Diagnostics::mark_thread_phase("Mechanics", "skinned:ccd_pose");
     for (auto& job : frame_jobs) {
         const auto geom_handle = job.geometry;
         const auto ik_transform_handle = job.transform;
@@ -1764,6 +1767,14 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
     for (const auto& job : frame_jobs)
         for (const auto& request : job.requests) active_gpu_keys.push_back(request.key);
 
+    // Release the per-model Scene read handles before any GPU submission.
+    // The collision topology built below is the only later consumer of Scene data
+    // and it goes through the self-locking overload, so no Scene read lock is held
+    // across skinning/collision waits.  Holding them across a stalled GPU wait
+    // blocked GeometrySystem's periodic *exclusive* RAM residency pass forever,
+    // which froze the whole geometry pipeline (imports included) until restart.
+    frame_scenes.clear();
+
     // Spans are created only after frame_jobs stops growing. All palettes and
     // source scene locks survive both GPU stages; no geometry storage lock is
     // held while recording, submitting or waiting.
@@ -1772,11 +1783,15 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
     for (const auto& job : frame_jobs) skin_batches.push_back({job.requests, job.finals});
     std::vector<GpuSkinningPipeline::Result> skin_results;
     if (!skin_batches.empty()) {
+        Corona::Diagnostics::PhaseScope skin_phase{"Mechanics", "skinned:gpu_skinning"};
         impl_->gpu_skinning.ensure();
+        skin_phase.set("skinned:gpu_skinning_submit");
         skin_results = impl_->gpu_skinning->update_batch(skin_batches);
     }
+    Corona::Diagnostics::mark_thread_phase("Mechanics", "skinned:publish_and_collision");
     std::size_t result_offset = 0;
     for (auto& job : frame_jobs) {
+        Corona::Diagnostics::PhaseScope job_phase{"Mechanics", "skinned:collision_refresh"};
         std::unordered_map<std::size_t, GpuSkinningPipeline::Result> lod0_results;
         job.blobs.resize(job.mesh_count);
         for (std::size_t i = 0; i < job.requests.size(); ++i) {
@@ -1792,7 +1807,6 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
           if (!resource || resource->model_id != job.model) continue; }
         const auto geom_handle = job.geometry;
         const auto model_id = job.model;
-        const auto& scene = *frame_scenes.at(model_id);
         job.bounds_min = make_fvec3(std::numeric_limits<float>::max(), std::numeric_limits<float>::max(),
                                     std::numeric_limits<float>::max());
         job.bounds_max = make_fvec3(std::numeric_limits<float>::lowest(), std::numeric_limits<float>::lowest(),
@@ -1800,7 +1814,9 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
 
         // Reuse the immutable segmented topology, including skipped and duplicated
         // mesh instances. Each source applies the same instance matrix as rendering.
-        ensure_collision_mesh(model_id, scene, impl_->collision_mesh_cache,
+        // Scene read lock is taken (and released) inside the call, not across the
+        // GPU stages below.
+        ensure_collision_mesh(model_id, impl_->collision_mesh_cache,
                               &impl_->static_triangle_index_cache, &impl_->static_triangle_bone_cache);
         auto bind = impl_->collision_mesh_cache.find(model_id);
         if (bind != impl_->collision_mesh_cache.end()) {
@@ -1848,7 +1864,10 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
     std::vector<GpuCollisionPipeline::VertexUpdate> collision_updates;
     for (const auto& job : frame_jobs)
         if (job.collision_ready) collision_updates.push_back({job.geometry, job.collision_sources, dt});
-    if (!collision_updates.empty()) impl_->gpu_collision->update_vertices(collision_updates);
+    if (!collision_updates.empty()) {
+        Corona::Diagnostics::PhaseScope collision_phase{"Mechanics", "skinned:gpu_collision"};
+        impl_->gpu_collision->update_vertices(collision_updates);
+    }
 
     // Publish only after both batches succeed. Revalidate identity because scene
     // collection and execution can overlap editor/model changes.
@@ -1872,7 +1891,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
     // Prepare one new resident mesh per animation update, including Phantom and
     // paused scenes. Never wait for background compilation just to do optional
     // preparation. Active physics still waits for every required pipeline.
-    GpuPerformance::Scope preparation{"animation.collision_prepare"};
+    Corona::Diagnostics::mark_thread_phase("Mechanics", "skinned:collision_prepare");
     std::unordered_set<std::uint64_t> live_models;
     std::vector<std::uint64_t> collision_keys;
     bool prepared_mesh = false;
@@ -1906,18 +1925,14 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
             transform = *current;
         }
         // Count a topology build against this frame's budget even if it yields
-        // no triangles. Reuse the scene read lock already held by animation.
+        // no triangles.  The Scene read lock is acquired inside the call: the
+        // per-frame Scene handles were released before the GPU stages above.
         auto mesh = impl_->collision_mesh_cache.find(model_id);
         if (mesh == impl_->collision_mesh_cache.end()) {
             prepared_mesh = true;
             impl_->collision_preparation_cursor = index + 1;
-            const auto scene = frame_scenes.find(model_id);
-            if (scene != frame_scenes.end())
-                ensure_collision_mesh(model_id, *scene->second, impl_->collision_mesh_cache,
-                                      &impl_->static_triangle_index_cache, &impl_->static_triangle_bone_cache);
-            else
-                ensure_collision_mesh(model_id, impl_->collision_mesh_cache,
-                                      &impl_->static_triangle_index_cache, &impl_->static_triangle_bone_cache);
+            ensure_collision_mesh(model_id, impl_->collision_mesh_cache,
+                                  &impl_->static_triangle_index_cache, &impl_->static_triangle_bone_cache);
             mesh = impl_->collision_mesh_cache.find(model_id);
         }
         // Animated geometry must come from the completed skinning batch above;

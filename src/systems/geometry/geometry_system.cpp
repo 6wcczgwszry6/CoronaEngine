@@ -1,4 +1,5 @@
-﻿#include <corona/events/engine_events.h>
+#include <corona/events/engine_events.h>
+#include <corona/diagnostics/thread_phase.h>
 #include <horizon/core/logging.h>
 #include <horizon/core/storage.h>
 #include <corona/resource/resource.h>
@@ -253,6 +254,10 @@ bool GeometrySystem::initialize(Kernel::ISystemContext* ctx) {
 }
 
 void GeometrySystem::update() {
+    // Every stage of this loop can block on a lock with no timeout (storage slot
+    // locks, Vulkan queue acquires, TBB arenas).  Naming the stage on entry makes
+    // such a stall visible as "Geometry stuck in phase X" instead of silence.
+    Corona::Diagnostics::PhaseScope update_phase{"Geometry", "update"};
     auto& hub = SharedDataHub::instance();
     auto& scene_storage = hub.scene_storage();
     auto& camera_storage = hub.camera_storage();
@@ -266,6 +271,7 @@ void GeometrySystem::update() {
         }
     }
 
+    update_phase.set("async_tasks");
     process_async_tasks();
 
     // ---- 延迟 GPU 释放（LRU evict 路径） ----
@@ -273,6 +279,7 @@ void GeometrySystem::update() {
     // 延迟到此处（下一帧 update 头部）释放 GPU 资源，避免与
     // OpticsSystem 渲染线程产生 data race。
     if (!impl_->pending_gpu_releases.empty()) {
+        update_phase.set("gpu_releases");
         std::unordered_set<Impl::Payload> to_release;
         {
             std::unique_lock lock(impl_->mtx);
@@ -288,19 +295,23 @@ void GeometrySystem::update() {
     // 填 model_id 后转 PendingBuild，并回填 MechanicsDevice AABB。
     // 磁盘 IO / assimp 解析全部在本（引擎）线程之外的 ResourceManager 线程池完成，
     // 不阻塞前端 CEF UI 线程。
+    update_phase.set("pending_imports");
     process_pending_geometry_imports();
 
     // ---- 初始构建（异步加载承接点）----
     // 为标记 PendingBuild 的 GeometryDevice 构建 GPU 资源（mesh_handles）。
     // 放在 LOD 上传之前，使本帧新建的 mesh 同帧即可上传其 LOD 数据。
+    update_phase.set("pending_builds");
     process_pending_geometry_builds();
 
     // ---- 动态减面管线 ----
     // LOD 由 GeometrySystem 内部自动管理，无外部开关。
     // upload：为新模型登记 LOD 缓存条目（LOD0 就绪 + LOD1..N 仅元数据，不建 GPU 缓冲）。
+    update_phase.set("lod_upload");
     upload_lod_from_scene_data();
     // 轮询回写已完成的异步 LOD 构建（方案 C）：放在 reconcile 之前，让本帧完成的级
     // 即刻参与本帧的驻留决策（计入 ready，避免对同级重复发起任务）。
+    update_phase.set("lod_build_poll");
     process_pending_lod_builds();
     // reconcile（Step 3a 按需驻留）和 reconcile_cpu_residency 已移到场景循环之后。
     // 这样 evict_lods_for_actor（场景循环内，按距离淘汰 LOD1..N）先于 reconcile 执行：
@@ -313,6 +324,7 @@ void GeometrySystem::update() {
     // MechanicsSystem::update_skinned_geometry() 在物理步进前执行。
     // Geometry 创建/驻留渲染缓冲，Mechanics 借出句柄提交 GPU 蒙皮与拷贝。
     // LOD0 回读和 AABB 写回 GeometryDevice，供 Vision / CPU 物理消费。
+    update_phase.set("scene_loop");
 
     for (std::uintptr_t scene_handle : scene_handles) {
         const auto scene_begin = std::chrono::steady_clock::now();
@@ -768,6 +780,7 @@ void GeometrySystem::update() {
     // 包括对已淘汰 mesh 保持 LOD0、对回到恢复区的 mesh 清除标记并重建需求级。
     // 若在场景循环之前调用，reconcile 先恢复 mesh，随后 evict_lods_for_actor
     // 同帧重新淘汰，造成"恢复→淘汰→恢复"的每帧 ping-pong。
+    update_phase.set("lod_residency");
     reconcile_lod_residency();
 
     // ---- CPU LOD 驻留协调（RAM 3层窗口管理）----
@@ -777,6 +790,7 @@ void GeometrySystem::update() {
     // 窗口内数据缺失的级从磁盘缓存回读，供 GPU 侧按需重建该级缓冲。
     if (++impl_->cpu_window_eval_counter >= Impl::kCpuWindowEvalInterval) {
         impl_->cpu_window_eval_counter = 0;
+        update_phase.set("cpu_residency");
         reconcile_cpu_residency();
     }
 
@@ -905,6 +919,7 @@ void GeometrySystem::update() {
     // 每隔 pressure_eval_interval 帧评估一次；不持 impl_->mtx（内部自管锁 + 锁外发事件）。
     if (++impl_->pressure_eval_counter >= impl_->pressure_eval_interval) {
         impl_->pressure_eval_counter = 0;
+        update_phase.set("memory_pressure_evict");
         evict_under_memory_pressure();
     }
 }
@@ -1855,6 +1870,19 @@ void GeometrySystem::Impl::ensure_lod_disk_cache() {
     });
 }
 
+void GeometrySystem::Impl::report_cpu_residency_scene_busy(std::uint64_t model_id) {
+    ++cpu_residency_busy_skips;
+    const auto now = std::chrono::steady_clock::now();
+    const bool due = last_cpu_residency_busy_log.time_since_epoch().count() == 0 ||
+                     now - last_cpu_residency_busy_log >= kCpuResidencyBusyLogInterval;
+    if (!due) return;
+    CFW_LOG_WARNING(
+        "[LOD-CPU] Scene 写锁被占用，跳过本轮 CPU 驻留窗口整理 model={:#x} "
+        "(skips={}，说明有读者长时间持有该 Scene 的读锁，例如蒙皮线程卡在 GPU 提交上)",
+        model_id, cpu_residency_busy_skips);
+    last_cpu_residency_busy_log = now;
+}
+
 void GeometrySystem::Impl::lod_disk_writer_loop() {
     CFW_LOG_NOTICE("[LOD-Disk] 写入线程已启动");
 
@@ -2689,6 +2717,71 @@ void GeometrySystem::process_pending_geometry_imports() {
     auto& resource_manager = Resource::ResourceManager::get_instance();
     auto& geom_storage = hub.geometry_storage();
 
+    // ---- 心跳：证明扫描仍在运行，并给出未就绪库存 / 在途任务年龄 ----
+    // "运行期加载的模型永远显示上传中" 有两种完全不同的成因：
+    //   ① 几何线程本身卡住 → 心跳消失；
+    //   ② 几何线程在跑但跳过了这个 geometry → 心跳在、库存里却仍是 PendingImport。
+    // 没有这行日志时两者在日志里无从区分（扫描起点/跳过点原本都不打日志）。
+    {
+        const auto heartbeat_now = std::chrono::steady_clock::now();
+        const bool heartbeat_due =
+            impl_->last_import_scan_heartbeat.time_since_epoch().count() == 0 ||
+            heartbeat_now - impl_->last_import_scan_heartbeat >= Impl::kImportScanHeartbeatInterval;
+        if (heartbeat_due) {
+            impl_->last_import_scan_heartbeat = heartbeat_now;
+            const auto state_name = [](GeometryDevice::GpuBuildState state) {
+                switch (state) {
+                    case GeometryDevice::GpuBuildState::Ready: return "Ready";
+                    case GeometryDevice::GpuBuildState::PendingImport: return "PendingImport";
+                    case GeometryDevice::GpuBuildState::PendingBuild: return "PendingBuild";
+                    case GeometryDevice::GpuBuildState::Failed: return "Failed";
+                }
+                return "Unknown";
+            };
+            std::size_t geometry_count = 0;
+            std::size_t not_ready_count = 0;
+            std::string not_ready_detail;
+            for (auto it = geom_storage.cbegin(); it != geom_storage.cend(); ++it) {
+                ++geometry_count;
+                const GeometryDevice& geom_dev = *it;
+                if (geom_dev.gpu_build_state == GeometryDevice::GpuBuildState::Ready) continue;
+                ++not_ready_count;
+                if (not_ready_count > 4) continue;
+                std::uint64_t model_id = 0;
+                if (geom_dev.model_resource_handle != 0) {
+                    if (auto model = hub.model_resource_storage().try_acquire_read(
+                            geom_dev.model_resource_handle)) {
+                        model_id = model->model_id;
+                    }
+                }
+                not_ready_detail += " [";
+                not_ready_detail += std::to_string(
+                    static_cast<unsigned long long>(reinterpret_cast<std::uintptr_t>(&geom_dev)));
+                not_ready_detail += "]" + std::string(state_name(geom_dev.gpu_build_state));
+                not_ready_detail += " meshes=" + std::to_string(geom_dev.mesh_handles.size());
+                not_ready_detail += " model=" + std::to_string(model_id);
+                not_ready_detail += " import_epoch=" + std::to_string(geom_dev.import_epoch);
+                not_ready_detail += " path='" + geom_dev.model_path_utf8 + "'";
+            }
+            std::string inflight_detail;
+            for (const auto& [task_handle, task] : impl_->pending_import_tasks) {
+                const auto age_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        heartbeat_now - task.started).count();
+                inflight_detail += " [";
+                inflight_detail += std::to_string(
+                    static_cast<unsigned long long>(static_cast<std::uintptr_t>(task_handle)));
+                inflight_detail += "]epoch=" + std::to_string(task.epoch) +
+                                   " age_ms=" + std::to_string(age_ms);
+            }
+            CFW_LOG_NOTICE(
+                "[GeometryScan] geometries={} not_ready={} import_tasks={}{} pending_builds={} "
+                "not_ready_detail:{}",
+                geometry_count, not_ready_count, impl_->pending_import_tasks.size(),
+                inflight_detail, impl_->pending_geometry_builds.size(),
+                not_ready_detail.empty() ? std::string{" none"} : not_ready_detail);
+        }
+    }
+
     // ---- 阶段 1：轮询已完成的 import 任务 ----
     // future 就绪 → 取 model_id → 写入 ModelResource 槽 → 转 PendingBuild。
     // 失败（rid==0）→ 转 Failed，不再重试。
@@ -2784,7 +2877,11 @@ void GeometrySystem::process_pending_geometry_imports() {
         const GeometryDevice& geom_dev = *it;
         if (geom_dev.gpu_build_state != GeometryDevice::GpuBuildState::PendingImport) continue;
         auto geom_handle = reinterpret_cast<std::uintptr_t>(&geom_dev);
-        if (impl_->pending_import_tasks.count(geom_handle)) continue;  // 已在途
+        if (impl_->pending_import_tasks.count(geom_handle)) {
+            // 正常只是一帧的窗口（任务已发起、结果未回）。若长期如此，心跳里的
+            // import_tasks age_ms 会持续增长 —— 那说明在途任务本身没跑完。
+            continue;  // 已在途
+        }
         if (geom_dev.model_path_utf8.empty()) {
             CFW_LOG_WARNING("[GeometrySystem] Skipping PendingImport geometry {:#x} — model_path is empty",
                             geom_handle);
@@ -2825,14 +2922,20 @@ void GeometrySystem::process_pending_geometry_imports() {
             if (!geom_write.valid()) continue;  // 已销毁
             if (geom_write->gpu_build_state != GeometryDevice::GpuBuildState::PendingImport ||
                 geom_write->import_epoch != 0) {
+                CFW_LOG_WARNING("[GeometryImport] launch aborted geometry={} state={} import_epoch={}",
+                                item.geom_handle,
+                                static_cast<int>(geom_write->gpu_build_state),
+                                geom_write->import_epoch);
                 continue;  // 状态已变 / 已有在途任务，跳过
             }
             geom_write->import_epoch = epoch;
         }
 
         impl_->pending_import_tasks[item.geom_handle] =
-            Impl::PendingImportTask{epoch,
+            Impl::PendingImportTask{epoch, std::chrono::steady_clock::now(),
                                     resource_manager.import_async(Utils::utf8_to_path(item.path))};
+        CFW_LOG_NOTICE("[GeometryImport] launched geometry={} epoch={} path='{}'",
+                       item.geom_handle, epoch, item.path);
         ++launched;
     }
 }
@@ -2888,10 +2991,13 @@ void GeometrySystem::process_pending_geometry_builds() {
             impl_->pending_geometry_builds.emplace(handle, std::move(task));
             impl_->geometry_build_tasks.run(
                 [model_id, first_mesh, batch_count, texture_cache, promise, &resource_manager]() {
+                    Corona::Diagnostics::PhaseScope build_phase{"GeometryWorker", "build_batch"};
                     std::vector<MeshDevice> result;
                     try {
+                        build_phase.set("build_batch:acquire_scene");
                         auto scene = resource_manager.acquire_read<Resource::Scene>(model_id);
                         if (scene.valid()) {
+                            build_phase.set("build_batch:build_meshes");
                             result = build_mesh_devices_from_scene_range(
                                 *scene, first_mesh, batch_count, *texture_cache);
                         }
@@ -3039,10 +3145,13 @@ void GeometrySystem::process_pending_geometry_builds() {
                                        texture_cache, promise->get_future()});
         impl_->geometry_build_tasks.run(
             [model_id = item.model_id, batch_count, texture_cache, promise, &resource_manager]() {
+                Corona::Diagnostics::PhaseScope build_phase{"GeometryWorker", "build_first_batch"};
                 std::vector<MeshDevice> result;
                 try {
+                    build_phase.set("build_first_batch:acquire_scene");
                     auto scene = resource_manager.acquire_read<Resource::Scene>(model_id);
                     if (scene.valid()) {
+                        build_phase.set("build_first_batch:build_meshes");
                         result = build_mesh_devices_from_scene_range(
                             *scene, 0, batch_count, *texture_cache);
                     }
@@ -4500,14 +4609,25 @@ void GeometrySystem::reconcile_cpu_residency() {
             impl_->model_cpu_windows[model_id] = {0, demand_lod_src, mi.coarsest_src};
         }
 
-        // 4. acquire_write<Scene>，对每个 mesh 的每个 lod_level 做双向处理：
+        // 4. 尽力而为获取 Scene 写锁，对每个 mesh 的每个 lod_level 做双向处理：
         //    窗口内 + 数据缺失 → 查磁盘缓存恢复（反序列化回填，供 GPU 侧重建该级）
         //    窗口外 + 数据仍在 → std::move 移交异步写盘队列（几何线程不做序列化/IO）
         // 写锁持有期间的开销：evict 侧仅移动指针 + 入队（微秒级）；restore 侧
         // 命中内存级缓存为一次 memcpy，仅在数据已被内存级 LRU 刷盘时才同步读盘
         // （小概率路径，128MB 内存级容量足以覆盖正常的换出→换入时间窗口）。
-        auto scene_write = resource_manager.acquire_write<Resource::Scene>(model_id);
-        if (!scene_write.valid()) continue;
+        //
+        // 必须是 nowait：写锁要等所有读者退出，而读者可能在 GPU 提交/管线准备上
+        // 停留很久（实测蒙皮线程持有 Scene 读锁数分钟）。此前这里用阻塞 acquire_write，
+        // 一旦命中就把整个 GeometrySystem 线程钉死 —— import 扫描、GPU 构建、LOD
+        // 全部停摆，于是"运行期新加的模型永远显示上传中"，直到重启引擎才恢复。
+        // 本函数只是周期性的 RAM 窗口整理，跳过一轮完全无害（下一轮重试）。
+        Corona::Diagnostics::mark_thread_phase("Geometry", "cpu_residency:acquire_scene_write");
+        auto scene_write = resource_manager.try_acquire_write_nowait<Resource::Scene>(model_id);
+        if (!scene_write.valid()) {
+            impl_->report_cpu_residency_scene_busy(model_id);
+            continue;
+        }
+        Corona::Diagnostics::mark_thread_phase("Geometry", "cpu_residency:window_apply");
 
         int freed_count    = 0;  // 本周期移交写盘队列的级数1
         int restored_count = 0;  // 本周期从磁盘恢复的级数

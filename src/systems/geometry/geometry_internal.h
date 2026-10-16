@@ -439,9 +439,26 @@ struct GeometrySystem::Impl {
     /// 并在此追踪；future 就绪后比对 epoch（防 slot 复用 ABA）、填 model_id、转 PendingBuild。
     struct PendingImportTask {
         std::uint64_t              epoch = 0;  // 与 GeometryDevice::import_epoch 比对
+        std::chrono::steady_clock::time_point started{};  // 诊断：在途时长
         std::future<std::uint64_t> future;
     };
     std::unordered_map<Payload, PendingImportTask> pending_import_tasks;
+
+    /// 诊断：cpu_residency 心跳。运行期创建的 actor 若永远停在 PendingImport，
+    /// 需要区分"扫描线程根本没在跑"与"扫描跑了但跳过了这个 geometry"，
+    /// 因此每 kImportScanHeartbeatInterval 打印一次库存快照 + 在途任务年龄。
+    std::chrono::steady_clock::time_point last_import_scan_heartbeat{};
+    static constexpr std::chrono::seconds kImportScanHeartbeatInterval{5};
+
+    /// 诊断：cpu_residency 拿不到 Scene 写锁而跳过本轮（限速打印，见下）。
+    std::chrono::steady_clock::time_point last_cpu_residency_busy_log{};
+    std::size_t cpu_residency_busy_skips = 0;
+
+    /// 报告一次"CPU 驻留窗口整理因 Scene 写锁被占用而跳过"。
+    /// 首次与之后每 kCpuResidencyBusyLogInterval 打印一次，其余只计数，
+    /// 避免每帧刷屏（该状态本身可能是持续数分钟的常态）。
+    void report_cpu_residency_scene_busy(std::uint64_t model_id);
+    static constexpr std::chrono::seconds kCpuResidencyBusyLogInterval{5};
 
     // 完成 CPU import 后，在 worker 上异步创建 GPU mesh；几何线程只轮询并发布结果。
     struct PendingGeometryBuild {

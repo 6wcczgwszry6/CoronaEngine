@@ -311,6 +311,31 @@ class ResourceCache {
         return WriteHandle<T>(std::move(entry), std::move(lock));
     }
 
+    /**
+     * @brief 尽力而为的写入句柄：条目锁被占用时立即返回无效句柄
+     *
+     * 与 try_acquire_read_nowait() 同理：写锁必须等待所有读者退出，而读者
+     * 可能在 GPU 提交/管线编译上停留很久（秒级到分钟级）。要求"写锁但绝不等"
+     * 的调用方（周期性的 LOD/RAM 窗口整理）应当接受"这次跳过、下个周期再来"，
+     * 否则整个系统线程会被一个无关的慢读者永久冻结。
+     *
+     * @param rid 资源ID
+     * @return WriteHandle<T> 锁被占用、资源未就绪或不存在时返回无效句柄
+     */
+    template <typename T = IResource>
+    WriteHandle<T> try_acquire_write_nowait(TResourceID rid) {
+        auto entry = get_entry(rid);
+        if (!entry) return {};
+
+        std::unique_lock lock(entry->mutex, std::try_to_lock);
+        if (!lock.owns_lock() || entry->state != LoadState::Ready || !entry->resource) {
+            return {};
+        }
+        entry->ref_count++;
+        entry->last_access = std::chrono::system_clock::now();
+        return WriteHandle<T>(std::move(entry), std::move(lock));
+    }
+
     // ========================================
     // 资源管理 (pin / touch / budget)
     // ========================================
