@@ -237,6 +237,7 @@ class OpticsSystem : public Kernel::SystemBase {
     std::optional<ActorPickRequest> take_pending_actor_pick(std::uintptr_t camera_handle);
     void complete_actor_pick(const ActorPickRequest& request,
                              const std::vector<std::uintptr_t>& scene_actor_handles,
+                             const std::vector<std::uint32_t>& node_indices,
                              bool read_ok,
                              std::uint32_t instance_id);
     void fail_actor_pick(const ActorPickRequest& request);
@@ -245,6 +246,7 @@ class OpticsSystem : public Kernel::SystemBase {
         Horizon::HardwareBuffer result_buffer,
         Horizon::SubmitReceipt receipt,
         std::vector<std::uintptr_t> scene_actor_handles,
+        std::vector<std::uint32_t> node_indices,
         OpticsDetail::ActorPickReadbackWorker::Reservation reservation);
 
     struct ViewportCursorState {

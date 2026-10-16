@@ -9,6 +9,7 @@
 #include <corona/resource/types/image.h>
 #include <corona/shared_data_hub.h>
 #include <corona/systems/geometry/geometry_system.h>
+#include <corona/systems/geometry/native_render_load_guard.h>
 #include <corona/systems/optics/optics_system.h>
 
 #include "shadow_culling.h"
@@ -84,6 +85,10 @@ namespace {
 
 constexpr uint32_t kShadowCascadeCount = 4;
 constexpr uint32_t kShadowMapSize = 1024;
+// Cascaded shadows duplicate every visible mesh submission once per cascade.  Imported
+// scenes can contain thousands of editable glTF nodes, so keep editor interaction
+// responsive by falling back to unshadowed direct lighting above this budget.
+constexpr uint32_t kRealtimeShadowInstanceBudget = 1024;
 constexpr float kShadowMaxDistance = 100.0f;
 constexpr float kShadowSplitLambda = 0.95f;
 constexpr float kShadowBias = 0.0015f;
@@ -342,12 +347,14 @@ struct RenderInstanceBatch {
     std::vector<Hardware::InstanceInfo> instances;
     std::vector<Hardware::MaterialInfo> materials;
     std::vector<std::uintptr_t> actorHandles;
+    std::vector<std::uint32_t> nodeIndices;
     std::shared_ptr<ResourceKeepAlive> resource_keep_alive = std::make_shared<ResourceKeepAlive>();
 
     void clear() {
         instances.clear();
         materials.clear();
         actorHandles.clear();
+        nodeIndices.clear();
         resource_keep_alive = std::make_shared<ResourceKeepAlive>();
     }
 
@@ -1722,6 +1729,7 @@ bool collect_actor_instances_for_visibility(
                     inst.flags = 0u;
                     batch.instances.push_back(inst);
                     batch.actorHandles.push_back(actor_handle);
+                    batch.nodeIndices.push_back(ms.node_index);
                     has_instances = true;
                 }
 
@@ -1931,6 +1939,54 @@ struct VisionModeSelection {
     std::size_t conflict_signature{0};
     std::string conflict_summary;
 };
+
+// The Vision path tracer keeps an acceleration structure and material/device state
+// in addition to the native renderer's resources.  It is intended for previewing
+// modest scenes; expanding a highly-instanced glTF scene here can exhaust memory
+// and starve the editor frame loop.  Native rendering still supports picking and
+// model-node editing, so it is the safe interactive fallback above this limit.
+constexpr std::size_t kVisionInteractiveInstanceLimit = 1024;
+
+void fallback_large_scenes_to_native_renderer() {
+    auto& hub = Corona::SharedDataHub::instance();
+    auto& actor_storage = hub.actor_storage();
+    auto& profile_storage = hub.profile_storage();
+    auto& optics_storage = hub.optics_storage();
+    auto& geometry_storage = hub.geometry_storage();
+    auto& camera_storage = hub.camera_storage();
+
+    for (const auto& scene : hub.scene_storage()) {
+        if (!scene.enabled) continue;
+
+        std::size_t instance_count = 0;
+        for (const auto actor_handle : scene.actor_handles) {
+            const auto actor = actor_storage.try_acquire_read(actor_handle);
+            if (!actor) continue;
+            for (const auto profile_handle : actor->profile_handles) {
+                const auto profile = profile_storage.try_acquire_read(profile_handle);
+                if (!profile || profile->optics_handle == 0 || profile->geometry_handle == 0) continue;
+                const auto optics = optics_storage.try_acquire_read(profile->optics_handle);
+                const auto geometry = geometry_storage.try_acquire_read(profile->geometry_handle);
+                if (!optics || !optics->visible || !geometry) continue;
+                instance_count += geometry->mesh_instances.empty()
+                    ? geometry->mesh_handles.size()
+                    : geometry->mesh_instances.size();
+                if (instance_count > kVisionInteractiveInstanceLimit) break;
+            }
+            if (instance_count > kVisionInteractiveInstanceLimit) break;
+        }
+        if (instance_count <= kVisionInteractiveInstanceLimit) continue;
+
+        for (const auto camera_handle : scene.camera_handles) {
+            const auto camera = camera_storage.try_acquire_write(camera_handle);
+            if (!camera || camera->render_backend != Corona::CameraRenderBackend::Vision) continue;
+            camera->render_backend = Corona::CameraRenderBackend::Native;
+            CFW_LOG_WARNING(
+                "OpticsSystem: switched camera {} to Native rendering because scene has more than {} instances (observed={})",
+                camera_handle, kVisionInteractiveInstanceLimit, instance_count);
+        }
+    }
+}
 
 [[nodiscard]] VisionModeSelection select_visible_vision_render_mode() {
     VisionModeSelection selection;
@@ -3730,6 +3786,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 uint32_t native_instance_count = 0;
                 uint32_t native_visibility_draws = 0;
                 uint64_t native_visibility_indices = 0;
+                bool native_scene_exceeds_realtime_shadow_budget = false;
                 std::array<uint32_t, kShadowCascadeCount> native_cascade_draws{};
                 std::array<uint64_t, kShadowCascadeCount> native_cascade_indices{};
                 bool native_shadows_enabled = false;
@@ -4073,6 +4130,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                     inst.flags = 0u;
                                     batch.instances.push_back(inst);
                                     batch.actorHandles.push_back(actor_handle);
+                    batch.nodeIndices.push_back(ms.node_index);
                                     has_instances = true;
                                 }
 
@@ -4437,6 +4495,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     }
                     native_collect_ms = elapsed_ms(native_collect_start, PerfClock::now());
                     native_instance_count = static_cast<uint32_t>(sceneBatch.instances.size());
+                    native_scene_exceeds_realtime_shadow_budget =
+                        native_instance_count > kRealtimeShadowInstanceBudget;
                     native_visibility_draws = native_instance_count;
                     for (const auto& instance : sceneBatch.instances) {
                         native_visibility_indices += instance.indexCount;
@@ -4501,7 +4561,8 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                     static_cast<float>(kShadowMapSize);
                 hardware_->shadowInfoBufferObjects.shadowBias = kShadowBias;
                 hardware_->shadowInfoBufferObjects.shadowEnabled =
-                    (!diag.skip_shadows && diag.shadow_cascade_mask != 0u &&
+                    (!native_scene_exceeds_realtime_shadow_budget &&
+                     !diag.skip_shadows && diag.shadow_cascade_mask != 0u &&
                      sun_intensity > 0.0f) ? 1u : 0u;
                 native_shadows_enabled = hardware_->shadowInfoBufferObjects.shadowEnabled != 0u;
                 prepare_shadow_caster_meshes();
@@ -4553,9 +4614,36 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                 const bool is_shadow_mask_debug_mode =
                     camera->output_mode == CameraOutputMode::ShadowMaskRaw ||
                     camera->output_mode == CameraOutputMode::ShadowMask;
-                const bool should_run_ssao = camera->ssao_enabled || is_ssao_debug_mode;
+                bool geometry_loading = false;
+                auto& shared_hub = SharedDataHub::instance();
+                // During async import the actor may not yet have a visible
+                // scene-batch instance. Inspect the storage globally so the
+                // loading guard is active from the first import frame.
+                for (auto it = shared_hub.geometry_storage().cbegin();
+                     it != shared_hub.geometry_storage().cend(); ++it) {
+                    if (it->gpu_build_state == GeometryDevice::GpuBuildState::PendingImport ||
+                        it->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild) {
+                        geometry_loading = true;
+                        break;
+                    }
+                }
+                for (const auto actor_handle : sceneBatch.actorHandles) {
+                    for (const auto geometry_handle : shared_hub.resolve_actor_geometry_handles(actor_handle)) {
+                        if (auto geometry = shared_hub.geometry_storage().try_acquire_read(geometry_handle)) {
+                            geometry_loading = geometry_loading ||
+                                geometry->gpu_build_state == GeometryDevice::GpuBuildState::PendingImport ||
+                                geometry->gpu_build_state == GeometryDevice::GpuBuildState::PendingBuild;
+                        }
+                        if (geometry_loading) break;
+                    }
+                    if (geometry_loading) break;
+                }
+                const bool loading_guard = Corona::Geometry::NativeRenderLoadGuard::is_loading(
+                    geometry_loading, false);
+                const bool should_run_ssao = Corona::Geometry::NativeRenderLoadGuard::effective_ssao(
+                    loading_guard, camera->ssao_enabled, is_ssao_debug_mode);
                 const bool should_run_shadow_mask =
-                    hardware_->shadowInfoBufferObjects.shadowEnabled != 0u ||
+                    (!loading_guard && hardware_->shadowInfoBufferObjects.shadowEnabled != 0u) ||
                     is_shadow_mask_debug_mode;
                 const uint32_t sceneMaterialCount =
                     static_cast<uint32_t>(sceneBatch.materials.size());
@@ -5048,6 +5136,7 @@ void OpticsSystem::optics_pipeline(float frame_count, uint64_t frame_index) {
                                                 std::move(*actor_pick_result_buffer),
                                                 latest_submit_receipt,
                                                 sceneBatch.actorHandles,
+                                                sceneBatch.nodeIndices,
                                                 std::move(*actor_pick_reservation));
                 }
 
@@ -5559,14 +5648,16 @@ std::optional<OpticsSystem::ActorPickRequest> OpticsSystem::take_pending_actor_p
 
 void OpticsSystem::complete_actor_pick(const ActorPickRequest& request,
                                        const std::vector<std::uintptr_t>& scene_actor_handles,
+                                       const std::vector<std::uint32_t>& node_indices,
                                        bool read_ok,
                                        std::uint32_t instance_id) {
     const auto resolved =
-        OpticsDetail::resolve_actor_pick_result(read_ok, instance_id, scene_actor_handles);
+        OpticsDetail::resolve_actor_pick_result(read_ok, instance_id, scene_actor_handles, node_indices);
 
     auto& hub = SharedDataHub::instance();
     if (auto pick = hub.actor_pick_storage().try_acquire_write(request.pick_handle)) {
         pick->actor_handle = resolved.actor_handle;
+        pick->node_index = resolved.node_index;
         pick->result_x = request.x;
         pick->result_y = request.y;
         pick->result_request_id = request.request_id;
@@ -5574,11 +5665,11 @@ void OpticsSystem::complete_actor_pick(const ActorPickRequest& request,
     }
     hub.enqueue_actor_pick_completion({request.camera_handle, request.scene_id, request.request_id,
                                        std::string(resolved.status), resolved.actor_handle,
-                                       request.x, request.y});
+                                       request.x, request.y, resolved.node_index});
 }
 
 void OpticsSystem::fail_actor_pick(const ActorPickRequest& request) {
-    complete_actor_pick(request, {}, false, 0);
+    complete_actor_pick(request, {}, {}, false, 0);
 }
 
 void OpticsSystem::enqueue_actor_pick_readback(
@@ -5586,6 +5677,7 @@ void OpticsSystem::enqueue_actor_pick_readback(
     Horizon::HardwareBuffer result_buffer,
     Horizon::SubmitReceipt receipt,
     std::vector<std::uintptr_t> scene_actor_handles,
+    std::vector<std::uint32_t> node_indices,
     OpticsDetail::ActorPickReadbackWorker::Reservation reservation) {
     if (!actor_pick_readback_worker_ || receipt.serial == 0) {
         fail_actor_pick(request);
@@ -5595,7 +5687,7 @@ void OpticsSystem::enqueue_actor_pick_readback(
     const auto fallback_buffer = result_buffer;
     const bool enqueued = actor_pick_readback_worker_->submit(
         std::move(reservation),
-        [this, request, result_buffer, receipt, scene_actor_handles]() mutable {
+        [this, request, result_buffer, receipt, scene_actor_handles, node_indices]() mutable {
             std::uint32_t instance_id = 0;
             bool read_ok = false;
             try {
@@ -5614,7 +5706,7 @@ void OpticsSystem::enqueue_actor_pick_readback(
             } catch (...) {
                 CFW_LOG_ERROR("OpticsSystem: Actor pick receipt wait/read failed");
             }
-            complete_actor_pick(request, scene_actor_handles, read_ok, instance_id);
+            complete_actor_pick(request, scene_actor_handles, node_indices, read_ok, instance_id);
         });
 
     if (!enqueued) {
@@ -5708,6 +5800,7 @@ void OpticsSystem::process_vision_actor_pick(std::uintptr_t camera_handle,
                                 std::move(*actor_pick_result_buffer),
                                 actor_pick_receipt,
                                 scene_batch.actorHandles,
+                                scene_batch.nodeIndices,
                                 std::move(*actor_pick_reservation));
 }
 #endif
@@ -5967,6 +6060,7 @@ std::size_t OpticsSystem::compute_vision_scene_signature() const {
                 mix(static_cast<std::size_t>(optics->geometry_handle));
                 mix(static_cast<std::size_t>(geom->model_resource_handle));
                 mix(geom->mesh_handles.size());
+                mix(geom->model_node_revision);
 
                 // Per-mesh material color (texture-color replacement detection).
                 for (const auto& mesh_dev : geom->mesh_handles) {
@@ -6576,6 +6670,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
             actors_to_remove.push_back(actor_handle);
         }
     }
+    const auto node_revision = [&](std::uintptr_t actor_handle){std::uint64_t revision=0;for(auto h:hub.resolve_actor_geometry_handles(actor_handle)){if(auto g=hub.geometry_storage().try_acquire_read(h))revision^=g->model_node_revision+0x9e3779b9u+(revision<<6)+(revision>>2);}return revision;};
     for (auto actor_handle : active_native_actors) {
         const auto* record = scene_resource->find_engine_mixed_shape(actor_handle);
         const auto resolved = resolve_engine_native_transform(
@@ -6586,6 +6681,9 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
             if (resolved) {
                 actors_to_add.push_back(actor_handle);
             }
+        } else if (record->model_node_revision != node_revision(actor_handle)) {
+            actors_to_remove.push_back(actor_handle);
+            if(resolved)actors_to_add.push_back(actor_handle);
         } else if (!resolved) {
             // Tracked but no longer renderable -> remove from the mix.
             actors_to_remove.push_back(actor_handle);
@@ -6646,6 +6744,7 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
                 .actor_handle = actor_handle,
                 .shape_index = result.shape_index,
                 .transform_signature = 0,
+                .model_node_revision = node_revision(actor_handle),
             };
         just_added_actors.insert(actor_handle);
         geometry_changed = true;
@@ -6688,7 +6787,21 @@ void OpticsSystem::sync_engine_native_mixed_shapes(VisionPipelineRuntime& runtim
                 .transform_signature = resolved->signature,
                 .object_to_world = object_to_world,
             });
-            instance->set_o2w(resolved->o2w);
+            auto matrix=resolved->o2w;
+            const std::string name(instance->name());
+            if(name.starts_with("corona-node:")){
+                const auto colon=name.find(':',12);
+                if(colon!=std::string::npos){
+                    const auto handle=static_cast<std::uintptr_t>(std::stoull(name.substr(12,colon-12)));
+                    const auto index=static_cast<std::size_t>(std::stoull(name.substr(colon+1)));
+                    if(auto geom=hub.geometry_storage().try_acquire_read(handle);geom&&index<geom->mesh_instances.size()){
+                        auto local=::vision::make_float4x4(1.f);
+                        for(int c=0;c<4;++c)for(int r=0;r<4;++r){float value=geom->mesh_instances[index].transform[c][r];if(r==2)value=-value;if(c==2)value=-value;local[c][r]=value;}
+                        matrix=matrix*local;
+                    }
+                }
+            }
+            instance->set_o2w(matrix);
             instance->init_aabb();
             group->aabb.extend(instance->aabb);
         });
@@ -7390,7 +7503,15 @@ void OpticsSystem::run_vision_frame(float frame_count, uint64_t frame_index) {
     last_vision_runtime_group_signature_ = 0;
 
 #ifndef CORONA_VISION_IMPORT_DEMO
+    fallback_large_scenes_to_native_renderer();
     const auto mode_selection = select_visible_vision_render_mode();
+    if (!mode_selection.has_visible_camera) {
+        // A large scene may have just switched its interactive camera back to
+        // Native. Release the unused path-tracing runtime immediately instead of
+        // retaining its acceleration structures and scene buffers in memory.
+        clear_vision_runtimes();
+        return;
+    }
     if (mode_selection.has_visible_camera) {
         if (mode_selection.conflict &&
             mode_selection.conflict_signature != last_vision_mode_conflict_signature_) {
