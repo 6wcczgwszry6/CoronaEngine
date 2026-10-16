@@ -240,7 +240,12 @@ test('an unknown wrapper path is rejected instead of being sent to native', asyn
   );
 });
 
-import { flattenLoadedNodes, virtualNodeWindow } from '../../src/utils/modelHierarchy.js';
+import {
+  flattenLoadedNodes,
+  MODEL_NODE_DISPLAY_MAX_SKIP,
+  resolveModelNodeDisplayParent,
+  virtualNodeWindow,
+} from '../../src/utils/modelHierarchy.js';
 
 test('loaded model nodes flatten only expanded branches and cap the render window', () => {
   const pages = {
@@ -263,4 +268,47 @@ test('collapsed nodes do not contribute descendant rows', () => {
     '0': { items: [{ node_index: 1, name: 'child', child_count: 0 }] },
   };
   assert.deepEqual(flattenLoadedNodes(pages, new Set()).map((row) => row.node.node_index), [0]);
+});
+
+test('a lone synthetic root is skipped so nodes hang directly under the actor', () => {
+  assert.equal(
+    resolveModelNodeDisplayParent({ items: [{ node_index: 0, name: 'root', child_count: 12 }] }),
+    0,
+  );
+  assert.equal(
+    resolveModelNodeDisplayParent({ items: [{ node_index: 7, name: 'Scene', child_count: 3 }] }, 1),
+    7,
+  );
+});
+
+test('a single root that carries content of its own is kept', () => {
+  assert.equal(
+    resolveModelNodeDisplayParent({ items: [{ node_index: 0, name: 'temple', child_count: 0 }] }),
+    -1,
+  );
+  assert.equal(resolveModelNodeDisplayParent({ items: [] }), -1);
+});
+
+test('several roots are real content, not a container to skip', () => {
+  assert.equal(
+    resolveModelNodeDisplayParent({
+      items: [{ node_index: 0, child_count: 2 }, { node_index: 1, child_count: 0 }],
+    }),
+    -1,
+  );
+});
+
+test('the synthetic root skip is bounded instead of walking away', () => {
+  const page = { items: [{ node_index: 5, child_count: 9 }] };
+  assert.equal(resolveModelNodeDisplayParent(page, MODEL_NODE_DISPLAY_MAX_SKIP), -1);
+});
+
+test('the flattened tree can start at the displayed parent instead of the roots', () => {
+  const pages = {
+    '-1': { items: [{ node_index: 0, name: 'root', child_count: 1 }] },
+    '0': { items: [{ node_index: 1, name: 'a', child_count: 1 }] },
+    '1': { items: [{ node_index: 2, name: 'b', child_count: 0 }] },
+  };
+  const rows = flattenLoadedNodes(pages, new Set([1]), '0');
+  assert.deepEqual(rows.map((row) => [row.node.node_index, row.depth]), [[1, 0], [2, 1]]);
 });
