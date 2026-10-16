@@ -2841,14 +2841,18 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     return item;
 }
 
-std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor,
-                                                            bool best_effort = false);
-std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor,
-                                                            bool best_effort = false);
+// The default is the rule, not a per-call decision: on the CEF UI thread - the thread
+// that paints the editor and dispatches its input - engine reads are best effort, so a
+// handler that forgets to think about it can never freeze the editor.  Other callers
+// (the Python script runtime) keep the waiting semantics they rely on.
+std::optional<std::array<float, 6>> native_actor_local_aabb(
+    const NativeEditorActor& actor, bool best_effort = CefCurrentlyOn(TID_UI));
+std::optional<std::array<float, 6>> native_actor_world_aabb(
+    const NativeEditorActor& actor, bool best_effort = CefCurrentlyOn(TID_UI));
 nlohmann::json aabb_to_json(const std::array<float, 6>& aabb);
 
 nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorActor& actor,
-                            bool best_effort = false) {
+                            bool best_effort = CefCurrentlyOn(TID_UI)) {
     nlohmann::json item;
     item["name"] = actor.name;
     item["actor_guid"] = actor.actor_guid;
@@ -3174,8 +3178,8 @@ nlohmann::json aabb_to_json(const std::array<float, 6>& aabb) {
     });
 }
 
-std::optional<std::array<float, 6>> native_scene_world_aabb(const NativeEditorScene& scene,
-                                                           bool best_effort = false) {
+std::optional<std::array<float, 6>> native_scene_world_aabb(
+    const NativeEditorScene& scene, bool best_effort = CefCurrentlyOn(TID_UI)) {
     std::optional<std::array<float, 6>> aggregate;
     for (const auto& actor : scene.actors) {
         const auto actor_aabb = native_actor_world_aabb(actor, best_effort);
@@ -7422,14 +7426,13 @@ std::string get_editor_scene_snapshot_from_python(const std::string& scene_name)
         const auto scene_route = normalize_route(scene_name);
         scene = resolve_native_editor_scene_request(scene, scene_route);
         nlohmann::json actors = nlohmann::json::array();
-        // The CEF UI thread paints the editor and dispatches its input, so on that
-        // thread every engine read on this path is best effort: the browser process
-        // must stay responsive even while a model is being parsed.
-        const bool best_effort = CefCurrentlyOn(TID_UI);
+        // Engine reads here are best effort on the CEF UI thread (the default of the
+        // helpers below), so a slow resource or a held lock degrades the snapshot
+        // instead of freezing the editor.
         for (const auto& actor : scene->actors) {
-            actors.push_back(actor_to_json(*scene, actor, best_effort));
+            actors.push_back(actor_to_json(*scene, actor));
         }
-        const auto scene_aabb = native_scene_world_aabb(*scene, best_effort);
+        const auto scene_aabb = native_scene_world_aabb(*scene);
         nlohmann::json cameras = nlohmann::json::array();
         for (const auto& camera : scene->cameras) {
             auto snapshot = camera_to_json(camera);
@@ -9127,11 +9130,9 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         }},
         {"list_actor_tree", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = scene_for_request_route(request);
-            // Same rule as the snapshot handler: the editor UI thread reads best effort.
-            const bool best_effort = CefCurrentlyOn(TID_UI);
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
-                actors.push_back(actor_to_json(*scene, actor, best_effort));
+                actors.push_back(actor_to_json(*scene, actor));
             }
             return native_success(actors);
         }},
