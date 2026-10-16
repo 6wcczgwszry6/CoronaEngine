@@ -1,3 +1,4 @@
+#include <corona/diagnostics/thread_phase.h>
 #include <corona/kernel/core/kernel_context.h>
 #include <corona/kernel/system/i_system_manager.h>
 #include <horizon/core/logging.h>
@@ -192,6 +193,12 @@ void UiSystem::update() {
     // of those requests never returns, that thread stops reporting anything at all,
     // while this main loop keeps running - so the watchdog is driven from here.
     UI::report_stuck_native_api_request();
+
+    // System threads have the same failure mode one level down: a blocking storage
+    // or resource lock inside update() freezes that system with no log line at all.
+    // This main loop is the only thread guaranteed to keep ticking, so it is also
+    // the watchdog for "which system is stuck in which stage".
+    Corona::Diagnostics::report_stuck_thread_phases();
 
     // Collaborative scene mutations must run on the UI/engine main thread and
     // must not depend on the lifetime of a particular Vue network page.

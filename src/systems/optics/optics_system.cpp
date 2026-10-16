@@ -1,4 +1,5 @@
-﻿#include <corona/utils/scene_path_key.h>
+#include <corona/utils/scene_path_key.h>
+#include <corona/diagnostics/thread_phase.h>
 #include <corona/events/display_system_events.h>
 #include <corona/events/optics_system_events.h>
 #include <horizon/core/logging.h>
@@ -3645,6 +3646,9 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
 }
 
 void OpticsSystem::update() {
+    // This thread owns the GPU submit path; when it blocks everything that waits
+    // on it (Scene/geometry holders included) blocks too, silently.
+    Corona::Diagnostics::PhaseScope update_phase{"Optics", "update"};
     if (hardware_) {
         const auto consumed_serial =
             pending_native_consumed_serial_.exchange(0, std::memory_order_acq_rel);
@@ -3658,6 +3662,7 @@ void OpticsSystem::update() {
             return;
         }
     }
+    update_phase.set("camera_commands");
     apply_pending_camera_moves();
     apply_pending_camera_viewport_updates();
     apply_pending_camera_state_updates();
