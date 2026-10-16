@@ -1350,7 +1350,12 @@ void MechanicsSystem::update_physics(float fixed_dt) {
     }
     // Skin poses also support Foot queries in scenes with simulation disabled.
     // Their lifetime follows live render geometry, not the physics participant list.
-    for (const auto& geometry : geometry_storage) {
+    // 只读遍历：用几何存储的 const 视图（cbegin/cend → 槽位共享锁）。此前这里直接
+    // 遍历非 const 引用，Storage::begin() 取的是**独占**槽锁，等于每帧把整张几何表
+    // 锁成写级别，与 CEF 线程的 IK 写锁、几何系统的读取互相排队。
+    for (auto geometry_it = geometry_storage.cbegin(); geometry_it != geometry_storage.cend();
+         ++geometry_it) {
+        const GeometryDevice& geometry = *geometry_it;
         if (geometry.is_skinned && geometry.model_resource_handle && !geometry.mesh_handles.empty() &&
             geometry.gpu_build_state == GeometryDevice::GpuBuildState::Ready) {
             alive_geom_handles.insert(reinterpret_cast<std::uintptr_t>(&geometry));
@@ -1449,7 +1454,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
 
     // Vision still imports CPU geometry; rasterization and mechanics consume GPU buffers.
     bool vision_readback = false;
-    for (const auto& enabled_scene : hub.scene_storage()) {
+    for (const auto& enabled_scene : std::as_const(hub.scene_storage())) {
         if (!enabled_scene.enabled) continue;
         for (auto camera_handle : enabled_scene.camera_handles) {
             auto camera = hub.camera_storage().try_acquire_read(camera_handle);

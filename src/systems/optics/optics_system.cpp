@@ -1962,7 +1962,7 @@ void fallback_large_scenes_to_native_renderer() {
     auto& geometry_storage = hub.geometry_storage();
     auto& camera_storage = hub.camera_storage();
 
-    for (const auto& scene : hub.scene_storage()) {
+    for (const auto& scene : std::as_const(hub.scene_storage())) {
         if (!scene.enabled) continue;
 
         std::size_t instance_count = 0;
@@ -2000,7 +2000,7 @@ void fallback_large_scenes_to_native_renderer() {
     std::hash<std::string> hash_string;
     std::string signature_source;
 
-    for (const auto& scene : Corona::SharedDataHub::instance().scene_storage()) {
+    for (const auto& scene : std::as_const(Corona::SharedDataHub::instance().scene_storage())) {
         if (!scene.enabled) continue;
         for (const auto camera_handle : scene.camera_handles) {
             auto camera =
@@ -3652,6 +3652,23 @@ bool OpticsSystem::initialize(Kernel::ISystemContext* ctx) {
 }
 
 bool OpticsSystem::ensure_native_frame_slot() {
+    // A saturated throttle is normal: Optics records faster than the display
+    // presents, so the throttle is what keeps it from running ahead. In that case
+    // the right answer is still "skip this frame" (the display acknowledges within
+    // a frame or two, and its acknowledgement releases every older entry too).
+    //
+    // What must never happen is a throttle that stays full because *nothing*
+    // acknowledges it: Display only publishes OpticsFrameConsumedEvent for surfaces
+    // it actually presented with an optics layer, so a removed/failed/lost surface
+    // drops its acknowledgement. Two dropped acknowledgements then stopped native
+    // rendering for every camera, silently, until the engine was restarted. Past
+    // this grace period Optics therefore takes over and retires the oldest
+    // submission by waiting for its own GPU completion.
+    constexpr std::uint64_t kNativeThrottleStuckMs = 500;
+    // Retiring a submission that the display never consumed should be immediate;
+    // anything slower is reported.
+    constexpr double kNativeThrottleSlowRetireMs = 100.0;
+
     if (!hardware_) {
         return true;
     }
@@ -3660,33 +3677,39 @@ bool OpticsSystem::ensure_native_frame_slot() {
         return true;
     }
 
-    // Full. Display never acknowledged these submissions (it only publishes for
-    // surfaces that were presented with an optics layer), so retire the oldest by
-    // waiting for its own GPU completion: the work was submitted long ago, so this
-    // returns as soon as the GPU has finished it, and rendering continues instead
-    // of stopping for every camera until the engine is restarted.
     throttle.note_saturated_frame();
     const auto now = PerfClock::now();
+    const auto oldest_age_ms = throttle.oldest_age_ms(now);
+    if (oldest_age_ms < kNativeThrottleStuckMs) {
+        // Display is simply behind: drop this frame, as the throttle intends.
+        return false;
+    }
+
     const bool report_due = last_native_throttle_report_.time_since_epoch().count() == 0 ||
                             now - last_native_throttle_report_ >= std::chrono::seconds(1);
     if (report_due) {
         last_native_throttle_report_ = now;
         CFW_LOG_WARNING(
-            "[OpticsThrottle] saturated: in_flight={} oldest_serial={} oldest_age_ms={} "
-            "saturated_frames={} retired_without_ack={} forgotten={} — Display did not "
-            "acknowledge consumed frames; retiring the oldest by GPU completion",
-            throttle.in_flight_count(), throttle.oldest_serial(), throttle.oldest_age_ms(now),
+            "[OpticsThrottle] stuck for {}ms: in_flight={} oldest_serial={} "
+            "saturated_frames={} retired_without_ack={} forgotten={} — no consumer "
+            "acknowledged these frames; retiring the oldest by GPU completion",
+            oldest_age_ms, throttle.in_flight_count(), throttle.oldest_serial(),
             throttle.saturated_frames(), throttle.released_without_ack(),
             throttle.forgotten_for_capacity());
     }
 
     const auto wait_start = PerfClock::now();
+    const auto retired_serial = throttle.oldest_serial();
     const bool retired = throttle.retire_oldest([this](const Horizon::SubmitReceipt& receipt) {
         hardware_->executor.wait_completed(receipt);
     });
-    pending_native_throttle_wait_ms_ += elapsed_ms(wait_start, PerfClock::now());
-    if (!retired) {
-        return throttle.try_acquire_slot();
+    const auto wait_ms = elapsed_ms(wait_start, PerfClock::now());
+    pending_native_throttle_wait_ms_ += wait_ms;
+    if (retired && wait_ms >= kNativeThrottleSlowRetireMs) {
+        CFW_LOG_WARNING(
+            "[OpticsThrottle] retiring serial={} cost {:.1f}ms (nothing acknowledged it; "
+            "the GPU queue is behind)",
+            retired_serial, wait_ms);
     }
     return throttle.try_acquire_slot();
 }
@@ -3728,7 +3751,7 @@ void OpticsSystem::update() {
 #ifdef CORONA_ENABLE_VISION
     std::vector<std::uintptr_t> requested_vision_cameras;
     bool camera_views_ready = true;
-    for (const auto& scene : SharedDataHub::instance().scene_storage()) {
+    for (const auto& scene : std::as_const(SharedDataHub::instance().scene_storage())) {
         if (!scene.enabled) {
             continue;
         }
@@ -5938,7 +5961,7 @@ void OpticsSystem::fail_unrenderable_pending_screenshots() {
 
         bool in_enabled_scene = false;
         bool in_any_scene = false;
-        for (const auto& scene : SharedDataHub::instance().scene_storage()) {
+        for (const auto& scene : std::as_const(SharedDataHub::instance().scene_storage())) {
             if (std::find(scene.camera_handles.begin(), scene.camera_handles.end(), camera_handle) ==
                 scene.camera_handles.end()) {
                 continue;

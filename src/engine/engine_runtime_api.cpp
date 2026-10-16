@@ -148,7 +148,7 @@ std::uintptr_t resolve_camera_handle(std::uintptr_t camera_handle) {
     }
 
     std::uintptr_t fallback = 0;
-    for (const auto& scene : Corona::SharedDataHub::instance().scene_storage()) {
+    for (const auto& scene : std::as_const(Corona::SharedDataHub::instance().scene_storage())) {
         if (scene.active_camera_handle != 0) {
             if (scene.enabled) {
                 return scene.active_camera_handle;
