@@ -220,6 +220,31 @@ def _parse_actor(
             "INVALID_IK_CHAINS", f"Invalid IK configuration for {key}: {exc}",
             details={"actor_name": section.get(f"{key}.name", key)},
         ) from exc
+    try:
+        model_node_overrides = json.loads(section.get(f"{key}.model.node_overrides", fallback="[]"))
+        if not isinstance(model_node_overrides, list) or any(
+            not isinstance(override, dict) for override in model_node_overrides
+        ):
+            raise ValueError("expected model node override objects")
+    except (ValueError, TypeError) as exc:
+        raise ArchiveParseError(
+            "INVALID_MODEL_NODE_OVERRIDES", f"Invalid model node configuration for {key}: {exc}",
+            details={"actor_name": section.get(f"{key}.name", key)},
+        ) from exc
+    try:
+        model_node_unmatched = json.loads(section.get(f"{key}.model.node_unmatched", fallback="[]"))
+        if not isinstance(model_node_unmatched, list) or any(
+            not isinstance(group, dict) or not isinstance(group.get("resource"), str)
+            or not isinstance(group.get("overrides"), list)
+            or any(not isinstance(override, dict) for override in group["overrides"])
+            for group in model_node_unmatched
+        ):
+            raise ValueError("expected resource strings and model node override arrays")
+    except (ValueError, TypeError) as exc:
+        raise ArchiveParseError(
+            "INVALID_MODEL_NODE_UNMATCHED", f"Invalid unmatched model node configuration for {key}: {exc}",
+            details={"actor_name": section.get(f"{key}.name", key)},
+        ) from exc
     return {
         "name": section.get(f"{key}.name", key),
         "actor_guid": section.get(f"{key}.actor_guid", ""),
@@ -261,6 +286,9 @@ def _parse_actor(
         "optics": optics,
         "audio_resource_id": section.get(f"{key}.audio_resource_id", ""),
         "ik_chains": ik_chains,
+        "model_node_overrides": model_node_overrides,
+        "model_node_resource": section.get(f"{key}.model.node_resource", fallback=""),
+        "model_node_unmatched": model_node_unmatched,
         "persisted_fields": persisted_fields,
     }
 

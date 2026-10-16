@@ -1,4 +1,4 @@
-﻿#ifdef _WIN32
+#ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
 #define WIN32_LEAN_AND_MEAN
 #endif
@@ -17,8 +17,13 @@
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
 #include "cef_editor_native_api_test_support.h"
+#include <cef_task.h>
 #include "scene_folder.h"
 #include "ik_chain_config.h"
+#include "model_node_config.h"
+#include "model_node_page.h"
+#include "scene_tree_actor.h"
+#include "ui_resource_read.h"
 #include "vision_actor_material_bridge.h"
 #include "vision_actor_transform_bridge.h"
 #include "vision_camera_direction.h"
@@ -46,6 +51,7 @@
 #include <iomanip>
 #include <iostream>
 #include <initializer_list>
+#include <limits>
 #include <map>
 #include <memory>
 #include <optional>
@@ -559,6 +565,10 @@ struct NativeEditorActor {
     std::string persisted_body_type{"dynamic"};
     nlohmann::json persisted_snapshot = nlohmann::json::object();
     nlohmann::json persisted_ik_chains = nlohmann::json::array();
+    nlohmann::json persisted_model_node_overrides = nlohmann::json::array();
+    std::string model_node_resource;
+    std::string model_node_current_resource;
+    nlohmann::json model_node_unmatched = nlohmann::json::array();
     NativeEditorActorOpticsState persisted_optics;
     std::unique_ptr<Corona::API::Geometry> geometry;
     std::unique_ptr<Corona::API::Optics> optics;
@@ -566,6 +576,69 @@ struct NativeEditorActor {
     std::unique_ptr<Corona::API::Acoustics> acoustics;
     std::unique_ptr<Corona::API::Actor> engine_actor;
 };
+
+nlohmann::json model_node_to_json(const Corona::API::ModelNodeState& node) {
+    return {{"node_index", node.node_index}, {"parent_index", node.parent_index},
+            {"name", node.name}, {"node_path", node.node_path},
+            {"position", node.position}, {"rotation", node.rotation}, {"scale", node.scale},
+            {"visible", node.visible}, {"effective_visible", node.effective_visible},
+            {"editable", node.editable}};
+}
+
+nlohmann::json native_model_nodes(const NativeEditorActor& actor) {
+    nlohmann::json nodes = nlohmann::json::array();
+    if (!actor.geometry) return nodes;
+    const bool actor_visible = actor.optics ? actor.optics->get_visible() : actor.persisted_visible;
+    for (const auto& node : actor.geometry->get_model_nodes()) {
+        auto item = model_node_to_json(node);
+        item["effective_visible"] = node.effective_visible && actor_visible;
+        nodes.push_back(std::move(item));
+    }
+    return nodes;
+}
+nlohmann::json native_model_node_page(const NativeEditorActor& actor, std::int64_t parent_index,
+                                      std::size_t offset, std::size_t limit) {
+    nlohmann::json items = nlohmann::json::array();
+    if (!actor.geometry) return {{"nodes", items}, {"total", 0}, {"next_offset", 0}, {"has_more", false}};
+    const auto nodes = actor.geometry->get_model_nodes();
+    std::unordered_map<std::uint32_t, std::size_t> child_counts;
+    for (const auto& node : nodes) ++child_counts[node.parent_index];
+    const auto page = Corona::Ui::Cef::model_node_page(nodes, parent_index, offset, limit);
+    const bool actor_visible = actor.optics ? actor.optics->get_visible() : actor.persisted_visible;
+    for (const auto* node : page.items) {
+        auto item = model_node_to_json(*node);
+        item["effective_visible"] = node->effective_visible && actor_visible;
+        item["child_count"] = child_counts[node->node_index];
+        items.push_back(std::move(item));
+    }
+    return {{"nodes", std::move(items)}, {"total", page.total},
+            {"next_offset", page.next_offset}, {"has_more", page.has_more}};
+}
+
+std::vector<Corona::API::ModelNodeOverride> parse_native_model_node_overrides(const nlohmann::json& data) {
+    std::vector<Corona::API::ModelNodeOverride> result;
+    for (const auto& item : ModelNodeConfig::normalize(data)) {
+        Corona::API::ModelNodeOverride node;
+        node.node_index = item.at("node_index").get<std::uint32_t>();
+        node.node_path = item.at("node_path").get<std::string>();
+        if (item.contains("position")) node.position = item.at("position").get<std::array<float, 3>>();
+        if (item.contains("rotation")) node.rotation = item.at("rotation").get<std::array<float, 3>>();
+        if (item.contains("scale")) node.scale = item.at("scale").get<std::array<float, 3>>();
+        if (item.contains("visible")) node.visible = item.at("visible").get<bool>();
+        result.push_back(std::move(node));
+    }
+    return result;
+}
+
+void restore_native_model_nodes(NativeEditorActor& actor) {
+    if (!actor.geometry || actor.persisted_model_node_overrides.empty()) return;
+    // Resource replacement must not apply the old model's edits to unrelated nodes.
+    if (actor.model_node_resource != actor.model_node_current_resource) return;
+    if (!actor.geometry->set_model_node_overrides(
+            parse_native_model_node_overrides(actor.persisted_model_node_overrides))) {
+        CFW_LOG_WARNING("Model node overrides could not be restored for {}", actor.name);
+    }
+}
 
 nlohmann::json native_actor_ik_configuration(const NativeEditorActor& actor) {
     if (!actor.geometry) return actor.persisted_ik_chains;
@@ -579,8 +652,7 @@ nlohmann::json native_actor_ik_configuration(const NativeEditorActor& actor) {
     if (chains.empty()) return nlohmann::json::array();
     const auto model_id = actor.geometry->get_model_id();
     if (model_id != 0) {
-        auto resource = Corona::Resource::ResourceManager::get_instance()
-                            .acquire_read<Corona::Resource::Scene>(model_id);
+        auto resource = read_resource_for_ui<Corona::Resource::Scene>(model_id);
         if (resource.valid() && resource->data.skeleton) {
             return IkChainConfig::serialize(chains, &*resource->data.skeleton);
         }
@@ -950,6 +1022,9 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
         lines.push_back(key + ".geometry.scale = " + format_float3(actor.geometry ? actor.geometry->get_scale() : actor.scale));
         lines.push_back(key + ".ik.chains = " + IkChainConfig::dump_ini(native_actor_ik_configuration(actor)));
+        lines.push_back(key + ".model.node_overrides = " + actor.persisted_model_node_overrides.dump());
+        lines.push_back(key + ".model.node_resource = " + actor.model_node_resource);
+        lines.push_back(key + ".model.node_unmatched = " + actor.model_node_unmatched.dump());
         if (actor.load_status != ActorLoadStatus::Loaded) {
             lines.push_back(key + ".optics.visible = " +
                             std::string(actor.persisted_visible ? "true" : "false"));
@@ -984,6 +1059,7 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
             "actor_guid", "actor_type", "audio_resource_id", "follow_camera", "name", "route",
             "camera_lock.enabled", "camera_lock.position_offset", "camera_lock.rotation_offset",
             "geometry.position", "geometry.rotation", "geometry.scale", "ik.chains",
+            "model.node_overrides", "model.node_resource", "model.node_unmatched",
             "material.texture", "mechanics.body_type", "optics.diffuse", "optics.emission", "optics.metallic",
             "optics.roughness", "optics.shininess", "optics.specular", "optics.visible",
             "runtime.entity_id", "runtime.asset_id", "runtime.model_ref", "runtime.entity_type",
@@ -1663,6 +1739,18 @@ void apply_native_actor_optics_state(NativeEditorActor& item) {
 NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
                                              NativeEditorActor item,
                                              const std::filesystem::path& asset_path) {
+    // Include the resolved model, not the mutable .actor wrapper. Cache this
+    // signature once per resource binding; node UI requests do no disk IO.
+    std::error_code node_identity_error;
+    const auto node_file_size = std::filesystem::file_size(asset_path, node_identity_error);
+    if (!node_identity_error) {
+        const auto modified = std::filesystem::last_write_time(asset_path, node_identity_error);
+        if (!node_identity_error) {
+            const auto relative = asset_path.lexically_normal().lexically_relative(scene.project_root.lexically_normal());
+            item.model_node_current_resource = path_to_utf8(relative.empty() ? asset_path : relative) + ":" +
+                std::to_string(node_file_size) + ":" + std::to_string(modified.time_since_epoch().count());
+        }
+    }
     if (item.actor_type == "ui_image") {
         auto image_geometry = Corona::API::Geometry::from_image(path_to_utf8(asset_path));
         item.geometry = std::make_unique<Corona::API::Geometry>(std::move(image_geometry));
@@ -1675,6 +1763,7 @@ NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
     item.geometry->set_position(item.position);
     item.geometry->set_rotation(item.rotation);
     item.geometry->set_scale(item.scale);
+    restore_native_model_nodes(item);
     if (!item.persisted_ik_chains.empty()) {
         auto chains = IkChainConfig::parse(item.persisted_ik_chains);
         auto geometry = Corona::SharedDataHub::instance().geometry_storage().try_acquire_write(
@@ -1783,6 +1872,13 @@ void load_native_actor(NativeEditorScene& scene,
     if (const auto ik = actors_section.find(actor_key + ".ik.chains"); ik != actors_section.end()) {
         item.persisted_ik_chains = IkChainConfig::serialize(
             IkChainConfig::parse(nlohmann::json::parse(ik->second)));
+    }
+    if (const auto nodes = actors_section.find(actor_key + ".model.node_overrides"); nodes != actors_section.end()) {
+        item.persisted_model_node_overrides = ModelNodeConfig::normalize(nlohmann::json::parse(nodes->second));
+    }
+    item.model_node_resource = actor_value(".model.node_resource");
+    if (const auto history = actors_section.find(actor_key + ".model.node_unmatched"); history != actors_section.end()) {
+        item.model_node_unmatched = nlohmann::json::parse(history->second);
     }
 
     if (item.route.empty()) {
@@ -2073,6 +2169,14 @@ void validate_archive_snapshot(const nlohmann::json& snapshot) {
             throw std::runtime_error("Duplicate actor_guid in ArchiveSnapshot");
         }
         IkChainConfig::parse(actor.value("ik_chains", nlohmann::json::array()));
+        ModelNodeConfig::normalize(actor.value("model_node_overrides", nlohmann::json::array()));
+        const auto history = actor.value("model_node_unmatched", nlohmann::json::array());
+        if (!history.is_array()) throw std::runtime_error("Model node unmatched history must be an array");
+        for (const auto& group : history) {
+            if (!group.is_object() || !group.contains("resource") || !group.at("resource").is_string())
+                throw std::runtime_error("Model node unmatched history requires resource identity");
+            ModelNodeConfig::normalize(group.value("overrides", nlohmann::json::array()));
+        }
         if (!actor.contains("route") || !actor["route"].is_string() ||
             !actor.contains("asset_path") || !actor["asset_path"].is_string() ||
             !actor.contains("transform") || !actor["transform"].is_object()) {
@@ -2157,6 +2261,10 @@ void validate_archive_snapshot(const nlohmann::json& snapshot) {
 NativeEditorActor native_actor_from_snapshot(const nlohmann::json& actor_data) {
     NativeEditorActor item;
     item.persisted_snapshot = actor_data;
+    item.persisted_model_node_overrides = ModelNodeConfig::normalize(
+        actor_data.value("model_node_overrides", nlohmann::json::array()));
+    item.model_node_resource = actor_data.value("model_node_resource", std::string{});
+    item.model_node_unmatched = actor_data.value("model_node_unmatched", nlohmann::json::array());
     item.persisted_ik_chains = IkChainConfig::serialize(
         IkChainConfig::parse(actor_data.value("ik_chains", nlohmann::json::array())));
     item.name = actor_data.value("name", std::string{"Actor"});
@@ -2733,11 +2841,14 @@ nlohmann::json camera_to_json(const NativeEditorCamera& camera) {
     return item;
 }
 
-std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor);
-std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor);
+std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor,
+                                                            bool best_effort = false);
+std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor,
+                                                            bool best_effort = false);
 nlohmann::json aabb_to_json(const std::array<float, 6>& aabb);
 
-nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorActor& actor) {
+nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorActor& actor,
+                            bool best_effort = false) {
     nlohmann::json item;
     item["name"] = actor.name;
     item["actor_guid"] = actor.actor_guid;
@@ -2750,6 +2861,9 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["model_dependencies"] = nlohmann::json::array();
     item["actor_type"] = actor.actor_type;
     item["ik_chains"] = native_actor_ik_configuration(actor);
+    item["model_node_overrides"] = actor.persisted_model_node_overrides;
+    item["model_node_resource"] = actor.model_node_resource;
+    item["model_node_unmatched"] = actor.model_node_unmatched;
     item["load_status"] = actor_load_status_name(actor.load_status);
     if (actor.load_status != ActorLoadStatus::Loaded) {
         item["load_error"] = {
@@ -2788,8 +2902,8 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
         {"rotation", actor.geometry ? actor.geometry->get_rotation() : actor.rotation},
         {"scale", actor.geometry ? actor.geometry->get_scale() : actor.scale},
     };
-    const auto local_aabb = native_actor_local_aabb(actor);
-    const auto world_aabb = native_actor_world_aabb(actor);
+    const auto local_aabb = native_actor_local_aabb(actor, best_effort);
+    const auto world_aabb = native_actor_world_aabb(actor, best_effort);
     item["local_aabb"] = local_aabb ? aabb_to_json(*local_aabb) : nlohmann::json(nullptr);
     item["world_aabb"] = world_aabb ? aabb_to_json(*world_aabb) : nlohmann::json(nullptr);
     item["aabb"] = item["world_aabb"];
@@ -3002,17 +3116,30 @@ bool aabb_has_usable_extent(const std::array<float, 6>& aabb) {
     return has_extent;
 }
 
-std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor) {
+std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorActor& actor,
+                                                            bool best_effort) {
     if (!actor.geometry) {
         return std::nullopt;
     }
-    const auto local = actor.geometry->get_aabb();
-    if (local.size() < 6) {
-        return std::nullopt;
-    }
+    // The editor UI thread must never wait on an engine lock: a loader holds a
+    // resource entry lock across its whole parse, which used to freeze the editor
+    // permanently.  Asking for the AABB best effort means "no bounds this refresh"
+    // instead of "no editor".
     std::array<float, 6> result{};
-    for (size_t index = 0; index < 6; ++index) {
-        result[index] = local[index];
+    if (best_effort) {
+        const auto value = actor.geometry->try_get_aabb();
+        if (!value) {
+            return std::nullopt;
+        }
+        result = *value;
+    } else {
+        const auto local = actor.geometry->get_aabb();
+        if (local.size() < 6) {
+            return std::nullopt;
+        }
+        for (size_t index = 0; index < 6; ++index) {
+            result[index] = local[index];
+        }
     }
     if (!aabb_has_usable_extent(result)) {
         return std::nullopt;
@@ -3020,8 +3147,9 @@ std::optional<std::array<float, 6>> native_actor_local_aabb(const NativeEditorAc
     return result;
 }
 
-std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor) {
-    const auto local = native_actor_local_aabb(actor);
+std::optional<std::array<float, 6>> native_actor_world_aabb(const NativeEditorActor& actor,
+                                                           bool best_effort) {
+    const auto local = native_actor_local_aabb(actor, best_effort);
     if (!local || !actor.geometry) {
         return std::nullopt;
     }
@@ -3046,10 +3174,11 @@ nlohmann::json aabb_to_json(const std::array<float, 6>& aabb) {
     });
 }
 
-std::optional<std::array<float, 6>> native_scene_world_aabb(const NativeEditorScene& scene) {
+std::optional<std::array<float, 6>> native_scene_world_aabb(const NativeEditorScene& scene,
+                                                           bool best_effort = false) {
     std::optional<std::array<float, 6>> aggregate;
     for (const auto& actor : scene.actors) {
-        const auto actor_aabb = native_actor_world_aabb(actor);
+        const auto actor_aabb = native_actor_world_aabb(actor, best_effort);
         if (!actor_aabb) {
             continue;
         }
@@ -3972,8 +4101,7 @@ PendingNetworkActorApplyOutcome apply_pending_network_actor_state(
             try {
                 const auto model_id = actor->geometry->get_model_id();
                 if (model_id != 0) {
-                    auto resource = Corona::Resource::ResourceManager::get_instance()
-                                        .acquire_read<Corona::Resource::Scene>(model_id);
+                    auto resource = read_resource_for_ui<Corona::Resource::Scene>(model_id);
                     if (!resource.valid()) {
                         return pending_actor_outcome(PendingNetworkActorApplyResult::Retry,
                                                      "Remote IK model resource is unavailable");
@@ -3989,6 +4117,20 @@ PendingNetworkActorApplyOutcome apply_pending_network_actor_state(
             } catch (const std::invalid_argument& error) {
                 return pending_actor_outcome(PendingNetworkActorApplyResult::Discard, error.what());
             }
+        }
+        if (!replacing_resource && actor_data.contains("model_node_overrides")) {
+            if (!actor->geometry) return pending_actor_outcome(PendingNetworkActorApplyResult::Retry,
+                "Remote model node geometry is not materialized yet");
+            const auto applicable = desired.model_node_resource == actor->model_node_current_resource
+                ? parse_native_model_node_overrides(desired.persisted_model_node_overrides)
+                : std::vector<Corona::API::ModelNodeOverride>{};
+            if (!actor->geometry->set_model_node_overrides(applicable)) {
+                return pending_actor_outcome(PendingNetworkActorApplyResult::Retry,
+                    "Remote model node state is not ready or could not be applied");
+            }
+            actor->persisted_model_node_overrides = desired.persisted_model_node_overrides;
+            actor->model_node_resource = desired.model_node_resource;
+            actor->model_node_unmatched = desired.model_node_unmatched;
         }
         if (replacing_resource) {
             const auto replacement_path = resolve_native_actor_asset_path(*scene, desired);
@@ -7280,10 +7422,14 @@ std::string get_editor_scene_snapshot_from_python(const std::string& scene_name)
         const auto scene_route = normalize_route(scene_name);
         scene = resolve_native_editor_scene_request(scene, scene_route);
         nlohmann::json actors = nlohmann::json::array();
+        // The CEF UI thread paints the editor and dispatches its input, so on that
+        // thread every engine read on this path is best effort: the browser process
+        // must stay responsive even while a model is being parsed.
+        const bool best_effort = CefCurrentlyOn(TID_UI);
         for (const auto& actor : scene->actors) {
-            actors.push_back(actor_to_json(*scene, actor));
+            actors.push_back(actor_to_json(*scene, actor, best_effort));
         }
-        const auto scene_aabb = native_scene_world_aabb(*scene);
+        const auto scene_aabb = native_scene_world_aabb(*scene, best_effort);
         nlohmann::json cameras = nlohmann::json::array();
         for (const auto& camera : scene->cameras) {
             auto snapshot = camera_to_json(camera);
@@ -7933,7 +8079,9 @@ void register_project_launcher_api_handlers(NativeApiRegistry& registry) {
             }
             emit_editor_api_event("ProjectLauncher.projectOpened", {
                 {"path", state.project_path}, {"status", prepared.status},
+                {"scene", {{"path", state.scene->route}, {"name", state.scene->name}}},
             });
+            emit_scene_tree_changed(state.scene->route);
             return native_success({
                 {"ok", true}, {"status", prepared.status}, {"path", state.project_path},
                 {"legacy", prepared.snapshot.value("project", nlohmann::json::object())
@@ -8906,49 +9054,162 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
         }},
         {"list_scene_tree", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = scene_for_request_route(request);
+            CFW_LOG_INFO("[SceneTree] snapshot requested='{}' resolved='{}' actors={} cameras={}",
+                         arg_string(request.args, 0), scene->route,
+                         scene->actors.size(), scene->cameras.size());
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
-                actors.push_back({
-                    {"name", actor.name},
-                    {"path", actor.route},
-                    {"type", actor.actor_type},
-                    {"visible", actor.optics ? actor.optics->get_visible() : true},
-                    {"handle", actor.engine_actor ? actor.engine_actor->get_handle() : 0},
-                    {"actor_guid", actor.actor_guid},
-                    {"vision_proxy", false},
-                    {"audio_resource_id", actor.actor_type == "audio"
-                                              ? std::to_string(actor.audio_resource_id)
-                                              : std::string{}},
-                });
+                const std::string gpu_build_state = actor.geometry
+                    ? actor.geometry->get_gpu_build_state()
+                    : std::string{"Ready"};
+                const bool gpu_pending = gpu_build_state == "PendingImport" ||
+                                         gpu_build_state == "PendingBuild";
+                const bool gpu_failed = gpu_build_state == "Failed";
+                // This handler runs on the CEF UI thread, together with the offscreen
+                // paint of the whole editor.  Building the full actor JSON here would
+                // re-derive AABBs, materials and mechanics for every actor, so a row
+                // only carries what the tree UI reads (see scene_tree_actor.h).
+                Corona::Ui::Cef::SceneTreeActorRow row;
+                row.name = actor.name;
+                row.actor_guid = actor.actor_guid;
+                row.route = actor.route;
+                row.actor_type = actor.actor_type;
+                row.handle = actor.engine_actor ? actor.engine_actor->get_handle() : 0;
+                row.visible = actor.optics ? actor.optics->get_visible() : true;
+                // The persisted actor remains in the tree while its GPU
+                // resources are built. UI identity must never depend on
+                // mesh_handles becoming ready.
+                row.load_status = gpu_failed ? "gpu_failed"
+                    : (gpu_pending ? "gpu_uploading" : actor_load_status_name(actor.load_status));
+                row.gpu_build_state = gpu_build_state;
+                row.audio_resource_id = actor.actor_type == "audio"
+                    ? std::to_string(actor.audio_resource_id) : std::string{};
+                row.has_load_error = actor.load_status != ActorLoadStatus::Loaded;
+                if (row.has_load_error) {
+                    row.load_error_code = actor.load_error_code;
+                    row.load_error_message = actor.load_error_message;
+                    row.load_error_resource_path = actor.route;
+                    row.load_error_path = actor.resolved_asset_path;
+                }
+                if (actor.geometry) {
+                    // Counts only: materializing every node state here would copy
+                    // thousands of strings per refresh on this thread.
+                    const auto node_counts = actor.geometry->get_model_node_counts();
+                    row.model_node_count = node_counts.total;
+                    row.model_node_root_count = node_counts.roots;
+                }
+                actors.push_back(Corona::Ui::Cef::scene_tree_actor_to_json(row));
             }
             nlohmann::json cameras = nlohmann::json::array();
             for (const auto& camera : scene->cameras) {
                 cameras.push_back(camera_to_json(camera));
             }
+            if (actors.empty() && cameras.empty()) {
+                CFW_LOG_WARNING("[SceneTree] empty snapshot requested='{}' resolved='{}'",
+                                arg_string(request.args, 0), scene->route);
+            }
             const bool has_project_sidecar =
                 scene->vision_storage == "project_sidecar" &&
                 !sanitize_vision_source_id(scene->vision_source_id).empty();
-            return native_success({
-                {"actors", actors},
-                {"cameras", cameras},
-                {"vision", {
-                    {"enabled", has_project_sidecar || !scene->vision_source_path.empty()},
-                    {"storage", scene->vision_storage},
-                    {"source_id", scene->vision_source_id},
-                    {"source_path", scene->vision_source_path},
-                    {"import_mode", scene->vision_import_mode},
-                    {"binding_count", 0},
-                    {"unsupported_count", 0},
-                }},
-            });
+            nlohmann::json vision = nlohmann::json::object();
+            vision["enabled"] = has_project_sidecar || !scene->vision_source_path.empty();
+            vision["storage"] = scene->vision_storage;
+            vision["source_id"] = scene->vision_source_id;
+            vision["source_path"] = scene->vision_source_path;
+            vision["import_mode"] = scene->vision_import_mode;
+            vision["binding_count"] = 0;
+            vision["unsupported_count"] = 0;
+            nlohmann::json data = nlohmann::json::object();
+            data["actors"] = std::move(actors);
+            data["cameras"] = std::move(cameras);
+            data["vision"] = std::move(vision);
+            return native_success(std::move(data));
         }},
         {"list_actor_tree", [](const NativeRequest& request, const NativeContext&) {
             auto* scene = scene_for_request_route(request);
+            // Same rule as the snapshot handler: the editor UI thread reads best effort.
+            const bool best_effort = CefCurrentlyOn(TID_UI);
             nlohmann::json actors = nlohmann::json::array();
             for (const auto& actor : scene->actors) {
-                actors.push_back(actor_to_json(*scene, actor));
+                actors.push_back(actor_to_json(*scene, actor, best_effort));
             }
             return native_success(actors);
+        }},
+        {"get_model_nodes", [](const NativeRequest& request, const NativeContext&) {
+            auto* scene = scene_for_request_route(request);
+            auto* actor = find_native_actor(*scene, arg_string(request.args, 1));
+            if (!actor || !actor->geometry) return native_failure("Model actor not found", 404);
+            try {
+                const auto parent_index = request.args.size() > 2 ? request.args.at(2).get<std::int64_t>() : -1;
+                const auto offset = request.args.size() > 3 ? request.args.at(3).get<std::size_t>() : 0;
+                const auto limit = request.args.size() > 4 ? request.args.at(4).get<std::size_t>() : 100;
+                if (parent_index < -1 || parent_index > std::numeric_limits<std::uint32_t>::max() ||
+                    limit == 0 || limit > 200) return native_failure("Invalid model node page request", 400);
+                auto response = native_model_node_page(*actor, parent_index, offset, limit);
+                response["actor_name"] = actor->name;
+                response["parent_index"] = parent_index;
+                response["status"] = response.at("nodes").empty()
+                    ? actor->geometry->get_gpu_build_state() : "ready";
+                return native_success(std::move(response));
+            } catch (const std::exception& error) {
+                return native_failure(error.what(), 400);
+            }
+        }},
+        {"set_model_node_state", [](const NativeRequest& request, const NativeContext&) {
+            try {
+                auto* scene = scene_for_request_route(request);
+                auto* actor = find_native_actor(*scene, arg_string(request.args, 1));
+                if (!actor || !actor->geometry) return native_failure("Model actor not found", 404);
+                if (request.args.size() < 4 || !request.args.at(3).is_object()) {
+                    return native_failure("Model node state must be an object", 400);
+                }
+                const auto checked = ModelNodeConfig::normalize(nlohmann::json::array({
+                    {{"node_index", request.args.at(2)}, {"node_path", "validate-index"}}}));
+                const auto index = checked.at(0).at("node_index").get<std::uint32_t>();
+                const auto patch = ModelNodeConfig::fields(request.args.at(3));
+                if (patch.empty()) return native_failure("Node state contains no supported fields", 400);
+                const auto nodes = actor->geometry->get_model_nodes();
+                const auto found = std::find_if(nodes.begin(), nodes.end(), [&](const auto& node) {
+                    return node.node_index == index;
+                });
+                if (found == nodes.end()) return native_failure("Model node is unavailable or not loaded", 409);
+                auto state = *found;
+                if (patch.contains("position")) state.position = patch.at("position").get<std::array<float, 3>>();
+                if (patch.contains("rotation")) state.rotation = patch.at("rotation").get<std::array<float, 3>>();
+                if (patch.contains("scale")) state.scale = patch.at("scale").get<std::array<float, 3>>();
+                if (patch.contains("visible")) state.visible = patch.at("visible").get<bool>();
+                if (!actor->geometry->set_model_node_state(index, state)) {
+                    return native_failure("Node edit rejected: animated or non-decomposable transform, or model not ready", 409);
+                }
+                nlohmann::json node_keys = nlohmann::json::array();
+                for (const auto& node : nodes) node_keys.push_back({
+                    {"node_index", node.node_index}, {"node_path", node.node_path}});
+                auto [active, unmatched] = ModelNodeConfig::partition(actor->persisted_model_node_overrides,
+                    actor->model_node_resource, actor->model_node_current_resource, node_keys);
+                for (auto& group : unmatched) actor->model_node_unmatched.push_back(std::move(group));
+                actor->persisted_model_node_overrides = ModelNodeConfig::merge(active, index, state.node_path, patch);
+                actor->model_node_resource = actor->model_node_current_resource;
+                actor->actor_version = std::max(actor->actor_version + 1, 1);
+                persist_native_scene_actors(*scene);
+                bool visibility_changed = false;
+                auto updated_node = model_node_to_json(state);
+                const auto updated = actor->geometry->get_model_nodes();
+                const bool actor_visible = actor->optics ? actor->optics->get_visible() : actor->persisted_visible;
+                for (std::size_t i = 0; i < updated.size(); ++i) {
+                    const auto& node = updated[i];
+                    if (node.node_index == index) {
+                        updated_node = model_node_to_json(node);
+                        updated_node["effective_visible"] = node.effective_visible && actor_visible;
+                    }
+                    if (i < nodes.size() && node.effective_visible != nodes[i].effective_visible) {
+                        visibility_changed = true;
+                    }
+                }
+                return native_success({{"status", "success"}, {"actor_name", actor->name},
+                    {"node", updated_node}, {"visibility_changed", visibility_changed}});
+            } catch (const std::exception& error) {
+                return native_failure(error.what(), 400);
+            }
         }},
         {"reload_scene", [](const NativeRequest& request, const NativeContext&) {
             const auto scene_route = arg_string(request.args, 0);
@@ -9631,7 +9892,8 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             if (pick_x < 0 || pick_x >= camera->width || pick_y < 0 || pick_y >= camera->height) {
                 return native_success({{"status", "miss"}});
             }
-            const auto handle = camera->engine_camera->pick_actor_at_pixel(pick_x, pick_y);
+            const auto picked = camera->engine_camera->pick_model_node_at_pixel(pick_x, pick_y);
+            const auto handle = picked.actor_handle;
             if (handle == 0) {
                 return native_success({{"status", "pending"}});
             }
@@ -9643,6 +9905,8 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             return native_success({
                 {"status", "success"},
                 {"actor", actor_to_json(*scene, *actor)},
+                {"actor_name", actor->name},
+                {"node_index", picked.node_index == UINT32_MAX ? nlohmann::json(nullptr) : nlohmann::json(picked.node_index)},
             });
         }},
         {"play_audio", [](const NativeRequest& request, const NativeContext&) {
@@ -9728,9 +9992,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                         actor->geometry->get_gpu_build_state() + ")",
                         2);
                 }
-
-                auto& rm = Corona::Resource::ResourceManager::get_instance();
-                auto scene_read = rm.acquire_read<Corona::Resource::Scene>(model_id);
+                auto scene_read = read_resource_for_ui<Corona::Resource::Scene>(model_id);
                 if (!scene_read.valid()) {
                     return native_failure(
                         "ResourceManager cannot acquire Scene for model_id=" +
@@ -9776,8 +10038,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                 }
                 const auto model_id = actor->geometry->get_model_id();
                 if (model_id == 0) return native_failure("IK model import is not ready: " + actor_name, 2);
-                auto resource = Corona::Resource::ResourceManager::get_instance()
-                                    .acquire_read<Corona::Resource::Scene>(model_id);
+                auto resource = read_resource_for_ui<Corona::Resource::Scene>(model_id);
                 if (!resource.valid()) return native_failure("IK model resource is unavailable", 2);
                 auto geometry = Corona::SharedDataHub::instance().geometry_storage().try_acquire_read(
                     actor->geometry->get_handle());
@@ -9806,8 +10067,7 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                 nlohmann::json payload;
                 nlohmann::json saved_config;
                 {
-                    auto resource = Corona::Resource::ResourceManager::get_instance()
-                                        .acquire_read<Corona::Resource::Scene>(model_id);
+                    auto resource = read_resource_for_ui<Corona::Resource::Scene>(model_id);
                     if (!resource.valid() || !resource->data.skeleton) {
                         return native_failure("Actor model has no skeleton: " + actor_name, 2);
                     }

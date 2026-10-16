@@ -1,4 +1,4 @@
-﻿#include "cef_editor_api.h"
+#include "cef_editor_api.h"
 
 #include <horizon/core/logging.h>
 #include <corona/systems/script/python_runtime_coordinator.h>
@@ -417,6 +417,20 @@ constexpr std::array<EditorApiParamSpec, 5> kSceneToolsPickActorParams = {{
     param("viewport_height", EditorApiValueType::Number),
 }};
 
+constexpr std::array<EditorApiParamSpec, 4> kModelNodeStateParams = {{
+    param("scene_name", EditorApiValueType::String),
+    param("actor_name", EditorApiValueType::String),
+    param("node_index", EditorApiValueType::Integer),
+    param("state", EditorApiValueType::Object),
+}};
+constexpr std::array<EditorApiParamSpec, 5> kModelNodePageParams = {{
+    param("scene_name", EditorApiValueType::String),
+    param("actor_name", EditorApiValueType::String),
+    param("parent_index", EditorApiValueType::Integer, true),
+    param("offset", EditorApiValueType::Integer, true),
+    param("limit", EditorApiValueType::Integer, true),
+}};
+
 constexpr std::array<EditorApiParamSpec, 2> kSceneToolsPlayAudioParams = {{
     param("resource_id", EditorApiValueType::Any),
     param("loop", EditorApiValueType::Boolean, true),
@@ -650,6 +664,8 @@ constexpr auto kEditorApiMethods = std::to_array<EditorApiMethodSpec>({
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, stop_audio, kResourceIdParam, "sceneTools.stopAudio", "scene_tools.stop_audio", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, sun_direction, kSceneToolsSunDirectionParams, "sceneTools.sunDirection", "scene_tools.sun_direction", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_actor_skeleton_leaves, kSceneActorParams, "sceneTools.getActorSkeletonLeaves", "scene_tools.get_actor_skeleton_leaves", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_model_nodes, kModelNodePageParams, "sceneTools.getModelNodes", "scene_tools.get_model_nodes", EditorApiValueType::Object),
+    EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_model_node_state, kModelNodeStateParams, "sceneTools.setModelNodeState", "scene_tools.set_model_node_state", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, get_actor_ik_chains, kSceneActorParams, "sceneTools.getActorIkChains", "scene_tools.get_actor_ik_chains", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, set_actor_ik_chains, kSceneToolsSetIkChainsParams, "sceneTools.setActorIkChains", "scene_tools.set_actor_ik_chains", EditorApiValueType::Object),
     EDITOR_API_METHOD_SCHEMA_WRAPPED(SceneTools, update_camera_view, kSceneToolsUpdateCameraViewParams, "sceneTools.updateCameraView", "scene_tools.update_camera_view", EditorApiValueType::Object),

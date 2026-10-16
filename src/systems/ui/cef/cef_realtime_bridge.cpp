@@ -1,5 +1,6 @@
 #include "cef_bridge_helpers.h"
 #include "cef_editor_api.h"
+#include "ui_resource_read.h"
 
 #include <horizon/core/logging.h>
 #include <corona/resource/resource_manager.h>
@@ -111,8 +112,7 @@ const ViewportGizmoCpuMasks& viewport_gizmo_cpu_masks() {
                 return;
             }
             auto image =
-                Corona::Resource::ResourceManager::get_instance()
-                    .acquire_read<Corona::Resource::Image>(image_id);
+                read_resource_for_ui<Corona::Resource::Image>(image_id);
             if (!image || image->get_width() <= 0 || image->get_height() <= 0 ||
                 image->get_data() == nullptr) {
                 CFW_LOG_WARNING("Viewport gizmo alpha mask is invalid: {}", path.string());
@@ -535,8 +535,7 @@ bool append_geometry_focus_bounds(const FocusGeometrySource& source, FocusBounds
         }
 
         auto scene_resource =
-            Corona::Resource::ResourceManager::get_instance()
-                .acquire_read<Corona::Resource::Scene>(model_id);
+            read_resource_for_ui<Corona::Resource::Scene>(model_id);
         if (!scene_resource) {
             return false;
         }
@@ -749,6 +748,7 @@ void drain_actor_pick_completion_events_impl() {
             {"cameraHandle", static_cast<std::uint64_t>(completion.camera_handle)},
             {"requestId", completion.request_id},
             {"actorHandle", static_cast<std::uint64_t>(completion.actor_handle)},
+            {"node_index", completion.node_index == UINT32_MAX ? nlohmann::json(nullptr) : nlohmann::json(completion.node_index)},
             {"x", completion.x},
             {"y", completion.y},
         };

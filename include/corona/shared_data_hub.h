@@ -6,6 +6,7 @@
 #include <corona/systems/optics/viewport_gizmo_math.h>
 
 #include <ktm/ktm.h>
+#include <corona/systems/geometry/model_node_state.h>
 
 #include <array>
 #include <chrono>
@@ -60,6 +61,10 @@ struct MeshDevice {
 struct MeshInstanceDevice {
     std::uint32_t mesh_index = 0;
     std::uint32_t object_id = 0;
+    std::uint32_t node_index = UINT32_MAX;
+    bool visible = true;
+    std::array<float,3> local_bounds_min{}, local_bounds_max{};
+    ktm::fmat4x4 original_transform{ktm::fmat4x4::from_eye()};
     ktm::fmat4x4 transform{ktm::fmat4x4::from_eye()};
 };
 
@@ -109,6 +114,13 @@ struct GeometryDevice {
     std::uintptr_t model_resource_handle{};
     std::vector<MeshDevice> mesh_handles;
     std::vector<MeshInstanceDevice> mesh_instances;
+    std::vector<ModelNodes::Node> model_nodes;
+    std::vector<API::ModelNodeOverride> model_node_overrides;
+    std::uint64_t model_node_revision = 0;
+    ModelNodes::Matrix node_instance_prefix=ModelNodes::identity();
+    bool has_node_instance_prefix=false;
+    bool model_node_instances_mapped=false;
+    std::optional<std::array<float,6>> model_node_bounds;
     ktm::fvec3 native_local_correction_offset{0.0f, 0.0f, 0.0f};
     float native_local_correction_scale{1.0f};
     GpuBuildState gpu_build_state{GpuBuildState::Ready};
@@ -378,6 +390,7 @@ struct ActorPickDevice {
     std::uint32_t result_x{0};
     std::uint32_t result_y{0};
     std::uintptr_t actor_handle{0};
+    std::uint32_t node_index{UINT32_MAX};
     bool pending{false};
     bool result_ready{false};
 };
@@ -401,6 +414,7 @@ struct ActorPickCompletion {
     std::uintptr_t actor_handle{};
     std::uint32_t x{0};
     std::uint32_t y{0};
+    std::uint32_t node_index{UINT32_MAX};
 };
 
 struct CameraMoveCommand {
