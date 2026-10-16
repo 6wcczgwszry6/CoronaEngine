@@ -356,9 +356,8 @@
 
           <!-- 对象列表 -->
           <div v-show="actorsExpanded" class="pl-2 pb-8" data-guidance="scene-actor-list">
+            <template v-for="scene in sceneImages" :key="scene.name">
             <div
-              v-for="scene in sceneImages"
-              :key="scene.name"
               :data-actor-name="scene.name"
               class="group flex items-center px-2 py-0.5 hover:bg-[#3c3c3c]/50 cursor-pointer border-l-2 border-transparent hover:border-[#d8b86c]"
               :class="{ 'bg-[#4b391c]/60': selectedItem === scene.name }"
@@ -407,8 +406,16 @@
               <span class="text-xs text-[#e0e0e0] truncate flex-1" :title="scene.name">
                 {{ scene.name }}
               </span>
+              <span
+                v-if="scene.load_status === 'gpu_uploading'"
+                class="text-[10px] text-[#8ab4f8] mr-1"
+                title="GPU 资源正在分批上传"
+                data-testid="actor-gpu-uploading"
+              >
+                上传中
+              </span>
               <button
-                v-if="scene.load_status && scene.load_status !== 'loaded'"
+                v-else-if="scene.load_status && scene.load_status !== 'loaded'"
                 class="text-[10px] text-[#f0c674] mr-1"
                 :title="scene.load_error?.message || '资源加载失败，点击重新绑定'"
                 data-testid="actor-load-warning"
@@ -527,6 +534,8 @@
               </button>
             </div>
 
+            <ModelNodeHierarchy v-if="Number(scene.model_node_count || 0) > 0" :active="actorsExpanded" :scene-name="currentSceneName" :actor="scene" :selection="modelNodeSelection" @select="selectModelNode" />
+            </template>
             <!-- 空状态 -->
             <div v-if="sceneImages.length === 0" class="px-4 py-8 text-center">
               <span class="text-xs text-[#666]">场景为空，点击 + 添加对象</span>
@@ -549,11 +558,15 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted, computed } from 'vue';
 import { useRoute } from 'vue-router';
+import ModelNodeHierarchy from '@/components/ui/ModelNodeHierarchy.vue';
+import { pickedNodeIdentity } from '@/utils/modelHierarchy.js';
 import DockTitleBar from '@/components/ui/DockTitleBar.vue';
 import { editorApi } from '@/api/editorApi.js';
 import { appService } from '@/services/appService.js';
 import { resourceService } from '@/services/resourceService.js';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
+import { resolveOpenedProjectScene } from '@/utils/projectSceneLifecycle.js';
+import { emptySceneTreeSettlement, resolveSceneTreeSnapshot } from '@/utils/sceneTreeSnapshot.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { setActorContext } from '@/blockly/composables/useActorContext.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
@@ -567,6 +580,35 @@ const { error: logError, warn: logWarn } = useErrorHandler('SceneBar');
 const currentSceneName = ref('');
 let actorChangedCallbackToken = null;
 let sceneTreeChangedCallbackToken = null;
+let projectOpenedCallbackToken = null;
+let nodeSelectionCallbackToken = null;
+let sceneTreeRequestSeq = 0;
+let sceneTreeSettleTimer = null;
+let sceneTreeSettleTimerScene = '';
+const sceneTreeSettlement = ref(emptySceneTreeSettlement());
+
+const clearSceneTreeSettleRetry = () => {
+  if (sceneTreeSettleTimer) window.clearTimeout(sceneTreeSettleTimer);
+  sceneTreeSettleTimer = null;
+  sceneTreeSettleTimerScene = '';
+};
+
+// A project or scene opened by the native editor materializes asynchronously, so
+// an empty snapshot can mean "the actors are not created yet" rather than "the
+// scene is empty".  Keep asking inside the settle window instead of leaving the
+// dock blank.
+const scheduleSceneTreeSettleRetry = (delayMs, sceneName) => {
+  if (!delayMs) return;
+  if (sceneTreeSettleTimer && sceneTreeSettleTimerScene === sceneName) return;
+  clearSceneTreeSettleRetry();
+  sceneTreeSettleTimerScene = sceneName;
+  sceneTreeSettleTimer = window.setTimeout(() => {
+    sceneTreeSettleTimer = null;
+    sceneTreeSettleTimerScene = '';
+    if (sceneName !== currentSceneName.value) return;
+    void OnInitObjTree();
+  }, delayMs);
+};
 
 const showLoading = (title, message, progress = 0) => {
   coronaEventBus.emit('loading-show', { title, message, progress });
@@ -617,6 +659,26 @@ const getTypeShort = (type) => {
 };
 
 const selectedItem = ref(null);
+const modelNodeSelection = ref(null);
+const publishModelNodeSelection = (identity) => {
+  modelNodeSelection.value = identity;
+  coronaEventBus.modelNodeSelection = identity;
+  coronaEventBus.emit('model-node-selection', identity);
+};
+const selectModelNode = (identity) => {
+  const previous = modelNodeSelection.value;
+  publishModelNodeSelection(identity); selectedItem.value = null;
+  const actorName = identity?.actorName || previous?.actorName;
+  if (!actorName) return;
+  const actor = sceneImages.value.find(item => item.name === actorName);
+  editorApi.sceneTools.selectActor(currentSceneName.value, actor?.type || 'model', actorName, {node_index: identity?.nodeIndex ?? null}).catch(error => logError('Failed to publish model node selection', error));
+};
+const handleModelNodePick = (payload) => {
+  const scene = payload.sceneId || payload.scene || payload.scene_id;
+  if (scene && scene !== currentSceneName.value) return;
+  publishModelNodeSelection(pickedNodeIdentity(payload));
+  if (modelNodeSelection.value) { selectedItem.value = null; actorsExpanded.value = true; }
+};
 const selectedCameraName = ref(null);
 const sceneCameras = ref([]);
 const camerasExpanded = ref(true);
@@ -905,6 +967,7 @@ const ControlObject = async (scene) => {
 };
 
 const SelectActor = (scene) => {
+  publishModelNodeSelection(null);
   selectedItem.value = scene.name;
   // 扁平音视频资源仅作选中；audio Actor 走正常 Actor 选中（打开物体栏变换编辑器）。
   if (isMediaItem(scene) && !isAudioActor(scene)) return;
@@ -928,6 +991,7 @@ const SelectActor = (scene) => {
 };
 
 const SelectCamera = (cam) => {
+  publishModelNodeSelection(null);
   selectedItem.value = 'cam:' + cam.name;
   selectedCameraName.value = cam.name;
   RefreshRenderBackendState();
@@ -1512,21 +1576,25 @@ const CloseFloat = async () => {
 };
 
 const OnInitObjTree = async () => {
+  const sceneName = currentSceneName.value;
+  const requestSeq = ++sceneTreeRequestSeq;
+  if (!sceneName) return;
   try {
-    const result = await editorApi.sceneTools.listSceneTree(currentSceneName.value);
-    sceneImages.value = [];
-    sceneCameras.value = [];
-    sceneVision.value = {};
+    const result = await editorApi.sceneTools.listSceneTree(sceneName);
+    // Scene switches and native tree notifications can overlap.  Only the most
+    // recent request for the still-active route may replace the displayed tree.
+    if (requestSeq !== sceneTreeRequestSeq || sceneName !== currentSceneName.value) return;
 
-    if (result.success && result.data) {
-      const data = result.data;
-      sceneVision.value = data.vision || {};
-
-      if (Array.isArray(data.actors)) {
-        data.actors.forEach((item) => {
-          sceneImages.value.push({
+    // Both transports return the native payload in `data`, but keeping the
+    // direct-payload fallback means a valid snapshot is never discarded when a
+    // CEF bridge has already unwrapped it.
+    const data = result?.data ?? result;
+    if (result?.success !== false && data && typeof data === 'object') {
+      const nextActors = Array.isArray(data.actors)
+        ? data.actors.map((item) => ({
             name: item.name,
             actor_guid: item.actor_guid || '',
+            model_node_count: Number(item.model_node_count || 0),
             path: item.path,
             type: item.type || 'obj',
             visible: item.visible !== false,
@@ -1536,20 +1604,31 @@ const OnInitObjTree = async () => {
             vision_binding: item.vision_binding || null,
             load_status: item.load_status || 'loaded',
             load_error: item.load_error || null,
-          });
-        });
-      }
-
-      if (Array.isArray(data.cameras)) {
-        applyCameraList(data.cameras);
-      }
+          }))
+        : [];
+      // Commit the full snapshot atomically.  A failed or stale refresh keeps
+      // the last known tree visible instead of presenting an empty panel.
+      const decision = resolveSceneTreeSnapshot({
+        sceneName,
+        actors: nextActors,
+        settlement: sceneTreeSettlement.value,
+      });
+      sceneTreeSettlement.value = decision.settlement;
+      // Cameras and vision metadata do not depend on actor materialization.
+      sceneVision.value = data.vision || {};
+      if (Array.isArray(data.cameras)) applyCameraList(data.cameras);
+      // An empty snapshot taken while a freshly opened scene is still building its
+      // actors is provisional; committing it left the dock empty for good.
+      if (decision.commit) sceneImages.value = decision.rows;
+      scheduleSceneTreeSettleRetry(decision.retryInMs, sceneName);
     }
   } catch (e) {
-    logError('Failed to load scene tree', e);
+    if (requestSeq === sceneTreeRequestSeq) logError('Failed to load scene tree', e);
   }
 };
 
 onMounted(async () => {
+  coronaEventBus.on('model-node-picked', handleModelNodePick);
   const result = await editorApi.main.onInit();
   if (RESOURCE_SEARCH_ENABLED) {
     resourceService.prepareIndex().catch((error) => {
@@ -1569,6 +1648,8 @@ onMounted(async () => {
   // 后端对象变化：场景切换/物体变化时重新加载场景树
   actorChangedCallbackToken = await editorApi.events.onActorChanged(onActorChangeEvent);
   sceneTreeChangedCallbackToken = await editorApi.events.onSceneTreeChanged(onSceneTreeChangedEvent);
+  projectOpenedCallbackToken = await editorApi.events.onProjectOpened(onProjectOpenedEvent);
+  nodeSelectionCallbackToken = await editorApi.events.onActorSelectionChanged(handleModelNodePick);
 });
 
 // 场景切换时刷新当前场景树；actor 选择只更新详情面板，不重建树，避免点击闪烁。
@@ -1576,6 +1657,7 @@ const onActorChangeEvent = (payload, maybeSceneId /*, actorId, oldPath */) => {
   const type = payload?.actor_type ?? payload?.type ?? payload;
   const sceneId = payload?.scene ?? maybeSceneId;
   if (type !== 'scene' || !sceneId) return;
+  publishModelNodeSelection(null);
   currentSceneName.value = sceneId;
   OnInitObjTree();
 };
@@ -1585,6 +1667,15 @@ const onSceneTreeChangedEvent = (payload) => {
   if (!sceneName || sceneName === currentSceneName.value) {
     OnInitObjTree();
   }
+};
+
+const onProjectOpenedEvent = (payload = {}) => {
+  const sceneRoute = resolveOpenedProjectScene(payload);
+  if (!sceneRoute) return;
+  publishModelNodeSelection(null);
+  currentSceneName.value = sceneRoute;
+  void OnInitObjTree();
+  void RefreshRenderBackendState();
 };
 
 const normalizeCameraPayload = (cam) => ({
@@ -1643,6 +1734,10 @@ const RefreshCameraListOnHover = () => {
 };
 
 onUnmounted(() => {
+  clearSceneTreeSettleRetry();
+  coronaEventBus.off('model-node-picked', handleModelNodePick);
+  if (nodeSelectionCallbackToken) editorApi.off(nodeSelectionCallbackToken).catch(error => logError('Failed to unregister node selection callback', error));
+  nodeSelectionCallbackToken = null;
   if (searchDebounce) {
     clearTimeout(searchDebounce);
     searchDebounce = null;
@@ -1665,6 +1760,12 @@ onUnmounted(() => {
       logError('Failed to unregister scene tree changed callback', error);
     });
     sceneTreeChangedCallbackToken = null;
+  }
+  if (projectOpenedCallbackToken) {
+    editorApi.off(projectOpenedCallbackToken).catch((error) => {
+      logError('Failed to unregister project opened callback', error);
+    });
+    projectOpenedCallbackToken = null;
   }
 });
 </script>

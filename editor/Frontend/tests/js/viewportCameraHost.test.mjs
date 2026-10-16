@@ -20,7 +20,6 @@ import { createPlayerSave } from '../../../../game/frontend/playerSave.mjs';
 import { ensureStoryCharacters, syncPlacementActors } from '../../../../game/frontend/storyActors.mjs';
 import { sceneFixture } from '../../../../game/tests/frontend/fixtures.mjs';
 import { registerWorldSessionSave, flushWorldSessionSaves, trackWorldSessionWork } from '../../src/services/worldSessionLifecycle.js';
-import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera } from '../../src/utils/visionRenderModes.js';
 import { normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera, visionStablePlanesFromCamera } from '../../src/utils/visionRenderModes.js';
 
 const source = fs.readFileSync(new URL('../../src/views/layout/MainPage.vue', import.meta.url), 'utf8');

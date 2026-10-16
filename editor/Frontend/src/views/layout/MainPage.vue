@@ -613,6 +613,7 @@ import { computed, ref, onMounted, onUnmounted, reactive, watch, nextTick } from
 import { useRouter } from 'vue-router';
 import { useI18n } from 'vue-i18n';
 import { DEFAULT_SCENE_NAME } from '@/utils/constants.js';
+import { resolveOpenedProjectScene, resolveSceneTabs } from '@/utils/projectSceneLifecycle.js';
 import {
   normalizeVisionRenderMode, visionAccumulationFromCamera, visionDenoiseFromCamera, visionStablePlanesFromCamera, visionRenderModes,
 } from '@/utils/visionRenderModes.js';
@@ -626,6 +627,7 @@ import { projectLauncherService } from '@/services/projectLauncherService.js';
 import { useErrorHandler } from '@/composables/useErrorHandler.js';
 import { useDockStore } from '@/stores/dockStore.js';
 import { PLUGIN_MANIFEST } from '@/config/pluginManifest.js';
+import { pickedNodeIdentity } from '@/utils/modelHierarchy.js';
 import { coronaEventBus } from '@/utils/eventBus.js';
 import {
   closeFloatingPanel,
@@ -799,6 +801,7 @@ let actorSelectionCallbackToken = null;
 let gizmoPointerResultCallbackToken = null;
 let actorTransformCallbackToken = null;
 let sceneAddedCallbackToken = null;
+let projectOpenedCallbackToken = null;
 const actorTransformBaselines = new Map();
 const ACTOR_TRANSFORM_EPSILON = 1e-5;
 let sceneRenamedCallbackToken = null;
@@ -965,8 +968,9 @@ const handleActorTransformForCabbage = (payload = {}) => {
   }
 };
 
-const emitActorChangeFast = (type, sceneId, actorName) => {
+const emitActorChangeFast = (type, sceneId, actorName, nodeContext = {}) => {
   editorApi.sceneTools.selectActor(sceneId, type, actorName, {
+    ...nodeContext,
     sourceViewport: 'main',
     sourceCameraHandle: Number(cameraBindingState.value.cameraHandle || 0),
   }).catch((error) => {
@@ -975,6 +979,8 @@ const emitActorChangeFast = (type, sceneId, actorName) => {
 };
 
 const handleActorSelectionForObjectDock = async (payload = {}, maybeSceneId = '', maybeActorName = '') => {
+  coronaEventBus.modelNodeSelection = pickedNodeIdentity(payload);
+  coronaEventBus.emit('model-node-selection', coronaEventBus.modelNodeSelection);
   const actorType = String(payload?.actor_type || payload?.type || '').trim().toLowerCase();
   const sceneId = String(payload?.scene || payload?.scene_id || maybeSceneId || '').trim();
   const actorName = String(payload?.actor || payload?.actor_name || maybeActorName || '').trim();
@@ -1012,7 +1018,7 @@ const viewportPickController = createViewportPickController({
   getHitRect: getViewportHitRect,
   getRenderRect: getViewportRenderRect,
   getActorIndex: () => actorPickIndex,
-  emitActorChange: (type, sceneId, actorName) => emitActorChangeFast(type, sceneId, actorName),
+  emitActorChange: (type, sceneId, actorName, nodeContext) => emitActorChangeFast(type, sceneId, actorName, nodeContext),
 });
 
 const viewportGizmoController = createViewportGizmoController({
@@ -1032,7 +1038,9 @@ const viewportGizmoController = createViewportGizmoController({
   },
 });
 
+const handleModelNodeGizmoSelection = (identity) => { if (identity) viewportGizmoController.clearTarget(); };
 const syncMainViewportGizmoSelection = async (selection = {}, pickResult = null) => {
+  if (coronaEventBus.modelNodeSelection) { viewportGizmoController.clearTarget(); return; }
   const sceneId =
     String(cameraBindingState.value.sceneId || tabs.value[activeTab.value]?.id || '').trim();
   let target = resolveViewportGizmoTarget({
@@ -1050,7 +1058,7 @@ const syncMainViewportGizmoSelection = async (selection = {}, pickResult = null)
       actorIndex: actorPickIndex,
     });
   }
-  if (target) {
+  if (target && !coronaEventBus.modelNodeSelection) {
     viewportGizmoController.setTarget(target);
   } else {
     viewportGizmoController.clearTarget();
@@ -1362,7 +1370,7 @@ function refreshCameraAfterProjectChange() {
   }, 0);
 }
 
-function applyActualProjectChange(projectPath) {
+function applyActualProjectChange(projectPath, { refreshCamera = true } = {}) {
   if (!viewCurrent()) return false;
   const normalizedPath = normalizeActiveProjectPath(projectPath);
   if (normalizedPath === activeProjectPathSnapshot) return false;
@@ -1375,7 +1383,7 @@ function applyActualProjectChange(projectPath) {
   clearNodeReviewForProjectChange();
   clearKnownEditorCameraInputLocks();
   void reconcileEditorCameraInputLocks();
-  refreshCameraAfterProjectChange();
+  if (refreshCamera) refreshCameraAfterProjectChange();
   return true;
 }
 
@@ -2311,6 +2319,8 @@ const refreshActorPickIndex = async (sceneId) => {
 
 const applyActorPickResult = (result, payload = result?.payload) => {
   if (result.status === 'pending' || result.status === 'stale') return;
+  if (result.status === 'selected') coronaEventBus.emit('model-node-picked', { ...payload, actor_name: payload?.actor_name || result.actor?.name });
+  if (result.status === 'miss') coronaEventBus.emit('model-node-picked', payload);
 
   if (result.status !== 'selected') {
     const fallbackActorHandle = Number(payload?.actorHandle || 0);
@@ -3048,6 +3058,30 @@ const onSceneAddedEvent = (payload) => addSceneTab(payload?.name, payload?.route
 
 const onSceneRenamedEvent = (payload) => renameSceneTab(payload?.old_path, payload?.new_path, payload?.name);
 
+let projectOpenedRefreshRevision = 0;
+const onProjectOpenedEvent = async (payload = {}) => {
+  const refreshRevision = ++projectOpenedRefreshRevision;
+  const openedSceneRoute = resolveOpenedProjectScene(payload);
+  applyActualProjectChange(payload?.path, { refreshCamera: false });
+
+  try {
+    const result = await editorApi.main.onInit();
+    if (!viewCurrent() || refreshRevision !== projectOpenedRefreshRevision) return;
+    const snapshot = resolveSceneTabs(result?.data ?? result, openedSceneRoute || DEFAULT_SCENE_NAME);
+    tabs.value = snapshot.tabs;
+    activeTab.value = snapshot.activeIndex;
+    resetRealtimeCameraInput();
+    const sceneId = tabs.value[activeTab.value]?.id || openedSceneRoute || DEFAULT_SCENE_NAME;
+    await syncSceneCameraBinding(sceneId, { preservePose: false });
+    if (!viewCurrent() || refreshRevision !== projectOpenedRefreshRevision) return;
+    syncViewportUiMode();
+    scheduleCameraViewportSync();
+    broadcastViewportControlsState();
+  } catch (error) {
+    logError('Failed to restore editor state after opening project', error);
+  }
+};
+
 const pendingPanelRedocks = new Map();
 const PANEL_REDOCK_TTL_MS = 5000;
 
@@ -3103,8 +3137,7 @@ onMounted(async () => {
   const result = await editorApi.main.onInit();
   if (!viewCurrent()) return;
   const initData = result?.data ?? result;
-  const scenes = initData?.scenes ?? [];
-  const activeIndex = Number(initData?.active_index ?? 0);
+  const initialTabs = resolveSceneTabs(initData, DEFAULT_SCENE_NAME);
   await pollProjectResourceLoadStatus();
   if (!viewCurrent()) return;
   try {
@@ -3115,21 +3148,8 @@ onMounted(async () => {
     visionAvailable.value = false;
   }
 
-  if (scenes.length > 0) {
-    for (const s of scenes) {
-      tabs.value.push({ name: s.name, id: s.path });
-    }
-  } else {
-    // 兼容旧格式
-    tabs.value.push({
-      name: initData?.name ?? DEFAULT_SCENE_NAME,
-      id: initData?.path ?? DEFAULT_SCENE_NAME,
-    });
-  }
-  const resolvedActiveIndex =
-    tabs.value.length > 0
-      ? Math.min(Math.max(Number.isFinite(activeIndex) ? activeIndex : 0, 0), tabs.value.length - 1)
-      : 0;
+  tabs.value = initialTabs.tabs;
+  const resolvedActiveIndex = initialTabs.activeIndex;
   activeTab.value = resolvedActiveIndex;
 
   await startEngine();
@@ -3182,6 +3202,8 @@ onMounted(async () => {
   coronaEventBus.on('node-graph-panel-open-request', handleNodeGraphPanelOpenRequest);
   sceneAddedCallbackToken = await subscribeWhileCurrent(editorApi.events.onSceneAdded, onSceneAddedEvent);
   if (!viewCurrent()) return;
+  projectOpenedCallbackToken = await subscribeWhileCurrent(editorApi.events.onProjectOpened, onProjectOpenedEvent);
+  if (!viewCurrent()) return;
   sceneRenamedCallbackToken = await subscribeWhileCurrent(editorApi.events.onSceneRenamed, onSceneRenamedEvent);
   if (!viewCurrent()) return;
   actorSelectionCallbackToken = await subscribeWhileCurrent(editorApi.events.onActorSelectionChanged, handleActorSelectionForObjectDock);
@@ -3193,6 +3215,7 @@ onMounted(async () => {
   gizmoPointerResultCallbackToken =
     await subscribeWhileCurrent(editorApi.events.onViewportGizmoPointerResult, handleViewportGizmoPointerResult);
     if (!viewCurrent()) return;
+  coronaEventBus.on('model-node-selection', handleModelNodeGizmoSelection);
   coronaEventBus.on('viewport-ui-calibration-changed', applyViewportUiCalibration);
 
   // Primary work docks start hidden. If this main CEF page is reused, close any native
@@ -3257,6 +3280,7 @@ onUnmounted(() => {
   window.removeEventListener('corona-active-project-changed', onActiveProjectChanged);
   window.removeEventListener('storage', onActiveProjectStorageChanged);
   closeTutorialSessionChannel();
+  coronaEventBus.off('model-node-selection', handleModelNodeGizmoSelection);
   coronaEventBus.off('panel-redock-request', handlePanelRedockRequest);
   coronaEventBus.off('panel-closed', handlePanelClosed);
   for (const timer of pendingPanelRedocks.values()) window.clearTimeout(timer);
@@ -3301,6 +3325,12 @@ onUnmounted(() => {
       logError('Failed to unregister scene added callback', error);
     });
     sceneAddedCallbackToken = null;
+  }
+  if (projectOpenedCallbackToken) {
+    editorApi.off(projectOpenedCallbackToken).catch((error) => {
+      logError('Failed to unregister project opened callback', error);
+    });
+    projectOpenedCallbackToken = null;
   }
   if (sceneRenamedCallbackToken) {
     editorApi.off(sceneRenamedCallbackToken).catch((error) => {
