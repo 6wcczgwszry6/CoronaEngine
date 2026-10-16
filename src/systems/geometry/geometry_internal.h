@@ -447,11 +447,25 @@ struct GeometrySystem::Impl {
     struct PendingGeometryBuild {
         std::uint64_t model_id = 0;
         std::uint64_t epoch = 0;
-        std::future<SceneGpuMeshData> future;
+        std::size_t next_mesh = 0;
+        std::size_t mesh_count = 0;
+        std::size_t inflight_mesh_count = 0;
+        std::vector<MeshDevice> mesh_devices;
+        std::shared_ptr<SceneGpuTextureCache> texture_cache;
+        std::future<std::vector<MeshDevice>> future;
     };
     std::unordered_map<Payload, PendingGeometryBuild> pending_geometry_builds;
+    // A reload remains in Loading until the last GPU batch has been published.
+    // Keyed by geometry so several profiles sharing one geometry emit one event.
+    std::unordered_map<Payload, std::pair<Payload, Payload>> pending_geometry_load_events;
     tbb::task_group geometry_build_tasks;
     static constexpr std::size_t kMaxInflightGeometryBuilds = 1;
+    // A scene is uploaded in bounded mesh batches.  Hardware resource creation
+    // is serialized by Horizon, so this yield point is what lets rendering
+    // submit work between large-model uploads.
+    static constexpr std::size_t kGeometryUploadMeshesPerBatch = 4;
+    static constexpr std::chrono::milliseconds kGeometryUploadMinInterval{8};
+    std::chrono::steady_clock::time_point last_geometry_build_submit_time{};
     std::uint64_t next_geometry_build_epoch = 1;
 
     /// import 任务 epoch 分配器（进程级单调递增，0 保留为"无任务"）。
