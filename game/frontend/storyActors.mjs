@@ -1,6 +1,6 @@
 import { FRAGMENT, FRAGMENT_GUID } from './storyGameplay.mjs';
 import { PLACEMENT_PREFIX, placementScene } from './storyProps.mjs';
-import { STORY_CHARACTERS, PLAYER_GUID, BOSS_MODEL_REF, PLAYER_MODEL_REF, PROPHET_MODEL_REF, PLAYER_MODEL_YAW_OFFSET, unwrap, sceneSnapshot, resolveStoryAssetPath,
+import { STORY_CHARACTERS, PLAYER_GUID, BOSS_MODEL_REF, PLAYER_MODEL_REF, PROPHET_MODEL_REF, PLAYER_MODEL_YAW_OFFSET, isMonsterRole, unwrap, sceneSnapshot, resolveStoryAssetPath,
   characterTransform, rotatedBounds, hasUsableBounds } from './storyCharacters.mjs';
 import { heightAt } from './storyMapHeight.mjs';
 import { PROPHET_PLACEMENT } from './storyDialogue.mjs';
@@ -14,6 +14,21 @@ const success = (response, operation) => {
   return data;
 };
 const loaded = actor => actor?.load_status === 'loaded' && Number(actor?.handle) > 0;
+/**
+ * Whether an actor's `route` still names the shipped art for `asset`.
+ *
+ * The engine exposes `actor.route` as a portable, project-relative path whose file name is the
+ * asset it actually imported (the same reading `storyMap.isMapCurrentAsset` relies on). A route
+ * that names another file cannot be repaired in place — `create_actor`'s `skip_if_exists` branch
+ * rewrites the transform and nothing else — so it has to be deleted and created again. An actor
+ * with no route yet is inconclusive and reported as current, which keeps the cheap repair path.
+ */
+const routeFileName = value => (typeof value === 'string' && value.trim()
+  ? value.replace(/\\/g, '/').split('/').pop().toLowerCase() : '');
+const routeNamesShippedArt = (actor, asset) => {
+  const actual = routeFileName(actor?.route);
+  return !actual || actual === routeFileName(asset);
+};
 /**
  * Delete an actor so the next `createActor` really imports the current route.
  *
@@ -77,9 +92,15 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
   let snapshot = sceneSnapshot(await api.scene.getSnapshot(sceneId));
   check();
   const actors = new Map((snapshot?.actors || []).map(actor => [actor.actor_guid, actor]));
-  const visibleCharacters = STORY_CHARACTERS.filter(character => !gameplay || character.role === 'player'
-    || (gameplay.role === 'main' && character.role === 'boss' && gameplay.state.boss.hp > 0)
-    || (gameplay.role === 'child' && character.role === 'prophet'));
+  // Creatures belong to the main world and are NOT gated on `boss.hp`, unlike the boss: they
+  // are the arena's other monsters, so killing the boss must not empty the arena. The small
+  // world keeps its own cast (player + prophet), which is why this branch names 'main'.
+  const visibleCharacters = STORY_CHARACTERS.filter(character => !gameplay
+    ? !isMonsterRole(character.role)
+    : character.role === 'player'
+      || (gameplay.role === 'main' && character.role === 'boss' && gameplay.state.boss.hp > 0)
+      || (gameplay.role === 'main' && isMonsterRole(character.role))
+      || (gameplay.role === 'child' && character.role === 'prophet'));
   if (gameplay?.role === 'main' && gameplay.state.drop && !gameplay.state.drop.collected) {
     visibleCharacters.push({ ...FRAGMENT, x: gameplay.state.drop.position[0], z: gameplay.state.drop.position[2] });
   }
@@ -157,6 +178,10 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
       const initializedPlayer = wasPresent && character.role === 'player'
         && sameVector(actor.geometry?.scale, placement.scale);
       const legacyPlayer = character.role === 'player' && actor.model_ref !== PLAYER_MODEL_REF;
+      // A marker mismatch alone only means "placement generation changed". A *route* that
+      // names another file means the imported art itself is stale, and no repair can swap it.
+      const stalePlayerModel = character.role === 'player' && wasPresent
+        && !routeNamesShippedArt(actor, character.asset);
       const initializedProphet = wasPresent && character.role === 'prophet'
         && actor.model_ref === PROPHET_MODEL_REF && sameVector(actor.geometry?.scale, placement.scale);
       // The prophet is placed on demand, so a first attempt must be committed in one
@@ -180,7 +205,46 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
       // world y at the character's (x, z) and `null` when no grid is loaded, in which case the
       // feet stay on the flat engine floor exactly as before.
       const transform = characterTransform(character, actor.local_aabb, savedGeometry, heightAt);
-      if (legacyPlayer || legacyProphet) {
+      if (stalePlayerModel) {
+        // Replacement, not repair: the world was built around a different player model, and the
+        // engine only imports a route when an actor is created. The guid is preserved, so the
+        // controller and the save path keep addressing the same actor. x/z survive the rebuild
+        // (the player is standing somewhere); rotation and y are re-derived from the table, so
+        // the previous model's facing convention cannot leak into the new one.
+        const saved = actor.geometry?.position;
+        const position = Array.isArray(saved) ? { position: [saved[0], 0, saved[2]],
+          rotation: [...character.rotation] } : null;
+        const route = source || resolveStoryAssetPath(frontendUrl, character.asset);
+        await removeActorForRebuild(api, sceneId, actor, `替换${character.name}模型`, call);
+        check();
+        const created = await call(`创建${character.name}`, () => api.sceneTools.createActor(sceneId, route, 'model', {
+          name: character.name, actor_guid: character.guid, semantic_role: character.role,
+          entity_id: `story.${character.role}`, entity_type: 'story_character',
+          model_ref: PLAYER_MODEL_REF,
+          position: [character.x, 0, character.z], rotation: [...character.rotation], scale: [1, 1, 1],
+          follow_camera: false, physics_enabled: false,
+        }));
+        actor = created.actor;
+        if (!loaded(actor)) throw new Error(actor?.load_error?.message || '模型解码失败');
+        for (let attempt = 0; !hasUsableBounds(actor.local_aabb); attempt++) {
+          if (!isCurrent()) throw canceled();
+          if (attempt >= renderAttempts) throw new Error('等待模型包围盒超时，请重试进入世界');
+          await wait(200);
+          if (!isCurrent()) throw canceled();
+          await assertSource();
+          actor = sceneSnapshot(await api.scene.getSnapshot(sceneId))?.actors
+            ?.find(item => item.actor_guid === character.guid);
+          if (!loaded(actor)) throw new Error(actor?.load_error?.message || '模型实例已失效');
+        }
+        check();
+        const rebuilt = characterTransform(character, actor.local_aabb, position, heightAt);
+        if (Object.entries(rebuilt).some(([key, value]) => !sameVector(actor.geometry?.[key], value))) {
+          actor = (await call('设置模型位置', () => api.scene.setActorTransform(sceneId, character.guid, rebuilt))).actor;
+        }
+        if (actor.model_ref !== PLAYER_MODEL_REF) {
+          throw new Error(`${character.name}模型未被引擎确认，请重试进入世界`);
+        }
+      } else if (legacyPlayer || legacyProphet) {
         const modelRef = legacyPlayer ? PLAYER_MODEL_REF : PROPHET_MODEL_REF;
         // Commit placement and its marker together, not while the new actor is still unscaled.
         // A lost reply/reentry must neither flip the player again nor preserve an ungrounded prophet.

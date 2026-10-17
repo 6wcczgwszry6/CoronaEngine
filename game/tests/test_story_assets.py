@@ -85,6 +85,34 @@ class StoryAssetTests(unittest.TestCase):
         self.assertEqual(roles[:4], ["player", "boss", "merchant", "prophet"])
         self.assertEqual(len({c["guid"] for c in characters}), len(characters),
                          "every character needs its own stable actor identity")
+        monsters = [c for c in characters if c["role"].startswith("monster-")]
+        # A roster, not a specific size: the count is a content decision. What must hold is
+        # that the main world has creatures at all...
+        self.assertTrue(monsters, "the main world should carry a roster")
+        # ... and that the shipped art and the roster agree exactly, both ways round. This is
+        # what catches art on disk that no roster row uses (dead weight) and a roster row whose
+        # art never reached the repo — neither of which the per-role loop below can see.
+        shipped = sorted(p.name for p in (ART / "monster").rglob("*") if p.is_file())
+        declared = sorted(Path(c["asset"]).name for c in monsters)
+        self.assertEqual(declared, shipped, "monster art on disk and the roster must match exactly")
+        for name in shipped:
+            self.assertEqual(Path(name).suffix.lower(), ".glb",
+                             f"{name}: creatures ship as a self-contained GLB")
+        # `em001_04` is the boss. Listing it here too would put two roles on one asset and make
+        # a future boss swap reach into this roster.
+        self.assertNotIn("em001_04", [c["asset"] for c in monsters],
+                         "the boss model must not be reused as a main-world monster")
+        # A creature must not be rotated: an earlier boss build bought height by rolling a model
+        # onto another axis and shipped it lying on its side. Identity is the rule.
+        for monster in monsters:
+            with self.subTest(role=monster["role"]):
+                self.assertEqual(list(monster["rotation"]), [0, 0, 0],
+                                 "main-world creatures keep their authored orientation")
+                self.assertNotIn("height", monster,
+                                 "creatures scale by `size`; `height` is for upright NPCs")
+                self.assertGreater(monster["size"], 0)
+                self.assertTrue(abs(monster["x"]) <= 32.4 and abs(monster["z"]) <= 45.0,
+                                "the site must be inside the map footprint (58.7 x 82.0 m)")
         # The boss's generation marker lives on the table entry itself, because the replacement
         # path reads it straight off the character. The player and the prophet carry theirs as
         # module constants (`PLAYER_MODEL_REF` / `PROPHET_MODEL_REF`), which is why only one
@@ -109,11 +137,18 @@ class StoryAssetTests(unittest.TestCase):
     # `scene` is the story world map: its measurements are re-derived from the shipped GLB
     # below and compared with the placement the page actually runs.
     ART_SOURCES = {
-        "player": ROOT / "assets/Maria WProp J J Ong",
+        # The player is a supplied, self-contained GLB (`player_walk.glb`, a Max Biped rig with
+        # two embedded PNGs), so there is no engine-asset directory to diff it against — the
+        # `_assert_glb_character_art` requirements stand in for that comparison, the same way
+        # they do for the boss. The previous player art is retired below, not deleted.
+        "player": None,
         # The boss is the em001 lineage, shipped as one self-contained GLB: its textures
         # are the embedded PNGs Blender wrote, so there is no source directory to diff
         # against — `_assert_glb_character_art` is what stands in for that comparison.
         "boss": None,
+        # The main-world roster ships as self-contained GLBs too: embedded textures, no
+        # sidecars, and the same requirements checked by `_assert_glb_character_art`.
+        "monster": None,
         "merchant": ROOT / "assets/Maw J Laygo",
         "prophet": ROOT / "assets/model",
         "fragment": ROOT / "assets/model",
@@ -122,11 +157,17 @@ class StoryAssetTests(unittest.TestCase):
     }
     # A character folder carries one rigged model; props are plain meshes with no animation.
     CHARACTER_ART_ROLES = ("player", "boss", "merchant", "prophet")
-    # Retired art that is still on disk. `boss/Dragon 2.5_dae.dae` was the boss until the
-    # em001_04 swap; it is kept so that swap can be reverted without a rebuild, and it is named
-    # by exact path so this exemption can never widen into "the boss folder is unchecked".
-    # Delete that file (and this entry) to reclaim ~9 MB.
-    RETIRED_CHARACTER_ART = frozenset({"boss/Dragon 2.5_dae.dae"})
+    # Retired art that is still on disk, so a swap can be reverted without a rebuild. Each entry
+    # is an exact path, so this exemption can never widen into "this character folder is
+    # unchecked"; delete the file (and its entry) to reclaim the space.
+    #   boss/Dragon 2.5_dae.dae        replaced by boss/Em001_04.glb        (~9 MB)
+    #   player/Maria WProp J J Ong.dae replaced by player/player_walk.glb   (~2.7 MB)
+    # Maria's sidecar textures stay unchecked now that the player folder has no engine-asset
+    # source; they are unreferenced, so deleting `player/textures/` reclaims a further ~14 MB.
+    RETIRED_CHARACTER_ART = frozenset({
+        "boss/Dragon 2.5_dae.dae",
+        "player/Maria WProp J J Ong.dae",
+    })
 
     # The story world map. `scale` is the map's largest world axis in metres: the engine
     # normalises every static model into a unit cube, so that is exactly the `geometry.scale`

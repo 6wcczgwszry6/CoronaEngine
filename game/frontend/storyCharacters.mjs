@@ -1,9 +1,44 @@
 /** Models in game/art/models and stable identities owned by the story game. */
 import { PROPHET_PLACEMENT } from './storyDialogue.mjs';
-// Maria faces local -Z. Gameplay and the camera use logical +Z instead.
-export const PLAYER_MODEL_YAW_OFFSET = Math.PI;
+/**
+ * How far the player model's own forward axis sits from the logical +Z the game steers by.
+ *
+ * `playerController.facePlayer` writes `rotation.yaw = facingYaw + offset`, and the logical
+ * facing is read back as `rotation.yaw - offset`, so this constant is the single place that
+ * reconciles "which way the art faces" with "which way the player walks". In other words it is
+ * the Y rotation that maps the model's own forward axis onto logical +Z.
+ *
+ * Its value is a property of the model, so it changed with the art:
+ *   - `Maria WProp J J Ong.dae` faces local -Z → `Math.PI`
+ *   - `player_walk.glb` / `waik.glb` (Max Biped) faces local +X → `-Math.PI / 2`
+ *
+ * How each value was established, in order, because the two 90-degree candidates are easy to
+ * confuse: with `Math.PI` the character walked *sideways* toward its own left; with `Math.PI/2`
+ * it walked **backwards**, i.e. W played what S should — exactly 180 degrees from correct, which
+ * puts the model's forward on +X and the answer at `-Math.PI / 2` (= `3pi/2`). The sideways
+ * observation alone was ambiguous about the sign; the W/S inversion settled it.
+ *
+ * If a future model walks backwards, rotate by pi again (`Math.PI / 2`); if sideways, by pi/2
+ * either way. There is no way to read this off the glTF bytes — the facing axis is authored
+ * geometry, not metadata — so it has to be observed once per model.
+ */
+export const PLAYER_MODEL_YAW_OFFSET = -Math.PI / 2;
 export const PROPHET_MODEL_REF = 'story.prophet.placement.v1';
-export const PLAYER_MODEL_REF = 'story.player.facing.v1';
+/**
+ * The player's **placement generation**: which model file the shipped table describes, plus
+ * the facing convention that goes with it.
+ *
+ * A world whose player actor carries an older marker is a player built from the previous art.
+ *   `story.player.facing.v1` -> `Maria WProp J J Ong.dae` (COLLADA, faces local -Z)
+ *   `story.player.waik.v1`   -> `waik.glb` (same Max Biped rig as below, faces local +X)
+ *   `story.player.walk.v1`   -> `player_walk.glb`, that same rig with a 1.100 s walk cycle
+ *                               instead of the 3.367 s one. Same AABB and same joint list, so
+ *                               the facing convention is unchanged: `-Math.PI / 2` holds for
+ *                               both, which is why only the asset changed here.
+ *
+ * **Bump this whenever the player's `asset` changes**, the same rule as `BOSS_MODEL_REF`.
+ */
+export const PLAYER_MODEL_REF = 'story.player.walk.v1';
 /**
  * The boss's **asset generation** — the migration key for its model.
  *
@@ -18,9 +53,60 @@ export const PLAYER_MODEL_REF = 'story.player.facing.v1';
  * silently keeps the previous model.
  */
 export const BOSS_MODEL_REF = 'story.boss.em001.v1';
+// ---------------------------------------------------------------------------
+// 主世界怪物 (main-world creatures)
+//
+// These inhabit the boss arena. The visibility filter in `storyActors.mjs` shows them when
+// `gameplay.role === 'main'` and hides them everywhere else, so the small world's cast stays
+// player + prophet and nothing here can reach it.
+//
+// **Not gated on `boss.hp > 0`.** They are additional monsters, not the boss: tying them to
+// the boss's health would empty the whole arena the instant it dies, which is the opposite of
+// "the main world has monsters". The boss keeps its own gate.
+//
+// **`rotation` is [0, 0, 0] for every one of them, on purpose and permanently.** An earlier
+// boss build "corrected" a model's orientation to buy height and shipped a creature lying on
+// its side. These keep the orientation the art was authored in; the numbers that place them
+// honestly are `size` (the model's largest axis, in metres) and a site proven clear of the
+// map, never a rotation.
+//
+// Every value was measured, not chosen. Model AABB -> world box at the shipped `size`:
+//   file        model AABB w x h x d            size  world box (w x h x d m)     site
+//   em135_03    29.819 x 40.140 x 17.536         5.0  3.71 x 5.00 x 2.18       (-30,  42)
+//   em001_01    26.641 x 17.520 x  6.106         6.0  6.00 x 3.95 x 1.38       ( 30,  42)
+//   em001_03    same AABB                        6.0  6.00 x 3.95 x 1.38       (  0, -42)
+//   em001_05    same AABB                        6.0  6.00 x 3.95 x 1.38       (  0,  36)
+//   em3         65.541 x 34.525 x 21.079         4.0  4.00 x 2.11 x 1.29       (-30, -42)
+//   em1          0.568 x  0.309 x  0.157         3.0  3.00 x 1.63 x 0.83       (-30,  12)
+//   em2          2.180 x  0.952 x  0.764         3.0  3.00 x 1.31 x 1.05       ( 27, -42)
+//
+// The sites are the output of a vertex-level search, not eyeballed: the main world's open
+// ground is tight — the boss stands at (2, 5.5) with only 4 m of clearance, and past that the
+// temple front rises (1.825 m at 5 m, 2.141 m at 6 m, 3.088 m at 10 m) — so a creature placed
+// by eye ends up inside a wall, which is exactly how the original dragon got buried at (0, 12).
+// Every pair here is 27-48 m apart and clear of the map at its own height.
+//
+// `em001_04` is absent by construction: it is the main world's boss, not an inhabitant.
+const MONSTERS = Object.freeze([
+  { role: 'monster-em135', name: '骸龙', guid: 'f9f5c8b0-7324-4b6c-a011-000000000014',
+    asset: 'monster/em135_03.glb', x: -30, z: 42, size: 5, rotation: [0, 0, 0] },
+  { role: 'monster-em001-a', name: '羽翼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000017',
+    asset: 'monster/em001_01.glb', x: 30, z: 42, size: 6, rotation: [0, 0, 0] },
+  { role: 'monster-em001-b', name: '铁翼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000018',
+    asset: 'monster/em001_03.glb', x: 0, z: -42, size: 6, rotation: [0, 0, 0] },
+  { role: 'monster-em001-c', name: '灰翼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000019',
+    asset: 'monster/em001_05.glb', x: 0, z: 36, size: 6, rotation: [0, 0, 0] },
+  { role: 'monster-em3', name: '石魔', guid: 'f9f5c8b0-7324-4b6c-a011-000000000013',
+    asset: 'monster/em3.glb', x: -30, z: -42, size: 4, rotation: [0, 0, 0] },
+  { role: 'monster-em1', name: '小兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000016',
+    asset: 'monster/em1.glb', x: -30, z: 12, size: 3, rotation: [0, 0, 0] },
+  { role: 'monster-em2', name: '幼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000015',
+    asset: 'monster/em2.glb', x: 27, z: -42, size: 3, rotation: [0, 0, 0] },
+]);
+
 export const STORY_CHARACTERS = Object.freeze([
   { role: 'player', name: '玩家', guid: 'f9f5c8b0-7324-4b6c-a011-000000000001',
-    asset: 'player/Maria WProp J J Ong.dae', x: 0, z: 0, height: 1.8, rotation: [0, PLAYER_MODEL_YAW_OFFSET, 0] },
+    asset: 'player/player_walk.glb', x: 0, z: 0, height: 1.8, rotation: [0, PLAYER_MODEL_YAW_OFFSET, 0] },
   // The forecourt pocket in front of the temple's main hall. Authored at (0, 12) the original
   // dragon stood *inside* the hall's front bay: the shipped map has geometry 3.088 m high
   // within 4 m of that point (`test_no_map_geometry_stands_over_the_boss_spawn_site`
@@ -55,7 +141,15 @@ export const STORY_CHARACTERS = Object.freeze([
     asset: 'merchant/Maw J Laygo.dae', x: -30, z: -15, height: 1.8, rotation: [0, Math.PI, 0] },
   { role: 'prophet', name: '先知', guid: 'f9f5c8b0-7324-4b6c-a011-000000000004',
     asset: PROPHET_PLACEMENT.asset, x: 30, z: -15, height: PROPHET_PLACEMENT.height, rotation: [0, Math.PI, 0] },
+  // Main-world creatures. Appended after the four inhabitants: `PLAYER_GUID`, `BOSS_GUID` and
+  // `PROPHET_GUID` address them by index, so appending keeps those stable.
+  ...MONSTERS,
 ].map(character => Object.freeze({ ...character, rotation: Object.freeze(character.rotation) })));
+
+/** Main-world creatures, in table order. One predicate, so the visibility filter and any
+ * future per-creature rule cannot disagree about what counts as a monster. */
+export const MONSTER_ROLES = Object.freeze(MONSTERS.map(monster => monster.role));
+export const isMonsterRole = role => MONSTER_ROLES.includes(role);
 
 export const PLAYER_GUID = STORY_CHARACTERS[0].guid;
 export const BOSS_GUID = STORY_CHARACTERS[1].guid;
