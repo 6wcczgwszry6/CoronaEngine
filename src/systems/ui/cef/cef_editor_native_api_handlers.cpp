@@ -19,6 +19,7 @@
 #include "cef_editor_native_api_test_support.h"
 #include "scene_folder.h"
 #include "ik_chain_config.h"
+#include "animation_config.h"
 #include "vision_actor_material_bridge.h"
 #include "vision_actor_transform_bridge.h"
 #include "vision_camera_direction.h"
@@ -559,6 +560,8 @@ struct NativeEditorActor {
     std::string persisted_body_type{"dynamic"};
     nlohmann::json persisted_snapshot = nlohmann::json::object();
     nlohmann::json persisted_ik_chains = nlohmann::json::array();
+    std::vector<std::string> persisted_animation_sources;
+    std::uint64_t animation_revision{};
     NativeEditorActorOpticsState persisted_optics;
     std::unique_ptr<Corona::API::Geometry> geometry;
     std::unique_ptr<Corona::API::Optics> optics;
@@ -586,6 +589,12 @@ nlohmann::json native_actor_ik_configuration(const NativeEditorActor& actor) {
         }
     }
     return IkChainConfig::serialize(chains);
+}
+
+std::shared_ptr<Corona::Resource::AnimationPlayer> actor_animation_player(const NativeEditorActor& actor) {
+    if (!actor.geometry) return {};
+    auto geometry = Corona::SharedDataHub::instance().geometry_storage().try_acquire_read(actor.geometry->get_handle());
+    return geometry ? geometry->animation_player : nullptr;
 }
 
 std::string body_type_name(const Corona::API::Mechanics& mechanics) {
@@ -950,6 +959,7 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         lines.push_back(key + ".geometry.rotation = " + format_float3(actor.geometry ? actor.geometry->get_rotation() : actor.rotation));
         lines.push_back(key + ".geometry.scale = " + format_float3(actor.geometry ? actor.geometry->get_scale() : actor.scale));
         lines.push_back(key + ".ik.chains = " + IkChainConfig::dump_ini(native_actor_ik_configuration(actor)));
+        lines.push_back(key + ".animation.sources = " + nlohmann::json(actor.persisted_animation_sources).dump(-1, ' ', true));
         if (actor.load_status != ActorLoadStatus::Loaded) {
             lines.push_back(key + ".optics.visible = " +
                             std::string(actor.persisted_visible ? "true" : "false"));
@@ -983,7 +993,7 @@ std::vector<std::string> build_actors_section_lines(const NativeEditorScene& sce
         static const std::set<std::string> normalized_fields{
             "actor_guid", "actor_type", "audio_resource_id", "follow_camera", "name", "route",
             "camera_lock.enabled", "camera_lock.position_offset", "camera_lock.rotation_offset",
-            "geometry.position", "geometry.rotation", "geometry.scale", "ik.chains",
+            "geometry.position", "geometry.rotation", "geometry.scale", "ik.chains", "animation.sources",
             "material.texture", "mechanics.body_type", "optics.diffuse", "optics.emission", "optics.metallic",
             "optics.roughness", "optics.shininess", "optics.specular", "optics.visible",
             "runtime.entity_id", "runtime.asset_id", "runtime.model_ref", "runtime.entity_type",
@@ -1675,6 +1685,14 @@ NativeEditorActor& add_native_actor_to_scene(NativeEditorScene& scene,
     item.geometry->set_position(item.position);
     item.geometry->set_rotation(item.rotation);
     item.geometry->set_scale(item.scale);
+    if (!item.persisted_animation_sources.empty()) {
+        std::vector<std::filesystem::path> paths;
+        for (const auto& source : item.persisted_animation_sources) {
+            auto path = path_from_utf8(source);
+            paths.push_back(path.is_absolute() ? path : scene.project_root / path);
+        }
+        actor_animation_player(item)->set_sources(item.persisted_animation_sources, std::move(paths));
+    }
     if (!item.persisted_ik_chains.empty()) {
         auto chains = IkChainConfig::parse(item.persisted_ik_chains);
         auto geometry = Corona::SharedDataHub::instance().geometry_storage().try_acquire_write(
@@ -1780,6 +1798,8 @@ void load_native_actor(NativeEditorScene& scene,
             : "1.0, 1.0, 1.0",
         {1.0f, 1.0f, 1.0f});
     item.persisted_optics = load_native_actor_optics_state(actors_section, actor_key);
+    if (const auto animations = actors_section.find(actor_key + ".animation.sources"); animations != actors_section.end())
+        item.persisted_animation_sources = AnimationConfig::parse_sources(nlohmann::json::parse(animations->second));
     if (const auto ik = actors_section.find(actor_key + ".ik.chains"); ik != actors_section.end()) {
         item.persisted_ik_chains = IkChainConfig::serialize(
             IkChainConfig::parse(nlohmann::json::parse(ik->second)));
@@ -2073,6 +2093,7 @@ void validate_archive_snapshot(const nlohmann::json& snapshot) {
             throw std::runtime_error("Duplicate actor_guid in ArchiveSnapshot");
         }
         IkChainConfig::parse(actor.value("ik_chains", nlohmann::json::array()));
+        AnimationConfig::parse_sources(actor.value("animation_sources", nlohmann::json::array()));
         if (!actor.contains("route") || !actor["route"].is_string() ||
             !actor.contains("asset_path") || !actor["asset_path"].is_string() ||
             !actor.contains("transform") || !actor["transform"].is_object()) {
@@ -2157,6 +2178,7 @@ void validate_archive_snapshot(const nlohmann::json& snapshot) {
 NativeEditorActor native_actor_from_snapshot(const nlohmann::json& actor_data) {
     NativeEditorActor item;
     item.persisted_snapshot = actor_data;
+    item.persisted_animation_sources = AnimationConfig::parse_sources(actor_data.value("animation_sources", nlohmann::json::array()));
     item.persisted_ik_chains = IkChainConfig::serialize(
         IkChainConfig::parse(actor_data.value("ik_chains", nlohmann::json::array())));
     item.name = actor_data.value("name", std::string{"Actor"});
@@ -2750,6 +2772,15 @@ nlohmann::json actor_to_json(const NativeEditorScene& scene, const NativeEditorA
     item["model_dependencies"] = nlohmann::json::array();
     item["actor_type"] = actor.actor_type;
     item["ik_chains"] = native_actor_ik_configuration(actor);
+    if (auto player = actor_animation_player(actor)) item.update(AnimationConfig::serialize(player->snapshot()));
+    else {
+        Corona::Resource::AnimationSnapshot animation;
+        animation.sources = actor.persisted_animation_sources;
+        animation.requested_sources = animation.sources;
+        animation.load_status = "error";
+        animation.load_error = "ACTOR_HAS_NO_GEOMETRY";
+        item.update(AnimationConfig::serialize(animation));
+    }
     item["load_status"] = actor_load_status_name(actor.load_status);
     if (actor.load_status != ActorLoadStatus::Loaded) {
         item["load_error"] = {
@@ -3334,6 +3365,32 @@ float arg_float_value(const nlohmann::json& args, size_t index, float fallback =
 
 void emit_scene_tree_changed(const std::string& scene_route);
 
+std::vector<std::string> prepare_animation_sources(const NativeEditorScene& scene, const nlohmann::json& value) {
+    auto sources = AnimationConfig::parse_sources(value);
+    if (sources.empty() || !detect_scene_folder(scene.project_root)) return sources;
+    SceneFolders::SceneAssetStore store(scene.project_root);
+    for (auto& source : sources) {
+        const auto path = resolve_project_path(scene.project_root, source);
+        const auto imported = store.import_model(path); // also copies glTF buffers and other sidecars
+        if (!imported.ok()) throw std::invalid_argument("Animation asset import failed: " + source);
+        source = imported.main_route;
+    }
+    if (!store.write_manifest()) throw std::runtime_error("Unable to save animation asset manifest");
+    return AnimationConfig::parse_sources(sources); // content-addressed duplicates are invalid too
+}
+
+void request_actor_animation_sources(const NativeEditorScene& scene, const NativeEditorActor& actor,
+                                     std::vector<std::string> sources) {
+    auto player = actor_animation_player(actor);
+    if (!player) throw std::invalid_argument("Actor has no geometry");
+    std::vector<std::filesystem::path> paths;
+    for (const auto& source : sources) {
+        auto path = path_from_utf8(source);
+        paths.push_back(path.is_absolute() ? path : scene.project_root / path);
+    }
+    player->set_sources(std::move(sources), std::move(paths));
+}
+
 NativeResult create_native_editor_actor(const std::string& scene_route_arg,
                                         const std::string& source_path,
                                         std::string actor_type,
@@ -3375,6 +3432,8 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
     };
 
     auto apply_actor_data_to_existing = [&](NativeEditorActor& target) {
+        if (actor_data.contains("animation_sources"))
+            request_actor_animation_sources(*scene, target, prepare_animation_sources(*scene, actor_data.at("animation_sources")));
         if (auto position = actor_data_float3(actor_data, "position")) {
             target.position = *position;
             if (target.geometry) {
@@ -3527,6 +3586,8 @@ NativeResult create_native_editor_actor(const std::string& scene_route_arg,
         }
     }
 
+    item.persisted_animation_sources = prepare_animation_sources(*scene,
+        actor_data.value("animation_sources", nlohmann::json::array()));
     auto asset_path = resolve_native_actor_asset_path(*scene, item);
     if (item.actor_guid.empty()) {
         item.actor_guid = make_actor_guid(scene->route, item.name, scene->actors.size());
@@ -3954,6 +4015,15 @@ PendingNetworkActorApplyOutcome apply_pending_network_actor_state(
         auto desired = native_actor_from_snapshot(merged_actor_data);
         const auto desired_route = normalize_route(desired.route);
         const bool replacing_resource = !desired_route.empty() && desired_route != normalize_route(actor->route);
+        if (!replacing_resource && actor_data.contains("animation_sources")) {
+            if (!actor->geometry)
+                return pending_actor_outcome(PendingNetworkActorApplyResult::Retry, "Remote animation geometry is not ready");
+            try {
+                request_actor_animation_sources(*scene, *actor, desired.persisted_animation_sources);
+            } catch (const std::invalid_argument& error) {
+                return pending_actor_outcome(PendingNetworkActorApplyResult::Discard, error.what());
+            }
+        }
         if (!replacing_resource && incoming_ik_chains) {
             if (!actor->geometry) {
                 return pending_actor_outcome(PendingNetworkActorApplyResult::Retry,
@@ -8462,6 +8532,27 @@ void register_project_settings_api_handlers(NativeApiRegistry& registry) {
     });
 }
 
+// Called on the same main thread as collaborative scene mutations. Workers and
+// mechanics never access NativeEditorActor or write the scene document.
+void tick_native_animation_updates() {
+    auto* scene = native_editor_state().scene.get();
+    if (!scene) return;
+    bool persist = false;
+    for (auto& actor : scene->actors) {
+        auto player = actor_animation_player(actor);
+        if (!player || actor.animation_revision == player->revision()) continue;
+        const auto state = player->snapshot();
+        actor.animation_revision = state.revision;
+        if (state.load_status == "ready" && actor.persisted_animation_sources != state.sources) {
+            actor.persisted_animation_sources = state.sources;
+            actor.actor_version = std::max(actor.actor_version + 1, 1);
+            persist = true;
+        }
+        emit_actor_change(NativeContext{}, *scene, actor);
+    }
+    if (persist) persist_native_scene_actors(*scene);
+}
+
 void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
     static const NativeMethodTable methods = {
         {"get_environment", [](const NativeRequest& request, const NativeContext&) {
@@ -8621,6 +8712,13 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
                 }
 
                 bool changed = false;
+                if (state.contains("animation_sources")) {
+                    if (actor_data_bool(state, {"visible"}) && !actor->optics)
+                        throw std::invalid_argument("Actor has no optics component");
+                    request_actor_animation_sources(*scene, *actor,
+                        prepare_animation_sources(*scene, state.at("animation_sources")));
+                    changed = true;
+                }
                 if (const auto value = actor_data_bool(state, {"visible"})) {
                     if (!actor->optics) {
                         return native_failure("Actor has no optics component: " + actor_name, 2);
@@ -8651,6 +8749,22 @@ void register_scene_tools_api_handlers(NativeApiRegistry& registry) {
             } catch (const std::exception& e) {
                 return native_failure(e.what(), 2);
             }
+        }},
+        {"set_actor_animation", [](const NativeRequest& request, const NativeContext&) {
+            try {
+                auto* scene = scene_for_request_route(request);
+                auto* actor = find_native_actor(*scene, arg_string(request.args, 1));
+                if (!actor) return native_failure("Actor not found", 2);
+                auto player = actor_animation_player(*actor);
+                if (!player) return native_failure("Actor has no geometry", 2);
+                const auto animation = arg_string(request.args, 2);
+                if (animation.empty()) return native_failure("animation must be a non-empty id or name", 2);
+                const double seconds = request.args.size() > 3 && !request.args[3].is_null()
+                    ? request.args[3].get<double>() : 0.2;
+                player->request_switch(animation, seconds);
+                return native_success({{"status", "accepted"}, {"scene", scene->route},
+                                       {"actor", actor_to_json(*scene, *actor)}});
+            } catch (const std::exception& error) { return native_failure(error.what(), 2); }
         }},
         {"set_actor_camera_lock", [](const NativeRequest& request, const NativeContext& context) {
             try {

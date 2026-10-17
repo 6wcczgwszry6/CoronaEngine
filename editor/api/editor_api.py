@@ -769,6 +769,12 @@ class _SceneToolsApi(_DynamicApiNamespace):
         )
 
     @staticmethod
+    def set_actor_animation(scene_name, actor_name, animation, blend_seconds=0.2):
+        return _invoke_manifest_cpp_api(
+            "scene_tools.set_actor_animation", [scene_name, actor_name, animation, blend_seconds]
+        )
+
+    @staticmethod
     def save_actor(scene_name, actor_name):
         return _invoke_manifest_cpp_api(
             "scene_tools.save_actor", [scene_name, actor_name]

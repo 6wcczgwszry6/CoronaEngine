@@ -220,6 +220,27 @@ def _parse_actor(
             "INVALID_IK_CHAINS", f"Invalid IK configuration for {key}: {exc}",
             details={"actor_name": section.get(f"{key}.name", key)},
         ) from exc
+    try:
+        animation_sources = json.loads(section.get(f"{key}.animation.sources", fallback="[]"))
+        if not isinstance(animation_sources, list) or any(
+            not isinstance(source, str) or not source or "\0" in source for source in animation_sources
+        ):
+            raise ValueError("expected an array of non-empty file paths")
+        animation_sources = [source.replace("\\", "/") for source in animation_sources]
+        if len(set(animation_sources)) != len(animation_sources):
+            raise ValueError("duplicate animation source")
+    except (ValueError, TypeError) as exc:
+        raise ArchiveParseError(
+            "INVALID_ANIMATION_SOURCES", f"Invalid animation configuration for {key}: {exc}",
+            details={"actor_name": section.get(f"{key}.name", key)},
+        ) from exc
+    if require_project_relative:
+        for source in animation_sources:
+            if not _is_relative_to((project_root / source).resolve(), project_root.resolve()):
+                raise ArchiveParseError(
+                    "RESOURCE_PATH_OUTSIDE_PROJECT", f"Animation source escapes the portable scene root: {source}",
+                    details={"actor_name": section.get(f"{key}.name", key)},
+                )
     return {
         "name": section.get(f"{key}.name", key),
         "actor_guid": section.get(f"{key}.actor_guid", ""),
@@ -261,6 +282,7 @@ def _parse_actor(
         "optics": optics,
         "audio_resource_id": section.get(f"{key}.audio_resource_id", ""),
         "ik_chains": ik_chains,
+        "animation_sources": animation_sources,
         "persisted_fields": persisted_fields,
     }
 
