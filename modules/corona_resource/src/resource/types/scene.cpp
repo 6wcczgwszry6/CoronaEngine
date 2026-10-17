@@ -5,6 +5,7 @@
 #include <assimp/IOStream.hpp>
 #include <assimp/IOSystem.hpp>
 #include <assimp/Importer.hpp>
+#include <assimp/version.h>
 #include <cfloat>
 #include <fstream>
 #include <iostream>
@@ -342,6 +343,11 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
         return nullptr;
     }
 
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".fbx" && aiGetVersionMajor() == 5 && aiGetVersionMinor() == 4 && aiGetVersionPatch() == 3)
+        repair_fbx_543_bind_offsets(ai_scene);
+
     auto scene = std::make_shared<Scene>(path);
     std::vector<std::uint32_t> material_map;
 
@@ -416,7 +422,7 @@ std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path
         }
 
         // 权重健全性抽检：统计每个蒙皮 mesh 的权重和分布，确认 ≈ 1.0
-        // （aiProcess_LimitBoneWeights 已归一化；偏离 1 说明抽取/remap 出错）。
+        // （抽取阶段显式归一化；Assimp 对部分 FBX 不保证权重和为 1）。
         for (std::uint32_t mi = 0; mi < scene->data.meshes.size(); ++mi) {
             const auto& mesh = scene->data.meshes[mi];
             if (mesh.bone_weights.empty()) continue;
