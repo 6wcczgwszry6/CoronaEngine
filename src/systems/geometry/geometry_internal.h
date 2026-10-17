@@ -236,6 +236,25 @@ struct GeometrySystem::Impl {
         AtomicLodMask frame_demand_mask;                       // render 写，reconcile 取走
         std::uint64_t demanded_mask = 0;                       // 本帧并集快照（诊断）
         bool          shared_instances = false;                // true = 走集合式驻留
+
+        // ---- 需求并集的"粘性"与新鲜度 ----
+        // 渲染线程只在真正为本 (geom,mesh) 走选级查询时才写 frame_demand_mask：
+        // 它的节拍低于几何线程的 60Hz，且渲染卡顿时会出现数百毫秒空档。几何线程每帧
+        // take() 取走位图，于是"本拍没有新消息"（空位图）与"没有实例需要任何级"在位图
+        // 上完全无法区分。
+        //
+        // 把空拍当无需求是致命的：某级的释放宽限只按几何帧计数（kSharedLodFreeGraceFrames
+        // = 5 帧 ≈ 83ms），每次渲染卡顿都会让整场 mesh 的宽限同时到期，把它们的级
+        // ——包括 LOD0（= mesh_dev 基础几何的引用副本）——成批释放；渲染端随后只能
+        // 回退到最粗的已就绪级，甚至因无级可用而整帧丢失该 mesh，视觉上是整片叶子闪没、
+        // 再慢慢重建。
+        //
+        // 因此：只有"非空快照"才是渲染线程发来的新消息，写入下面三个字段；空快照沿用
+        // 上一次的并集。只有连续 kSharedLodDemandStaleMs 没有收到任何非空快照，才认定
+        // 该 mesh 真的不再被需要（此时它本来就没在渲染，晚一点回收无副作用）。
+        std::uint64_t                          sticky_demand_mask  = 0;
+        std::chrono::steady_clock::time_point  sticky_demand_stamp{};
+        bool                                   sticky_demand_valid = false;
     };
 
     mutable std::shared_mutex          lod_cache_mutex;
@@ -285,6 +304,23 @@ struct GeometrySystem::Impl {
     // 粗级数据量小，且 reconcile 仍每 (geom,mesh) 至多一个在途任务）。
     static constexpr size_t kMaxInflightLodBuilds = 8;
 
+    // LOD0 重建的独立在途额度（不与上面共享）。
+    // LOD0 是 mesh_dev 基础几何，也是渲染端在其它级都没就绪时唯一的兜底；若与简化级
+    // 共享同一个在途上限，成批的粗级构建会把 LOD0 重建一直挤在队尾，该 mesh 长期只剩
+    // 最粗级，表现为叶子一块块慢慢回来。独立额度后两类互不阻塞；总量上限仍由
+    // kMaxInflightLodBuilds 约束简化级，额外最多这么多个基础几何重建（每个几 MB 量级，
+    // 对 VRAM 尖峰影响可忽略）。
+    static constexpr size_t kMaxInflightLod0Builds = 2;
+
+    /// 当前在途构建中目标级为 LOD0 的个数（LOD0 重建优先判定用）。
+    [[nodiscard]] std::size_t inflight_lod0_builds() const {
+        std::size_t n = 0;
+        for (const auto& kv : pending_lod_builds) {
+            if (kv.second.level == 0) ++n;
+        }
+        return n;
+    }
+
     // 诊断（与现有 diag_* 一同每秒输出）：发起次数 / 丢弃次数（ABA 校验失败或构建失败）。
     std::uint64_t diag_lod_build_launches = 0;
     std::uint64_t diag_lod_build_discards = 0;
@@ -332,6 +368,23 @@ struct GeometrySystem::Impl {
     // 共享实例资产：某级最后一次被需求后，再保留这么多帧才允许释放。
     // 吸收"某帧实例被剔除/选级抖动"造成的短暂零需求，避免建-删-建。
     static constexpr std::uint64_t kSharedLodFreeGraceFrames = 5;
+
+    // 共享实例资产：某级最后一次被需求后，再保留这么多毫秒才允许释放。
+    // 与 kSharedLodFreeGraceFrames 同时生效——两者都过期才允许释放（取更保守者）。
+    // 为什么必须有时间维度的宽限：几何线程稳定 60Hz，而渲染侧的选级发表节拍只有
+    // 约 15Hz（≈67ms/次）且卡顿时更长。5 帧 = 83ms < 一个发表周期，于是一次跨阈值的
+    // 选级变化（某实例从 LOD0 调到 LOD1）就足以让该级在下一个发表周期之前被拆掉；
+    // 而重建要走 CPU→GPU 上传 4 个 buffer 并在 kMaxInflightLodBuilds 队列里排队，
+    // 代价远高于"多留 500ms"。实测该策略下同一秒内 free≈build≈done（同一批级
+    // 拆了又建），且 skip 高达 286/s。
+    static constexpr std::uint64_t kSharedLodFreeGraceMs = 500;
+
+    // 共享实例需求并集的陈旧阈值（毫秒）：超过这段时间没有收到任何"非空"需求快照，
+    // 才认定该 mesh 真的不再被需要。
+    // 取值依据（实测）：渲染/选级查询节拍约 15Hz（≈67ms），渲染卡顿时空档可达 ~700ms；
+    // 2s 留足余量。真正不再渲染时晚 2 秒回收显存，代价可忽略——显存无压力时
+    // enforce_lod_budget 本来也不会淘汰任何东西。
+    static constexpr std::int64_t kSharedLodDemandStaleMs = 2000;
 
     // reconcile 每帧按显存压力算出的像素误差预算，供渲染端按实例选级复用，
     // 让显存压力同时作用于标量路径与共享实例集合路径（压力 → 选更粗 → 并集收窄）。
