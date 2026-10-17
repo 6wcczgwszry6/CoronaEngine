@@ -727,6 +727,8 @@ const editorApiStatic = {
       call_manifest_editor_api('sceneTools.focusActor', [sceneName, actorName, cameraName]),
     setActorState: (sceneName, actorName, state) =>
       call_manifest_editor_api('sceneTools.setActorState', [sceneName, actorName, state]),
+    setActorAnimation: (sceneName, actorName, animation, blendSeconds = 0.2) =>
+      call_manifest_editor_api('sceneTools.setActorAnimation', [sceneName, actorName, animation, blendSeconds]),
     saveActor: (sceneName, actorName) =>
       call_manifest_editor_api('sceneTools.saveActor', [sceneName, actorName]),
     selectModelFile: (sceneName, actorName, fileType = 'model') =>

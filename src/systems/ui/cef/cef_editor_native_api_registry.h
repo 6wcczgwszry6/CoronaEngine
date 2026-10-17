@@ -60,6 +60,7 @@ std::string native_success_json(const NativeRequest& request, const NativeResult
 std::string unsupported_editor_api_route_json(const NativeRequest& request);
 
 void register_builtin_native_api_handlers();
+void tick_native_animation_updates();
 
 std::string arg_string(const nlohmann::json& args, size_t index, std::string fallback = "");
 bool arg_bool(const nlohmann::json& args, size_t index, bool fallback = false);
