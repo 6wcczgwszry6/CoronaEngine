@@ -154,7 +154,10 @@ void UiSystem::stop() {
 
     auto& browser_manager = UI::BrowserManager::instance();
     std::vector<std::uintptr_t> camera_handles;
-    for (const auto& [tab_id, tab] : browser_manager.get_tabs()) {
+    for (const auto& tab_entry : browser_manager.tabs_snapshot()) {
+        const int tab_id = tab_entry.tab_id;
+        auto* tab = tab_entry.tab;
+        if (tab == nullptr) continue;
         if (tab->camera_view) {
             if (auto record = UI::CameraViewportManager::instance().find_by_tab(tab_id)) {
                 camera_handles.push_back(record->camera_handle);
