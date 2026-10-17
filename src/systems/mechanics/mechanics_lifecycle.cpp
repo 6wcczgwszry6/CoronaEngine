@@ -1,4 +1,5 @@
 #include <horizon/core/logging.h>
+#include <corona/diagnostics/thread_phase.h>
 #include <corona/systems/geometry/geometry_system.h>
 #include <corona/systems/mechanics/mechanics_system.h>
 
@@ -223,6 +224,10 @@ void MechanicsSystem::update() {
     if (impl_->shutdown_requested.load(std::memory_order_acquire)) {
         return;
     }
+    // Stage marker: this loop holds Scene read handles for the whole skinning pass
+    // (frame_scenes) and blocks on scene/geometry slot locks, so a stall here also
+    // stalls every writer that wants the same Scene entry.
+    Corona::Diagnostics::PhaseScope update_phase{"Mechanics", "update"};
     PerformanceReport performance_report;
     GpuPerformance::Scope frame_performance{"mechanics.frame"};
 
@@ -232,7 +237,9 @@ void MechanicsSystem::update() {
         impl_->last_update_time = now;
         impl_->first_update = false;
         // 首帧：先蒙皮（dt=0，建立初始姿态 AABB），再跑一步物理
+        update_phase.set("skinned_geometry(first)");
         update_skinned_geometry(0.0f);
+        update_phase.set("physics(first)");
         update_physics(resolve_fixed_dt());
         return;
     }
@@ -249,6 +256,7 @@ void MechanicsSystem::update() {
     // 消除之前 update_physics 使用上一帧 AABB 的一帧延迟。
     // 蒙皮模型即使未开物理（simulation_enabled=false）也照常播放。
     if (!impl_->shutdown_requested.load(std::memory_order_acquire)) {
+        update_phase.set("skinned_geometry");
         update_skinned_geometry(actual_dt);
     }
 
@@ -259,6 +267,7 @@ void MechanicsSystem::update() {
     while (impl_->time_accumulator >= fixed_dt &&
            catch_up_steps < kMaxCatchUpSteps &&
            !impl_->shutdown_requested.load(std::memory_order_acquire)) {
+        update_phase.set("physics");
         update_physics(fixed_dt);
         impl_->time_accumulator -= fixed_dt;
         ++catch_up_steps;

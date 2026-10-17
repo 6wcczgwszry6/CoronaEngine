@@ -816,6 +816,10 @@ const editorApiStatic = {
       call_manifest_editor_api('sceneTools.actorStopAudio', [actorName]),
     getActorSkeletonLeaves: (sceneName, actorName) =>
       call_manifest_editor_api('sceneTools.getActorSkeletonLeaves', [sceneName, actorName]),
+    getModelNodes: (sceneName, actorName, parentIndex = -1, offset = 0, limit = 100) =>
+      call_manifest_editor_api('sceneTools.getModelNodes', [sceneName, actorName, parentIndex, offset, limit]),
+    setModelNodeState: (sceneName, actorName, nodeIndex, state) =>
+      call_manifest_editor_api('sceneTools.setModelNodeState', [sceneName, actorName, nodeIndex, state]),
     getActorIkChains: (sceneName, actorName) =>
       call_manifest_editor_api('sceneTools.getActorIkChains', [sceneName, actorName]),
     setActorIkChains: (sceneName, actorName, chains, expectedRevision) =>

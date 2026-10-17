@@ -147,6 +147,15 @@ struct LODMeshBuffers {
     // D 在相邻级反复横跳不会每帧重建/释放 GPU 缓冲（消除 GPU churn）。
     // 0 = 从未被需求（LOD0 恒驻，不参与冷却释放）。
     std::uint64_t last_demand_frame = 0;
+
+    // 该级最后一次被判定为"需求级"的单调时间戳（毫秒，steady_clock，由几何线程写入）。
+    // 与 last_demand_frame 并存、缺一不可：帧计数在"消费端节拍 ≠ 生产端节拍"时表达不了
+    // 真实时间——几何线程稳定 60Hz，而渲染侧的选级发表只有约 15Hz（≈67ms/次）且会卡顿，
+    // 于是 5 帧只有 83ms，一次跨阈值的选级变化就足以把该级拆掉，而重建要走
+    // CPU→GPU 上传 4 个 buffer 并在队列里排队。释放判定现在同时要求"帧数"和"真实时间"
+    // 两个宽限都过期（见 Impl::kSharedLodFreeGraceMs）。
+    // 0 = 从未被需求。
+    std::uint64_t last_demand_ms = 0;
 };
 
 // LOD（动态减面）现由 GeometrySystem 内部自行决策，无外部配置面：
@@ -356,6 +365,7 @@ class GeometrySystem : public Kernel::SystemBase {
     struct MeshSlot {
         uint32_t               mesh_index    = 0;
         uint32_t               instance_index = 0;
+        uint32_t               node_index = UINT32_MAX;
         uint32_t               object_id = 0;
         ktm::fmat4x4           instance_transform{ktm::fmat4x4::from_eye()};
         RenderMeshBuffers      geo;              ///< LOD 解析后的几何缓冲
@@ -610,7 +620,11 @@ class GeometrySystem : public Kernel::SystemBase {
     /// 重新加载完成时重建 actor 关联的 GPU 资源（HardwareBuffer / HardwareImage），
     /// 从已导入的 Scene 资源中重新创建 mesh_handles 并恢复 model_resource_handle。
     /// 同时清理 LOD 缓存以保证下一帧 update() 重新上传 LOD 数据。
-    void rebuild_actor_gpu_resources(std::uintptr_t actor, std::uint64_t rid);
+    /// @returns true when the actor's GPU resources were queued for staged
+    /// upload.  In that case ActorLoadFinishedEvent is emitted on publication.
+    bool rebuild_actor_gpu_resources(std::uintptr_t actor,
+                                     std::uint64_t rid,
+                                     std::uintptr_t scene_handle = 0);
 
     // ========================================
     // 动态减面内部管线（在 update() 中每帧调用，外部不可见）
