@@ -10,6 +10,9 @@
 
 namespace Corona::Resource {
 
+struct AnimationSource;
+using AnimationSources = std::vector<std::shared_ptr<const AnimationSource>>;
+
 /**
  * @brief 资源管理器类（单例模式）
  *
@@ -70,6 +73,9 @@ class ResourceManager final {
      * @return std::future<TResourceID> 包含资源ID的future对象
      */
     std::future<TResourceID> import_async(const std::filesystem::path& path);
+
+    // Separate typed animation cache; uses the same managed worker lifetime.
+    std::shared_future<AnimationSources> import_animations_async(std::vector<std::filesystem::path> paths);
 
     /**
      * @brief 同步导出资源
