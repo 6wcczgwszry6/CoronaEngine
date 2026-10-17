@@ -7,7 +7,10 @@ target_include_directories(corona_ik_chain_config_tests PRIVATE ${PROJECT_SOURCE
 target_link_libraries(corona_ik_chain_config_tests PRIVATE nlohmann_json::nlohmann_json corona::resource::manager)
 add_test(NAME IkChainConfigTests COMMAND corona_ik_chain_config_tests)
 add_executable(corona_model_node_config_tests test_model_node_config.cpp)
-target_include_directories(corona_model_node_config_tests PRIVATE ${PROJECT_SOURCE_DIR}/src/systems/ui)
+# model_node_config.h 现在包含 <corona/systems/geometry/model_node_state.h>，
+# 因此需要 include/ 而不只是 UI 的私有头目录。
+target_include_directories(corona_model_node_config_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/include ${PROJECT_SOURCE_DIR}/src/systems/ui)
 target_link_libraries(corona_model_node_config_tests PRIVATE nlohmann_json::nlohmann_json)
 add_test(NAME ModelNodeConfigTests COMMAND corona_model_node_config_tests)
 target_include_directories(corona_vision_camera_direction_tests
