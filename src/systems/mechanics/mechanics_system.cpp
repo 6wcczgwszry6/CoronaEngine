@@ -1413,7 +1413,7 @@ void MechanicsSystem::update_physics(float fixed_dt) {
 // 锁序：Scene 共享读锁保活输入；GPU 调度及等待在 geometry storage 锁外执行；
 //       get_skinning_lod_targets 内部锁 lod_cache_mutex，必须在释放 geom 写锁后调用。
 //
-// 自动循环：始终播放 animations[0]，anim_time 由 advance_anim_time 推进并 fmod 回绕。
+// 每实例播放器在 IK 前完成片段采样和局部 TRS 混合。
 // ============================================================================
 void MechanicsSystem::update_skinned_geometry(float dt) {
     GpuPerformance::Scope performance{"animation.frame"};
@@ -1474,7 +1474,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         geometry->bone_name_to_node_idx.clear();
         geometry->leaf_bone_names.clear();
         if (had_skin) {
-            geometry->anim_time = 0.0f;
+            geometry->animation_player->reset_model();
             for (auto& chain : geometry->ik_chains) chain.runtime = {};
             ++geometry->ik_chains_revision;
         }
@@ -1490,7 +1490,6 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         std::size_t mesh_count{};
         std::uintptr_t transform{};
         std::uint64_t ik_revision{};
-        float anim_time{};
         bool pose_ready{};
         std::vector<Resource::IkChain> chains;
         std::vector<std::array<float, 16>> locals, finals;
@@ -1520,17 +1519,23 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         // ---- 第 1 步：读取 model_resource_handle（brief 读锁）----
         std::uintptr_t model_resource_handle = 0;
         std::uint64_t previous_skin_model = 0;
-        bool geometry_ready = false;
+        bool geometry_ready = false, geometry_failed = false;
+        std::shared_ptr<Resource::AnimationPlayer> player;
+        std::string model_path;
         {
             auto geom_read = geom_storage.try_acquire_read(geom_handle);
             if (!geom_read) continue;
             model_resource_handle = geom_read->model_resource_handle;
             previous_skin_model = geom_read->skeleton_cache_model_id;
+            player = geom_read->animation_player;
+            model_path = geom_read->model_path_utf8;
+            geometry_failed = geom_read->gpu_build_state == GeometryDevice::GpuBuildState::Failed;
             geometry_ready = geom_read->gpu_build_state == GeometryDevice::GpuBuildState::Ready &&
                              !geom_read->mesh_handles.empty();
         }
         if (model_resource_handle == 0) {
             invalidate_skin(geom_handle);
+            if (player) player->unavailable("ACTOR_HAS_NO_MODEL");
             continue;
         }
 
@@ -1541,7 +1546,10 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         }
         if (model_id == 0 || (previous_skin_model != 0 && previous_skin_model != model_id))
             invalidate_skin(geom_handle);
-        if (model_id == 0 || !geometry_ready) continue;
+        if (model_id == 0) {
+            if (geometry_failed) player->unavailable("MODEL_IMPORT_FAILED");
+            continue;
+        }
 
         // ---- 第 3 步：取 Scene，判断是否蒙皮（非蒙皮直接跳过）----
         auto scene_entry = frame_scenes.find(model_id);
@@ -1553,16 +1561,27 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         const Resource::Scene& scene = *scene_entry->second;
         if (!scene.data.skeleton.has_value()) {
             invalidate_skin(geom_handle);
+            player->unavailable("ACTOR_HAS_NO_SKELETON");
             continue;
         }
 
         const Resource::SkeletonData& skeleton = *scene.data.skeleton;
-        const Resource::AnimationClip empty_clip;
-        const Resource::AnimationClip& clip = scene.data.animations.empty() ? empty_clip : scene.data.animations[0];
+        std::vector<std::array<float, 16>> working_locals;
+        bool animation_discontinuity = false;
+        try {
+            GpuPerformance::Scope stage{"animation.sample"};
+            GpuPerformance::record_work_items(skeleton.nodes.size());
+            animation_discontinuity = player->evaluate(model_id, skeleton, scene.data.animations,
+                                                       model_path, geometry_ready ? dt : 0, working_locals);
+        } catch (const std::exception& error) {
+            player->unavailable(error.what());
+            working_locals.clear();
+            for (const auto& node : skeleton.nodes) working_locals.push_back(node.local);
+        }
+        if (!geometry_ready) continue;
 
-        // ---- 第 4 步：brief 写锁推进 anim_time + 拷出 buffer 句柄 ----
+        // ---- 第 4 步：brief 写锁释放 IK 锚点 + 拷出 buffer 句柄 ----
         // HardwareBuffer 为引用计数句柄，可拷贝；拷出后锁外提交 GPU 蒙皮和拷贝。
-        float anim_time = 0.0f;
         std::vector<Horizon::HardwareBuffer> vbufs;
         std::vector<Horizon::HardwareBuffer> vstoragebufs;
         std::size_t mesh_count = 0;
@@ -1573,8 +1592,10 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
             auto geom_write = geom_storage.try_acquire_write(geom_handle);
             if (!geom_write) continue;
             geom_write->is_skinned = true;
-            geom_write->anim_time = Resource::advance_anim_time(geom_write->anim_time, dt, clip);
-            anim_time = geom_write->anim_time;
+            if (animation_discontinuity) {
+                for (auto& chain : geom_write->ik_chains) chain.runtime = {};
+                ++geom_write->ik_chains_revision;
+            }
 
             // Build the named-bone cache initially and invalidate it when the model changes.
             if (geom_write->bone_name_to_node_idx.empty() || geom_write->skeleton_cache_model_id != model_id) {
@@ -1629,13 +1650,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
                 geom_handle, static_cast<uint32_t>(mi));
         }
 
-        // Sample once, then apply automatic drivers before CCD in this same update.
-        std::vector<std::array<float, 16>> working_locals;
-        {
-            GpuPerformance::Scope stage{"animation.sample"};
-            GpuPerformance::record_work_items(skeleton.nodes.size());
-            Resource::sample_pose_locals(skeleton, clip, anim_time, working_locals);
-        }
+        // The mixed pre-IK pose was sampled once, outside the geometry lock.
         SkinFrameJob job;
         job.geometry = geom_handle;
         job.resource = model_resource_handle;
@@ -1643,7 +1658,6 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         job.mesh_count = mesh_count;
         job.transform = ik_transform_handle;
         job.ik_revision = ik_revision;
-        job.anim_time = anim_time;
         job.chains = std::move(ik_chains);
         job.locals = std::move(working_locals);
         job.vertex_targets = vbufs;
@@ -1696,7 +1710,6 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         const auto& scene = *frame_scenes.at(job.model);
         const auto& skeleton = *scene.data.skeleton;
         const Resource::AnimationClip empty_clip;
-        const auto& clip = scene.data.animations.empty() ? empty_clip : scene.data.animations[0];
         ktm::fmat4x4 world_to_model{};
         bool have_transform = false;
         {
@@ -1753,7 +1766,7 @@ void MechanicsSystem::update_skinned_geometry(float dt) {
         {
             GpuPerformance::Scope stage{"animation.fk"};
             GpuPerformance::record_work_items(skeleton.nodes.size());
-            Resource::compute_pose(skeleton, clip, job.anim_time, job.finals, nullptr, &working_locals);
+            Resource::compute_pose(skeleton, empty_clip, 0, job.finals, nullptr, &working_locals);
         }
         job.pose_ready = true;
     }

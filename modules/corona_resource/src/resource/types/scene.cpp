@@ -14,6 +14,8 @@
 
 #include "corona/resource/types/image.h"
 #include "corona/resource/types/animation_pose.h"
+#include "corona/resource/types/animation.h"
+#include <stdexcept>
 #include "parse_assimp.h"
 
 #ifdef _WIN32
@@ -294,6 +296,20 @@ SceneParser::SceneParser() {
     register_extension(".3ds", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
     // register_extension(".ply", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
     register_extension(".stl", [this](const auto& path, ResourceCache& cache) { return parse_assimp(path); });
+}
+
+std::shared_ptr<const AnimationSource> read_animation_source(const std::filesystem::path& path) {
+    Assimp::Importer importer;
+    importer.SetIOHandler(new UnicodeIOSystem(path.parent_path()));
+    // Match the model import's coordinate convention. INCOMPLETE is allowed:
+    // an animation source is not required to contain any meshes/materials.
+    const aiScene* scene = importer.ReadFile(path_to_utf8(path), aiProcess_MakeLeftHanded);
+    if (!scene || !scene->mRootNode || scene->mNumAnimations == 0)
+        throw std::runtime_error("ANIMATION_IMPORT_FAILED: " + path_to_utf8(path) + ": " + importer.GetErrorString());
+    auto result = std::make_shared<AnimationSource>();
+    result->skeleton.root = read_skeleton_hierarchy(scene->mRootNode, result->skeleton);
+    read_animations(scene, result->clips);
+    return result;
 }
 
 std::shared_ptr<IResource> SceneParser::parse_assimp(const std::filesystem::path& path) {

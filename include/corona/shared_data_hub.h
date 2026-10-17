@@ -2,6 +2,7 @@
 #include <horizon/core/storage.h>
 #include <corona/memory/gpu_mem_ledger.h>
 #include <corona/resource/types/scene.h>  // Resource::IkChain（GeometryDevice::ik_chains）
+#include <corona/resource/types/animation_player.h>
 #include <corona/systems/display/image_frame_metadata.h>
 #include <corona/systems/optics/viewport_gizmo_math.h>
 
@@ -124,13 +125,13 @@ struct GeometryDevice {
     // ---- 骨骼动画（per-instance，P2）----
     // is_skinned：对应 Scene 带骨架（model_id 解析的 Scene::data.skeleton 有值）。
     //   GeometrySystem 在 mesh 构建/上传时探测并置位；非蒙皮几何此字段恒 false，零开销。
-    // anim_time：当前播放时间（tick）。每帧由 advance_anim_time 推进并 fmod 自动循环。
+    // Player owns per-instance clip selection, asynchronous sources and local-TRS transitions.
     // skinned_cpu_vertices：仅活跃 Vision 相机请求 GPU 蒙皮 LOD0 回读，每个 mesh 一份原始字节，
     //   布局严格等同 Resource::Vertex 数组（pos[3]+normal[3]+uv[2]，32B）。
     //   Vision 读取该副本；碰撞和光栅顶点缓冲直接使用 GPU 结果，
     //   不依赖该回读副本重新上传。光栅模式及非蒙皮几何此容器为空。
     bool is_skinned{false};
-    float anim_time{0.0f};
+    std::shared_ptr<Resource::AnimationPlayer> animation_player{std::make_shared<Resource::AnimationPlayer>()};
     std::vector<std::vector<std::byte>> skinned_cpu_vertices;
 
     // 蒙皮动态 local AABB：每帧合并 GPU 蒙皮包围盒；混合静态子网格时根据完整
