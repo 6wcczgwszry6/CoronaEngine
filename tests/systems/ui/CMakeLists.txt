@@ -224,3 +224,12 @@ add_executable(corona_resource_cache_nowait_tests test_resource_cache_nowait.cpp
 target_link_libraries(corona_resource_cache_nowait_tests PRIVATE corona::resource::manager)
 corona_copy_tbb_runtime_artifacts(corona_resource_cache_nowait_tests)
 add_test(NAME ResourceCacheNowaitTests COMMAND corona_resource_cache_nowait_tests)
+
+# 编辑器状态派发契约：所有 handler 只在 owner（CEF UI）线程执行，跨线程调用必须
+# marshal 且有界等待；唯一的两条例外是 owner 正阻塞等 Python（就地执行，交接协议）
+# 和还没有 owner 线程（CEF 未起，加锁就地执行）。纯头文件实现，不需要 CEF 运行时。
+add_executable(corona_editor_dispatch_tests test_editor_dispatch.cpp)
+target_include_directories(corona_editor_dispatch_tests
+    PRIVATE ${PROJECT_SOURCE_DIR}/src/systems/ui
+)
+add_test(NAME EditorDispatchTests COMMAND corona_editor_dispatch_tests)

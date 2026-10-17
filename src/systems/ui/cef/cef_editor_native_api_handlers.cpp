@@ -17,6 +17,7 @@
 #include "cef_editor_api.h"
 #include "cef_editor_native_api_registry.h"
 #include "cef_editor_native_api_test_support.h"
+#include "editor_dispatch.h"
 #include <cef_task.h>
 #include "scene_folder.h"
 #include "ik_chain_config.h"
@@ -7216,6 +7217,58 @@ Corona::Systems::UI::CollaborativeEditorApplyOutcome to_collaborative_outcome(
     return {result, std::move(outcome.error), std::move(outcome.actor)};
 }
 
+/// 协作同步的 apply 从**引擎主线程**（`tick_collaborative_editor_runtime`）发起，但它改的
+/// 是编辑器场景状态 —— 那份状态的唯一 owner 是 CEF UI 线程（见 `editor_dispatch.h`）。
+/// 所以真正干活的闭包被投递到 owner 线程执行：
+///   - owner 线程能在时限内接手 → 同步拿到真实结果；
+///   - owner 线程没接手 → **撤销**，返回 nullopt，调用方按"下一帧再试"处理。
+///
+/// 撤销语义是这里的关键：拖到超时之后才执行的任务必须变成空操作，否则调用方会"报告
+/// 没执行 → 下一帧重试"，同一个 actor 就被创建两次。反过来，如果 owner 线程已经开始
+/// 执行，就一定要等它跑完拿回结果（见 `call_on_editor_owner_thread`）。
+///
+/// 代价：引擎主线程最多在这里花 `kCollaborativeApplyDispatchTimeout`；正常情况下投递
+/// 一次就是几毫秒。
+constexpr std::chrono::milliseconds kCollaborativeApplyDispatchTimeout{200};
+
+std::optional<PendingNetworkActorApplyOutcome> run_collaborative_apply(
+    const std::function<void(PendingNetworkActorApplyOutcome&)>& apply) {
+    using namespace Corona::Systems::UI::Detail;
+    // 注意顺序：`on_editor_owner_thread()` 会记录"见过 owner 线程"，必须先于
+    // `editor_owner_thread_seen()` 求值（函数实参的求值顺序是不指定的）。
+    const bool on_owner_thread = on_editor_owner_thread();
+    const auto route = decide_editor_dispatch_route(
+        on_owner_thread,
+        editor_thread_waiting_for_python(),
+        editor_owner_thread_seen());
+
+    EditorDispatchReport report;
+    auto outcome = call_editor_dispatch(
+        [&apply] {
+            PendingNetworkActorApplyOutcome result =
+                pending_actor_outcome(PendingNetworkActorApplyResult::Discard);
+            apply(result);
+            return result;
+        },
+        route,
+        kCollaborativeApplyDispatchTimeout,
+        &report);
+    if (outcome) {
+        return outcome;
+    }
+
+    // 编辑器线程没接手：本帧跳过，下一帧再来。按 1/100 节流，避免卡顿时刷屏。
+    static std::atomic<std::uint64_t> busy_count{0};
+    const auto count = busy_count.fetch_add(1, std::memory_order_relaxed) + 1;
+    if (count == 1 || count % 100 == 0) {
+        CFW_LOG_WARNING(
+            "CollaborativeEditorRuntime: the editor thread did not take the pending actor "
+            "apply within {}ms ({} times); the mutation stays queued for the next frame",
+            static_cast<long long>(kCollaborativeApplyDispatchTimeout.count()), count);
+    }
+    return std::nullopt;
+}
+
 }  // namespace
 
 std::shared_ptr<Corona::Systems::NetworkSystem> collaborative_editor_network_system() {
@@ -7227,32 +7280,62 @@ CollaborativeEditorApplyOutcome apply_collaborative_actor_create(
     const std::string& scene_name,
     const std::string& model_path,
     nlohmann::json actor_data) {
-    return to_collaborative_outcome(apply_pending_network_actor_create(
-        actor_guid, scene_name, model_path, std::move(actor_data), NativeContext{}));
+    auto outcome = run_collaborative_apply([&](PendingNetworkActorApplyOutcome& result) {
+        result = apply_pending_network_actor_create(
+            actor_guid, scene_name, model_path, std::move(actor_data), NativeContext{});
+    });
+    if (!outcome) {
+        return {Corona::Systems::UI::CollaborativeEditorApplyResult::Retry,
+                "the editor thread is busy",
+                nlohmann::json::object()};
+    }
+    return to_collaborative_outcome(std::move(*outcome));
 }
 
 CollaborativeEditorApplyOutcome apply_collaborative_actor_state(
     const std::string& actor_guid,
     const std::string& scene_name,
     const nlohmann::json& actor_data) {
-    return to_collaborative_outcome(
-        apply_pending_network_actor_state(actor_guid, scene_name, actor_data, NativeContext{}));
+    auto outcome = run_collaborative_apply([&](PendingNetworkActorApplyOutcome& result) {
+        result = apply_pending_network_actor_state(actor_guid, scene_name, actor_data,
+                                                  NativeContext{});
+    });
+    if (!outcome) {
+        return {Corona::Systems::UI::CollaborativeEditorApplyResult::Retry,
+                "the editor thread is busy",
+                nlohmann::json::object()};
+    }
+    return to_collaborative_outcome(std::move(*outcome));
 }
 
 CollaborativeEditorApplyOutcome apply_collaborative_actor_transform(
     const std::string& actor_guid,
     const std::string& scene_name,
     const nlohmann::json& transform_data) {
-    return to_collaborative_outcome(
-        apply_pending_network_actor_transform(
-            actor_guid, scene_name, transform_data, NativeContext{}));
+    auto outcome = run_collaborative_apply([&](PendingNetworkActorApplyOutcome& result) {
+        result = apply_pending_network_actor_transform(actor_guid, scene_name, transform_data,
+                                                      NativeContext{});
+    });
+    if (!outcome) {
+        return {Corona::Systems::UI::CollaborativeEditorApplyResult::Retry,
+                "the editor thread is busy",
+                nlohmann::json::object()};
+    }
+    return to_collaborative_outcome(std::move(*outcome));
 }
 
 CollaborativeEditorApplyOutcome apply_collaborative_actor_delete(
     const std::string& actor_guid,
     const std::string& scene_name) {
-    return to_collaborative_outcome(
-        apply_pending_network_actor_delete(actor_guid, scene_name));
+    auto outcome = run_collaborative_apply([&](PendingNetworkActorApplyOutcome& result) {
+        result = apply_pending_network_actor_delete(actor_guid, scene_name);
+    });
+    if (!outcome) {
+        return {Corona::Systems::UI::CollaborativeEditorApplyResult::Retry,
+                "the editor thread is busy",
+                nlohmann::json::object()};
+    }
+    return to_collaborative_outcome(std::move(*outcome));
 }
 
 void load_native_editor_scene_for_test(const nlohmann::json& snapshot) {
