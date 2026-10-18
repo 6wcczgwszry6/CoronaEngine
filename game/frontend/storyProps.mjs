@@ -35,6 +35,14 @@ export const STORY_PROPS = Object.freeze([
     height: 0.5, yaw: 0,
     placeable: true,
   }),
+  Object.freeze({
+    // Monster loot: the same ball art the world fragment used before the reward moved
+    // into the bag, now a placeable model in its own right.
+    id: 'ball', name: '球', itemKey: 'ball',
+    asset: 'fragment/Ball.obj', description: '击败怪物得到的球，可在小世界中摆放。',
+    height: 0.5, yaw: 0,
+    placeable: true,
+  }),
 ]);
 
 /** The props the player may actually put down. A keepsake is never one of them. */
@@ -119,8 +127,17 @@ export function blockSpawnTransform(player, yaw, distance = PLACEMENT_DISTANCE, 
  */
 export const PLACED_BLOCK_REACH = 2.5;
 
+/**
+ * Retired prop ids. `pillar` shared the block's cube model, so every old placement and
+ * inventory count is treated as a ball instead. Keeping the alias here means old saves
+ * open without losing their objects, and the next save writes the canonical id.
+ */
+export const PROP_ALIASES = Object.freeze({ pillar: 'ball' });
+
+export const canonicalPropId = id => PROP_ALIASES[id] || id;
+
 export function findProp(id) {
-  return STORY_PROPS.find(prop => prop.id === id) || null;
+  return STORY_PROPS.find(prop => prop.id === canonicalPropId(id)) || null;
 }
 
 export function placementGuid(index) {
@@ -155,7 +172,7 @@ export function sanitizePlacements(raw) {
   for (const entry of raw) {
     if (!validPlacement(entry) || seen.has(entry.index)) continue;
     seen.add(entry.index);
-    result.push({ propId: entry.propId, index: entry.index, siteId: entry.siteId,
+    result.push({ propId: canonicalPropId(entry.propId), index: entry.index, siteId: entry.siteId,
       position: [...entry.position], rotation: [...entry.rotation], scale: entry.scale });
   }
   return result.sort((a, b) => a.index - b.index);
@@ -173,12 +190,12 @@ export function nextPlacementIndex(placements) {
 /**
  * The placement the player may take back: the nearest one within `reach`.
  *
- * Distance is horizontal (x/z), the same measure `storyGameplay.pickupDistance` uses for the
- * drop, so every proximity rule on the page reads the same way. Only props that may be placed
+ * Distance is horizontal (x/z), the same measure the prophet interaction uses, so every
+ * proximity rule on the page reads the same way. Only props that may be placed
  * (`canPlace`) are ever candidates — a keepsake that somehow sits in the layout, or an entry
  * written by a future build, is never something F can hand back.
  *
- * The reach is the whole gate: unlike the drop, retrieving is symmetric with placing, and
+ * The reach is the whole gate: retrieving is symmetric with placing, and
  * placing itself is allowed mid-air or mid-dodge, so a movement state must not silently
  * remove the prompt. Pure: junk player data, junk lists and a junk reach all answer `null`
  * instead of throwing.
@@ -217,7 +234,7 @@ export function siteFor(placement) {
 /** Exhibits are laid out in index order so a reload reproduces the same arrangement. */
 export function placementScene(placements, propId) {
   return sanitizePlacements(placements)
-    .filter(entry => !propId || entry.propId === propId)
+    .filter(entry => !propId || entry.propId === canonicalPropId(propId))
     .map(entry => ({ ...entry, guid: placementGuid(entry.index), prop: findProp(entry.propId) }))
     .filter(entry => Boolean(entry.prop));
 }

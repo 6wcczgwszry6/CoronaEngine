@@ -28,9 +28,6 @@ class GameplayTests(unittest.TestCase):
         data = {'projectPath': self.info['project_path'], 'action': action}
         if action != 'load':
             data.update(operationId=str(uuid.uuid4()), expectedRevision=self.revision)
-            data.update(bossPosition=[0, 0, 12] if action == 'hitBoss' else None)
-            if action == 'pickupDrop':
-                data['dropId'] = game.DROP_ID
         data.update(kwargs)
         return data
 
@@ -58,21 +55,98 @@ class GameplayTests(unittest.TestCase):
         return Path(StorySubworlds(save=lambda _: None, validate=lambda _: None)
                     .prepare(self.root, 'O')['navigation']['target'])
 
-    def test_ten_hits_death_pickup_and_reopen(self):
+    def test_ten_hits_unlock_the_small_world_without_a_pickup(self):
         self.assertEqual(self.call()['state']['boss']['hp'], 200)
+        self.assertEqual(self.call()['state']['inventory']['block'], 0, '开局的背包里没有方块')
         for _ in range(5):
             self.hit()
         self.assertEqual(self.call()['state']['boss']['hp'], 100)
         for _ in range(5):
             result = self.hit()
         self.assertEqual(result['state']['boss']['hp'], 0)
-        self.assertFalse(self.call()['state']['drop']['collected'])
-        self.assertEqual(result['state']['drop']['position'], [0, 0, 12])
+        # The reward is handed over by the killing blow itself: no red ball, no F.
+        self.assertIsNone(result['state']['drop'])
+        self.assertEqual(result['state']['inventory']['worldFragment'], 1)
+        self.assertEqual(result['state']['inventory']['block'], game.BLOCK_REWARD)
         self.assertEqual(self.call(action='hitBoss')['status'], 'error')
-        self.assertEqual(self.call(action='pickupDrop')['state']['inventory']['worldFragment'], 1)
-        self.assertTrue(self.call()['state']['drop']['collected'])
         self.assertEqual(self.call(action='pickupDrop')['status'], 'error')
-        self.assertEqual(len(self.call()['state']['operations']), 11)
+        self.assertEqual(len(self.call()['state']['operations']), 10)
+        # Reopening the world reads the same unlocked inventory back.
+        reopened = self.call()
+        self.assertEqual(reopened['state']['inventory']['worldFragment'], 1)
+        self.assertIsNone(reopened['state']['drop'])
+
+    def test_each_monster_has_its_own_health_pool_and_can_be_hit(self):
+        self.assertEqual(game.CONFIG['monsterDropChance'], 0.7)
+        self.assertEqual(game.CONFIG['monsterEquipmentChance'], 0.5)
+        state = self.call()['state']
+        self.assertEqual(set(state['monsters']), set(game.CONFIG['monsters']))
+        for role, stats in game.CONFIG['monsters'].items():
+            self.assertEqual(state['monsters'][role]['hp'], stats['hp'])
+        result = self.call(self.request('hitMonster', monsterId='monster-em1'))
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['state']['monsters']['monster-em1']['hp'], 60)
+        self.assertEqual(result['state']['monsters']['monster-em2']['hp'], 90)
+        self.assertEqual(result['state']['boss']['hp'], 200, '打怪不会顺带伤到 Boss')
+        self.assertEqual(result['state']['rage'], 10)
+        self.assertEqual(self.call(action='hitMonster', monsterId='no-such-monster')['status'], 'error')
+
+    def test_a_monster_kill_rolls_both_drops_and_replays_the_same_outcome(self):
+        last = None
+        # The model roll hits (0.1 < 0.7) and the equipment roll hits (0.1 < 0.5).
+        with patch.object(game.random, 'random', return_value=0.1), \
+                patch.object(game.random, 'choice', side_effect=['ball', 'hunter-blade']):
+            for _ in range(4):
+                last = self.request('hitMonster', monsterId='monster-em1')
+                result = self.call(last)
+        self.assertEqual(result['state']['monsters']['monster-em1']['hp'], 0)
+        self.assertEqual(result['state']['inventory']['ball'], 1, '70% 命中：模型直接进背包')
+        self.assertEqual(result['state']['inventory']['hunter-blade'], 1,
+                         '50% 命中：装备也直接进背包')
+        # A retry of the same operation must not roll or grant again.
+        self.assertEqual(self.call(last)['state']['inventory']['ball'], 1)
+        self.assertEqual(self.call()['state']['inventory']['hunter-blade'], 1)
+        last_operation = self.call()['state']['operations'][-1]
+        self.assertEqual(last_operation['loot'], 'ball')
+        self.assertEqual(last_operation['gear'], 'hunter-blade')
+        # A high roll means no item at all; both decisions are stored in the operation log.
+        with patch.object(game.random, 'random', return_value=0.9):
+            for _ in range(5):
+                last = self.request('hitMonster', monsterId='monster-em2')
+                result = self.call(last)
+        self.assertEqual(result['state']['monsters']['monster-em2']['hp'], 0)
+        self.assertEqual(result['state']['inventory']['ball'], 1)
+        self.assertEqual(result['state']['inventory']['block'], 0)
+        last_operation = self.call()['state']['operations'][-1]
+        self.assertIsNone(last_operation['loot'])
+        self.assertIsNone(last_operation['gear'])
+        self.assertEqual(self.call(action='hitMonster', monsterId='monster-em1')['status'], 'error')
+
+    def test_a_client_cannot_forge_a_drop_by_sending_loot_or_gear(self):
+        with patch.object(game.random, 'random', return_value=0.9):
+            for _ in range(4):
+                last = self.request('hitMonster', monsterId='monster-em1',
+                                    loot='ball', gear='hunter-blade')
+                result = self.call(last)
+        self.assertEqual(result['state']['monsters']['monster-em1']['hp'], 0)
+        self.assertEqual(result['state']['inventory']['ball'], 0, '掉落只能由后端掷点决定')
+        self.assertEqual(result['state']['inventory']['hunter-blade'], 0)
+        last_operation = self.call()['state']['operations'][-1]
+        self.assertIsNone(last_operation['loot'])
+        self.assertIsNone(last_operation['gear'])
+
+    def test_skills_can_finish_a_monster_without_touching_the_boss(self):
+        for _ in range(3):
+            self.call(action='hitMonster', monsterId='monster-em1')
+        self.assertEqual(self.call()['state']['monsters']['monster-em1']['hp'], 20)
+        self.assertEqual(self.call()['state']['rage'], 30)
+        with patch.object(game.random, 'random', return_value=0.9):
+            result = self.call(action='castSkill', skillId='heavy', hit=True,
+                               monsterId='monster-em1')
+        self.assertEqual(result['status'], 'ok', result)
+        self.assertEqual(result['state']['monsters']['monster-em1']['hp'], 0)
+        self.assertEqual(result['state']['boss']['hp'], 200)
+        self.assertEqual(result['state']['rage'], 0)
 
     def test_repeated_ids_and_lost_reply_do_not_apply_twice(self):
         request = self.request('hitBoss')
@@ -81,11 +155,14 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(first['state'], second['state'])
         self.assertEqual(second['state']['boss']['hp'], 180)
         for _ in range(9):
-            self.hit()
-        pickup = self.request('pickupDrop')
-        self.call(pickup)
-        self.assertEqual(self.call(pickup)['state']['inventory']['worldFragment'], 1)
-        self.assertEqual(self.call({**request, 'bossPosition': [10, 0, 12]})['status'], 'error')
+            result = self.hit()
+        # The killing blow is the one that hands over the fragment; replaying any earlier
+        # request must neither resurrect the boss nor grant a second fragment.
+        self.assertEqual(result['state']['inventory']['worldFragment'], 1)
+        self.assertIsNone(result['state']['drop'])
+        self.assertEqual(self.call(request)['state']['inventory']['worldFragment'], 1)
+        self.assertEqual(self.call({**request, 'bossPosition': [10, 0, 12]})
+                         ['status'], 'error')
 
     def test_revision_conflict_returns_current_state_without_writing(self):
         self.hit()
@@ -95,19 +172,20 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(result['state']['boss']['hp'], 180)
         self.assertEqual((self.root / game.SAVE_PATH).read_bytes(), original)
 
-    def test_child_shares_inventory_but_cannot_fight_or_pick_up(self):
+    def test_child_shares_inventory_but_cannot_fight_or_take_the_reward_again(self):
         child = self.child()
         self.kill()
-        self.call(action='pickupDrop')
         self.info['project_path'] = str(child)
         result = self.call()
         self.assertEqual(result['role'], 'child')
         self.assertEqual(result['state']['inventory']['worldFragment'], 1)
+        self.assertEqual(result['state']['inventory']['block'], game.BLOCK_REWARD)
         self.assertEqual(self.call(action='hitBoss')['status'], 'error')
         self.assertEqual(self.call(action='pickupDrop')['status'], 'error')
         self.assertFalse((child / game.SAVE_PATH).exists())
         self.info['project_path'] = str(self.root)
         self.assertEqual(self.call()['state']['inventory']['worldFragment'], 1)
+        self.assertIsNone(self.call()['state']['drop'])
 
     def test_rage_skills_charge_once_on_hit_or_miss_and_survive_reload(self):
         for hit in (True, False):
@@ -166,15 +244,22 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(list(path.parent.glob('.story-gameplay-*')), [])
         self.assertEqual(self.call(request)['state']['boss']['hp'], 160)
 
-    def test_pickup_failure_is_atomic_with_inventory(self):
-        self.kill()
-        request = self.request('pickupDrop')
+    def test_the_killing_blow_grants_the_reward_atomically(self):
+        for _ in range(9):
+            self.hit()
+        request = self.request('hitBoss')
         with patch.object(game.os, 'replace', side_effect=PermissionError('read only')):
             self.assertEqual(self.call(request)['status'], 'error')
         state = self.call()['state']
-        self.assertFalse(state['drop']['collected'])
+        self.assertEqual(state['boss']['hp'], 20)
         self.assertEqual(state['inventory']['worldFragment'], 0)
-        self.assertEqual(self.call(request)['state']['inventory']['worldFragment'], 1)
+        self.assertEqual(state['inventory']['block'], 0)
+        self.assertIsNone(state['drop'])
+        # Same operation ID, retried after the disk is writable: commits once.
+        committed = self.call(request)['state']['inventory']
+        self.assertEqual(committed['worldFragment'], 1)
+        self.assertEqual(committed['block'], game.BLOCK_REWARD)
+        self.assertEqual(self.call(request)['state']['inventory']['block'], game.BLOCK_REWARD)
 
     def test_stale_or_creative_project_cannot_write(self):
         request = self.request('hitBoss')
@@ -197,12 +282,88 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(path.read_bytes(), previous)
 
     def test_unknown_actions_bad_numbers_and_operation_ids_are_rejected(self):
-        for data in [self.request('writeFile'), self.request('hitBoss', bossPosition=[float('nan'), 0, 0]),
+        for data in [self.request('writeFile'), self.request('pickupDrop'),
+                     self.request('hitBoss', bossPosition=[float('nan'), 0, 0]),
                      self.request('hitBoss', operationId='../elsewhere'),
                      self.request('hitBoss', expectedRevision=True), self.request(projectPath='')]:
             self.assertEqual(self.call(data)['status'], 'error', data)
         self.assertEqual(game.handle_gameplay_request('[]', api=self.api)['status'], 'error')
         self.assertFalse((self.root / game.SAVE_PATH).exists())
+
+    def test_a_legacy_red_ball_save_opens_with_the_small_world_unlocked(self):
+        """Worlds saved by the previous flow keep their reward.
+
+        The previous boss death wrote a red ball and a `pickupDrop` operation. Loading such
+        a save must hide the ball and hand the fragment over instead of leaving the player
+        locked out of a small world they already earned.
+        """
+        for collected, pickup_operation in ((False, True), (True, True), (False, False)):
+            with self.subTest(collected=collected, pickup_operation=pickup_operation):
+                operations = [{'operationId': str(uuid.uuid4()), 'action': 'hitBoss',
+                               'expectedRevision': index, 'bossPosition': [0, 0, 12]}
+                              for index in range(10)]
+                if pickup_operation:
+                    operations.append({'operationId': str(uuid.uuid4()), 'action': 'pickupDrop',
+                                       'expectedRevision': 10, 'dropId': game.DROP_ID})
+                state = {'version': 2, 'revision': len(operations), 'legacyRevision': 0, 'rage': 100,
+                         'boss': {'hp': 0},
+                         'drop': {'id': game.DROP_ID, 'position': [0, 0, 12],
+                                  'collected': collected},
+                         'inventory': {'worldFragment': 1 if collected else 0,
+                                       'block': game.BLOCK_SEED},
+                         'operations': operations}
+                folder = self.root / '.game'
+                folder.mkdir(exist_ok=True)
+                path = self.root / game.SAVE_PATH
+                path.write_text(json.dumps(state), encoding='utf-8')
+                loaded = self.call()
+                self.assertEqual(loaded['status'], 'ok', loaded)
+                self.assertEqual(loaded['state']['inventory']['worldFragment'], 1)
+                self.assertEqual(loaded['state']['inventory']['block'], game.BLOCK_REWARD)
+                self.assertIsNone(loaded['state']['drop'])
+                self.assertEqual(set(loaded['state']['monsters']), set(game.CONFIG['monsters']),
+                                 '旧存档读取时补齐每只怪物的满血状态')
+                self.assertEqual(self.call(action='pickupDrop')['status'], 'error')
+
+    def test_a_retired_pillar_save_becomes_a_ball(self):
+        """The pillar reused the block's cube model; both its count and its old log entry
+        are folded into the ball, so an existing small world does not lose the object."""
+        monsters = game.initial_monsters()
+        monsters['monster-em1']['hp'] = 0
+        operations = [{'operationId': str(uuid.uuid4()), 'action': 'hitMonster',
+                       'expectedRevision': index, 'monsterId': 'monster-em1'}
+                      for index in range(4)]
+        operations[-1]['loot'] = 'pillar'
+        inventory = game.initial_inventory()
+        inventory['pillar'] = 1
+        state = {'version': 2, 'revision': 4, 'legacyRevision': 0, 'rage': 40,
+                 'boss': {'hp': 200}, 'drop': None, 'monsters': monsters,
+                 'inventory': inventory, 'operations': operations}
+        folder = self.root / '.game'
+        folder.mkdir(exist_ok=True)
+        (self.root / game.SAVE_PATH).write_text(json.dumps(state), encoding='utf-8')
+        loaded = self.call()
+        self.assertEqual(loaded['status'], 'ok', loaded)
+        self.assertEqual(loaded['state']['inventory']['ball'], 1)
+        self.assertNotIn('pillar', loaded['state']['inventory'])
+        self.assertEqual(loaded['state']['monsters']['monster-em1']['hp'], 0)
+        self.assertTrue(all('gear' not in operation for operation in loaded['state']['operations']),
+                        '旧日志没有装备字段，重放时不会凭空补发装备')
+
+    def test_a_pre_kill_old_save_does_not_keep_the_free_block_stack(self):
+        """The 64 blocks used to be a starting item; now only the killing blow grants them."""
+        for _ in range(3):
+            self.hit()
+        state = self.call()['state']
+        state['inventory']['block'] = game.BLOCK_SEED
+        path = self.root / game.SAVE_PATH
+        path.write_text(json.dumps(state), encoding='utf-8')
+        loaded = self.call()
+        self.assertEqual(loaded['status'], 'ok', loaded)
+        self.assertEqual(loaded['state']['inventory']['block'], 0)
+        # The next committed hit persists the corrected inventory, not the old free stack.
+        self.assertEqual(self.hit()['state']['inventory']['block'], 0)
+        self.assertEqual(self.call()['state']['inventory']['block'], 0)
 
     def test_broken_child_link_is_not_treated_as_fresh_main(self):
         child = self.child()
@@ -241,7 +402,8 @@ class GameplayTests(unittest.TestCase):
         # Re-entering the same small world reads the same layout back, block for block.
         reloaded = self.document('loadPlacements')
         self.assertEqual(reloaded['state']['placements'], [entry])
-        self.assertEqual(self.document('load')['state']['inventory']['block'], game.BLOCK_SEED)
+        self.assertEqual(self.document('load')['state']['inventory']['block'], 0,
+                         '未击杀 Boss 时行囊里没有方块')
 
 
 if __name__ == '__main__':

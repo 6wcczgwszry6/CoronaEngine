@@ -1,4 +1,4 @@
-import { FRAGMENT, FRAGMENT_GUID } from './storyGameplay.mjs';
+import { FRAGMENT_GUID } from './storyGameplay.mjs';
 import { PLACEMENT_PREFIX, placementScene } from './storyProps.mjs';
 import { STORY_CHARACTERS, PLAYER_GUID, BOSS_MODEL_REF, PLAYER_MODEL_REF, PROPHET_MODEL_REF, PLAYER_MODEL_YAW_OFFSET, isMonsterRole, unwrap, sceneSnapshot, resolveStoryAssetPath,
   characterTransform, rotatedBounds, hasUsableBounds } from './storyCharacters.mjs';
@@ -99,14 +99,17 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
     ? !isMonsterRole(character.role)
     : character.role === 'player'
       || (gameplay.role === 'main' && character.role === 'boss' && gameplay.state.boss.hp > 0)
-      || (gameplay.role === 'main' && isMonsterRole(character.role))
+      // A monster stays in the arena until its own health reaches zero; the boss's health
+      // has no effect on them. A save that predates the roster has no entry and stays alive.
+      || (gameplay.role === 'main' && isMonsterRole(character.role)
+          && ((gameplay.state.monsters?.[character.role]?.hp ?? 1) > 0))
       || (gameplay.role === 'child' && character.role === 'prophet'));
-  if (gameplay?.role === 'main' && gameplay.state.drop && !gameplay.state.drop.collected) {
-    visibleCharacters.push({ ...FRAGMENT, x: gameplay.state.drop.position[0], z: gameplay.state.drop.position[2] });
-  }
   if (gameplay) {
     const visibleGuids = new Set(visibleCharacters.map(character => character.guid));
     // Only manage game-owned actors; scenery and user-authored models stay untouched.
+    // FRAGMENT_GUID is no longer part of the cast, but a world saved by the old flow may
+    // still contain its red ball — leave it in the managed set so it is hidden rather
+    // than left lying in the arena after the reward moved into the bag.
     for (const guid of [...STORY_CHARACTERS.map(character => character.guid), FRAGMENT_GUID]) {
       const actor = actors.get(guid);
       if (actor && actor.visible !== false && !visibleGuids.has(guid)) {
@@ -115,7 +118,7 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
     }
   }
   // Never use the update subset to decide which actors should be visible.
-  const characters = visibleCharacters.filter(character => !combatOnly || ['boss', 'fragment'].includes(character.role));
+  const characters = visibleCharacters.filter(character => !combatOnly || character.role === 'boss');
   for (let character of characters) {
     check();
     let actor = actors.get(character.guid);
@@ -356,6 +359,19 @@ export async function syncPlacementActors({ api, sceneId, frontendUrl, placement
     const { prop, guid } = entry;
     const source = resolveStoryAssetPath(frontendUrl, prop.asset);
     let actor = actors.get(guid);
+    // A recorded placement can name a different model than the layout now says. The
+    // retired pillar is the concrete case: its old actor is a cube, but the same slot is
+    // now a ball. A `skip_if_exists` repair never rewrites `route`, so the stale actor has
+    // to be removed before the correct art can be imported.
+    if (actor) {
+      const entityId = String(actor.entity_id || actor.runtime?.entity_id || '');
+      const expectedId = `story.placement.${prop.id}`;
+      if ((entityId && entityId !== expectedId) || !routeNamesShippedArt(actor, prop.asset)) {
+        await call('替换陈列物模型', () => api.sceneTools.removeActor(sceneId, guid));
+        actors.delete(guid);
+        actor = null;
+      }
+    }
     const wasPresent = Boolean(actor);
     try {
       if (!actor) {

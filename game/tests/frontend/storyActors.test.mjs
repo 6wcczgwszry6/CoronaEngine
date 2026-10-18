@@ -358,6 +358,17 @@ test('main hides NPCs; child reuses only prophet; corrected dragon bounds stay g
 });
 
 
+test('a monster whose health reaches zero leaves the main-world stage', async () => {
+  const f = apiFixture({ actors: STORY_CHARACTERS.map(character => actorFixture(character)) });
+  const dead = MONSTERS[0];
+  const monsters = Object.fromEntries(MONSTERS.map(monster =>
+    [monster.role, { hp: monster.role === dead.role ? 0 : 120 }]));
+  await load(f, { gameplay: { role: 'main', state: { boss: { hp: 200 }, drop: null, monsters } } });
+  assert.equal(f.get(dead.guid).visible, false, '血量归零的怪物不再出现在主世界');
+  for (const monster of MONSTERS.slice(1))
+    assert.equal(f.get(monster.guid).visible, true, monster.role);
+});
+
 test('each character reaches real render readiness before the next character is submitted', async () => {
   const f = apiFixture(), gate = deferred(), entered = deferred();
   const create = f.api.sceneTools.createActor;
