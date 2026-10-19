@@ -1306,10 +1306,11 @@ test('the boss kill opens the small world and drops gear straight into the bag, 
       if (request.action === 'hitBoss' || request.hit) {
         state.boss.hp = Math.max(0, state.boss.hp - 100);
       }
-      // 击杀本身发放凭证与 64 个方块：没有红球，也没有 pickupDrop。
+      // 击杀本身发放凭证、64 个方块与 64 个球：没有红球，也没有 pickupDrop。
       if (state.boss.hp === 0) {
         state.inventory.worldFragment = 1;
         state.inventory.block = (state.inventory.block || 0) + 64;
+        state.inventory.ball = (state.inventory.ball || 0) + 64;
       }
     }
     return { status: 'ok', role: 'main', config: gameplayConfig, state: structuredClone(state) };
@@ -1356,8 +1357,13 @@ test('the boss kill opens the small world and drops gear straight into the bag, 
   assert.ok(blockItem.stats.some(([, value]) => value === '可以在小世界中使用'),
     '鼠标悬停的浮签必须说明方块可以在小世界中使用');
   assert.match(page.instance.bagTipFoot(blockItem), /可以在小世界中使用/);
+  const ballItem = page.instance.bagCellItems()[2];
+  assert.equal(ballItem.name, '球');
+  assert.equal(ballItem.qty, 64);
   assert.equal(page.instance.hotbarSlots.value[0].id, 'block');
   assert.equal(page.instance.hotbarSlots.value[0].owned, 64);
+  assert.equal(page.instance.hotbarSlots.value[1].id, 'ball');
+  assert.equal(page.instance.hotbarSlots.value[1].owned, 64);
   // 再确认一次状态不会重复发奖。
   await page.instance.gameplay.flush();
   assert.equal(gearIds().length, gearAfter.length);
@@ -1566,6 +1572,7 @@ test('the killing blow grants the fragment and gear immediately, with no red bal
       if (state.boss.hp === 0) {
         state.inventory.worldFragment = 1;
         state.inventory.block = (state.inventory.block || 0) + 64;
+        state.inventory.ball = (state.inventory.ball || 0) + 64;
         state.drop = null;
       }
     }
@@ -1597,8 +1604,10 @@ test('the killing blow grants the fragment and gear immediately, with no red bal
   assert.equal(state.drop, null, '不再留下未拾取的红球');
   assert.equal(state.inventory.worldFragment, 1, '击杀确认时凭证已经在背包里');
   assert.equal(state.inventory.block, 64, '击杀确认时 64 个方块已经在背包里');
+  assert.equal(state.inventory.ball, 64, '击杀确认时 64 个球已经在背包里');
   assert.equal(p().gameplayState.value.state.inventory.worldFragment, 1);
   assert.equal(p().bagCellItems()[1].qty, 64);
+  assert.equal(p().bagCellItems()[2].qty, 64);
   assert.ok(p().bagCellItems()[1].stats.some(([, value]) => value === '可以在小世界中使用'));
   assert.match(p().feedback.value, /小世界已开启/);
   // 场景里没有红球 actor：奖励不再经过世界。

@@ -58,6 +58,7 @@ class GameplayTests(unittest.TestCase):
     def test_ten_hits_unlock_the_small_world_without_a_pickup(self):
         self.assertEqual(self.call()['state']['boss']['hp'], 200)
         self.assertEqual(self.call()['state']['inventory']['block'], 0, '开局的背包里没有方块')
+        self.assertEqual(self.call()['state']['inventory']['ball'], 0, '开局的背包里没有球')
         for _ in range(5):
             self.hit()
         self.assertEqual(self.call()['state']['boss']['hp'], 100)
@@ -68,6 +69,7 @@ class GameplayTests(unittest.TestCase):
         self.assertIsNone(result['state']['drop'])
         self.assertEqual(result['state']['inventory']['worldFragment'], 1)
         self.assertEqual(result['state']['inventory']['block'], game.BLOCK_REWARD)
+        self.assertEqual(result['state']['inventory']['ball'], game.BALL_REWARD)
         self.assertEqual(self.call(action='hitBoss')['status'], 'error')
         self.assertEqual(self.call(action='pickupDrop')['status'], 'error')
         self.assertEqual(len(self.call()['state']['operations']), 10)
@@ -77,7 +79,8 @@ class GameplayTests(unittest.TestCase):
         self.assertIsNone(reopened['state']['drop'])
 
     def test_each_monster_has_its_own_health_pool_and_can_be_hit(self):
-        self.assertEqual(game.CONFIG['monsterDropChance'], 0.7)
+        self.assertEqual(game.CONFIG['monsterDropMin'], 5)
+        self.assertEqual(game.CONFIG['monsterDropMax'], 15)
         self.assertEqual(game.CONFIG['monsterEquipmentChance'], 0.5)
         state = self.call()['state']
         self.assertEqual(set(state['monsters']), set(game.CONFIG['monsters']))
@@ -93,46 +96,55 @@ class GameplayTests(unittest.TestCase):
 
     def test_a_monster_kill_rolls_both_drops_and_replays_the_same_outcome(self):
         last = None
-        # The model roll hits (0.1 < 0.7) and the equipment roll hits (0.1 < 0.5).
+        # Every kill drops 5–15 of one model; the equipment roll hits at 0.1 < 0.5.
         with patch.object(game.random, 'random', return_value=0.1), \
+                patch.object(game.random, 'randint', return_value=7), \
                 patch.object(game.random, 'choice', side_effect=['ball', 'hunter-blade']):
             for _ in range(4):
                 last = self.request('hitMonster', monsterId='monster-em1')
                 result = self.call(last)
         self.assertEqual(result['state']['monsters']['monster-em1']['hp'], 0)
-        self.assertEqual(result['state']['inventory']['ball'], 1, '70% 命中：模型直接进背包')
+        self.assertEqual(result['state']['inventory']['ball'], 7, '击杀掉落 7 个球')
         self.assertEqual(result['state']['inventory']['hunter-blade'], 1,
                          '50% 命中：装备也直接进背包')
         # A retry of the same operation must not roll or grant again.
-        self.assertEqual(self.call(last)['state']['inventory']['ball'], 1)
+        self.assertEqual(self.call(last)['state']['inventory']['ball'], 7)
         self.assertEqual(self.call()['state']['inventory']['hunter-blade'], 1)
         last_operation = self.call()['state']['operations'][-1]
         self.assertEqual(last_operation['loot'], 'ball')
+        self.assertEqual(last_operation['lootCount'], 7)
         self.assertEqual(last_operation['gear'], 'hunter-blade')
-        # A high roll means no item at all; both decisions are stored in the operation log.
-        with patch.object(game.random, 'random', return_value=0.9):
+        # High equipment roll: no gear, but the model stack still always drops.
+        with patch.object(game.random, 'random', return_value=0.9), \
+                patch.object(game.random, 'randint', return_value=5), \
+                patch.object(game.random, 'choice', return_value='block'):
             for _ in range(5):
                 last = self.request('hitMonster', monsterId='monster-em2')
                 result = self.call(last)
         self.assertEqual(result['state']['monsters']['monster-em2']['hp'], 0)
-        self.assertEqual(result['state']['inventory']['ball'], 1)
-        self.assertEqual(result['state']['inventory']['block'], 0)
+        self.assertEqual(result['state']['inventory']['ball'], 7)
+        self.assertEqual(result['state']['inventory']['block'], 5)
         last_operation = self.call()['state']['operations'][-1]
-        self.assertIsNone(last_operation['loot'])
+        self.assertEqual(last_operation['loot'], 'block')
+        self.assertEqual(last_operation['lootCount'], 5)
         self.assertIsNone(last_operation['gear'])
         self.assertEqual(self.call(action='hitMonster', monsterId='monster-em1')['status'], 'error')
 
     def test_a_client_cannot_forge_a_drop_by_sending_loot_or_gear(self):
-        with patch.object(game.random, 'random', return_value=0.9):
+        with patch.object(game.random, 'random', return_value=0.9), \
+                patch.object(game.random, 'randint', return_value=9), \
+                patch.object(game.random, 'choice', return_value='block'):
             for _ in range(4):
                 last = self.request('hitMonster', monsterId='monster-em1',
-                                    loot='ball', gear='hunter-blade')
+                                    loot='ball', gear='hunter-blade', lootCount=99)
                 result = self.call(last)
         self.assertEqual(result['state']['monsters']['monster-em1']['hp'], 0)
-        self.assertEqual(result['state']['inventory']['ball'], 0, '掉落只能由后端掷点决定')
+        self.assertEqual(result['state']['inventory']['block'], 9, '掉落只能由后端掷点决定')
+        self.assertEqual(result['state']['inventory']['ball'], 0)
         self.assertEqual(result['state']['inventory']['hunter-blade'], 0)
         last_operation = self.call()['state']['operations'][-1]
-        self.assertIsNone(last_operation['loot'])
+        self.assertEqual(last_operation['loot'], 'block')
+        self.assertEqual(last_operation['lootCount'], 9)
         self.assertIsNone(last_operation['gear'])
 
     def test_skills_can_finish_a_monster_without_touching_the_boss(self):
@@ -140,7 +152,9 @@ class GameplayTests(unittest.TestCase):
             self.call(action='hitMonster', monsterId='monster-em1')
         self.assertEqual(self.call()['state']['monsters']['monster-em1']['hp'], 20)
         self.assertEqual(self.call()['state']['rage'], 30)
-        with patch.object(game.random, 'random', return_value=0.9):
+        with patch.object(game.random, 'random', return_value=0.9), \
+                patch.object(game.random, 'randint', return_value=5), \
+                patch.object(game.random, 'choice', return_value='block'):
             result = self.call(action='castSkill', skillId='heavy', hit=True,
                                monsterId='monster-em1')
         self.assertEqual(result['status'], 'ok', result)
@@ -180,6 +194,7 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(result['role'], 'child')
         self.assertEqual(result['state']['inventory']['worldFragment'], 1)
         self.assertEqual(result['state']['inventory']['block'], game.BLOCK_REWARD)
+        self.assertEqual(result['state']['inventory']['ball'], game.BALL_REWARD)
         self.assertEqual(self.call(action='hitBoss')['status'], 'error')
         self.assertEqual(self.call(action='pickupDrop')['status'], 'error')
         self.assertFalse((child / game.SAVE_PATH).exists())
@@ -254,11 +269,13 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(state['boss']['hp'], 20)
         self.assertEqual(state['inventory']['worldFragment'], 0)
         self.assertEqual(state['inventory']['block'], 0)
+        self.assertEqual(state['inventory']['ball'], 0)
         self.assertIsNone(state['drop'])
         # Same operation ID, retried after the disk is writable: commits once.
         committed = self.call(request)['state']['inventory']
         self.assertEqual(committed['worldFragment'], 1)
         self.assertEqual(committed['block'], game.BLOCK_REWARD)
+        self.assertEqual(committed['ball'], game.BALL_REWARD)
         self.assertEqual(self.call(request)['state']['inventory']['block'], game.BLOCK_REWARD)
 
     def test_stale_or_creative_project_cannot_write(self):
@@ -320,6 +337,7 @@ class GameplayTests(unittest.TestCase):
                 self.assertEqual(loaded['status'], 'ok', loaded)
                 self.assertEqual(loaded['state']['inventory']['worldFragment'], 1)
                 self.assertEqual(loaded['state']['inventory']['block'], game.BLOCK_REWARD)
+                self.assertEqual(loaded['state']['inventory']['ball'], game.BALL_REWARD)
                 self.assertIsNone(loaded['state']['drop'])
                 self.assertEqual(set(loaded['state']['monsters']), set(game.CONFIG['monsters']),
                                  '旧存档读取时补齐每只怪物的满血状态')

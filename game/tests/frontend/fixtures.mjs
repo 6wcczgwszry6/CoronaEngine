@@ -85,7 +85,7 @@ export function apiFixture({ actors = [], wrapped = true } = {}) {
 export const gameplayConfig = { playerHp: 100, rageMax: 100, ragePerHit: 10, bossHp: 200,
   damage: 20, cooldownMs: 400, bossBarRadius: 10, monsterBarRadius: 10,
   meleeRange: 2.5, meleeHalfAngle: Math.PI / 3,
-  monsterDropChance: 0.7, monsterEquipmentChance: 0.5,
+  monsterDropMin: 5, monsterDropMax: 15, monsterEquipmentChance: 0.5,
   monsters: {
     'monster-em135': { hp: 180 },
     'monster-em001-a': { hp: 120 },
