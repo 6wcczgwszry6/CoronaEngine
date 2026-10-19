@@ -20,7 +20,7 @@ import { createBossDirector } from '../../../../../game/frontend/storyBossAi.mjs
 import { createPlayerController, VIEW_LABELS } from '../../../../../game/frontend/playerController.mjs';
 import { createPlayerSave } from '../../../../../game/frontend/playerSave.mjs';
 import { createStoryGameplay, worldBounds, distanceToBounds, pickupDistance,
-  contextualInteraction } from '../../../../../game/frontend/storyGameplay.mjs';
+  contextualInteraction, FRAGMENT_GUID } from '../../../../../game/frontend/storyGameplay.mjs';
 import { STORY_CHARACTERS, PROPHET_GUID, resolveStoryAssetPath,
   sceneSnapshot } from '../../../../../game/frontend/storyCharacters.mjs';
 import { MAX_PLACEMENTS, PLACED_BLOCK_REACH, PLACEMENT_DISTANCE, blockSpawnTransform, cycleSlot, findProp,
@@ -38,6 +38,7 @@ import { ADJUST_ACTIONS, FRAGMENT_ADJUST_ACTIONS, PROPHET_SCREENS, adjustFeedbac
   adjustFragmentRule, fragmentAdjustPanel, fragmentPanel,
   nextObjectTransform, objectLabel, prophetKeyAction, selectableObjects,
   toggleFragment } from '../../../../../game/frontend/storyProphetActions.mjs';
+
 
 const router = useRouter();
 const surface = ref(null);
@@ -1315,6 +1316,8 @@ function cycleView() {
   const label = viewLabel();
   camera.cycleViewMode?.();
   viewTick.value++;
+  // 视角循环可能把玩家模型翻回可见，小世界里立刻改回隐藏。
+  keepChildPlayerHidden();
   showToast(`视角：${label} → ${viewLabel()}（V 键切换）`);
 }
 function openDialogue() {
@@ -1396,6 +1399,7 @@ function enterAdjustMode() {
   previousViewMode.value = camera.viewMode?.() || null;
   camera.setViewMode?.('top');
   adjustMode.value = true;
+  keepChildPlayerHidden();
   dialogueOpen.value = false;
   camera.resetInput();
   void nextTick(() => surface.value?.focus());
@@ -1425,6 +1429,7 @@ function exitAdjustMode({ reopenDialogue = true } = {}) {
   if (!adjustMode.value) return;
   if (previousViewMode.value) camera.setViewMode?.(previousViewMode.value);
   previousViewMode.value = null;
+  keepChildPlayerHidden();
   adjustMode.value = false;
   adjustSelection.value = null;
   actionFeedback.value = '';
@@ -1469,6 +1474,41 @@ function rememberCube(actor) {
   cubeActor = actor || null;
   cubeTransform = cubeTransformOf(cubeActor);
   return cubeTransform;
+}
+// ---- 小世界模型裁剪（场景只保留玩家（隐形）、先知与地形）----------------------
+// 角色可见性的权威处理在 game/frontend/storyActors.mjs（只读不改）：它把小世界里的
+// Boss、商人、小怪与红球设为不可见。这里在进入小世界时把它们从场景中**移除**——
+// 隐藏只是改可见性，模型仍占着场景；移除只针对快照中真实存在的 actor，重复进入幂等。
+async function cullChildWorld(snapshot, gameplay) {
+  if (gameplay?.role !== 'child') return;
+  // 只对快照中真实存在的 actor 发起移除：重复进入小世界时场景里已没有它们，返回空列表。
+  const present = new Set((Array.isArray(snapshot?.actors) ? snapshot.actors : [])
+    .map(actor => actor?.actor_guid).filter(Boolean));
+  const keepRoles = new Set(['player', 'prophet']);
+  const list = [...STORY_CHARACTERS.filter(character => !keepRoles.has(character.role))
+    .map(character => character.guid), FRAGMENT_GUID]
+    .filter(guid => present.has(guid));
+  for (const guid of list) {
+    try {
+      const data = unwrap(await editorApi.sceneTools.removeActor(sceneId, guid));
+      if (!data || data.ok === false || !['success', 'loaded'].includes(data.status)) {
+        throw new Error(data?.message || data?.diagnostics?.[0]?.message || '引擎未确认移除');
+      }
+    } catch (error) {
+      actionFeedback.value = `小世界模型移除失败：${error.message}`;
+    }
+  }
+}
+// 小世界的玩家不渲染模型：玩法（移动、跳跃、摆放、存档）仍然对着它，只是不再画出角色。
+// 相机控制器在绑定与切换视角时会尝试恢复可见性（V 循环、调整模式的俯瞰视角），
+// 这里在同一 tick 内把它改回隐藏——引擎读到的最终值就是不可见。
+function keepChildPlayerHidden() {
+  if (!inSubworld.value || !playerActor?.handle) return;
+  const bridge = current() ? window.coronaBridge : null;
+  if (typeof bridge?.setActorState !== 'function') return;
+  try {
+    bridge.setActorState(playerActor.handle, { visible: false });
+  } catch (error) { if (current()) gameplayError.value = error.message; }
 }
 // Rebuild the animated set from a fresh snapshot: reading the scene is an asynchronous
 // CEF round trip, so the frame loop only replays the handles captured here. Passing no
@@ -1897,6 +1937,8 @@ onMounted(async () => {
       isCurrent: () => current() && worldModeState.projectPath === projectPath,
     });
     if (!current() || worldModeState.projectPath !== projectPath) return;
+    // 小世界只保留玩家（隐形）、先知与地形：Boss、商人、小怪与红球在此从副本场景移除。
+    await cullChildWorld(snapshot, loadedGameplay);
     // 地图是这条故事线的地面：与角色、方块一样在进入世界时由前端确认在位。
     // 不按角色分叉——主世界要有它，小世界是主场景的副本因此自动继承同一份；
     // 没有它角色只会站在空气里，所以这里不设 role 门槛。
@@ -1911,8 +1953,10 @@ onMounted(async () => {
     if (!current() || worldModeState.projectPath !== projectPath) return;
     // Look the boss up by role: array position is not an identity, and inserting a
     // character would otherwise silently point this at whoever slid into slot 1.
-    bossActor = snapshot.actors?.find(actor =>
-      actor.actor_guid === STORY_CHARACTERS.find(character => character.role === 'boss').guid) || null;
+    // 小世界没有 Boss：裁剪后场景里不再有它，这里也保持 null，战斗逻辑由 role 守卫。
+    bossActor = loadedGameplay?.role === 'child' ? null
+      : snapshot.actors?.find(actor =>
+        actor.actor_guid === STORY_CHARACTERS.find(character => character.role === 'boss').guid) || null;
     bossBounds = worldBounds(bossActor);
     // 先知只在小世界按需生成，主世界里缺失是正常的：交互保持不可用即可。
     prophetActor = snapshot.actors?.find(actor => actor.actor_guid === PROPHET_GUID) || null;
@@ -1944,6 +1988,8 @@ onMounted(async () => {
     visualPlacements = placementSignature(placements.value);
     cameraReady = camera.bind(snapshot, sceneId);
     camera.bindPlayer(player, targetOffset);
+    // 小世界的玩家不渲染模型：绑定发生在相机控制器之后，避免它把模型翻回可见。
+    if (loadedGameplay?.role === 'child') keepChildPlayerHidden();
     updateProximity();
     playerSave = createPlayerSave({ api: editorApi, sceneId,
       readPlayer: camera.snapshotPlayer, stopInput: camera.resetInput,
