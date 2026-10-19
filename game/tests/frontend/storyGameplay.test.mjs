@@ -15,7 +15,7 @@ const LEGACY_FRAGMENT = { role: 'fragment', name: '世界碎片', guid: FRAGMENT
   x: 0, z: 12, size: 0.5, rotation: [0, 0, 0] };
 function fixture(options = {}) {
   let state = { version: 2, revision: 0, rage: 0, boss: { hp: 200 }, drop: null,
-    inventory: { worldFragment: 0, block: 0 } };
+    inventory: { worldFragment: 0, block: 0, ball: 0 } };
   let role = 'main', time = 0, id = 0, fail = false, lostReply = false, visualFail = false, gate = null, replyGate = null;
   const boss = actorFixture(STORY_CHARACTERS[1]), bounds = worldBounds(boss);
   const player = { position: [0, 0, bounds[2] - 1], rotation: [0, Math.PI, 0], facingYaw: 0, grounded: true };
@@ -54,10 +54,11 @@ function fixture(options = {}) {
           state.rage -= skill.rageCost;
           if (request.hit) state.boss.hp = Math.max(0, state.boss.hp - skill.damage);
         }
-        // The killing blow grants the fragment and the block stack; no drop is ever written.
+        // The killing blow grants the fragment, 64 blocks and 64 balls; no drop is written.
         if (!state.boss.hp) {
           state.inventory.worldFragment = Math.max(1, state.inventory.worldFragment);
           state.inventory.block = (state.inventory.block || 0) + 64;
+          state.inventory.ball = (state.inventory.ball || 0) + 64;
         }
       }
       if (lostReply) { lostReply = false; throw new Error('reply lost'); }
@@ -118,6 +119,7 @@ test('ten acknowledged hits grant the fragment immediately, with no red ball and
   // 击杀本身就把凭证交给背包：世界里没有红球，F 也没有「拾取」这一步。
   assert.equal(f.state.inventory.worldFragment, 1);
   assert.equal(f.state.inventory.block, 64, '击杀同时把 64 个方块交给行囊');
+  assert.equal(f.state.inventory.ball, 64, '击杀同时把 64 个球交给行囊');
   assert.equal(f.state.drop, null);
   assert.equal(f.game.pickup, undefined, 'pickup 不再是玩法 API 的一部分');
   assert.deepEqual(f.requests.map(request => request.action).includes('pickupDrop'), false);
@@ -155,7 +157,7 @@ test('a monster swing dispatches its role and a kill reports both dropped items'
       state.revision++;
       if (request.action === 'hitMonster') {
         state.monsters[request.monsterId].hp = 0;
-        state.inventory.ball = 1;
+        state.inventory.ball = 7;
         state.inventory['hunter-blade'] = 1;
       }
       return { status: 'ok', role: 'main', config: gameplayConfig, state: structuredClone(state) };
@@ -165,7 +167,7 @@ test('a monster swing dispatches its role and a kill reports both dropped items'
   assert.equal(requests.at(-1).action, 'hitMonster');
   assert.equal(requests.at(-1).monsterId, monster.role);
   assert.equal(game.data.state.monsters[monster.role].hp, 0);
-  assert.deepEqual(feedback, ['击败怪物 · 获得 球 ×1、猎人长刃 ×1']);
+  assert.deepEqual(feedback, ['击败怪物 · 获得 球 ×7、猎人长刃 ×1']);
 });
 
 test('out of range, behind and child world never dispatch damage', async () => {

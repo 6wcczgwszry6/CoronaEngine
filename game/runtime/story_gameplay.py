@@ -51,7 +51,7 @@ STARTING_ITEMS = {'rage-herb': 3}
 CONFIG = {
     'playerHp': 100, 'rageMax': 100, 'ragePerHit': 10, 'bossHp': 200, 'damage': 20,
     'cooldownMs': 400, 'bossBarRadius': 10, 'monsterBarRadius': 10, 'meleeRange': 2.5,
-    'meleeHalfAngle': math.pi / 3, 'monsterDropChance': 0.7,
+    'meleeHalfAngle': math.pi / 3, 'monsterDropMin': 5, 'monsterDropMax': 15,
     'monsterEquipmentChance': 0.5,
     'monsters': {role: {'hp': hp} for role, hp in MONSTER_HP.items()},
     # `coefficient` 是伤害乘数：空手攻击 20 × 2.5 = 50，与旧版的固定伤害一致。
@@ -68,6 +68,10 @@ _lock = threading.RLock()
 # The boss hands the player a stack of blocks for the small world when it dies. The stack
 # is a reward, not a starting item: the bag is empty of blocks until the fight is won.
 BLOCK_REWARD = 64
+# The boss also hands over a stack of balls: both placeable models are part of the reward.
+BALL_REWARD = 64
+MONSTER_DROP_MIN = 5
+MONSTER_DROP_MAX = 15
 # Backwards-compatible name for saves and tests written before the reward moved to the kill.
 BLOCK_SEED = BLOCK_REWARD
 
@@ -200,6 +204,12 @@ def _operation(request, *, stored=False):
         if loot is not None and loot not in (*LOOT_PROPS, 'pillar'):
             raise ValueError('未知的掉落物')
         operation['loot'] = loot
+    if stored and 'lootCount' in request:
+        count = request['lootCount']
+        # Legacy operations stored no count and meant exactly one item.
+        if type(count) is not int or not 0 <= count <= MONSTER_DROP_MAX:
+            raise ValueError('掉落数量无效')
+        operation['lootCount'] = count
     if stored and 'gear' in request:
         gear = request['gear']
         if gear is not None and gear not in MONSTER_EQUIPMENT:
@@ -219,28 +229,32 @@ def _operation(request, *, stored=False):
 def _drop_monster_loot(state, operation, *, live):
     """Roll a monster's drops once, then store the outcome in the operation.
 
-    A live kill rolls twice, independently: a 70% chance for a placeable model and a 50%
-    chance for equipment. Replaying a stored operation must not roll again, which is why
-    both outcomes are written into the operation itself. They are only accepted from the
-    save log, never from a fresh client request.
+    A live kill always leaves a model stack of 5–15 blocks or balls, and independently a
+    50% chance for equipment. Replaying a stored operation must not roll again, which is
+    why both outcomes are written into the operation itself. They are only accepted from
+    the save log, never from a fresh client request.
     """
     if live:
-        loot = random.choice(LOOT_PROPS) if random.random() < CONFIG['monsterDropChance'] else None
+        loot = random.choice(LOOT_PROPS)
+        loot_count = random.randint(MONSTER_DROP_MIN, MONSTER_DROP_MAX)
         gear = (random.choice(MONSTER_EQUIPMENT)
                 if random.random() < CONFIG['monsterEquipmentChance'] else None)
         operation['loot'] = loot
+        operation['lootCount'] = loot_count
         operation['gear'] = gear
     else:
         # Operations saved before equipment drops have no `gear` key; they must not roll
-        # equipment retroactively when the save is replayed.
+        # equipment retroactively when the save is replayed. Likewise, an old `loot`
+        # without a count meant exactly one item.
         loot = operation.get('loot') if 'loot' in operation else None
+        loot_count = operation.get('lootCount', 1) if loot is not None else 0
         gear = operation.get('gear') if 'gear' in operation else None
     # The retired pillar prop becomes the ball; old operations keep their original id in
     # the log, but the inventory counter and the bag only know about balls.
     if loot == 'pillar':
         loot = 'ball'
     if loot is not None:
-        state['inventory'][loot] = state['inventory'].get(loot, 0) + 1
+        state['inventory'][loot] = state['inventory'].get(loot, 0) + loot_count
     if gear is not None:
         state['inventory'][gear] = state['inventory'].get(gear, 0) + 1
 
@@ -347,6 +361,7 @@ def _apply(state, operation, *, legacy=False, live=False):
                 # 小世界物品栏从此有东西可放；五件兵甲一并进包，等着被披挂。
                 state['inventory']['worldFragment'] = max(1, state['inventory']['worldFragment'])
                 state['inventory']['block'] = state['inventory'].get('block', 0) + BLOCK_REWARD
+                state['inventory']['ball'] = state['inventory'].get('ball', 0) + BALL_REWARD
                 # 掷点结果是服务端定的：先写进操作日志，再按日志发货，重放才不会重掷。
                 if live:
                     operation['bossGear'] = list(BOSS_EQUIPMENT)
@@ -428,11 +443,18 @@ def _validate(state):
         state['drop'] = None
         if state['boss']['hp'] == 0:
             state['inventory']['worldFragment'] = max(1, state['inventory']['worldFragment'])
-    # The boss stack is now part of the killing-blow reward, while monster loot adds to
-    # the same counter. Old saves seeded 64 from the start, so rebuild the counter from
-    # the two authoritative sources instead of trusting the stored number.
-    block_loot = sum(1 for operation in operations if operation.get('loot') == 'block')
-    state['inventory']['block'] = (0 if state['boss']['hp'] > 0 else BLOCK_REWARD) + block_loot
+    # Boss stacks and monster loot share these counters. Old saves seeded 64 blocks (and no
+    # balls) from the start, while old monster operations stored no count, so rebuild both
+    # counters from the authoritative operation log instead of trusting the stored numbers.
+    def loot_amount(operation):
+        return operation.get('lootCount', 1) if operation.get('loot') is not None else 0
+    block_loot = sum(loot_amount(operation) for operation in operations
+                     if operation.get('loot') == 'block')
+    ball_loot = sum(loot_amount(operation) for operation in operations
+                    if operation.get('loot') in ('ball', 'pillar'))
+    boss_alive = state['boss']['hp'] > 0
+    state['inventory']['block'] = (0 if boss_alive else BLOCK_REWARD) + block_loot
+    state['inventory']['ball'] = (0 if boss_alive else BALL_REWARD) + ball_loot
     for key in ('boss', 'drop', 'monsters', 'inventory', 'rage', 'equipped'):
         if replay[key] != state[key]:
             raise ValueError('玩法状态与操作记录不一致')
@@ -658,7 +680,7 @@ def handle_gameplay_request(payload: str, *, api=None):
                     # `loot` is chosen by the server after the request was accepted, so a
                     # retry (which does not carry it) must still match the stored command.
                     stored = {key: value for key, value in prior.items()
-                              if key not in ('loot', 'gear', 'bossGear')}
+                              if key not in ('loot', 'lootCount', 'gear', 'bossGear')}
                     if stored != operation:
                         raise ValueError('同一操作 ID 不能用于不同请求')
                     return response()  # A committed request whose reply was lost.
