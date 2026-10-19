@@ -940,6 +940,8 @@ function bagEquipFromSlot(index) {
   bag.cells[index] = previous;            // 旧物回落到同一格，格阵不塌陷
   bagToast(`披掛 · ${SLOT_BY_ID[slotId].name} · ${item.name}`);
   bag.sel = item.uid;
+  // 属性由后端按披挂算：这里只发一条命令，扣件与加成都在存档里。
+  gameplay.equipItem(item.u).catch(() => {});
   bagSave();
 }
 function bagUnequip(slotId) {
@@ -951,6 +953,7 @@ function bagUnequip(slotId) {
   bag.gear[slotId] = null;
   bagToast(`卸下 · ${item.name}`);
   bag.sel = item.uid;
+  gameplay.unequipItem(slotId).catch(() => {});
   bagSave();
 }
 function bagUseFromSlot(index) {
@@ -965,6 +968,8 @@ function bagUseFromSlot(index) {
     bag.cells[index] = null;
     if (bag.sel === entry.uid) bag.sel = null;
   }
+  // 服用效果（回气）由后端结算，界面只声明「吃了一枚」。
+  gameplay.useItem(entry.u).catch(() => {});
   bagSave();
 }
 function bagDropItem(uid) {
@@ -974,6 +979,8 @@ function bagDropItem(uid) {
   else bag.cells[found.idx] = null;
   bag.sel = null;
   bagToast(`${found.item.cat === 'equip' ? '熔去' : '弃之'} · ${found.item.name}`);
+  // 弃置要落在存档里，否则重进世界会按计数把这件东西补回来。
+  gameplay.discardItem(found.item.u).catch(() => {});
   bagSave();
 }
 function bagDetailAct(uid, action) {

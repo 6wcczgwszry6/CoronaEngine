@@ -1532,7 +1532,8 @@ test('the real save shape starts with no red ball and no pickup range', async t 
   if (!realConfig) return;
   // 盘上的初始存档形状：这些字段一个都不能少，否则页面拿到的不是后端真的那份 state。
   assert.deepEqual(Object.keys(realState).sort(),
-    ['boss', 'drop', 'inventory', 'legacyRevision', 'monsters', 'operations', 'rage', 'revision', 'version'],
+    ['boss', 'drop', 'equipped', 'inventory', 'legacyRevision', 'monsters', 'operations', 'rage',
+      'revision', 'version'],
     '夹具必须就是 story_gameplay.initial_state() 的真实字段');
   assert.equal(realState.drop, null, '新存档不再预置红球');
   assert.equal(realState.inventory.worldFragment, 0);

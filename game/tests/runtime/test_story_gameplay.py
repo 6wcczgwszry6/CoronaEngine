@@ -211,7 +211,7 @@ class GameplayTests(unittest.TestCase):
         path = self.root / game.SAVE_PATH
         path.write_text(json.dumps(old), encoding='utf-8')
         migrated = self.call()['state']
-        self.assertEqual(migrated['version'], 2)
+        self.assertEqual(migrated['version'], 3)
         self.assertEqual(migrated['legacyRevision'], 3)
         self.assertEqual(migrated['rage'], 0)
         self.assertEqual(migrated['boss'], old['boss'])
@@ -404,6 +404,46 @@ class GameplayTests(unittest.TestCase):
         self.assertEqual(reloaded['state']['placements'], [entry])
         self.assertEqual(self.document('load')['state']['inventory']['block'], 0,
                          '未击杀 Boss 时行囊里没有方块')
+
+    def test_a_worn_weapon_changes_damage_and_boots_shorten_the_cooldown(self):
+        """披挂改的是同一记普通攻击的扣血量，冷却也被疾行词条压缩。"""
+        for _ in range(10):
+            result = self.hit()
+        self.assertEqual(result['state']['inventory']['boss-main'], 1, 'Boss 的兵甲随击杀进包')
+        self.assertEqual(self.call()['config']['skills']['heavy']['cooldownMs'], 1200)
+        # 空手 20 点伤害：怪物 80 血打一下还剩 60。
+        hit = self.call(action='hitMonster', monsterId='monster-em1')
+        self.assertEqual(hit['state']['monsters']['monster-em1']['hp'], 60)
+        self.assertEqual(self.call(action='equipItem', itemId='boss-main')['status'], 'ok')
+        # 攻击 20 + 148：同一条命令，伤害由后端按属性算。
+        self.assertEqual(self.call(action='hitMonster', monsterId='monster-em1')
+                         ['state']['monsters']['monster-em1']['hp'], 0)
+        equipped = self.call()['state']
+        self.assertEqual(equipped['equipped']['weapon'], 'boss-main')
+        self.assertEqual(equipped['inventory']['boss-main'], 0, '披挂后不在囊中重复计数')
+        self.assertEqual(self.call()['config']['attributes']['atk'], 168)
+        # 换上疾行战靴：重斩的冷却从 1200ms 压到 1080ms。
+        self.assertEqual(self.call(action='equipItem', itemId='boss-boots')['status'], 'ok')
+        self.assertEqual(self.call()['config']['skills']['heavy']['cooldownMs'], 1080)
+        self.assertEqual(self.call(action='unequipItem', slot='weapon')['status'], 'ok')
+        self.assertEqual(self.call()['config']['attributes']['atk'], 20, '卸下后完全还原')
+        self.assertEqual(self.call()['state']['inventory']['boss-main'], 1)
+
+    def test_using_and_discarding_items_survive_a_reload(self):
+        """服用扣一枚、回气；弃置也落进存档，重进世界不会复活。"""
+        self.assertEqual(self.call()['state']['inventory']['rage-herb'], 3)
+        used = self.call(action='useItem', itemId='rage-herb')
+        self.assertEqual(used['state']['inventory']['rage-herb'], 2)
+        self.assertEqual(used['state']['rage'], 30)
+        dropped = self.call(action='discardItem', itemId='rage-herb')
+        self.assertEqual(dropped['state']['inventory']['rage-herb'], 1)
+        reloaded = self.call()
+        self.assertEqual(reloaded['state']['inventory']['rage-herb'], 1)
+        self.assertEqual(reloaded['state']['rage'], 30)
+        self.assertEqual(self.call(action='discardItem', itemId='not-an-item')['status'], 'error')
+        self.assertEqual(self.call(action='equipItem', itemId='hunter-blade')['status'], 'error',
+                         '囊中没有的装备不能凭空披挂')
+
 
 
 if __name__ == '__main__':

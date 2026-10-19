@@ -184,6 +184,13 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss, re
     pending = { action, operationId: newId(), expectedRevision: data.state.revision, ...fields };
     return flush();
   }
+  // 背包的三件事（披挂 / 服用 / 弃置）都只是一条后端操作：界面只管发命令，
+  // 扣几件、加多少属性一律由后端算，客户端不报数值。战斗请求在途时先让路，
+  // 免得把一次没发出的攻击顶掉。
+  function commitBag(action, fields) {
+    if (!data || data.role !== 'main' || pending || inFlight) return Promise.resolve(false);
+    return commit(action, fields);
+  }
   // The side documents are declared as functions of this factory, not only as methods of the
   // returned object: `load()` calls them by name, and an object literal's methods are *not*
   // in scope inside their siblings. Written as methods, each of these three calls was a
@@ -342,5 +349,11 @@ export function createStoryGameplay({ api, projectPath, readPlayer, readBoss, re
         ...(hit && target.kind === 'monster' ? { monsterId: target.id } : {}) });
     },
     flush,
+    // 属性与技能数值由后端按已披挂的装备算好放在 config 里，页面直接显示即可。
+    get attributes() { return data?.config?.attributes || null; },
+    equipItem(itemId) { return commitBag('equipItem', { itemId }); },
+    unequipItem(slot) { return commitBag('unequipItem', { slot }); },
+    useItem(itemId) { return commitBag('useItem', { itemId }); },
+    discardItem(itemId) { return commitBag('discardItem', { itemId }); },
   };
 }
