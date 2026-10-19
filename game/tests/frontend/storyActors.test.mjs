@@ -63,7 +63,8 @@ test('unrelated names are untouched; fixed NPCs and disabled physics are enforce
   assert.deepEqual(f.state.actors[0], unrelated);
   assert.equal(boss.mechanics.physics_enabled, false);
   assert.equal(boss.follow_camera, false); assert.equal(boss.camera_lock.enabled, false);
-  assert.equal(boss.geometry.position[2], 5.5);
+  // 位置以人物表为准：移动角色不该让这条断言失败，它检查的是"摆位与表一致"。
+  assert.equal(boss.geometry.position[2], STORY_CHARACTERS.find(c => c.role === 'boss').z);
 });
 test('partial failure preserves successful actors; retry repairs incomplete placement without duplication', async () => {
   const f = apiFixture(); const original = f.api.scene.setActorTransform;
@@ -230,6 +231,54 @@ test('legacy player facing is migrated with its marker in one write, preserving 
   for (let i = 0; i < 3; i++) await load(f);
   assert.equal(f.calls.length, 1); assert.equal(f.state.actors.length, INHABITANT_COUNT);
 });
+test('a lost race on scene.ini is retried instead of aborting the world load', async () => {
+  const f = apiFixture({ actors: [] });
+  const create = f.api.sceneTools.createActor;
+  let failures = 1;
+  f.api.sceneTools.createActor = async (...args) => {
+    if (failures > 0) {
+      failures -= 1;
+      throw new Error('创建模型：Unable to replace scene.ini');
+    }
+    return create(...args);
+  };
+  await load(f);
+  assert.equal(failures, 0, 'the retry consumed the injected failure');
+  // The whole cast still comes up, and the retried character was not created twice.
+  assert.equal(f.state.actors.length, INHABITANT_COUNT);
+  for (const character of INHABITANTS) {
+    assert.equal(f.state.actors.filter(actor => actor.actor_guid === character.guid).length, 1, character.role);
+  }
+});
+
+test('a permanent scene.ini failure still surfaces after the retries are spent', async () => {
+  const f = apiFixture({ actors: [] });
+  f.api.sceneTools.createActor = async () => { throw new Error('创建模型：Unable to replace scene.ini'); };
+  await assert.rejects(load(f), /Unable to replace scene\.ini/);
+});
+
+test('a duplicate actor sharing the player guid is deleted, keeping the named one', async () => {
+  // The exact shape observed after a model swap: `玩家` and `玩家_1`, same guid, both imported.
+  const player = actorFixture();
+  const duplicate = { ...actorFixture(), name: `${player.name}_1`,
+    geometry: { ...player.geometry, position: [0, 0, 0] } };
+  assert.equal(duplicate.actor_guid, player.actor_guid, 'the fixture must reproduce the shared guid');
+  const f = apiFixture({ actors: [player, duplicate, ...INHABITANTS.slice(1).map(c => actorFixture(c))] });
+  await load(f);
+  const removed = f.calls.filter(call => call[0] === 'remove');
+  assert.equal(removed.length, 1, 'exactly the duplicate is deleted');
+  assert.equal(f.state.actors.filter(a => a.actor_guid === player.actor_guid).length, 1,
+    'one actor per guid afterwards');
+  assert.equal(f.state.actors.find(a => a.actor_guid === player.actor_guid).name, player.name,
+    'the actor whose name matches the character survives');
+});
+
+test('a world without duplicates costs no extra engine calls', async () => {
+  const f = apiFixture({ actors: STORY_CHARACTERS.map(c => actorFixture(c)) });
+  await load(f);
+  assert.equal(f.calls.filter(call => call[0] === 'remove').length, 0);
+});
+
 test('a player built from previous art is replaced, not repaired, so the engine imports the new model', async () => {
   // The world still holds the previous player model. Bumping the generation marker alone would
   // only rewrite the transform: `create_actor`'s `skip_if_exists` branch never re-imports, so

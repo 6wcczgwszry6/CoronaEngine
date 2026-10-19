@@ -35,6 +35,16 @@ test('third-person starts behind player and movement/facing is camera relative',
   near(f.pose.position[2], 0.15 - Math.cos(PLAYER_CONTROLS.pitch) * 4.5);
   f.controller.dispose(); assert.equal(f.frames.size, 0);
 });
+test('releasing the last movement key reports idle, which is what stops the walk clip', () => {
+  const f = controlFixture();
+  f.controller.keyDown(key('KeyW')); f.step(50);
+  assert.equal(f.controller.snapshotPlayer().movementState, 'walking');
+  // The page subscribes through this callback; it is the only signal after the loop stops.
+  f.controller.keyUp(key('KeyW'));
+  assert.equal(f.controller.snapshotPlayer().movementState, 'idle');
+  f.controller.dispose();
+});
+
 test('diagonal movement is normalized and a stalled frame does not teleport', () => {
   const f = controlFixture(); f.controller.keyDown(key('KeyW')); f.controller.keyDown(key('KeyD'));
   f.step(5000); const p = f.controller.snapshotPlayer(); near(Math.hypot(p.position[0],p.position[2]), 0.15);

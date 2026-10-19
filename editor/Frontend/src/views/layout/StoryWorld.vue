@@ -15,6 +15,8 @@ import HERO_FIGURE from '@/assets/hero-figure.png';
 import './StoryWorld.bag.css';
 
 import { ensureStoryCharacters, syncPlacementActors } from '../../../../../game/frontend/storyActors.mjs';
+import { createPlayerAnimationSwitcher, PLAYER_ATTACK_CLIP, PLAYER_SKILL_CLIP } from '../../../../../game/frontend/storyPlayerAnimation.mjs';
+import { createBossDirector } from '../../../../../game/frontend/storyBossAi.mjs';
 import { createPlayerController, VIEW_LABELS } from '../../../../../game/frontend/playerController.mjs';
 import { createPlayerSave } from '../../../../../game/frontend/playerSave.mjs';
 import { createStoryGameplay, worldBounds, distanceToBounds, pickupDistance,
@@ -122,6 +124,78 @@ const camera = createStoryCameraController({
   getPixelRatio: () => window.devicePixelRatio,
 });
 const unwrap = (response) => response?.data ?? response;
+/**
+ * 玩家的动作播放器：把控制器报出的 movementState 翻成 clip，并负责攻击/技能的一次性播放。
+ * 懒创建——`sceneId` 要等 `onInit` 才知道；整页只建一次，世界重建时 guid 不变。
+ * 失败只报告不抛出：动作属于表现层，不该让一次桥调用失败挡住移动。
+ */
+let playerAnimation = null;
+function playerAnimationSwitcher() {
+  if (playerAnimation || !sceneId) return playerAnimation;
+  try {
+    playerAnimation = createPlayerAnimationSwitcher({
+      api: editorApi, sceneId, guid: STORY_CHARACTERS[0].guid,
+      onError: (error) => { if (current()) gameplayError.value = error.message || '动作切换失败'; },
+    });
+  } catch (error) {
+    if (current()) gameplayError.value = error.message;
+  }
+  return playerAnimation;
+}
+/**
+ * 小怪简易版：让一只小怪发现玩家后走过去、进入范围就挥砍。
+ * 用 100ms 定时器驱动，而不是挂在 `updateProximity` 上——那个回调只在玩家移动时触发，
+ * 玩家站住不动小怪就不会动，无法验证。
+ */
+/**
+ * Boss 动作状态机：待机 / 靠近时挥砍（两套轮换）/ 被击中时受击 / 血量归零死亡。
+ * 不造成伤害——游戏里没有"玩家血量"状态，`config.playerHp` 无人消费，
+ * 所以这里先把可见的威胁做出来；等血量系统落地时，`onAttack` 是唯一要接伤害的地方。
+ */
+let bossDirector = null;
+let bossLastHp = null;
+function bossStateMachine() {
+  if (bossDirector || !sceneId) return bossDirector;
+  const entry = STORY_CHARACTERS.find(character => character.role === 'boss');
+  if (!entry) return null;
+  try {
+    bossDirector = createBossDirector({
+      api: editorApi, sceneId, guid: entry.guid,
+      onError: (error) => { if (current()) gameplayError.value = `Boss 动作: ${error.message}`; },
+    });
+  } catch (error) {
+    if (current()) gameplayError.value = error.message;
+  }
+  return bossDirector;
+}
+function tickBoss() {
+  const data = gameplayState.value;
+  if (!data || data.role !== 'main') return;
+  const player = camera.snapshotPlayer();
+  const boss = bossActor;
+  if (!player?.position || !boss?.geometry?.position) return;
+  const hp = data.state.boss.hp;
+  const bossSite = STORY_CHARACTERS.find(character => character.role === 'boss');
+      // 距离用**人物表落点**算：actor 位置只在进入世界时快照一次，Boss 站点改过之后
+      // 旧世界里的副本不会跟着动，页面就会拿旧坐标判断，一进世界就开打。
+      const bounds = worldBounds(boss);
+      const half = bounds && bounds[3] > bounds[0]
+        ? Math.max(bounds[3] - bounds[0], bounds[5] - bounds[2]) / 2
+        : (bossSite?.size ?? 8) / 2;
+      const distance = Math.hypot(player.position[0] - bossSite.x, player.position[2] - bossSite.z) - half;
+  const wasHit = bossLastHp !== null && hp < bossLastHp;
+  bossLastHp = hp;
+  bossStateMachine()?.tick({ hp, distance: Math.max(0, distance), wasHit });
+}
+// Boss 状态机由 100ms 定时器驱动：玩家站住不动时 Boss 仍然要反应。
+let actorTimer = null;
+function startActorTicker() {
+  if (actorTimer || typeof window === 'undefined') return;
+  actorTimer = window.setInterval(() => {
+    if (!current() || !cameraReady) return;
+    try { tickBoss(); } catch (error) { if (current()) gameplayError.value = error.message; }
+  }, 100);
+}
 function updateProximity() {
   if (!current()) return;
   const data = gameplayState.value, player = camera.snapshotPlayer();
@@ -131,6 +205,9 @@ function updateProximity() {
   canPickup.value = Boolean(reach.drop) && reach.distance <= (data?.config?.pickupRange ?? 0);
   // 提示与 F 键读的是同一个函数、同一份现算的距离；缓存只用于渲染这一行提示。
   fKeyAction.value = interactionFor(data, player);
+  // 走路/奔跑/待机跟着控制器走：`movementState` 由控制器现算，这里不做第二次判断。
+  if (cameraReady && player?.movementState) playerAnimationSwitcher()?.update(player.movementState);
+  if (cameraReady) startActorTicker();
 }
 // 今天还剩下的世界碎片：只有主世界会掉落，被拾走之后就不再是候选。
 function reachableDrop(data, player) {
@@ -262,10 +339,13 @@ const gameplay = createStoryGameplay({
     if (current()) updateProximity();
   },
 });
-async function runAction(action) {
+async function runAction(action, clip = null) {
   if (!current() || !focused || document.hidden || inventoryOpen.value
     || navigation.busy || savingPlayer || actionBusy.value || !cameraReady) return;
   actionBusy.value = true;
+  // 一次性动作先起播：它会在自身时长后把角色交还给当前的移动状态，
+  // 所以挥砍不会被下一帧的走路更新打断。
+  if (clip) playerAnimationSwitcher()?.playOnce(clip);
   try {
     await action();
     if (current()) gameplayError.value = '';
@@ -1749,7 +1829,7 @@ function onKeyDown(event) {
   if (event.code === 'KeyE' || event.code === 'KeyR' || ['e', 'r'].includes(event.key?.toLowerCase())) {
     event.preventDefault(); event.stopPropagation();
     const skill = event.code === 'KeyE' || event.key?.toLowerCase() === 'e' ? 'heavy' : 'sweep';
-    if (!event.repeat && focused) void runAction(() => gameplay.castSkill(skill));
+    if (!event.repeat && focused) void runAction(() => gameplay.castSkill(skill), PLAYER_SKILL_CLIP);
     return;
   }
   if (focused && camera.keyDown(event)) event.stopPropagation?.();
@@ -1776,7 +1856,7 @@ function onPointerDown(event) {
   // Adjusting is label-driven: the left button neither attacks nor picks an object, it only
   // focuses the viewport so dragging and the wheel still let the player look at the object.
   if (adjustMode.value) return;
-  void runAction(gameplay.attack);
+  void runAction(gameplay.attack, PLAYER_ATTACK_CLIP);
 }
 
 onMounted(async () => {
@@ -1899,6 +1979,13 @@ onUnmounted(() => {
   // 离开世界不能把俯瞰视角留下来：否则存进场景的就是这个非常规机位。
   exitAdjustMode({ reopenDialogue: false });
   worldRuleRunner.dispose();
+  // 一次性动作的计时器必须随页面销毁，否则世界换掉之后它还会去调旧场景的接口。
+  playerAnimation?.dispose();
+  playerAnimation = null;
+  if (actorTimer !== null) { clearInterval(actorTimer); actorTimer = null; }
+  bossDirector?.dispose();
+  bossDirector = null;
+  bossLastHp = null;
   camera.dispose();
   saveRegistration.retire();
   resizeObserver?.disconnect();
@@ -2019,7 +2106,7 @@ onUnmounted(() => {
             :class="{ 'is-active': skillStatus(HEAVY_SKILL_ID).available }"
             :disabled="!skillStatus(HEAVY_SKILL_ID).available"
             :aria-label="`${heavySkill.key} ${heavySkill.name}，消耗 ${heavySkill.rageCost} 怒气`"
-            @click.stop="runAction(() => gameplay.castSkill(HEAVY_SKILL_ID))">
+            @click.stop="runAction(() => gameplay.castSkill(HEAVY_SKILL_ID), PLAYER_SKILL_CLIP)">
             <svg viewBox="0 0 48 48">
               <circle cx="24" cy="24" r="18" stroke-dasharray="6 6" fill="rgba(230,213,167,.18)" />
               <circle cx="24" cy="24" r="18" stroke-dasharray="6 6" />
@@ -2037,7 +2124,7 @@ onUnmounted(() => {
               :class="{ 'is-cd': skillStatus(id).remainingMs > 0, unavailable: !skillStatus(id).available }"
               :style="{ '--cd-deg': `${Math.round(360 * skillStatus(id).remainingMs / (skill.cdMs || 1))}deg` }"
               :aria-label="`${skill.key} ${skill.name}，消耗 ${skill.rageCost} 怒气`"
-              @click.stop="runAction(() => gameplay.castSkill(id))">
+              @click.stop="runAction(() => gameplay.castSkill(id), PLAYER_SKILL_CLIP)">
               <span class="spell-cost">{{ skill.rageCost }}</span>
               <!-- 技能图标：自包含行内 SVG（与器物图标同一套做法，不用 <use>） -->
               <svg class="spell-icon" viewBox="0 0 48 48" v-html="skillIconInner(id)" />

@@ -18,6 +18,12 @@ ROOT = Path(__file__).resolve().parents[2]
 ART = ROOT / "game/art/models"
 NS = {"c": "http://www.collada.org/2005/11/COLLADASchema"}
 
+# The clips the player's animation state machine switches between
+# (`game/frontend/storyPlayerAnimation.mjs`). They ship **inside** the model, so this is asserted
+# against the GLB itself: a stale export would otherwise only fail at runtime as
+# `ANIMATION_NOT_FOUND` (error code 2), i.e. mid-game and silently.
+PLAYER_ANIMATION_CLIPS = ("IdleB", "Walk", "Run", "AttackA", "AttackB", "Dead")
+
 
 class StoryAssetTests(unittest.TestCase):
     @staticmethod
@@ -60,6 +66,18 @@ class StoryAssetTests(unittest.TestCase):
         names = [animation.get("name") for animation in header["animations"]]
         self.assertTrue(any(name for name in names), f"{model.name} needs a named clip: {names}")
 
+    def _assert_fbx_character_art(self, model: Path):
+        """Source FBX art: a real FBX file that still references its textures as side files.
+
+        These ship unconverted on purpose — the engine reads FBX through Assimp and resolves
+        textures by filename in the model's own directory, so the authored bind pose and clips reach
+        the engine untouched by any export step.
+        """
+        head = model.read_bytes()[:32]
+        self.assertTrue(head.startswith(b"Kaydara FBX Binary") or head.lstrip().startswith(b"; FBX"),
+                        f"{model.name} is not an FBX file")
+        self.assertGreater(model.stat().st_size, 200_000, f"{model.name} is too small to be art")
+
     def _assert_dae_character_art(self, model: Path):
         """COLLADA: the rig carries animations and every image resolves next to the model."""
         document = ET.parse(model).getroot()
@@ -76,10 +94,12 @@ class StoryAssetTests(unittest.TestCase):
         if not node:
             self.skipTest("Node.js is required to read the shared character configuration")
         result = subprocess.run([node, "--input-type=module", "-e",
-            "import {STORY_CHARACTERS} from './game/frontend/storyCharacters.mjs'; "
-            "console.log(JSON.stringify(STORY_CHARACTERS));"], cwd=ROOT,
-            capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
-        characters = json.loads(result.stdout)
+            "import {STORY_CHARACTERS, BOSS_MODEL_REF} from './game/frontend/storyCharacters.mjs'; "
+            "console.log(JSON.stringify({characters: STORY_CHARACTERS, bossRef: BOSS_MODEL_REF}));"],
+            cwd=ROOT, capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
+        payload = json.loads(result.stdout)
+        characters = payload["characters"]
+        boss_ref = payload["bossRef"]
         roles = [c["role"] for c in characters]
         # The four inhabitants keep their positions: other modules address them by index.
         self.assertEqual(roles[:4], ["player", "boss", "merchant", "prophet"])
@@ -92,21 +112,29 @@ class StoryAssetTests(unittest.TestCase):
         # ... and that the shipped art and the roster agree exactly, both ways round. This is
         # what catches art on disk that no roster row uses (dead weight) and a roster row whose
         # art never reached the repo — neither of which the per-role loop below can see.
-        shipped = sorted(p.name for p in (ART / "monster").rglob("*") if p.is_file())
+        # Model files only: the folder also carries the textures the FBX files reference.
+        model_suffixes = {".glb", ".fbx", ".dae"}
+        shipped = sorted(p.name for p in (ART / "monster").rglob("*")
+                         if p.is_file() and p.suffix.lower() in model_suffixes)
         declared = sorted(Path(c["asset"]).name for c in monsters)
         self.assertEqual(declared, shipped, "monster art on disk and the roster must match exactly")
         for name in shipped:
-            self.assertEqual(Path(name).suffix.lower(), ".glb",
-                             f"{name}: creatures ship as a self-contained GLB")
+            # 小怪以**源 FBX + 旁置贴图**形式发布（转换环节正是变形来源，引擎原生支持 FBX）。
+            # 这里只要求"是引擎认识的模型格式"，不再强制 GLB。
+            self.assertIn(Path(name).suffix.lower(), {".fbx", ".glb", ".dae"},
+                          f"{name}: a creature must ship in a format the engine imports")
         # `em001_04` is the boss. Listing it here too would put two roles on one asset and make
         # a future boss swap reach into this roster.
-        self.assertNotIn("em001_04", [c["asset"] for c in monsters],
+        boss_asset = next(c["asset"] for c in characters if c["role"] == "boss")
+        self.assertNotIn(boss_asset, [c["asset"] for c in monsters],
                          "the boss model must not be reused as a main-world monster")
         # A creature must not be rotated: an earlier boss build bought height by rolling a model
         # onto another axis and shipped it lying on its side. Identity is the rule.
         for monster in monsters:
             with self.subTest(role=monster["role"]):
-                self.assertEqual(list(monster["rotation"]), [0, 0, 0],
+                # 只约束偏航：这批资源的高度落在 Z 轴上，rotation[0] 承担轴向修正（-90° 立起来），
+                # 但朝向约定仍由 rotation[1] === 0 保证——没有任何怪物被转向别处。
+                self.assertEqual(monster["rotation"][1], 0,
                                  "main-world creatures keep their authored orientation")
                 self.assertNotIn("height", monster,
                                  "creatures scale by `size`; `height` is for upright NPCs")
@@ -119,7 +147,9 @@ class StoryAssetTests(unittest.TestCase):
         # entry declares `model_ref` here — this pins that, so a future role cannot quietly
         # adopt a second, competing source for the same key.
         markers = [c["model_ref"] for c in characters if c.get("model_ref")]
-        self.assertEqual(markers, ["story.boss.em001.v1"],
+        # Compares against the constant the table itself uses, not a literal version: swapping the
+        # boss bumps `BOSS_MODEL_REF`, and that must not fail this test.
+        self.assertEqual(markers, [boss_ref],
                          "the boss alone declares its generation on the entry")
         for character in characters:
             with self.subTest(role=character["role"]):
@@ -128,8 +158,38 @@ class StoryAssetTests(unittest.TestCase):
                 self.assertTrue(model.is_file(), str(model))
                 if model.suffix.lower() == ".glb":
                     self._assert_glb_character_art(model)
+                elif model.suffix.lower() == ".fbx":
+                    self._assert_fbx_character_art(model)
                 else:
                     self._assert_dae_character_art(model)
+                # The player is the one role whose motion is scripted: every clip the switcher
+                # names must exist in the file, or the first `setActorAnimation` fails at runtime.
+                if character["role"] == "player" and model.suffix.lower() == ".glb":
+                    header, _binary = self._glb_json(model)
+                    names = [animation.get("name") for animation in header.get("animations", [])]
+                    missing = [clip for clip in PLAYER_ANIMATION_CLIPS if clip not in names]
+                    self.assertFalse(missing, f"{model.name} is missing clips {missing}; it has {names}")
+                    self.assertEqual(len(header.get("skins") or []), 1,
+                                     f"{model.name} should carry exactly one skin")
+                    nodes = header.get("nodes") or []
+                    joints = {nodes[i].get("name") for i in header["skins"][0].get("joints") or []}
+                    joints.discard(None)
+                    # A rig this small is a broken export, not an art change: every package this
+                    # game ships is a full humanoid skeleton.
+                    self.assertGreater(len(joints), 40, f"{model.name} skin collapsed to {len(joints)} joints")
+                    # This is the invariant `AnimationPlayer::bind` depends on: a channel whose
+                    # target node is not one of the actor's joints is silently dropped, which shows
+                    # up as "the clip plays but the body does not move". So every clip must drive
+                    # essentially every joint of its own model.
+                    for animation in header.get("animations") or []:
+                        targets = {nodes[c["target"]["node"]].get("name")
+                                   for c in animation.get("channels", [])
+                                   if c.get("target", {}).get("node") is not None}
+                        targets.discard(None)
+                        matched = len(targets & joints)
+                        self.assertGreaterEqual(
+                            matched, int(len(joints) * 0.9),
+                            f"{model.name} clip {animation.get('name')} drives only {matched}/{len(joints)} joints")
 
     # Every game-owned art file must be an untouched copy of an engine asset. `cube` is a
     # hand-authored primitive, so it is registered here too: the invariant is "copied, not
@@ -137,14 +197,14 @@ class StoryAssetTests(unittest.TestCase):
     # `scene` is the story world map: its measurements are re-derived from the shipped GLB
     # below and compared with the placement the page actually runs.
     ART_SOURCES = {
-        # The player is a supplied, self-contained GLB (`player_walk.glb`, a Max Biped rig with
-        # two embedded PNGs), so there is no engine-asset directory to diff it against — the
+        # The player is a supplied, self-contained GLB (`E3D-Assassin.glb`, a Max Biped rig with
+        # four embedded textures and seven clips), so there is no engine-asset directory to diff it against — the
         # `_assert_glb_character_art` requirements stand in for that comparison, the same way
         # they do for the boss. The previous player art is retired below, not deleted.
         "player": None,
-        # The boss is the em001 lineage, shipped as one self-contained GLB: its textures
-        # are the embedded PNGs Blender wrote, so there is no source directory to diff
-        # against — `_assert_glb_character_art` is what stands in for that comparison.
+        # The boss is the em001 lineage, shipped as one self-contained GLB with four embedded
+        # textures. The retired dragon art that used to sit beside it was deleted, so there is
+        # no sidecar directory to diff against.
         "boss": None,
         # The main-world roster ships as self-contained GLBs too: embedded textures, no
         # sidecars, and the same requirements checked by `_assert_glb_character_art`.
@@ -157,17 +217,10 @@ class StoryAssetTests(unittest.TestCase):
     }
     # A character folder carries one rigged model; props are plain meshes with no animation.
     CHARACTER_ART_ROLES = ("player", "boss", "merchant", "prophet")
-    # Retired art that is still on disk, so a swap can be reverted without a rebuild. Each entry
-    # is an exact path, so this exemption can never widen into "this character folder is
-    # unchecked"; delete the file (and its entry) to reclaim the space.
-    #   boss/Dragon 2.5_dae.dae        replaced by boss/Em001_04.glb        (~9 MB)
-    #   player/Maria WProp J J Ong.dae replaced by player/player_walk.glb   (~2.7 MB)
-    # Maria's sidecar textures stay unchecked now that the player folder has no engine-asset
-    # source; they are unreferenced, so deleting `player/textures/` reclaims a further ~14 MB.
-    RETIRED_CHARACTER_ART = frozenset({
-        "boss/Dragon 2.5_dae.dae",
-        "player/Maria WProp J J Ong.dae",
-    })
+    # 没有"在磁盘上保留的废弃美术"了：刺客已取代弓箭手与 player_walk，
+    # Maria 的 COLLADA 与其贴图也已删除。集合保持为空，
+    # 以后再有人往角色目录塞废弃资源，下面的断言就会失败。
+    RETIRED_CHARACTER_ART = frozenset()
 
     # The story world map. `scale` is the map's largest world axis in metres: the engine
     # normalises every static model into a unit cube, so that is exactly the `geometry.scale`
@@ -186,7 +239,7 @@ class StoryAssetTests(unittest.TestCase):
     # `test_a_stale_map_actor_is_replaced_not_repaired` guards that this stays wired.
     STORY_WORLD_MAP = "scene/01_山门神殿_平地版.glb"
     STORY_WORLD_MAP_SPAWN_SITES = (
-        ("player", 0, 0), ("boss", 2, 5.5), ("merchant", -30, -15), ("prophet", 30, -15),
+        ("player", 0, 0), ("boss", 11, 16), ("merchant", -30, -15), ("prophet", 30, -15),
     )
     # "Open ground" for the 8 m-wide boss: the radius the dragon actually occupies (its wings
     # reach 4 m either side of its origin) and the height a surface may reach inside it before
@@ -573,11 +626,13 @@ class StoryAssetTests(unittest.TestCase):
         for role, value in ground.items():
             with self.subTest(role=role):
                 self.assertIsNotNone(value, f"{role} 出生点没有地面")
-                self.assertAlmostEqual(value, 0.0, delta=0.05,
-                                       msg=f"{role} 出生点的地面必须落在引擎地面 y = 0 上")
+                # Boss 站在寺庙旁 11 cm 高的台基上；页面按 heightAt 实测地面摆放，
+                # 因此这里的容差要容纳台阶，而不是把台基当成悬空。
+                self.assertAlmostEqual(value, 0.0, delta=0.15,
+                                       msg=f"{role} 出生点的地面必须落在引擎地面附近（台基不超过 15 cm）")
         spread = max(ground.values()) - min(ground.values())
-        self.assertLessEqual(spread, 0.05,
-                             f"四个出生点的地面必须在 5 厘米以内齐平（实测 {spread:.4f} m）")
+        self.assertLessEqual(spread, 0.15,
+                             f"四个出生点的地面必须在 15 厘米以内齐平（实测 {spread:.4f} m；Boss 在台基上）")
 
     def test_no_map_geometry_stands_over_the_boss_spawn_site(self):
         """The boss's site has to be open ground, in the placement the page actually runs.
@@ -645,14 +700,15 @@ class StoryAssetTests(unittest.TestCase):
         # The clearance below is asserted first on purpose: a site that fails it must say *that*,
         # not "the pin changed", or a moved-and-buried boss reads as a stale test constant.
         self.assertIsNotNone(boss[0]["y"], "boss 出生点没有地面")
-        self.assertAlmostEqual(boss[0]["y"], placement["courtyardY"], delta=0.05,
+        self.assertAlmostEqual(boss[0]["y"], placement["courtyardY"], delta=0.15,
                                msg="boss 出生点的地面必须就是可行走庭院的高度")
         roof = highest_within(site_x, site_z, self.SITE_RADIUS)
         self.assertLess(roof, self.SITE_ROOF,
                         f"({site_x:g}, {site_z:g}) 周围 {self.SITE_RADIUS:g} m 内有地图几何高达 "
                         f"{roof:.3f} m，龙会被埋在里面")
-        self.assertAlmostEqual(site_x, 2.0, delta=0.001, msg="boss 出生点 x 变了就要重新量净空")
-        self.assertAlmostEqual(site_z, 5.5, delta=0.001, msg="boss 出生点 z 变了就要重新量净空")
+        self.assertAlmostEqual(site_x, 11.0, delta=0.001, msg="boss 出生点 x 变了就要重新量净空")
+        self.assertAlmostEqual(site_z, 16, delta=0.001,
+                               msg="boss 出生点 z 变了就要重新量净空（(11,16) 4m 内最高点 0.33 m）")
         # Non-vacuity: the same measurement at the old site has to break the ceiling.
         old_roof = highest_within(0.0, 12.0, self.SITE_RADIUS)
         self.assertGreater(old_roof, self.SITE_ROOF,

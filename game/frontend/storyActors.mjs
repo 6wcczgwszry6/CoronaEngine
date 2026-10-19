@@ -81,17 +81,74 @@ export async function ensureStoryCharacters(options) {
   finally { await waitForStoryResources(options, true); }
 }
 
+/**
+ * Scene-document writes that can fail for a moment and succeed on a retry.
+ *
+ * The editor replaces `scene.ini` atomically (`MoveFileExW` over `.scene.ini.tmp`,
+ * `scene_folder.cpp:1206`), and the temp name is fixed, so two writers racing over the same world
+ * make one of them fail with `scene_replace_failed`. That became reachable when the animation
+ * work added a second writer on the UI thread (`UiSystem::update` →
+ * `tick_native_animation_updates` → `persist_native_scene_actors`) next to the one the Python
+ * runtime thread performs for `createActor`/`setActorState`. A single lost race used to abort the
+ * whole world load at whichever character happened to be in flight — the error surfaced as
+ * 「羽翼兽加载失败」/「Boss加载失败」 with `Unable to replace scene.ini`.
+ *
+ * Retrying is safe because every call routed through `call` is idempotent: `createActor` matches
+ * the guid and `setActorState`/`setActorTransform` assign values.
+ */
+const TRANSIENT_SCENE_WRITE = /Unable to replace scene\.ini|scene_replace_failed/i;
+const TRANSIENT_SCENE_WRITE_ATTEMPTS = 6;
+
 async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent = () => true,
   wait = ms => new Promise(resolve => setTimeout(resolve, ms)), renderAttempts = 150,
   gameplay = null, combatOnly = false, assertSource = async () => {} }) {
   const check = () => { if (!isCurrent()) throw canceled(); };
-  const call = async (operation, invoke) => { check(); await assertSource(); check();
-    const result = success(await invoke(), operation); check(); return result; };
+  const call = async (operation, invoke) => {
+    for (let attempt = 1; ; attempt++) {
+      check(); await assertSource(); check();
+      try {
+        const result = success(await invoke(), operation);
+        check();
+        return result;
+      } catch (error) {
+        if (attempt >= TRANSIENT_SCENE_WRITE_ATTEMPTS || !TRANSIENT_SCENE_WRITE.test(error?.message || '')) throw error;
+        // Back off a little: the other writer is mid-replace, so the retry needs it to finish.
+        await wait(250 * attempt);
+      }
+    }
+  };
   check();
   await assertSource();
   let snapshot = sceneSnapshot(await api.scene.getSnapshot(sceneId));
   check();
   const actors = new Map((snapshot?.actors || []).map(actor => [actor.actor_guid, actor]));
+  // 一个 guid 只允许一个 actor。换模型走"先删后建"，若删除没生效，`create_actor` 会保留 guid
+  // 但给新 actor 起一个派生名字（`玩家_1`），于是同一个角色有两份模型叠在一起——而按 guid 建表
+  // 的 Map 只会留下其中一个，页面因此看不出来。这里先清掉多余的，保留名字与角色一致的那个。
+  {
+    const shipped = new Map(STORY_CHARACTERS.map(character => [character.guid, character.name]));
+    const byGuid = new Map();
+    for (const actor of snapshot?.actors || []) {
+      if (!shipped.has(actor.actor_guid)) continue;
+      if (!byGuid.has(actor.actor_guid)) byGuid.set(actor.actor_guid, []);
+      byGuid.get(actor.actor_guid).push(actor);
+    }
+    for (const [guid, group] of byGuid) {
+      if (group.length < 2) continue;
+      const expectedName = shipped.get(guid);
+      const keep = group.find(actor => actor.name === expectedName) || group[group.length - 1];
+      for (const actor of group) {
+        if (actor === keep) continue;
+        check();
+        // 必须按**名字**删：`removeActorForRebuild` 的第一优先键是 guid，而这两个 actor 共用 guid，
+        // 按 guid 删会命中引擎找到的第一个——也就是要保留的那一个。
+        await call(`清理重复的${expectedName || actor.name}`,
+          () => api.sceneTools.removeActor(sceneId, actor.name));
+        actors.delete(guid);
+      }
+      actors.set(guid, keep);
+    }
+  }
   // Creatures belong to the main world and are NOT gated on `boss.hp`, unlike the boss: they
   // are the arena's other monsters, so killing the boss must not empty the arena. The small
   // world keeps its own cast (player + prophet), which is why this branch names 'main'.
@@ -218,6 +275,9 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
         await removeActorForRebuild(api, sceneId, actor, `替换${character.name}模型`, call);
         check();
         const created = await call(`创建${character.name}`, () => api.sceneTools.createActor(sceneId, route, 'model', {
+      ...(character.animation_sources
+        ? { animation_sources: character.animation_sources.map(resolveStoryAssetPath) }
+        : {}),
           name: character.name, actor_guid: character.guid, semantic_role: character.role,
           entity_id: `story.${character.role}`, entity_type: 'story_character',
           model_ref: PLAYER_MODEL_REF,
@@ -251,6 +311,9 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
         // Reuse the portable resource route; an existing world needs no source art.
         const route = actor.route || source || resolveStoryAssetPath(frontendUrl, character.asset);
         actor = (await call(`校正${character.name}摆位`, () => api.sceneTools.createActor(sceneId, route, 'model', {
+      ...(character.animation_sources
+        ? { animation_sources: character.animation_sources.map(resolveStoryAssetPath) }
+        : {}),
           actor_guid: character.guid, skip_if_exists: true, update_if_exists: true,
           model_ref: modelRef, ...transform,
         }))).actor;
@@ -268,6 +331,9 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
         await removeActorForRebuild(api, sceneId, actor, `替换${character.name}模型`, call);
         check();
         const created = await call(`创建${character.name}`, () => api.sceneTools.createActor(sceneId, route, 'model', {
+      ...(character.animation_sources
+        ? { animation_sources: character.animation_sources.map(resolveStoryAssetPath) }
+        : {}),
           name: character.name, actor_guid: character.guid, semantic_role: character.role,
           entity_id: `story.${character.role}`, entity_type: 'story_character',
           model_ref: BOSS_MODEL_REF,
@@ -333,8 +399,19 @@ export async function syncPlacementActors({ api, sceneId, frontendUrl, placement
   assertSource = async () => {}, isCurrent = () => true,
   wait = ms => new Promise(resolve => setTimeout(resolve, ms)), renderAttempts = 150 }) {
   const check = () => { if (!isCurrent()) throw canceled(); };
-  const call = async (operation, invoke) => { check(); await assertSource(); check();
-    const result = success(await invoke(), operation); check(); return result; };
+  const call = async (operation, invoke) => {
+    for (let attempt = 1; ; attempt++) {
+      check(); await assertSource(); check();
+      try {
+        const result = success(await invoke(), operation);
+        check();
+        return result;
+      } catch (error) {
+        if (attempt >= TRANSIENT_SCENE_WRITE_ATTEMPTS || !TRANSIENT_SCENE_WRITE.test(error?.message || '')) throw error;
+        await wait(250 * attempt);
+      }
+    }
+  };
   const desired = placementScene(placements);
   check();
   await assertSource();

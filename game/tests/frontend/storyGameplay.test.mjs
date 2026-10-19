@@ -16,7 +16,10 @@ function fixture(options = {}) {
   let state = { version: 2, revision: 0, rage: 0, boss: { hp: 200 }, drop: null, inventory: { worldFragment: 0 } };
   let role = 'main', time = 0, id = 0, fail = false, lostReply = false, visualFail = false, gate = null, replyGate = null;
   const boss = actorFixture(STORY_CHARACTERS[1]), bounds = worldBounds(boss);
-  const player = { position: [0, 0, bounds[2] - 1], rotation: [0, Math.PI, 0], facingYaw: 0, grounded: true };
+  // 玩家摆在 Boss 正前方：x 用 Boss 自己的中线，而不是写死的 0——
+  // Boss 一旦横向挪位，写死 0 会让玩家站到十几米开外，命中类断言全部失真。
+  const bossCentreX = (bounds[0] + bounds[3]) / 2;
+  const player = { position: [bossCentreX, 0, bounds[2] - 1], rotation: [0, Math.PI, 0], facingYaw: 0, grounded: true };
   const requests = [], reads = [], feedback = [], states = [], visuals = [], operations = new Set();
   // 小世界的自有文档（陈列 / 世界规则 / 名册）与战斗版本号无关，进入世界时各读一次；
   // `requests` 只记战斗请求与 `load`，文档读取记在 `reads` 里，两者互不混淆。
