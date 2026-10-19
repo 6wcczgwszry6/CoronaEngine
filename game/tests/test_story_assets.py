@@ -760,6 +760,43 @@ class StoryAssetTests(unittest.TestCase):
         self.assertLessEqual(spin["amplitude"], 100.0)
         self.assertGreater(spin["periodMs"], 0)
 
+    def test_the_runtime_reserved_rule_targets_match_the_frontend_identities(self):
+        """地图与先知不能成为碎片规则的目标：运行时那份冻结表必须与前端的身份同源。
+
+        碎片规则现在可以点名一个物体（`target` = actor guid），而运行时是纯文件系统逻辑
+        （不 import 前端、不读场景），所以它自带一份「保留身份」表。表只能靠这条用例保持
+        同源：前端改 guid（storyMap.MAP_GUID / storyCharacters 里 role='prophet'）而运行时
+        没跟上，这里就会红；反过来也一样。
+        """
+        from game.runtime import world_rules
+
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("Node.js is required to read the shared character configuration")
+        script = (
+            "import {MAP_GUID} from './game/frontend/storyMap.mjs'; "
+            "import {PROPHET_GUID} from './game/frontend/storyCharacters.mjs'; "
+            "import {RESERVED_TARGET_GUIDS, isReservedTargetGuid} from './game/frontend/storyWorldRules.mjs'; "
+            "console.log(JSON.stringify({map: MAP_GUID, prophet: PROPHET_GUID, "
+            "reserved: RESERVED_TARGET_GUIDS, "
+            "refusesMap: isReservedTargetGuid(MAP_GUID), "
+            "refusesProphet: isReservedTargetGuid(PROPHET_GUID)}));")
+        result = subprocess.run([node, "--input-type=module", "-e", script], cwd=ROOT,
+                                capture_output=True, text=True, encoding="utf-8", check=True, timeout=15)
+        identities = json.loads(result.stdout)
+        # 前端自己先得拒绝这两个身份。
+        self.assertTrue(identities["refusesMap"])
+        self.assertTrue(identities["refusesProphet"])
+        self.assertEqual(identities["reserved"], [identities["map"], identities["prophet"]])
+        # 运行时那份表必须与前端逐项相同。
+        self.assertEqual(sorted(world_rules.RESERVED_TARGETS),
+                         sorted(identities["reserved"]),
+                         "world_rules.RESERVED_TARGETS 必须与前端保留身份一致")
+        # 地图的身份最终来自数据文件：三处（数据、前端、运行时）必须同一个 guid。
+        self.assertEqual(identities["map"], self._map_placement()["guid"])
+        # 一个普通物体不是保留身份（非真空：表里不是「什么都拒绝」）。
+        self.assertNotIn("story.placement.0003", world_rules.RESERVED_TARGETS)
+
     def test_frontend_deployment_contains_every_module_and_cleans_stale_modules(self):
         spec = importlib.util.spec_from_file_location("story_asset_deployment", ROOT / "tools/build/editor_copy_and_build.py")
         deployment = importlib.util.module_from_spec(spec)

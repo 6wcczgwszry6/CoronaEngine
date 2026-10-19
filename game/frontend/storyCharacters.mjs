@@ -154,6 +154,37 @@ export const isMonsterRole = role => MONSTER_ROLES.includes(role);
 export const PLAYER_GUID = STORY_CHARACTERS[0].guid;
 export const BOSS_GUID = STORY_CHARACTERS[1].guid;
 export const PROPHET_GUID = STORY_CHARACTERS[3].guid;
+/** The prophet's `entity_id` as `storyActors` creates it (`story.${role}`). */
+export const PROPHET_ENTITY_ID = 'story.prophet';
+/**
+ * True for the game's prophet only, so no world rule can ever animate or resize it.
+ *
+ * 「碎片不影响先知」has exactly one answer, and this is it: the world-rule target list asks
+ * this function instead of keeping its own copy of the rule, the same way `isMapActor`
+ * answers 地图不算物体 for the map. A fragment never names its targets (see
+ * `storyWorldRules.collectSwayTargets`), so the only place a prophet-targeted rule can be
+ * refused is where the targets are resolved — which is why the identity has to be readable
+ * from the actor record alone, never from a display name: a renamed (or translated) 先知
+ * must stay excluded, and a rule the player installed before this guard existed must be
+ * harmless on the next entry.
+ *
+ * Identity is read from the fields no other actor carries — the guid, the placement
+ * generation the page stamps on it, its `entity_id` and its semantic role — never from
+ * `name`. `runtime.*` is the same fallback the other identity readers use for engine
+ * records that nest these fields.
+ */
+export function isProphetActor(actor) {
+  if (!actor || typeof actor !== 'object') return false;
+  const runtime = actor.runtime && typeof actor.runtime === 'object' ? actor.runtime : {};
+  const identity = field => {
+    const value = actor[field] ?? runtime[field];
+    return value === null || value === undefined ? '' : String(value);
+  };
+  return identity('actor_guid') === PROPHET_GUID
+    || identity('model_ref') === PROPHET_MODEL_REF
+    || identity('entity_id') === PROPHET_ENTITY_ID
+    || identity('semantic_role') === 'prophet';
+}
 export const unwrap = value => value?.data ?? value;
 export const sceneSnapshot = value => {
   const data = unwrap(value);

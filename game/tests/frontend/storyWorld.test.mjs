@@ -15,11 +15,13 @@ import * as storyMapHeightModule from '../../frontend/storyMapHeight.mjs';
 import * as storyMapHeightLoaderModule from '../../frontend/storyMapHeightLoader.mjs';
 import * as storyWorldRulesModule from '../../frontend/storyWorldRules.mjs';
 import * as storyProphetActionsModule from '../../frontend/storyProphetActions.mjs';
-import { STORY_CHARACTERS, PROPHET_GUID, isMonsterRole, resolveStoryAssetPath, sceneSnapshot,
-  characterTransform } from '../../frontend/storyCharacters.mjs';
+import { STORY_CHARACTERS, PROPHET_GUID, PLAYER_MODEL_YAW_OFFSET, isMonsterRole, resolveStoryAssetPath,
+  sceneSnapshot, characterTransform } from '../../frontend/storyCharacters.mjs';
 import { actorFixture, apiFixture, CHARACTER_BY_GUID } from './fixtures.mjs';
 import { createStoryNavigationController } from '../../frontend/storyNavigation.mjs';
 import { createStoryCameraController } from '../../../editor/Frontend/src/utils/viewportStoryCamera.js';
+import { createStoryWorldControls, SMALL_WORLD_VIEW_LABELS } from '../../../editor/Frontend/src/utils/viewportStoryWorldCamera.js';
+import { routeStoryKeydown } from '../../../editor/Frontend/src/utils/storyKeyRouter.js';
 import { editorApi } from '../../../editor/Frontend/src/api/editorApi.js';
 import * as launcher from '../../../editor/Frontend/src/services/projectLauncherService.js';
 import * as worldMode from '../../../editor/Frontend/src/services/worldModeService.js';
@@ -247,6 +249,7 @@ async function fixture(t, options = {}) {
     return { data: { status: 'success' } };
   });
   t.mock.method(editorApi.sceneTools, 'setActorState', async (scene, guid, state) => {
+    calls.push(['state', activePath, guid, structuredClone(state)]);
     const actor = actors.get(activePath).find(item => item.actor_guid === guid);
     Object.assign(actor, state);
     return { status: 'success', actor: structuredClone(actor) };
@@ -271,6 +274,23 @@ async function fixture(t, options = {}) {
       if (existing && data.update_if_exists) Object.assign(existing, actor);
       else if (!existing) actors.get(activePath).push(actor);
       return { status: 'success', actor: structuredClone(existing || actor) };
+    }
+    // 先知旁的方块：和地图一样是引擎侧创建的「非角色」actor，真实引擎会建它，夹具也必须会，
+    // 否则小世界里一个可被碎片规则动画的物体都没有（碎片不影响先知，也就只剩它了）。
+    if (!character && data.actor_guid === storyCubeModule.CUBE_GUID) {
+      const existing = actors.get(activePath).find(item => item.actor_guid === data.actor_guid);
+      const describe = () => ({ name: data.name, actor_guid: data.actor_guid, handle: ++handle,
+        load_status: 'loaded', render_ready: true, gpu_build_state: 'Ready',
+        model_ref: data.model_ref, route: path, semantic_role: 'prophet-cube',
+        entity_id: 'story.prophet.cube', entity_type: 'story_prop',
+        local_aabb: [-0.5, -0.5, -0.5, 0.5, 0.5, 0.5], visible: true, follow_camera: false,
+        camera_lock: { enabled: false }, mechanics: { physics_enabled: false },
+        geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } });
+      if (existing && data.update_if_exists) Object.assign(existing, {
+        geometry: { position: [...data.position], rotation: [...data.rotation], scale: [...data.scale] } });
+      else if (!existing) actors.get(activePath).push(describe());
+      const actor = existing || actors.get(activePath).at(-1);
+      return { status: 'success', actor: structuredClone(actor) };
     }
     // 陈列物（guid 形如 story.placement.0000）不是剧情角色：它由布局驱动创建，
     // 形状与名字来自 storyProps / syncPlacementActors 写下的字段，不能套用角色夹具。
@@ -350,6 +370,10 @@ async function fixture(t, options = {}) {
       '@/services/projectLauncherService.js': launcher,
       '@/services/worldSessionLifecycle.js': lifecycle,
       '@/utils/viewportStoryCamera.js': { createStoryCameraController },
+      // 小世界的相机（自由/俯视）走真实模块：它自己就是这条用例要证明的东西之一。
+      '@/utils/viewportStoryWorldCamera.js': { createStoryWorldControls, SMALL_WORLD_VIEW_LABELS },
+      // 键盘路由走真实模块，页面根的 onKeyDown 分支与真机一致。
+      '@/utils/storyKeyRouter.js': { routeStoryKeydown },
       // 图片资源：测试里只当作一个 URL 字符串
       '@/assets/hero-figure.png': { default: 'hero-figure.png' },
       '../../../../../game/frontend/storyNavigation.mjs': { createStoryNavigationController, NAVIGATION_KEY },
@@ -357,8 +381,8 @@ async function fixture(t, options = {}) {
       '../../../../../game/frontend/playerController.mjs': { createPlayerController, VIEW_LABELS },
       '../../../../../game/frontend/playerSave.mjs': { createPlayerSave },
       '../../../../../game/frontend/storyGameplay.mjs': gameplayModule,
-      '../../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, isMonsterRole,
-        resolveStoryAssetPath, sceneSnapshot },
+      '../../../../../game/frontend/storyCharacters.mjs': { STORY_CHARACTERS, PROPHET_GUID, PLAYER_MODEL_YAW_OFFSET,
+        isMonsterRole, resolveStoryAssetPath, sceneSnapshot },
       '../../../../../game/frontend/storyProps.mjs': storyPropsModule,
       '../../../../../game/frontend/storyLoot.mjs': storyLootModule,
       '../../../../../game/frontend/prophetDialogue.mjs': prophetDialogueModule,
@@ -1469,7 +1493,9 @@ test('the F prompt and the F key agree: no pickup in the main world, the prophet
   assert.equal(p().dialogueOpen.value, false, '够不着就不能交谈');
 
   // 让玩家站到先知面前：页面在挂载时把场景快照读进 prophetActor，所以摆位要在挂载前完成。
-  childActor('player').geometry.position = [...prophetAt];
+  // 小世界里内部主角不显示，相机就是那双眼睛——F 量的是相机脚下的玩家位置
+  // （`viewportStoryWorldCamera.snapshotPlayer`），所以「站到先知面前」是把机位放过去。
+  f.poses.set(CHILD, pose([...prophetAt]));
   page.unmount(); await turn();
   page = f.mount(); await page.mount(); await turn(); await turn();
   assert.equal(p().fKeyAction.value.kind, 'prophet', '先知就在身上，裁决必须选它');
@@ -2150,4 +2176,382 @@ test('a boss kill never leaves a red ball on the terrain, even with a height gri
   assert.equal(state.inventory.worldFragment, 1, '凭证直接进入背包');
   assert.equal(f.actors.get(MAIN).find(actor => actor.actor_guid === gameplayModule.FRAGMENT_GUID),
     undefined, '场景里没有世界碎片模型可落在地面上');
+});
+
+/* ============================================================
+   小世界视角：不显示内部主角、自由视角 + 俯视视角、Ctrl+滚轮缩放、碎片不影响先知
+   ============================================================ */
+// 进入小世界的既有路径：先切世界，再按世界重新挂载页面。
+async function enterChild(f, page) {
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  return page;
+}
+const SHOWN = { version: 2, revision: 0, rage: 0, boss: { hp: 0 }, drop: null,
+  inventory: { worldFragment: 1, block: 64 } };
+const childGameplay = () => async (request, activePath) => ({ status: 'ok',
+  role: activePath === MAIN ? 'main' : 'child', config: gameplayConfig, state: structuredClone(SHOWN) });
+/**
+ * 小世界的玩法桩，但会真的回写陈列：摆放（B）走的是 `savePlacements`，一个只会回 ok 的桩会让
+ * 页面报「保存小世界陈列失败」，于是场景里不会出现方块 actor。
+ */
+function placementAware() {
+  let layout = { version: 1, placements: [] };
+  return async (request, activePath) => {
+    if (request.action === 'savePlacements') {
+      layout = { version: 1, placements: structuredClone(request.placements) };
+      return { status: 'ok', role: 'child', state: structuredClone(layout) };
+    }
+    return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+      config: gameplayConfig, state: structuredClone(SHOWN) };
+  };
+}
+// 渲染后的提示行文本：把 vnode 里的字符串全部拼起来，再断言「视角 · …」那一行。
+function renderedText(instance) {
+  const texts = [];
+  const walk = node => {
+    if (Array.isArray(node)) { for (const child of node) walk(child); return; }
+    if (!node || typeof node !== 'object') return;
+    if (typeof node.children === 'string') { texts.push(node.children); return; }
+    for (const child of Array.isArray(node.children) ? node.children : []) walk(child);
+  };
+  walk(renderStory(proxyRefs(instance), []));
+  return texts.join('');
+}
+
+test('小世界里内部主角不渲染，主世界里照常显示', async t => {
+  const f = await fixture(t, { gameplay: childGameplay() });
+  const playerOf = path => f.actors.get(path)
+    .find(actor => actor.actor_guid === STORY_CHARACTERS[0].guid);
+  // 可见性由引擎持久化：普通进入世界一个字节都不写，只有真正要翻转的那一次才写。
+  const visibilityWrites = path => f.calls.filter(call => call[0] === 'state'
+    && call[1] === path && call[2] === STORY_CHARACTERS[0].guid);
+  let page = f.mount(); await page.mount(); await turn();
+  assert.equal(playerOf(MAIN).visible, true, '主世界的玩家模型必须看得见');
+  assert.deepEqual(visibilityWrites(MAIN), [], '主世界的可见性本来就对，不许写');
+
+  page = await enterChild(f, page);
+  const player = playerOf(CHILD);
+  assert.ok(player, '玩家 actor 仍然存在：存档、F 的射程、摆放都读它');
+  assert.equal(player.visible, false, '小世界里内部主角不显示——相机就是它的眼睛');
+  assert.equal(visibilityWrites(CHILD).length, 1, '隐藏只写一次');
+
+  // 再进一次小世界：已经隐藏了，于是同一次进入不再写可见性（引擎记住了）。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  page = await enterChild(f, page);
+  assert.equal(playerOf(CHILD).visible, false);
+  assert.equal(visibilityWrites(CHILD).length, 1, '第二次进入不再重复写');
+
+  // 非空证明的另一半：回到主世界，它必须重新可见（隐藏只属于小世界）。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn(); await turn();
+  assert.equal(playerOf(MAIN).visible, true, '主世界不许被小世界的隐藏连累');
+});
+
+test('小世界的 V 在自由视角与俯视视角之间切换，并且熬得住一次重新渲染', async t => {
+  const f = await fixture(t, { gameplay: childGameplay() });
+  let page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  // 主世界仍然是原来的三档，且名字没被小世界的表覆盖。
+  const mainLabels = [];
+  for (let i = 0; i < 3; i++) { p().onKeyDown(event({ code: 'KeyV', key: 'v' })); mainLabels.push(p().viewLabel()); }
+  assert.deepEqual(mainLabels, ['降临视角', '俯视建筑', '第三人称']);
+
+  page = await enterChild(f, page);
+  assert.equal(p().camera.viewMode(), 'free', '进入小世界从自由视角开始');
+  assert.match(renderedText(p()), /视角 · 自由视角/);
+  p().onKeyDown(event({ code: 'KeyV', key: 'v' }));
+  assert.equal(p().camera.viewMode(), 'top');
+  assert.deepEqual(p().camera.snapshotPose().camera.forward, [0, -1, 0], '俯视就是正下方');
+  assert.match(renderedText(p()), /视角 · 俯视视角/);
+  // 「重新渲染」：真的再渲染一次组件，提示与相机都不能回到自由视角。
+  await nextTick();
+  assert.match(renderedText(p()), /视角 · 俯视视角/);
+  assert.equal(p().camera.viewMode(), 'top');
+  assert.equal(p().camera.snapshotPose().camera.forward[1], -1);
+  // 再按一次 V 回到自由视角：小世界只有这两档，没有第三人称/降临。
+  p().onKeyDown(event({ code: 'KeyV', key: 'v' }));
+  assert.equal(p().camera.viewMode(), 'free');
+  assert.match(renderedText(p()), /视角 · 自由视角/);
+  assert.doesNotMatch(renderedText(p()), /第三人称/);
+});
+
+test('Ctrl+滚轮缩放，普通滚轮仍然换物品栏格子', async t => {
+  const f = await fixture(t, { gameplay: childGameplay() });
+  let page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+  page = await enterChild(f, page);
+  const fov = () => p().camera.snapshotPose().camera.fov;
+  const opened = fov();
+  const slot = p().hotbarIndex.value;
+  p().onSurfaceWheel(event({ deltaY: -120 }));
+  assert.notEqual(p().hotbarIndex.value, slot, '普通滚轮还是换格');
+  assert.equal(fov(), opened, '普通滚轮不缩放相机');
+
+  const slotNow = p().hotbarIndex.value;
+  p().onSurfaceWheel(event({ deltaY: -120, ctrlKey: true }));
+  assert.equal(p().hotbarIndex.value, slotNow, 'Ctrl+滚轮不换格');
+  assert.equal(fov(), opened - 5, 'Ctrl+滚轮才是缩放');
+  p().onSurfaceWheel(event({ deltaY: 120, ctrlKey: true }));
+  assert.equal(fov(), opened, '反方向回到原处');
+
+  // 主世界没有 zoom：Ctrl+滚轮仍然走改动前那条路（相机拉近），行为不变。
+  clickWorld(page); await turn(); await turn();
+  page = f.mount(); await page.mount(); await turn();
+  const mainFov = p().camera.snapshotPose().camera.fov;
+  const before = p().camera.snapshotPose().camera.position;
+  p().onSurfaceWheel(event({ deltaY: -120, ctrlKey: true }));
+  f.step();
+  assert.equal(p().camera.snapshotPose().camera.fov, mainFov, '主世界不改 fov');
+  assert.notDeepEqual(p().camera.snapshotPose().camera.position, before, '主世界仍然拉近相机');
+});
+
+/**
+ * 「按空格可以上升」的页面级验收：同一个键盘事件，主世界起跳、小世界抬相机。
+ *
+ * 非真空：把小世界那台控制器的 `extraMovement` 去掉，下面三条「空格抬高」的断言全部失败
+ * （帧数为 0、机位不动）；把空格塞进共用的 MOVEMENT 表，主世界那条「还是跳跃」失败；
+ * 把 `isInputLocked` 从相机里摘掉，物品栏打开时那条「帧数为 0 / 机位不动」失败。
+ */
+test('空格在小世界里抬高相机（自由与俯视），面板打开时无效，主世界仍然是跳跃', async t => {
+  const f = await fixture(t, { gameplay: childGameplay() });
+  let page = f.mount(); await page.mount(); await turn();
+  const p = () => page.instance;
+
+  // 主世界：空格 = 跳跃，不是「把机位抬上去」。
+  const groundY = p().camera.snapshotPlayer().position[1];
+  const mainSpace = event({ code: 'Space', key: ' ' });
+  p().onKeyDown(mainSpace);
+  f.step();
+  assert.equal(p().camera.snapshotPlayer().grounded, false, '主世界的空格必须还是跳跃');
+  assert.ok(p().camera.snapshotPlayer().position[1] > groundY, '人离地了');
+  assert.equal(mainSpace.defaultPrevented, true, '跳跃也挡住页面滚动');
+
+  page = await enterChild(f, page);
+  const y = () => p().camera.snapshotPose().camera.position[1];
+  // 页面把真实时钟交给相机，而这里的帧时钟是假时钟，所以**第一帧**的 dt 是「上一帧到现在」
+  // 那一段，不能写死；第二帧起 dt 恰好等于 50 ms。于是每次按键都走两帧，只量第二帧的位移：
+  // 0.2 m/帧 × 60 × 0.05 s = 0.6 m。第一帧只断言「确实动了」，证明按键不是空操作。
+  const hold = (code, key) => {
+    const before = y();
+    const down = event({ code, key });
+    p().onKeyDown(down);
+    f.step();
+    const afterFirst = y();
+    f.step();
+    const delta = y() - afterFirst;
+    p().camera.keyUp(event({ code, key }));
+    f.step();
+    return { down, held: afterFirst - before, delta };
+  };
+
+  // ---- 自由视角 ----
+  const free = hold('Space', ' ');
+  assert.equal(free.down.defaultPrevented, true, '相机接手之后 Space 不滚页面、也不点亮聚焦按钮');
+  assert.ok(free.held > 0, '按住空格的第一帧就开始上升，不是空操作');
+  assert.ok(Math.abs(free.delta - 0.6) < 1e-6, `自由视角的空格抬 0.6 m/帧（实际 ${free.delta}）`);
+  assert.equal(f.frames.size, 0, '松开空格就停');
+
+  // ---- Q/E 没有被空格顶掉 ----
+  const q = hold('KeyQ', 'q');
+  assert.ok(Math.abs(q.delta - 0.6) < 1e-6, `Q 还是抬（实际 ${q.delta}）`);
+  const e = hold('KeyE', 'e');
+  assert.ok(Math.abs(e.delta + 0.6) < 1e-6, `E 还是降（实际 ${e.delta}）`);
+
+  // ---- 俯视视角 ----
+  p().onKeyDown(event({ code: 'KeyV', key: 'v' }));
+  assert.equal(p().camera.viewMode(), 'top');
+  const top = hold('Space', ' ');
+  assert.equal(top.down.defaultPrevented, true);
+  assert.ok(Math.abs(top.delta - 0.6) < 1e-6, `俯视视角的空格同样抬 0.6 m/帧（实际 ${top.delta}）`);
+  assert.deepEqual(p().camera.snapshotPose().camera.forward, [0, -1, 0], '上升不改俯视朝向');
+
+  // ---- 面板（物品栏）占着输入：空格既不动相机、也不启动帧 ----
+  p().onKeyDown(event({ code: 'Tab' }));
+  assert.equal(p().inventoryOpen.value, true);
+  const beforePanel = structuredClone(p().camera.snapshotPose().camera);
+  p().onKeyDown(event({ code: 'Space', key: ' ' }));
+  assert.equal(f.frames.size, 0, '面板打开时空格不得启动相机帧');
+  assert.deepEqual(p().camera.snapshotPose().camera, beforePanel, '面板打开时机位一个数都不动');
+  p().onKeyDown(event({ code: 'Tab' }));
+  assert.equal(p().inventoryOpen.value, false);
+  // 非真空：面板关掉之后同一个空格又生效。
+  const reopened = hold('Space', ' ');
+  assert.ok(Math.abs(reopened.delta - 0.6) < 1e-6, `关掉面板后空格恢复（实际 ${reopened.delta}）`);
+  assert.equal(f.frames.size, 0);
+});
+
+test('碎片规则不写先知：正常物体照常浮动，先知一个字节都没有', async t => {
+  const rules = { version: 1, rules: [{ fragmentId: 'sway', type: 'sway', axis: 'x',
+    amplitude: 0.25, periodMs: 2400 }] };
+  const f = await fixture(t, { documents: { loadWorldRules: rules }, gameplay: childGameplay() });
+  let page = f.mount(); await page.mount(); await turn();
+  page = await enterChild(f, page);
+  const actorOf = guid => f.actors.get(CHILD).find(actor => actor.actor_guid === guid);
+  const prophet = actorOf(PROPHET_GUID);
+  const cube = actorOf(storyCubeModule.CUBE_GUID);
+  const map = actorOf(storyMapModule.MAP_GUID);
+  assert.ok(prophet && cube && map, '先知、方块、地图都在小世界里');
+  assert.equal(page.instance.worldRuleRunner.isRunning(), true, '规则按保存的碎片跑起来');
+
+  const writes = () => f.calls.filter(call => call[0] === 'actorTransform');
+  const start = writes().length;
+  for (let i = 0; i < 5; i++) f.step(50);
+  const fresh = writes().slice(start);
+  assert.ok(fresh.some(call => call[1] === cube.handle), '方块照常被浮动：否则这条用例证明不了什么');
+  assert.deepEqual(fresh.filter(call => call[1] === prophet.handle), [], '先知一个字节都不写');
+  assert.deepEqual(fresh.filter(call => call[1] === map.handle), [], '地图仍然零写入');
+
+  // 「调整物体」这条静态路径同样不列先知：碎片/物体都改不到它。
+  const listed = storyProphetActionsModule.selectableObjects(
+    { data: { scene: { actors: f.actors.get(CHILD) } } }).map(entry => entry.guid);
+  assert.ok(!listed.includes(PROPHET_GUID), '先知不在可调物体列表里');
+  assert.ok(listed.includes(storyCubeModule.CUBE_GUID), '方块才是可调物体');
+});
+
+/* ---------------------------------------------------------------
+   碎片改为可作用于单独物体：盘上的 target 一直走到帧循环，且只动它自己那个物体。
+   --------------------------------------------------------------- */
+test('带目标的碎片规则只动自己的物体：另一件没规则的物体一个字节都不写', async t => {
+  const spinTarget = storyPropsModule.placementGuid(0);
+  const bystander = storyPropsModule.placementGuid(1);
+  // 两条规则各指一个物体：浮动 → 先知方块，旋转 → 第一件陈列物。第二件陈列物没有任何规则。
+  const rules = { version: 1, rules: [
+    { fragmentId: 'sway', type: 'sway', axis: 'x', amplitude: 0.25, periodMs: 2400,
+      target: storyCubeModule.CUBE_GUID },
+    { fragmentId: 'spin', type: 'spin', axis: 'z', amplitude: 15, periodMs: 3600, target: spinTarget },
+  ] };
+  const f = await fixture(t, { documents: { loadWorldRules: rules }, gameplay: placementAware() });
+  let page = f.mount(); await page.mount(); await turn();
+  page = await enterChild(f, page);
+  const p = () => page.instance;
+  // 放两件方块：布局是权威来源，场景里的 actor 由既有 reconcile 路径创建（guid = 序号）。
+  for (let i = 0; i < 2; i++) {
+    p().onKeyDown(event({ code: 'KeyB', key: 'b' }));
+    for (let step = 0; step < 3; step++) await turn();
+  }
+  assert.deepEqual(p().placements.value.map(entry => entry.index), [0, 1], '两件方块都落盘了');
+  const actorOf = guid => f.actors.get(CHILD).find(actor => actor.actor_guid === guid);
+  const cube = actorOf(storyCubeModule.CUBE_GUID);
+  const spun = actorOf(spinTarget);
+  const idle = actorOf(bystander);
+  const prophet = actorOf(PROPHET_GUID);
+  const map = actorOf(storyMapModule.MAP_GUID);
+  assert.ok(cube && spun && idle && prophet && map, '方块、两件陈列物、先知与地图都在小世界里');
+
+  // 目标表是进入世界那一刻的快照：按当前场景再起一次规则，让两件陈列物都进目标表。
+  p().applyWorldRules(await editorApi.scene.getSnapshot());
+  assert.equal(p().worldRuleRunner.isRunning(), true, '规则跑起来了');
+  assert.equal(p().worldRuleRunner.animatedCount(), 2, '只有带规则的两件物体进动画集合');
+
+  const writes = () => f.calls.filter(call => call[0] === 'actorTransform');
+  const start = writes().length;
+  for (let i = 0; i < 6; i++) f.step(50);
+  const fresh = writes().slice(start);
+  const forHandle = handle => fresh.filter(call => call[1] === handle);
+  // 方块：被自己的浮动规则写入位置，旋转保持基准（旋转规则没有指向它）。
+  const cubePos = forHandle(cube.handle).filter(call => call[2] === 0);
+  const cubeRot = forHandle(cube.handle).filter(call => call[2] === 1);
+  assert.ok(cubePos.length > 0, '方块照常被自己的规则浮动');
+  assert.ok(cubePos.some(call => Math.abs(call[3][0] - cube.geometry.position[0]) > 1e-9),
+    '方块的位置真的被浮动了，不只是写回基准');
+  assert.ok(cubeRot.every(call => call[3][2] === 0), '方块的旋转一直是基准：旋转规则没串过来');
+  // 第一件陈列物：位置一直是自己的基准位（浮动规则不是写给它的），旋转却真的在转。
+  const spunPos = forHandle(spun.handle).filter(call => call[2] === 0);
+  const spunRot = forHandle(spun.handle).filter(call => call[2] === 1);
+  assert.ok(spunPos.length > 0, '它有自己的规则，所以每帧仍有一次位置写入（合成值就是基准位）');
+  assert.ok(spunPos.every(call => call[3][0] === spun.geometry.position[0]
+    && call[3][1] === spun.geometry.position[1]
+    && call[3][2] === spun.geometry.position[2]), '它的位置一直是自己的基准位：方块的浮动没有串过来');
+  assert.ok(spunRot.some(call => Math.abs(call[3][2]) > 1e-9), '它被自己的旋转规则转动');
+  // 没有规则的陈列物、先知、地图：一个字节都没有。
+  assert.deepEqual(forHandle(idle.handle), [], '没有规则的物体一次都没被写');
+  assert.deepEqual(forHandle(prophet.handle), [], '先知零写入');
+  assert.deepEqual(forHandle(map.handle), [], '地图零写入');
+});
+
+/* ---------------------------------------------------------------
+   「碎片」屏与「调整碎片」子屏是真的渲染得出来的：先选目标物体，再装填/调整。
+   --------------------------------------------------------------- */
+test('「碎片」屏先选目标物体再装填：落盘的规则带着那个物体的 guid', async t => {
+  const saved = [];
+  let layout = { version: 1, placements: [] };
+  const f = await fixture(t, {
+    gameplay: async (request, activePath) => {
+      if (request.action === 'saveWorldRules') {
+        saved.push(structuredClone(request.rules));
+        return { status: 'ok', role: 'child',
+          state: { version: 1, rules: structuredClone(request.rules) } };
+      }
+      if (request.action === 'savePlacements') {
+        layout = { version: 1, placements: structuredClone(request.placements) };
+        return { status: 'ok', role: 'child', state: structuredClone(layout) };
+      }
+      return { status: 'ok', role: activePath === MAIN ? 'main' : 'child',
+        config: gameplayConfig, state: structuredClone(SHOWN) };
+    },
+  });
+  let page = f.mount(); await page.mount(); await turn();
+  page = await enterChild(f, page);
+  const p = () => page.instance;
+  const collectNodes = (node, predicate, found = []) => {
+    if (Array.isArray(node)) { for (const child of node) collectNodes(child, predicate, found); return found; }
+    if (!node || typeof node !== 'object') return found;
+    if (predicate(node)) found.push(node);
+    for (const child of Array.isArray(node.children) ? node.children : []) collectNodes(child, predicate, found);
+    return found;
+  };
+  const render = () => renderStory(proxyRefs(p()), []);
+
+  // 「碎片」屏：每块碎片一行，点行进子屏（不再直接装填成「整世界生效」）。
+  p().dialogueOpen.value = true;
+  p().openProphetScreen('fragments');
+  await turn();
+  const rows = collectNodes(render(), node => node.props?.['data-prophet-fragment'] !== undefined);
+  assert.deepEqual(rows.map(node => node.props['data-prophet-fragment']), ['sway', 'spin']);
+  // 点行 = 进子屏（而不是立刻把碎片装成「整世界生效」）。
+  rows[0].props.onClick();
+  assert.equal(p().prophetScreen.value, 'fragment-adjust');
+  assert.equal(p().installedRules.value.length, 0, '进子屏本身一个字节都没写');
+  await turn();
+  let tree = render();
+  const targets = collectNodes(tree, node => node.props?.['data-fragment-target'] !== undefined);
+  const targetGuids = targets.map(node => node.props['data-fragment-target']);
+  assert.ok(targetGuids.includes(storyCubeModule.CUBE_GUID), '方块是可以选的');
+  assert.ok(!targetGuids.includes(storyMapModule.MAP_GUID), '地图不在目标列表里');
+  assert.ok(!targetGuids.includes(PROPHET_GUID), '先知不在目标列表里');
+  // 目标列表就是「调整物体」那份列表：同一个 selectableObjects，没有第二套过滤器。
+  assert.deepEqual(targetGuids, storyProphetActionsModule.selectableObjects(
+    { data: { scene: { actors: f.actors.get(CHILD) } } }).map(entry => entry.guid));
+  const toggleOf = rendered => collectNodes(rendered,
+    node => node.props?.['data-fragment-toggle'] !== undefined)[0];
+  assert.equal(toggleOf(tree).props.disabled, true, '没选目标时装填不可用');
+  assert.equal(p().fragmentToggle.value.state, 'pick-target');
+
+  // 选方块：按钮变成「装填到这个物体」，点下去之后规则带着方块的 guid 落盘。
+  const cubeEntry = p().selectableList.value.find(entry => entry.guid === storyCubeModule.CUBE_GUID);
+  p().selectFragmentTarget(cubeEntry);
+  tree = render();
+  const install = toggleOf(tree);
+  assert.equal(install.props.disabled, false);
+  assert.equal(install.props['data-state'], 'install');
+  await install.props.onClick();
+  await turn(); await turn();
+  assert.deepEqual(saved.at(-1), [{ fragmentId: 'sway', type: 'sway', axis: 'x',
+    amplitude: 0.25, periodMs: 2400, target: storyCubeModule.CUBE_GUID }],
+  '装填记录必须点名那个物体');
+  assert.equal(p().installedRules.value[0].target, storyCubeModule.CUBE_GUID);
+  // 装好之后子屏显示的是这个物体上的数字，五个调整按钮都在。
+  tree = render();
+  const actions = collectNodes(tree, node => node.props?.['data-fragment-action'] !== undefined);
+  assert.deepEqual(actions.map(node => node.props['data-fragment-action']),
+    ['amplitude-up', 'amplitude-down', 'period-up', 'period-down', 'axis-next']);
+  assert.ok(actions.every(node => node.props.disabled === false));
+  assert.equal(toggleOf(tree).props['data-state'], 'remove');
+  // 「碎片」屏那一行也写出了作用对象。
+  p().leaveProphetScreen();
+  await turn();
+  const owner = collectNodes(render(), node => node.props?.['data-fragment-owner'] !== undefined);
+  assert.equal(owner.length, 1, '装填过的那一行写出作用对象');
 });

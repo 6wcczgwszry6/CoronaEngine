@@ -118,9 +118,13 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
     }
   }
   // Never use the update subset to decide which actors should be visible.
+  // 小世界里内部主角不显示：小世界的相机就是它的眼睛（自由视角 / 俯视视角）。它仍然是场景
+  // 里真实存在、并且仍然被存档的 actor——F 的射程、摆放的位置、玩家存档读的都是它。
+  const hideProtagonistRole = gameplay?.role === 'child';
   const characters = visibleCharacters.filter(character => !combatOnly || character.role === 'boss');
   for (let character of characters) {
     check();
+    const hideProtagonist = hideProtagonistRole && character.role === 'player';
     let actor = actors.get(character.guid);
     const wasPresent = Boolean(actor);
     if (gameplay?.role === 'child' && character.role === 'prophet' && actor?.model_ref !== PROPHET_MODEL_REF) {
@@ -288,9 +292,10 @@ async function initializeStoryCharacters({ api, sceneId, frontendUrl, isCurrent 
         actor = (await call('关闭物理驱动', () => api.sceneTools.setActorPhysics(sceneId, character.guid,
           { physics_enabled: false }))).actor;
       }
-      if (actor.follow_camera || !actor.visible) {
-        actor = (await call('设置模型可见性', () => api.sceneTools.setActorState(sceneId, character.guid,
-          { visible: true, follow_camera: false }))).actor;
+      if (actor.follow_camera || Boolean(!actor.visible) !== hideProtagonist) {
+        actor = (await call(hideProtagonist ? '隐藏主角' : '设置模型可见性',
+          () => api.sceneTools.setActorState(sceneId, character.guid,
+            { visible: !hideProtagonist, follow_camera: false }))).actor;
       }
       if (actor.camera_lock?.enabled || actor.camera_lock?.lock_to_camera) {
         actor = (await call('关闭相机锁定', () => api.sceneTools.setActorCameraLock(sceneId, character.guid,

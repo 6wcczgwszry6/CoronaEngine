@@ -4,6 +4,10 @@ import { useRouter, onBeforeRouteLeave } from 'vue-router';
 import { editorApi } from '@/api/editorApi.js';
 import { worldModeState, normalizeProjectPath } from '@/services/worldModeService.js';
 import { createStoryCameraController } from '@/utils/viewportStoryCamera.js';
+// 小世界的两个视角：自由视角复用创造模式的相机（同一个 viewportCameraController），
+// 另一个是俯视；主世界仍然是原来的第三人称控制器。
+import { createStoryWorldControls, SMALL_WORLD_VIEW_LABELS } from '@/utils/viewportStoryWorldCamera.js';
+import { routeStoryKeydown } from '@/utils/storyKeyRouter.js';
 import { projectLauncherService, cancelPendingProjectOpen, getProjectSelectionVersion } from '@/services/projectLauncherService.js';
 import { trackWorldSessionWork, notifyWorldError, registerWorldSessionSave } from '@/services/worldSessionLifecycle.js';
 import { createStoryNavigationController, NAVIGATION_KEY } from '../../../../../game/frontend/storyNavigation.mjs';
@@ -19,7 +23,7 @@ import { createPlayerController, VIEW_LABELS } from '../../../../../game/fronten
 import { createPlayerSave } from '../../../../../game/frontend/playerSave.mjs';
 import { createStoryGameplay, worldBounds, distanceToBounds,
   contextualInteraction } from '../../../../../game/frontend/storyGameplay.mjs';
-import { STORY_CHARACTERS, PROPHET_GUID, isMonsterRole, resolveStoryAssetPath,
+import { STORY_CHARACTERS, PROPHET_GUID, PLAYER_MODEL_YAW_OFFSET, isMonsterRole, resolveStoryAssetPath,
   sceneSnapshot } from '../../../../../game/frontend/storyCharacters.mjs';
 import { MAX_PLACEMENTS, PLACED_BLOCK_REACH, PLACEMENT_DISTANCE, blockSpawnTransform, cycleSlot, findProp,
   hotbarSlots as hotbarSlotsFor, nearestPlacedBlock, nextPlacementIndex, placementGuid,
@@ -112,7 +116,12 @@ const current = () => !disposed && !leaving && worldModeState.status === 'ready'
  */
 const groundYAt = (x, z) => heightAt(x, z);
 const camera = createStoryCameraController({
-  createControls: createPlayerController,
+  // 主世界：第三人称跟随（原样）。小世界：自由视角 / 俯视视角，见 viewportStoryWorldCamera.js。
+  createControls: options => createStoryWorldControls({ ...options,
+    createThirdPerson: createPlayerController,
+    role: () => (roleRef.value === 'child' ? 'child' : 'main'),
+    // 内部主角的朝向偏移：俯视/自由相机写回玩家存档时要把逻辑朝向换成模型 rotation.y。
+    modelYawOffset: PLAYER_MODEL_YAW_OFFSET }),
   // 玩家的地面线：地图是 phantom（引擎不为它建碰撞体），脚下多高只能由烘好的高度网格回答。
   // `heightAt` 在没有网格时返回 null，控制器便退回原来的固定地板——这条绑定必须在
   // createStoryCameraController 里继续往下传，否则控制器收不到它（这正是之前的原因）。
@@ -126,6 +135,9 @@ const camera = createStoryCameraController({
   isInputLocked: () => initializing.value || !focused || document.hidden || navigation.busy || savingPlayer || inventoryOpen.value || dialogueOpen.value,
   onPlayerChanged: updateProximity,
   getRect: () => surface.value?.getBoundingClientRect(),
+  // 自由视角的裸鼠标转向：指针锁定之后视口坐标不再有意义，判定改由「是否锁定」回答。
+  // 拿不到锁定的页面（或浏览器）这里恒为 false，转向照旧由裸鼠标事件驱动。
+  isPointerLocked: () => Boolean(surface.value) && document.pointerLockElement === surface.value,
   getPixelRatio: () => window.devicePixelRatio,
 });
 const unwrap = (response) => response?.data ?? response;
@@ -1370,24 +1382,37 @@ const worldLabel = computed(() => transitioning.value ? '切换中…'
   : inSubworld.value ? '小世界' : '主世界');
 // 小世界没有 Boss、没有怒气消耗、没有攻击目标，整条战斗 HUD 隐藏而不是显示一排禁用控件。
 const showCombatHud = computed(() => !inSubworld.value);
+// 视角名按世界取：主世界是「第三人称 / 降临 / 俯视建筑」，小世界是「自由视角 / 俯视视角」。
+// 两个表都含 `top`，因此必须按世界选表而不是合并——否则主世界的「俯视建筑」会被改名。
 function viewLabel() {
   void viewTick.value;
   const mode = camera.viewMode?.();
-  return (mode && VIEW_LABELS?.[mode]) || '第三人称';
+  const labels = inSubworld.value ? SMALL_WORLD_VIEW_LABELS : VIEW_LABELS;
+  return (mode && labels[mode]) || (inSubworld.value ? '自由视角' : '第三人称');
 }
 // 操作提示按世界过滤：先知的 F 与碎片的 F 分属两个世界，天然互斥。
 // F 这一行只由 fKeyAction 决定（同一个裁决也驱动 F 键），因此提示与实际动作不会分歧。
-const controlHints = computed(() => [
-  ['WASD', '移动'],
-  ['鼠标', '转向 · 滚轮缩放'],
-  ['Space', '跳远'],
-  ['Shift', '长按跑步 · 点按闪避'],
-  ...(showCombatHud.value ? [['左键', '攻击'], ['E / R', '技能']] : []),
-  ...(fKeyAction.value.prompt ? [['F', fKeyAction.value.prompt]] : []),
-  ['V', `视角 · ${viewLabel()}`],
-  ['Tab', '背包'],
-  ['Esc', inSubworld.value ? '保存离开' : '保存退出'],
-]);
+const controlHints = computed(() => {
+  // 视角切换会改变「转向」那一行（自由视角裸鼠标 / 俯视右键），所以这里也读一次 viewTick：
+  // 否则按 V 之后提示会停在上一格，和真实输入对不上。
+  void viewTick.value;
+  return [
+    // 小世界里内部主角不显示，相机就是那双眼睛：滚轮留给物品栏换格，缩放挪到 Ctrl+滚轮。
+    // 自由视角不按键也能转向（`viewportStoryWorldCamera` 的裸鼠标）；单击只是把鼠标锁进视口，
+    // Esc 第一下放开它。俯视视角仍然只有右键拖动改朝向，提示因此分开写。
+    ...(inSubworld.value
+      ? [['WASD', '移动 · Q/E/空格 升降'],
+        [camera.isLookActive?.() ? '鼠标' : '鼠标右键',
+          camera.isLookActive?.() ? '移动转向 · 单击锁定 · Esc 放开' : '转向'],
+        ['Ctrl+滚轮', '缩放']]
+      : [['WASD', '移动'], ['鼠标', '转向 · 滚轮缩放'], ['Space', '跳远'], ['Shift', '长按跑步 · 点按闪避']]),
+    ...(showCombatHud.value ? [['左键', '攻击'], ['E / R', '技能']] : []),
+    ...(fKeyAction.value.prompt ? [['F', fKeyAction.value.prompt]] : []),
+    ['V', `视角 · ${viewLabel()}`],
+    ['Tab', '背包'],
+    ['Esc', inSubworld.value ? '保存离开' : '保存退出'],
+  ];
+});
 const hotbarSlots = computed(() => {
   void viewTick.value;
   return hotbarSlotsFor(gameplayState.value?.state?.inventory, placements.value);
@@ -1419,6 +1444,7 @@ function closeDialogue() {
   if (!dialogueOpen.value) return;
   // 关掉整个面板时不许只退一级：面板再打开时必须回到主选项，而不是停在子屏上。
   adjustFragmentId.value = null;
+  fragmentTargetGuid.value = null;
   prophetScreen.value = null;
   actionFeedback.value = '';
   exitAdjustMode({ reopenDialogue: false });
@@ -1458,9 +1484,13 @@ const resolvedRules = computed(() => installedRules.value
   .map(record => {
     const rule = findFragment(record?.fragmentId)?.rule;
     if (!rule) return null;
-    return { ...rule,
+    const resolved = { ...rule,
       amplitude: typeof record.amplitude === 'number' ? record.amplitude : rule.amplitude,
       periodMs: typeof record.periodMs === 'number' ? record.periodMs : rule.periodMs };
+    // 目标原样带过去。没有 target 的记录是旧规则（作用于整个小世界），不能凭空补一个目标，
+    // 否则一份旧存档会在加载时突然只动一个物体。
+    if (typeof record.target === 'string' && record.target) resolved.target = record.target;
+    return resolved;
   }).filter(Boolean));
 // The panel has two main options. «碎片» is a screen inside the panel; «调整物体» leaves the
 // panel for the overhead editing mode, and leaving that mode reopens the panel.
@@ -1471,9 +1501,39 @@ const previousViewMode = ref(null);
 const adjustSelection = ref(null);
 // Which fragment the «调整碎片» sub-screen is editing; null whenever that screen is closed.
 const adjustFragmentId = ref(null);
-const fragmentList = computed(() => fragmentPanel(installedRules.value));
+// 这块碎片要作用于哪个物体（actor guid）。子屏先选它，再改规则；没选时编辑的是旧的整世界
+// 规则（只有旧存档才有，子屏会明确写出「作用于整个小世界」）。
+const fragmentTargetGuid = ref(null);
+// 目标列表与「调整物体」用的是同一份：只列小世界里的方块与布景，地图/先知/角色都不在里面
+// （`selectableObjects` 一处裁决）。guid → 名字只用于显示，规则里存的是 guid。
+const fragmentNames = computed(() => Object.fromEntries(
+  selectableList.value.map(entry => [entry.guid, entry.name])));
+const fragmentList = computed(() => fragmentPanel(installedRules.value, fragmentNames.value));
+const fragmentTargetEntry = computed(() => selectableList.value
+  .find(entry => entry.guid === fragmentTargetGuid.value) || null);
 const fragmentAdjust = computed(() => fragmentAdjustPanel(installedRules.value,
-  adjustFragmentId.value));
+  adjustFragmentId.value, { target: fragmentTargetGuid.value,
+    label: fragmentTargetEntry.value ? objectLabel(fragmentTargetEntry.value) : '' }));
+// 装填/拆下按钮：先说清楚这一下会发生什么。旧规则单独一条路径（它没有目标物体），
+// 这样「整世界生效」的记录只能被显式拆掉，而不是被一次「装填到某物体」悄悄覆盖。
+const fragmentToggle = computed(() => {
+  const panel = fragmentAdjust.value;
+  if (panel.legacy) return { state: 'remove-legacy', label: '拆下这条旧规则（作用于整个小世界）', enabled: true };
+  if (!fragmentTargetGuid.value) return { state: 'pick-target', label: '先选目标物体', enabled: false };
+  return panel.installed
+    ? { state: 'remove', label: '从这个物体上拆下', enabled: true }
+    : { state: 'install', label: '装填到这个物体', enabled: true };
+});
+const fragmentOn = entry => installedRules.value.some(rule =>
+  rule?.fragmentId === adjustFragmentId.value
+  && (typeof rule.target === 'string' && rule.target ? rule.target : null) === entry?.guid);
+const isFragmentTarget = entry => Boolean(entry?.guid) && entry.guid === fragmentTargetGuid.value;
+function selectFragmentTarget(entry) {
+  if (!entry?.guid) return false;
+  fragmentTargetGuid.value = entry.guid;
+  actionFeedback.value = `目标：${objectLabel(entry)}`;
+  return true;
+}
 const adjustHint = computed(() => (adjustSelection.value
   ? `已选中：${adjustSelection.value.name}`
   : '俯瞰视角：点击物体选中它，再用下面的按钮调整'));
@@ -1530,24 +1590,33 @@ function openProphetScreen(id) {
   if (id === 'adjust') { enterAdjustMode(); return; }
   actionFeedback.value = '';
   adjustFragmentId.value = null;
+  fragmentTargetGuid.value = null;
   prophetScreen.value = id;
+  // 「碎片」屏要写清每条规则作用于哪个物体，名字来自场景快照，所以进屏时读一次。
+  if (id === 'fragments') void loadSelectableObjects();
 }
-// 「调整」在碎片行上：进子屏，记下改的是哪一块。没装填的碎片也进得去，子屏会说明要先装填，
-// 这样按 1-4 得到的反馈与点击一致，而不是一个没有反应的按钮。
+// 「装填 / 调整」在碎片行上：进子屏，记下改的是哪一块，并把目标清空——目标不跨碎片继承，
+// 否则很容易把第二块碎片装到第一块选中的物体上。没装填的碎片也进得去，子屏会先让玩家选物体，
+// 再说明要先装填，这样按 1-5 得到的反馈与点击一致，而不是一个没有反应的按钮。
 function openFragmentAdjust(entry) {
   adjustFragmentId.value = entry?.id || null;
+  fragmentTargetGuid.value = null;
   prophetScreen.value = 'fragment-adjust';
-  actionFeedback.value = entry?.installed ? '' : '先装填该碎片再调整';
+  actionFeedback.value = entry?.installed ? '' : '先选一个目标物体，再装填这块碎片';
+  // 目标列表是这份快照里的对象，进屏读一次即可。
+  void loadSelectableObjects();
 }
 // Escape 与「返回」都只退一级：调整碎片 → 碎片 → 主选项。
 function leaveProphetScreen() {
   if (prophetScreen.value === 'fragment-adjust') {
     adjustFragmentId.value = null;
+    fragmentTargetGuid.value = null;
     actionFeedback.value = '';
     prophetScreen.value = 'fragments';
     return;
   }
   adjustFragmentId.value = null;
+  fragmentTargetGuid.value = null;
   prophetScreen.value = null;
   actionFeedback.value = '';
 }
@@ -1566,8 +1635,9 @@ function rememberCube(actor) {
 function applyWorldRules(snapshot) {
   worldRuleRunner.stop();
   if (!snapshot || !inSubworld.value || !resolvedRules.value.length) return false;
-  // One shared target list for every installed rule: a world may have sway and spin at the
-  // same time, and the runner composes them into a single write per actor per frame.
+  // One target list for the whole world: every rule resolves its own target out of it (a rule
+  // without a target is a legacy rule and keeps animating every eligible object), and the
+  // runner composes the rules of one object into a single write per actor per frame.
   worldRuleRunner.setTargets(collectSwayTargets(snapshot));
   worldRuleRunner.setRules(resolvedRules.value);
   return worldRuleRunner.start();
@@ -1583,10 +1653,20 @@ async function runProphetAction(chosen) {
   // Gating only on `dialogueOpen` silently dropped every adjustment action.
   if ((!dialogueOpen.value && !adjustMode.value) || !chosen) return;
   if (chosen.type === 'open-screen') { openProphetScreen(chosen.screen); return; }
+  if (chosen.type === 'open-fragment-adjust') {
+    openFragmentAdjust(fragmentList.value.find(entry => entry.id === chosen.fragmentId));
+    return;
+  }
   actionFeedback.value = '';
+  // 目标：动作自带就用它，否则用子屏里选中的那个物体。两者都没有时是一份旧存档的记录
+  // （没有目标 = 作用于整个小世界），`toggleFragment` / `adjustFragmentRule` 会照旧规则处理它。
+  const ruleTarget = chosen.target ?? fragmentTargetGuid.value ?? null;
+  const ruleTargetEntry = selectableList.value.find(item => item.guid === ruleTarget) || null;
+  const ruleTargetLabel = ruleTargetEntry ? objectLabel(ruleTargetEntry) : '';
   if (chosen.type === 'toggle-fragment') {
     await runAction(async () => {
-      const result = toggleFragment(installedRules.value, chosen.fragmentId);
+      const result = toggleFragment(installedRules.value, chosen.fragmentId,
+        { target: ruleTarget, label: ruleTargetLabel });
       const saved = await gameplay.saveWorldRules(result.rules);
       installedRules.value = Array.isArray(saved?.rules) ? saved.rules : result.rules;
       actionFeedback.value = result.feedback;
@@ -1595,19 +1675,20 @@ async function runProphetAction(chosen) {
     });
     return;
   }
-  // 「调整碎片」：改的是已装填记录里的数字，因此与装填/拆下走完全同一条路径——先落盘，
-  // 再用新快照重启规则引擎，改完立刻在场景里看得到。
+  // 「调整碎片」：改的是「这块碎片 × 这个物体」那一条记录里的数字与方向，因此与装填/拆下
+  // 走完全同一条路径——先落盘，再用新快照重启规则引擎，改完立刻在场景里看得到。
   if (chosen.type === 'adjust-fragment') {
     const fragmentId = chosen.fragmentId || adjustFragmentId.value;
+    const options = { target: ruleTarget };
     // 纯函数先判一次：未装填、已到边界、未知动作都只改提示、一个字节也不写盘。放在
     // runAction 之外，是为了让这句话不受「必须有焦点」的限制，玩家一定看得到。
-    const preview = adjustFragmentRule(installedRules.value, fragmentId, chosen.id);
+    const preview = adjustFragmentRule(installedRules.value, fragmentId, chosen.id, options);
     if (!preview.changed) {
       actionFeedback.value = preview.feedback;
       return;
     }
     await runAction(async () => {
-      const result = adjustFragmentRule(installedRules.value, fragmentId, chosen.id);
+      const result = adjustFragmentRule(installedRules.value, fragmentId, chosen.id, options);
       if (!result.changed) { actionFeedback.value = result.feedback; return; }
       const saved = await gameplay.saveWorldRules(result.rules);
       installedRules.value = Array.isArray(saved?.rules) ? saved.rules : result.rules;
@@ -1676,10 +1757,14 @@ function cycleHotbar(delta) {
   return true;
 }
 /**
- * 视口滚轮只有一个入口：物品栏可见时换格且不缩放相机，其余情况（主世界、任何面板打开）
- * 仍交给相机缩放。preventDefault 已由模板上的 @wheel.prevent 完成，这里不再重复。
+ * 视口滚轮有两个入口，但只有一个裁决：
+ *   - Ctrl+滚轮 = 缩放。只有小世界的自由/俯视相机有 `zoom`（改 fov）；主世界没有，于是
+ *     `zoom` 返回 false，滚轮继续走改动前那条路（相机拉近/推远），行为不变。
+ *   - 其余情况：物品栏可见时换格，否则交给相机。
+ * preventDefault 已由模板上的 @wheel.prevent 完成，这里不再重复。
  */
 function onSurfaceWheel(event) {
+  if (event.ctrlKey && camera.zoom?.(event)) return true;
   if (!hotbarVisible.value) return camera.wheel(event);
   if (focused && !document.hidden) cycleHotbar(event.deltaY);
   return true;
@@ -1832,10 +1917,21 @@ const navigation = createStoryNavigationController({
   notify: error => { if (current()) gameplayError.value = error.message; notifyWorldError(error); },
 });
 function onKeyDown(event) {
-  if (!current()) return;
-  // The adjustment mode owns the keyboard outright: only the adjustment steps and the way out
-  // get through, so a stray key cannot cast a skill or swing while the player is arranging.
-  if (adjustMode.value) {
+  // 键盘路由抽到 `storyKeyRouter.js`，这一层只执行对应分支的副作用。路由是纯函数，测试才能
+  // 走「页面根 → 路由裁决 → 相机」的完整链路，而不是只把事件直接塞给相机。
+  const route = routeStoryKeydown(event, {
+    current: current(),
+    adjustMode: adjustMode.value,
+    dialogueOpen: dialogueOpen.value,
+    inSubworld: inSubworld.value,
+    inventoryOpen: inventoryOpen.value,
+    actionBusy: actionBusy.value,
+    busy: gameplay.busy,
+    needsSave: gameplay.needsSave,
+  });
+
+  if (route === 'ignore') return;
+  if (route === 'adjust') {
     event.preventDefault();
     event.stopPropagation();
     if (event.code === 'Escape' || event.key === 'Escape') {
@@ -1848,8 +1944,7 @@ function onKeyDown(event) {
     }
     return;
   }
-  // 对话面板打开时独占键盘：Esc 不再退出世界，F/Space 也不会漏给相机或其它交互。
-  if (dialogueOpen.value) {
+  if (route === 'dialogue') {
     event.preventDefault();
     event.stopPropagation();
     if (event.code === 'Escape' || event.key === 'Escape') {
@@ -1869,22 +1964,20 @@ function onKeyDown(event) {
     }
     return;
   }
-  // 物品栏：调整模式与对话（上面两个分支）已经吃掉数字键，因此这里只在
-  // 小世界、面板关闭时接管数字键与 B。主世界里这套键完全不生效。
-  if (inSubworld.value && !inventoryOpen.value && !event.ctrlKey && !event.altKey
-    && !event.metaKey && !event.isComposing) {
-    if (/^[1-9]$/.test(event.key || '')) {
-      event.preventDefault(); event.stopPropagation();
-      if (!event.repeat) selectHotbarSlot(Number(event.key) - 1);
-      return;
-    }
-    if (event.code === 'KeyB' || event.key?.toLowerCase() === 'b') {
-      event.preventDefault(); event.stopPropagation();
-      if (!event.repeat) void placeSelectedItem();
-      return;
-    }
+  if (route === 'hotbar-slot') {
+    event.preventDefault(); event.stopPropagation();
+    if (!event.repeat) selectHotbarSlot(Number(event.key) - 1);
+    return;
   }
-  if (event.code === 'Escape' || event.key === 'Escape') {
+  if (route === 'place-item') {
+    event.preventDefault(); event.stopPropagation();
+    if (!event.repeat) void placeSelectedItem();
+    return;
+  }
+  if (route === 'escape') {
+    // 第一次 Esc 只把鼠标还给页面：自由视角锁定指针之后，玩家按 Esc 想的是「放开鼠标」，
+    // 而不是「存档离开」。没有锁定时这一层不生效，Esc 的含义与改动前一模一样。
+    if (releaseMouseLook()) { event.preventDefault(); event.stopPropagation(); return; }
     event.preventDefault();
     event.stopPropagation();
     if (navigation.busy) { if (!event.repeat) void exitStory(); }
@@ -1892,37 +1985,38 @@ function onKeyDown(event) {
     else if (!event.repeat) void exitStory();
     return;
   }
-  if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing) return;
-  if (event.code === 'Tab' || event.key === 'Tab') {
+  if (route === 'tab') {
     event.preventDefault(); event.stopPropagation();
     if (!event.repeat && focused && !document.hidden && cameraReady && !navigation.busy && !savingPlayer) toggleInventory();
     return;
   }
-  if (inventoryOpen.value) {
+  if (route === 'inventory') {
     if (!['Enter', 'Space'].includes(event.code)) event.preventDefault();
     event.stopPropagation(); return;
   }
-  if (event.code === 'KeyV' || event.key?.toLowerCase() === 'v') {
+  if (route === 'cycle-view') {
     event.preventDefault(); event.stopPropagation();
     if (!event.repeat) cycleView();
     return;
   }
-  if (event.code === 'KeyF' || event.key?.toLowerCase() === 'f') {
+  if (route === 'interact') {
     event.preventDefault(); event.stopPropagation();
     if (!event.repeat && focused) interact();
     return;
   }
-  if ((event.code === 'Space' || event.key === ' ' || event.key === 'Spacebar')
-    && (actionBusy.value || gameplay.busy || gameplay.needsSave)) {
+  if (route === 'space-busy') {
     event.preventDefault(); event.stopPropagation(); return;
   }
-  if (event.code === 'KeyE' || event.code === 'KeyR' || ['e', 'r'].includes(event.key?.toLowerCase())) {
+  if (route === 'skill') {
     event.preventDefault(); event.stopPropagation();
     const skill = event.code === 'KeyE' || event.key?.toLowerCase() === 'e' ? 'heavy' : 'sweep';
     if (!event.repeat && focused) void runAction(() => gameplay.castSkill(skill));
     return;
   }
-  if (focused && camera.keyDown(event)) event.stopPropagation?.();
+  if (route === 'camera') {
+    if (focused && camera.keyDown(event)) event.stopPropagation?.();
+    return;
+  }
 }
 function onBlur() { focused = false; camera.resetInput(); }
 function onFocus() { focused = !document.hidden; }
@@ -1936,6 +2030,32 @@ function watchDpi() {
   dpiQuery?.addEventListener('change', onDpiChanged);
 }
 function onDpiChanged() { camera.syncViewport(); watchDpi(); }
+/**
+ * 自由视角把鼠标交给相机：点击视口时请求指针锁定（可选的增强）。
+ *
+ * 浏览器只在用户手势里允许 requestPointerLock，所以请求挂在点击上。但**转向不依赖它**：
+ * 拿不到锁定（CEF 宿主、被拒绝、测试环境里没有这个 API）时，裸鼠标移动照样转向，见
+ * viewportStoryWorldCamera.js 的 pointerMove。所以这里只做「能锁就锁」，不把任何行为挂在
+ * 它成功之上。点到 HUD/按钮上不抢鼠标——那些控件还要用光标点。
+ */
+function captureMouseLook(event) {
+  if (!inSubworld.value || camera.viewMode?.() !== 'free') return false;
+  if (event?.target?.closest?.('button, input, select, textarea, [contenteditable="true"]')) return false;
+  const element = surface.value;
+  if (!element || typeof element.requestPointerLock !== 'function') return false;
+  if (document.pointerLockElement === element) return true;
+  try {
+    // Chrome 返回 Promise；被拒绝只是「没有锁定」，不该留下未处理的 rejection。
+    element.requestPointerLock()?.catch?.(() => false);
+    return true;
+  } catch { return false; }
+}
+/** Esc 的第一层含义：把鼠标还给页面（指针锁定），而不是直接存档离开。 */
+function releaseMouseLook() {
+  if (!document.pointerLockElement) return false;
+  try { document.exitPointerLock?.(); } catch { /* 已经释放 */ }
+  return true;
+}
 function onPointerDown(event) {
   if (inventoryOpen.value) return;
   surface.value?.focus();
@@ -1946,6 +2066,8 @@ function onPointerDown(event) {
   // Adjusting is label-driven: the left button neither attacks nor picks an object, it only
   // focuses the viewport so dragging and the wheel still let the player look at the object.
   if (adjustMode.value) return;
+  // 小世界的自由视角：这一下点击顺便把鼠标交给相机（Esc 归还）。
+  captureMouseLook(event);
   void runAction(gameplay.attack);
 }
 
@@ -2305,39 +2427,72 @@ onUnmounted(() => {
             </button>
           </template>
 
-          <!-- 「碎片」屏：点整行装填/拆下，行尾的「调整」进子屏改数字 -->
+          <!-- 「碎片」屏：每块碎片一行，写清它现在作用于哪个物体；点行进子屏先选物体，再装填/调整 -->
           <template v-else-if="prophetScreen === 'fragments'">
             <div v-for="(entry, index) in fragmentList" :key="entry.id" class="prophet-row"
               :data-prophet-row="entry.id">
               <button class="prophet-action prophet-row-main"
-                :data-prophet-fragment="entry.id" :disabled="!entry.owned"
-                @click="runProphetAction({ type: 'toggle-fragment', fragmentId: entry.id })">
+                :data-prophet-fragment="entry.id"
+                @click="openFragmentAdjust(entry)">
                 <span class="prophet-action-key">{{ index + 1 }}</span>
                 <span class="prophet-action-label">{{ entry.name }}</span>
                 <span class="prophet-action-state" :data-state="entry.state">{{ entry.stateLabel }}</span>
+                <span v-if="entry.installed" class="prophet-action-detail" data-fragment-owner>
+                  作用于：{{ entry.targetLabel }}{{ entry.legacy ? '（旧规则）' : '' }}
+                </span>
                 <span class="prophet-action-detail">{{ entry.description }} · {{ entry.details }}</span>
               </button>
               <button class="prophet-action prophet-row-adjust"
                 :data-prophet-adjust="entry.id" @click="openFragmentAdjust(entry)">
-                <span class="prophet-action-label">调整</span>
+                <span class="prophet-action-label">选物体</span>
               </button>
             </div>
           </template>
 
-          <!-- 「调整碎片」子屏：只改选中碎片的幅度与周期，改完即落盘并重启规则 -->
+          <!-- 「调整碎片」子屏：先选目标物体，再改这条规则的类型/方向/幅度/周期 -->
           <template v-else>
             <p class="prophet-action-detail" data-fragment-adjust-title>
-              {{ fragmentAdjust.known ? `${fragmentAdjust.name} · ${fragmentAdjust.details}` : fragmentAdjust.name }}
+              {{ fragmentAdjust.known ? `${fragmentAdjust.name} · ${fragmentAdjust.typeLabel}` : fragmentAdjust.name }}
+            </p>
+            <p class="prophet-action-detail" data-fragment-adjust-target>
+              目标：{{ fragmentAdjust.targetLabel }}
+              <span v-if="fragmentAdjust.legacy" data-fragment-legacy>（旧规则：作用于整个小世界）</span>
             </p>
             <p class="prophet-action-detail" data-fragment-adjust-values>
-              当前：{{ fragmentAdjust.amplitudeLabel }} · {{ fragmentAdjust.periodLabel }}
+              <template v-if="fragmentAdjust.installed">
+                当前：{{ fragmentAdjust.amplitudeLabel }} · {{ fragmentAdjust.periodLabel }} · {{ fragmentAdjust.axisLabel }}
+              </template>
+              <template v-else-if="fragmentAdjust.target">
+                这个物体上还没有这条规则
+              </template>
             </p>
+            <!-- 先选目标物体：列表与「调整物体」同一份（地图/先知/角色都不在里面） -->
+            <div class="prophet-actions" style="flex-basis: 100%; max-height: 130px; overflow-y: auto;">
+              <button v-for="entry in selectableList" :key="entry.guid" class="prophet-action"
+                :data-fragment-target="entry.guid"
+                :style="isFragmentTarget(entry) ? { borderColor: '#a08750', background: '#2a2f22' } : null"
+                @click="selectFragmentTarget(entry)">
+                <span class="prophet-action-label">{{ objectLabel(entry) }}</span>
+                <span v-if="fragmentOn(entry)" class="prophet-action-state" data-fragment-on>已装填</span>
+              </button>
+              <button class="prophet-action" data-fragment-targets-refresh @click="loadSelectableObjects">
+                <span class="prophet-action-label">刷新物体</span>
+              </button>
+              <p v-if="!selectableList.length" class="prophet-action-detail">
+                场景里没有读出可作用的对象，点「刷新物体」重试
+              </p>
+            </div>
+            <button class="prophet-action" data-fragment-toggle :data-state="fragmentToggle.state"
+              :disabled="!fragmentToggle.enabled"
+              @click="runProphetAction({ type: 'toggle-fragment', fragmentId: fragmentAdjust.id, target: fragmentTargetGuid })">
+              <span class="prophet-action-label">{{ fragmentToggle.label }}</span>
+            </button>
             <p v-if="fragmentAdjust.hint" class="prophet-action-detail" data-fragment-adjust-hint>
               {{ fragmentAdjust.hint }}
             </p>
             <button v-for="action in FRAGMENT_ADJUST_ACTIONS" :key="action.id" class="prophet-action"
-              :data-fragment-action="action.id"
-              @click="runProphetAction({ type: 'adjust-fragment', id: action.id, fragmentId: fragmentAdjust.id })">
+              :data-fragment-action="action.id" :disabled="!fragmentAdjust.installed"
+              @click="runProphetAction({ type: 'adjust-fragment', id: action.id, fragmentId: fragmentAdjust.id, target: fragmentTargetGuid })">
               <span class="prophet-action-key">{{ action.key }}</span>
               <span class="prophet-action-group">{{ action.group }}</span>
               <span class="prophet-action-label">{{ action.label }}</span>
