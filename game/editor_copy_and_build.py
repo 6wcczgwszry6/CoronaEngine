@@ -212,7 +212,7 @@ def maybe_run_npm(frontend_dir: Path, node_dir: Path) -> int:
 
 def copy_game_frontend(dest_root: Path, repository_root: Path | None = None) -> None:
     """Keep the story modules beside CabbageEditor, as in the source checkout."""
-    root = repository_root or Path(__file__).resolve().parents[2]
+    root = repository_root or Path(__file__).resolve().parents[1]
     source = root / "game" / "frontend"
     destination = dest_root.parent / "game"
     if not source.is_dir():
@@ -224,7 +224,7 @@ def copy_game_frontend(dest_root: Path, repository_root: Path | None = None) -> 
 
 def copy_game_art(dest_root: Path, repository_root: Path | None = None) -> None:
     """Deploy game-owned models/textures without modifying the shared engine assets."""
-    root = repository_root or Path(__file__).resolve().parents[2]
+    root = repository_root or Path(__file__).resolve().parents[1]
     source = root / "game" / "art"
     destination = dest_root.parent / "game" / "art"
     if not source.is_dir():
@@ -238,7 +238,7 @@ def copy_game_art(dest_root: Path, repository_root: Path | None = None) -> None:
 
 def copy_game_runtime(dest_root: Path, repository_root: Path | None = None) -> None:
     """Deploy Python gameplay next to editor; no C++ manifest or engine rebuild needed."""
-    root = repository_root or Path(__file__).resolve().parents[2]
+    root = repository_root or Path(__file__).resolve().parents[1]
     source = root / "game"
     destination = dest_root.parent / "game"
     if source.resolve() == destination.resolve():
@@ -256,7 +256,7 @@ def copy_game_data(dest_root: Path, repository_root: Path | None = None) -> None
     plain JSON: the shipped program must carry the same authoritative content the
     repository validates against.
     """
-    root = repository_root or Path(__file__).resolve().parents[2]
+    root = repository_root or Path(__file__).resolve().parents[1]
     source = root / "game" / "data"
     destination = dest_root.parent / "game" / "data"
     if not source.is_dir():

@@ -12,7 +12,7 @@ import unittest
 class GameDeploymentTests(unittest.TestCase):
     def test_runtime_deploy_imports_outside_source_checkout_and_includes_hotkeys(self):
         repository = Path(__file__).resolve().parents[3]
-        spec = importlib.util.spec_from_file_location('game_test_deployment', repository / 'tools/build/editor_copy_and_build.py')
+        spec = importlib.util.spec_from_file_location('game_test_deployment', repository / 'game/editor_copy_and_build.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         with tempfile.TemporaryDirectory() as temporary:
@@ -33,7 +33,7 @@ class GameDeploymentTests(unittest.TestCase):
 
     def test_source_layout_is_not_copied_onto_itself(self):
         repository = Path(__file__).resolve().parents[3]
-        spec = importlib.util.spec_from_file_location('game_test_deployment', repository / 'tools/build/editor_copy_and_build.py')
+        spec = importlib.util.spec_from_file_location('game_test_deployment', repository / 'game/editor_copy_and_build.py')
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         from unittest.mock import patch

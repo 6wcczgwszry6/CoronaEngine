@@ -5,7 +5,7 @@
  * This module is what the page actually imports, because a JSON import would depend on
  * import-attribute support agreeing between Vite and `node --test`, and a failed
  * frontend build is only a `CMake Warning` in this repository
- * (see tools/build/editor_copy_and_build.py), so a broken import would ship silently.
+ * (see game/editor_copy_and_build.py), so a broken import would ship silently.
  *
  * The two are kept honest by `game/tests/test_story_assets.py`, which reads this module
  * with Node and compares every field against the JSON. Editing either side alone turns

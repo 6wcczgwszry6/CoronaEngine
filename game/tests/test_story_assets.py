@@ -798,7 +798,7 @@ class StoryAssetTests(unittest.TestCase):
         self.assertNotIn("story.placement.0003", world_rules.RESERVED_TARGETS)
 
     def test_frontend_deployment_contains_every_module_and_cleans_stale_modules(self):
-        spec = importlib.util.spec_from_file_location("story_asset_deployment", ROOT / "tools/build/editor_copy_and_build.py")
+        spec = importlib.util.spec_from_file_location("story_asset_deployment", ROOT / "game/editor_copy_and_build.py")
         deployment = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(deployment)
         with tempfile.TemporaryDirectory(prefix="story assets ") as temporary:
@@ -815,7 +815,7 @@ class StoryAssetTests(unittest.TestCase):
 
 
     def test_art_deployment_preserves_models_textures_and_attribution(self):
-        spec = importlib.util.spec_from_file_location("story_art_deployment", ROOT / "tools/build/editor_copy_and_build.py")
+        spec = importlib.util.spec_from_file_location("story_art_deployment", ROOT / "game/editor_copy_and_build.py")
         deployment = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(deployment)
         with tempfile.TemporaryDirectory(prefix="剧情美术 assets ") as temporary:
@@ -900,7 +900,7 @@ class StoryAssetTests(unittest.TestCase):
         self.assertEqual(prophet["height"], placement["height"])
 
     def test_game_data_deployment_carries_the_story_content(self):
-        spec = importlib.util.spec_from_file_location("story_data_deployment", ROOT / "tools/build/editor_copy_and_build.py")
+        spec = importlib.util.spec_from_file_location("story_data_deployment", ROOT / "game/editor_copy_and_build.py")
         deployment = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(deployment)
         with tempfile.TemporaryDirectory(prefix="story data ") as temporary:
