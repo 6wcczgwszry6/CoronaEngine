@@ -419,172 +419,7 @@ const GEAR_SLOTS = [
 ];
 const SLOT_BY_ID = {};
 GEAR_SLOTS.forEach(slot => { SLOT_BY_ID[slot.id] = slot; });
-const BAG_TABS = [
-  { id: 'all', name: '全部' },
-  { id: 'equip', name: '兵甲' },
-  { id: 'usable', name: '丹散' },
-  { id: 'mat', name: '材料' },
-];
-/* 界面自带的器物表；其中「世界碎片」一格接真实存档数量 */
-const BAG_ITEMS = [
-  { u: 'armor-1', name: '影纹鳞甲', type: '重甲', cat: 'equip', slot: 'chest', rarity: 'epic', glyph: 'g-armor',
-    stats: [['护体', '+186'], ['筋骨', '+24'], ['抗蚀', '+18%']],
-    flavor: '鳞片取自深潭老蛟，贴着火光看，纹路会自己游动。' },
-  { u: 'legs-1', name: '缚地胫铠', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'rare', glyph: 'g-legs-h',
-    stats: [['护体', '+104'], ['负重', '+9']],
-    flavor: '胫甲上留着一道旧铆痕，走过碎石地时才会响。' },
-  { u: 'main-1', name: '赤霄长兵', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-sword',
-    stats: [['锋芒', '86 - 124'], ['力道', '+31'], ['破甲', '+12%']],
-    flavor: '刃上缠着一线不散的血气，主人不问，它也不说。' },
-  { u: 'helm-1', name: '兜鍪 · 静水', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'rare', glyph: 'g-helmet',
-    stats: [['护体', '+92'], ['定神', '+14']],
-    flavor: '面甲内侧刻着半句残咒，据说是铸者留给自己的。' },
-  { u: 'boots-1', name: '踏雾履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'rare', glyph: 'g-boots-l',
-    stats: [['身法', '+19'], ['疾行', '+9%']],
-    flavor: '踩在松针上，声音比风还迟一步。' },
-  { u: 'amulet-1', name: '青囊护符', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-talis',
-    stats: [['定神', '+22'], ['回气', '+8/s']],
-    flavor: '符纸换了七次，绳结始终没舍得拆。' },
-  { u: 'belt-1', name: '缠云腰带', type: '法器', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-belt',
-    stats: [['护体', '+38'], ['术法', '+12']],
-    flavor: '三层素绢，一层一线都是山里人自己纺的。' },
-  { u: 'ring-1', name: '残玉指环', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-ring',
-    stats: [['锋芒', '+9'], ['身法', '+11']],
-    flavor: '玉上有一道旧裂，握紧时微微发烫。' },
-  { u: 'off-1', name: '断水短刃', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-sword',
-    stats: [['锋芒', '42 - 58'], ['身法', '+11']],
-    flavor: '短得只能贴身用，也近得让人来不及退。' },
-  { u: 'main-2', name: '乌木猎弓', type: '弓弩', cat: 'equip', slot: 'weapon', rarity: 'fine', glyph: 'g-bow',
-    stats: [['锋芒', '56 - 74'], ['力道', '+14']],
-    flavor: '弦是旧弦，换过三次弓臂，准头反而更稳。' },
-  { u: 'main-3', name: '镇魂法铃', type: '法器', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-staff',
-    stats: [['术法', '+27'], ['定神', '+16']],
-    flavor: '摇一下，活人听见的是铃，别的东西听见的是雷。' },
-  { u: 'off-2', name: '开山短斧', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'common', glyph: 'g-axe',
-    stats: [['锋芒', '33 - 45'], ['力道', '+8']],
-    flavor: '斧背豁了几处口，砍柴砍人都不耽误。' },
-  { u: 'legs-2', name: '藤编胫衣', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'fine', glyph: 'g-legs-l',
-    stats: [['护体', '+52'], ['身法', '+14']],
-    flavor: '老藤浸过桐油，走夜路时几乎不发出声响。' },
-  { u: 'chest-2', name: '素麻战衣', type: '轻甲', cat: 'equip', slot: 'chest', rarity: 'fine', glyph: 'g-chest-l',
-    stats: [['护体', '+71'], ['回气', '+4/s']],
-    flavor: '洗得发白的粗麻，针脚却密得看不出线头。' },
-  { u: 'use-1', name: '回春丹', type: '丹散', cat: 'usable', rarity: 'fine', glyph: 'g-pill', qty: 12,
-    stats: [['回复生命', '240'], ['念咒时长', '1.2s']],
-    flavor: '入口先苦后甘，苦的那口才是药。' },
-  { u: 'use-2', name: '凝神散', type: '丹散', cat: 'usable', rarity: 'fine', glyph: 'g-pill', qty: 8,
-    stats: [['回复法力', '180'], ['念咒时长', '1.0s']],
-    flavor: '化在舌下，像咽了一口山里的凉雾。' },
-  { u: 'use-3', name: '青铜小还丹', type: '丹散', cat: 'usable', rarity: 'rare', glyph: 'g-elixir', qty: 3,
-    stats: [['回复生命', '520'], ['回复法力', '260'], ['念咒时长', '1.8s']],
-    flavor: '丹衣上浮着铜绿，老药师说这是它睡醒的样子。' },
-  { u: 'use-4', name: '朱砂符纸', type: '符纸', cat: 'usable', rarity: 'fine', glyph: 'g-scroll', qty: 5,
-    stats: [['附火', '36 / 6s']],
-    flavor: '画符的人手很稳，最后那一笔却总爱往上挑。' },
-  { u: 'chest-3', name: '玄鳞重铠', type: '重甲', cat: 'equip', slot: 'chest', rarity: 'rare', glyph: 'g-chest-h',
-    stats: [['护体', '+148'], ['抗蚀', '+14%']],
-    flavor: '每一片鳞都单独锻过，穿起来比看起来轻。' },
-  { u: 'chest-4', name: '云纹法袍', type: '轻甲', cat: 'equip', slot: 'chest', rarity: 'rare', glyph: 'g-chest-l',
-    stats: [['护体', '+88'], ['术法', '+31']],
-    flavor: '袍角绣着半幅云纹，走起来像有雾跟着。' },
-  { u: 'chest-5', name: '旧皮护心', type: '轻甲', cat: 'equip', slot: 'chest', rarity: 'common', glyph: 'g-chest-l',
-    stats: [['护体', '+34']],
-    flavor: '皮面磨得发亮，胸口那道补丁是后来缝的。' },
-  { u: 'helm-2', name: '沉铁面甲', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'epic', glyph: 'g-helm-h',
-    stats: [['护体', '+132'], ['定神', '+19'], ['抗蚀', '+9%']],
-    flavor: '戴上后只听得见自己的呼吸，别的都远了一层。' },
-  { u: 'helm-3', name: '竹编斗笠', type: '轻甲', cat: 'equip', slot: 'helm', rarity: 'fine', glyph: 'g-helm-l',
-    stats: [['护体', '+41'], ['身法', '+8']],
-    flavor: '雨点打上去是闷的，正好遮住脚步。' },
-  { u: 'helm-4', name: '破面铁盔', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'common', glyph: 'g-helm-h',
-    stats: [['护体', '+46']],
-    flavor: '面甲被砍开一道口子，主人说这样看得更清楚。' },
-  { u: 'boots-2', name: '沉铁战靴', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'epic', glyph: 'g-boots-h',
-    stats: [['护体', '+97'], ['筋骨', '+21']],
-    flavor: '鞋底钉着九枚铁钉，站定了就没人推得动。' },
-  { u: 'boots-3', name: '青毡软履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'fine', glyph: 'g-boots-l',
-    stats: [['护体', '+36'], ['回气', '+3/s']],
-    flavor: '毡面洗过许多次，颜色淡了，却更贴身。' },
-  { u: 'boots-4', name: '旧布行履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'common', glyph: 'g-boots-l',
-    stats: [['护体', '+22']],
-    flavor: '底子补过三回，走山路依然不打滑。' },
-  { u: 'legs-3', name: '铁线胫甲', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'epic', glyph: 'g-legs-h',
-    stats: [['护体', '+142'], ['负重', '+26']],
-    flavor: '铁线一道压一道编成，弯不下腿，但也不会断。' },
-  { u: 'legs-4', name: '布缚胫衣', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'common', glyph: 'g-legs-l',
-    stats: [['护体', '+28']],
-    flavor: '缠得紧，走远路腿肚子不容易酸。' },
-  { u: 'main-4', name: '裂山重锤', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-axe',
-    stats: [['锋芒', '104 - 138'], ['力道', '+38'], ['破甲', '+16%']],
-    flavor: '锤头补过一次铁，补痕比原来的纹路还深。' },
-  { u: 'main-5', name: '细雪长刀', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-sword',
-    stats: [['锋芒', '72 - 96'], ['身法', '+18']],
-    flavor: '出鞘时几乎没有声音，收回去也一样。' },
-  { u: 'main-6', name: '巡夜短弩', type: '弓弩', cat: 'equip', slot: 'weapon', rarity: 'common', glyph: 'g-bow',
-    stats: [['锋芒', '40 - 52']],
-    flavor: '弩臂上刻着巡夜的更次，最后一格是空着的。' },
-  { u: 'main-7', name: '引雷法杖', type: '法器', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-staff',
-    stats: [['术法', '+44'], ['定神', '+21']],
-    flavor: '杖头那颗石头阴天会自己发烫，老人说它在等雨。' },
-  { u: 'legs-5', name: '玄铁重胫', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'rare', glyph: 'g-legs-h',
-    stats: [['护体', '+118'], ['筋骨', '+17']],
-    flavor: '一套两件，左胫内侧刻着铸者的名，右胫那道被人磨平了。' },
-  { u: 'legs-6', name: '流沙胫缚', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'rare', glyph: 'g-legs-l',
-    stats: [['护体', '+64'], ['身法', '+22']],
-    flavor: '细沙灌进夹层，跑起来脚步比平时沉，落地却更稳。' },
-  { u: 'legs-7', name: '猎户皮胫', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'common', glyph: 'g-legs-l',
-    stats: [['护体', '+26']],
-    flavor: '硝过的鹿皮，膝盖那两块加厚是自己补的。' },
-  { u: 'legs-8', name: '霜纹胫铠', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'epic', glyph: 'g-legs-h',
-    stats: [['护体', '+162'], ['抗蚀', '+21%'], ['负重', '+14']],
-    flavor: '甲面上的霜纹不是刻的，是天冷时自己长出来的。' },
-  { u: 'legs-9', name: '断锋护腿', type: '重甲', cat: 'equip', slot: 'legs', rarity: 'fine', glyph: 'g-legs-h',
-    stats: [['护体', '+71'], ['破甲', '+6%']],
-    flavor: '边缘全是豁口，挡过的东西比主人记得的还多。' },
-  { u: 'legs-10', name: '雾行胫套', type: '轻甲', cat: 'equip', slot: 'legs', rarity: 'epic', glyph: 'g-legs-l',
-    stats: [['护体', '+83'], ['身法', '+27'], ['疾行', '+8%']],
-    flavor: '套上后小腿总像隔着一层薄雾，冷热都迟半拍才传到。' },
-  { u: 'chest-6', name: '沉铁胸铠', type: '重甲', cat: 'equip', slot: 'chest', rarity: 'common', glyph: 'g-chest-h',
-    stats: [['护体', '+58']],
-    flavor: '分量实在，走远路的人穿它，多半是为了心里踏实。' },
-  { u: 'boots-5', name: '藤底行履', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'common', glyph: 'g-boots-l',
-    stats: [['护体', '+25']],
-    flavor: '藤底编得密，湿了也不打滑。' },
-  { u: 'boots-6', name: '鸣沙战靴', type: '靴履', cat: 'equip', slot: 'boots', rarity: 'rare', glyph: 'g-boots-h',
-    stats: [['护体', '+84'], ['身法', '+16']],
-    flavor: '踏在沙上会发出极轻的响声，像有人在远处数着步子。' },
-  { u: 'helm-5', name: '素面轻盔', type: '轻甲', cat: 'equip', slot: 'helm', rarity: 'common', glyph: 'g-helm-l',
-    stats: [['护体', '+33']],
-    flavor: '没有任何纹饰，反倒是营里最不容易认错的一顶。' },
-  { u: 'helm-6', name: '玄铁重盔', type: '重甲', cat: 'equip', slot: 'helm', rarity: 'rare', glyph: 'g-helm-h',
-    stats: [['护体', '+108'], ['定神', '+12']],
-    flavor: '内衬换过三回，铁壳始终没舍得扔。' },
-  { u: 'main-8', name: '断岳长兵', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-sword',
-    stats: [['锋芒', '112 - 146'], ['力道', '+41'], ['破甲', '+18%']],
-    flavor: '据说劈开过一道山脊，主人从没提过这事。' },
-  { u: 'main-9', name: '碎星双刃', type: '刀剑', cat: 'equip', slot: 'weapon', rarity: 'rare', glyph: 'g-sword',
-    stats: [['锋芒', '78 - 102'], ['身法', '+21']],
-    flavor: '两刃对称，据说原本是一对，另一把在别人手里。' },
-  { u: 'mat-1', name: '玄铁矿', type: 'material', cat: 'mat', rarity: 'common', glyph: 'g-ore', qty: 24,
-    stats: [['锻造', '可用']],
-    flavor: '敲开来，断口里有一线细细的黑光。' },
-  { u: 'mat-2', name: '铜绿矿脉', type: 'material', cat: 'mat', rarity: 'fine', glyph: 'g-ore', qty: 9,
-    stats: [['锻造', '上品']],
-    flavor: '埋得越深，颜色越像雨后旧钟。' },
-  { u: 'mat-3', name: '幽昙草', type: 'material', cat: 'mat', rarity: 'fine', glyph: 'g-herb', qty: 14,
-    stats: [['炼丹', '可用']],
-    flavor: '子时开，丑时谢，采药的人从不点灯。' },
-  { u: 'mat-4', name: '蚀骨妖牙', type: 'material', cat: 'mat', rarity: 'rare', glyph: 'g-fang', qty: 2,
-    stats: [['锻造', '秘材']],
-    flavor: '牙根还带着温，剥下来时整片林子都静了。' },
-  { u: 'mat-5', name: '地脉残炭', type: 'material', cat: 'mat', rarity: 'common', glyph: 'g-coal', qty: 31,
-    stats: [['燃料', '耐烧']],
-    flavor: '燃起来无烟，火色是很少见的青。' },
-  { u: 'mat-6', name: '蚕丝云缎', type: 'material', cat: 'mat', rarity: 'fine', glyph: 'g-silk', qty: 6,
-    stats: [['缝制', '上品']],
-    flavor: '抖开像一小片云，落在手上几乎没有分量。' },
-];
-const BAG_LOADOUT = { weapon: 'main-1', helm: 'helm-1', chest: 'armor-1', legs: 'legs-1', boots: 'boots-1' };
+/* 行囊不再预置任何器物：初始只有空格位，内容全部来自 Boss / 小怪掉落。 */
 const BAG_WEIGHT_MAX = 120;
 /* 真实存档里唯一的行囊物品 */
 const FRAGMENT_DEF = { u: 'corona-world-fragment', name: '世界碎片', type: '未解之物', cat: 'mat', rarity: 'epic',
@@ -601,11 +436,10 @@ const BALL_DEF = { u: 'corona-ball', name: '球', type: '小世界模型', cat: 
   stats: [['用途', '可以在小世界中使用'], ['摆放', '按 B 放在身前']],
   flavor: '从怪物身上滚落的圆球，表面还留着一点余温。' };
 /* 背包前几格固定留给这些真实物品（世界碎片 + 每种可摆放模型），
-   其余格子才是随机器物、Boss 装备与小怪掉落的装备。 */
+   其余格子初始为空，只放 Boss 装备与小怪掉落的装备。 */
 const REAL_BAG_DEFS = Object.freeze([FRAGMENT_DEF, BLOCK_DEF, BALL_DEF]);
-/* Boss 倒下时直接塞进行囊的几件兵甲：单独一套定义，不混进开局的随机器物池，
-   否则「多几件装备」只会变成同一件东西的重复副本。字段与 BAG_ITEMS 完全一致，
-   因此图标、品阶、属性与详情页走的是同一条渲染路径。 */
+/* Boss 倒下时直接塞进行囊的几件兵甲：单独一套定义，不与小怪掉落混用。
+   字段与背包器物完全一致，因此图标、品阶、属性与详情页走同一条渲染路径。 */
 const BOSS_LOOT_ITEMS = [
   { u: 'boss-main', name: '龙牙断岳', type: '长兵', cat: 'equip', slot: 'weapon', rarity: 'epic', glyph: 'g-sword',
     stats: [['锋芒', '128 - 168'], ['力道', '+47'], ['破甲', '+21%']],
@@ -688,8 +522,7 @@ let bagToastTimer = null;
 const bagTip = ref(null);
 
 function bagDef(u) {
-  return BAG_ITEMS.find(def => def.u === u)
-    || BOSS_LOOT_ITEMS.find(def => def.u === u)
+  return BOSS_LOOT_ITEMS.find(def => def.u === u)
     || MONSTER_EQUIPMENT.find(def => def.u === u)
     || null;
 }
@@ -786,7 +619,8 @@ function bagSave() {
 function bagInit() {
   const saved = bagLoad();
   if (saved) {
-    bag.tab = BAG_TABS.some(tab => tab.id === saved.tab) ? saved.tab : 'all';
+    // 单页签“背包”展示全部器物，不再沿用旧存档里的分类筛选。
+    bag.tab = 'all';
     bag.bossLoot = Boolean(saved.bossLoot);
     bag.monsterGear = saved.monsterGear && typeof saved.monsterGear === 'object'
       ? { ...saved.monsterGear } : {};
@@ -841,32 +675,8 @@ function bagInit() {
     bag.worlds.push({ art: { ...WORLD_SMALL.art } });
   }
   if (!bag.cells.length) {
-    // 未披挂的兵甲 + 消耗品 + 材料，乱序铺进格阵（与 bag.html 同一铺陈方式）
-    const equipDefs = BAG_ITEMS.filter(def => def.cat === 'equip');
-    const pool = equipDefs.filter(def => !Object.values(BAG_LOADOUT).includes(def.u)).map(bagMakeItem)
-      .concat(BAG_ITEMS.filter(def => def.cat !== 'equip').map(bagMakeItem));
-    for (let i = pool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [pool[i], pool[j]] = [pool[j], pool[i]];
-    }
-    // 前 REAL_BAG_DEFS 格留给真实物品；其余器物随机落格，
-    // 并**始终预留** Boss 装备的位置，避免格阵刚好铺满、击杀后反而塞不进去。
-    const reserved = BOSS_LOOT_IDS.length + REAL_BAG_DEFS.length;
-    const slots = Array.from({ length: BAG_TOTAL - REAL_BAG_DEFS.length },
-      (_, i) => i + REAL_BAG_DEFS.length);
-    for (let i = slots.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [slots[i], slots[j]] = [slots[j], slots[i]];
-    }
+    // 初始只有空格位：所有器物都来自 Boss / 小怪掉落，不再预置装备与材料。
     bag.cells = Array.from({ length: BAG_TOTAL }, () => null);
-    const placed = Math.min(pool.length, BAG_TOTAL - reserved);
-    for (let i = 0; i < placed; i++) bag.cells[slots[i]] = pool[i];
-    if (!Object.keys(bag.gear).length) {
-      Object.entries(BAG_LOADOUT).forEach(([slotId, u]) => {
-        const def = bagDef(u);
-        if (def) bag.gear[slotId] = bagMakeItem(def);
-      });
-    }
   }
 }
 /**
@@ -933,13 +743,6 @@ function bagPassFilter(item) {
   if (!item) return false;
   if (item.real) return bag.tab === 'all' || bag.tab === 'mat';
   return bag.tab === 'all' || item.cat === bag.tab;
-}
-/* 分类页签右侧的件数：已披挂的兵甲也算进「全部 / 兵甲」。 */
-function bagTabCount(tabId) {
-  const all = [ ...Object.values(bag.gear).filter(Boolean), ...bagCellItems().filter(Boolean) ];
-  if (tabId === 'all') return all.reduce((sum, item) => sum + (item.qty || 1), 0);
-  return all.filter(item => (item.real ? tabId === 'mat' : item.cat === tabId))
-    .reduce((sum, item) => sum + (item.qty || 1), 0);
 }
 /* 器物 glyph → 图标 id。每种兵甲有自己的精细图标
    （头盔分重/轻，胸甲分重/轻，腿甲分重/轻，战靴分重/轻，武器分利器/重兵/弓弩/法器），
@@ -1071,7 +874,11 @@ function bagFindByUid(uid) {
   return null;
 }
 function bagSelected() { return bag.sel ? bagFindByUid(bag.sel) : null; }
-function bagGearMeta() { return `${GEAR_SLOTS.filter(slot => bag.gear[slot.id]).length} / ${GEAR_SLOTS.length}`; }function bagItemWeight(item) {
+function bagGearMeta() {
+  // 8 = 5 个可披挂位 + 3 个版面占位，和 bag3 的 0 / 8 一致。
+  return `${GEAR_SLOTS.filter(slot => bag.gear[slot.id]).length} / 8`;
+}
+function bagItemWeight(item) {
   return (RARITY[item.rarity].weight * 0.5 + (item.cat === 'equip' ? 2.2 : 0.3)) * item.qty;
 }
 function bagFoot() {
@@ -1284,39 +1091,13 @@ const bagGearMetaText = computed(() => bagGearMeta());
    - 代币：持件数与品阶权重派生的计数，四舍五入到百位，避免看起来像精确经济数值；
    - 属性：取已披挂器物的「三围」标签求和（凡品权重 1 / 良品 2 / 珍品 3 / 秘宝 4），
      再按标签归入强度·防御·共鸣·耐久四类。 */
-function bagStatNumbers(item) {
-  const text = (item?.stats || []).map(pair => String(pair[1])).join(' ');
-  return (text.match(/\d+(?:\.\d+)?/g) || []).map(Number);
-}
 const bagPurseText = computed(() => {
   const items = [ ...Object.values(bag.gear).filter(Boolean), ...bagCellItems().filter(Boolean) ];
   const value = items.reduce((sum, item) => sum + RARITY[item.rarity].weight * 1370 * (item.qty || 1), 0);
   return (Math.round(value / 100) * 100).toLocaleString('en-US');
 });
-const bagHeroStats = computed(() => {
-  const total = { atk: 0, def: 0, crit: 0, hp: 0 };
-  for (const item of Object.values(bag.gear)) {
-    if (!item) continue;
-    const weight = RARITY[item.rarity].weight;
-    total.atk += 24 * weight;
-    total.def += 18 * weight;
-    total.crit += 2 * weight;
-    total.hp += 60 * weight;
-    for (const value of bagStatNumbers(item)) {
-      const scaled = Math.round(value * weight);
-      // 「护体/负重/筋骨」偏防御，「锋芒/力道/术法」偏强度，「定神/回气/身法」共鸣，
-      // 「破甲/疾行」等百分比条目并入强度，避免出现无归属的读数。
-      const label = (item.stats || []).find(pair => String(pair[1]).includes(String(value)))?.[0] || '';
-      if (/护体|负重|筋骨|抗蚀/.test(label)) total.def += scaled;
-      else if (/定神|回气|身法/.test(label)) total.crit += Math.round(scaled / 4);
-      else total.atk += scaled;
-    }
-  }
-  return total;
-});
 const bagWorld = computed(bagCurWorld);
 const bagWorldScene = computed(() => (bagWorld.value ? worldArtHTML(bagWorld.value.art) : ''));
-const bagTabList = computed(() => BAG_TABS.map(tab => ({ ...tab })));
 /* 格阵：所有页签都**顶格**排列 —— 先把有器物的格位按原次序排到最前，
    空格位一律补在后面，因此「全部」和各个分类里都不会有夹在中间的空洞。
    总数仍是 BAG_TOTAL 格，所以方向键游走不会塌陷。
@@ -2234,7 +2015,7 @@ onUnmounted(() => {
         <div class="boss-header">
           <div class="boss-title">
             <span class="boss-badge">DANGER</span>
-            <h2 class="boss-name">荒野巨兽 · 远古聚合体</h2>
+            <h2 class="boss-name">BOSS</h2>
           </div>
           <div class="boss-val"><b>{{ gameplayState.state.boss.hp }}</b> / <span>{{ gameplayState.config.bossHp }}</span></div>
         </div>
@@ -2264,7 +2045,6 @@ onUnmounted(() => {
         <div class="soul-frame-group">
           <!-- 原型是「荒野修复剂」，引擎侧对应怒气：满怒即可释放重斩 -->
           <div class="gourd-hub" title="怒气槽 · 满怒可释放重斩">
-            <span class="gourd-key">{{ heavySkill?.key || 'E' }}</span>
             <svg class="gourd-icon" viewBox="0 0 48 48">
               <polygon points="24,4 40,24 24,44 8,24" fill="rgba(230,213,167,.28)" />
               <polygon points="24,4 40,24 24,44 8,24" />
@@ -2310,15 +2090,6 @@ onUnmounted(() => {
         </div>
       </div>
 
-      <!-- 左下：操作提示 -->
-      <aside v-if="!inventoryOpen" class="action-tips" aria-label="操作提示">
-        <p>
-          <template v-for="([key, text], index) in controlHints" :key="key">
-            <template v-if="index"> · </template>{{ text }} <kbd>{{ key }}</kbd>
-          </template>
-        </p>
-      </aside>
-
       <!-- 右下：气刃槽 + 战技群 -->
       <div v-if="!inventoryOpen && showCombatHud" class="action-cluster">
         <div class="focus-system">
@@ -2339,7 +2110,6 @@ onUnmounted(() => {
               <polygon points="24,10 32,28 16,28" fill="rgba(230,213,167,.4)" />
               <polygon points="24,10 32,28 16,28" />
             </svg>
-            <span class="key-tag">{{ heavySkill.key }}</span>
             <span class="ui-tooltip" role="tooltip">{{ heavySkill.name }} · {{ heavySkill.rageCost }} 怒气</span>
           </button>
         </div>
@@ -2356,7 +2126,6 @@ onUnmounted(() => {
               <svg class="spell-icon" viewBox="0 0 48 48" v-html="skillIconInner(id)" />
               <div class="spell-cd-overlay"></div>
               <span class="spell-cd-num">{{ cooldownSeconds(id) }}</span>
-              <span class="spell-key">{{ skill.key }}</span>
               <span class="ui-tooltip" role="tooltip">{{ skill.name }} · {{ skill.rageCost }} 怒气</span>
             </button>
             <span class="spell-name">{{ skill.name }}</span>
@@ -2601,24 +2370,19 @@ onUnmounted(() => {
                     <span class="eslot__ph">{{ slot.name }}</span>
                     <span v-if="bag.gear[slot.id]" class="icon" aria-hidden="true" v-html="bagIconHTML(bag.gear[slot.id])" />
                   </button>
+                  <!-- 版面占位：对齐原型 3×4 编成格，不参与装备逻辑。 -->
+                  <div class="eslot eslot--ghost" data-slot="acc1"><span class="eslot__ph">挂件I</span></div>
+                  <div class="eslot eslot--ghost" data-slot="core"><span class="eslot__ph">核心</span></div>
+                  <div class="eslot eslot--ghost" data-slot="acc2"><span class="eslot__ph">挂件II</span></div>
                 </div>
 
-                <div class="hero-stats">
-                  <div class="hstat"><span class="hstat-name">物理强度</span><span class="hstat-val">{{ bagHeroStats.atk }}</span></div>
-                  <div class="hstat"><span class="hstat-name">护甲防御</span><span class="hstat-val">{{ bagHeroStats.def }}</span></div>
-                  <div class="hstat"><span class="hstat-name">暴击共鸣</span><span class="hstat-val">{{ bagHeroStats.crit }}%</span></div>
-                  <div class="hstat"><span class="hstat-name">耐久上限</span><span class="hstat-val">{{ bagHeroStats.hp }}</span></div>
-                </div>
               </div>
               </div>
 
               <!-- 右上：物品分类与仓库阵列 -->
               <div class="colR">
                 <div class="tabs" role="tablist" aria-label="分类">
-                  <button v-for="tabItem in bagTabList" :key="tabItem.id" type="button" class="tab" role="tab"
-                    :aria-selected="bag.tab === tabItem.id ? 'true' : 'false'" @click="bag.tab = tabItem.id">
-                    {{ tabItem.name }}<span class="tab__count">{{ bagTabCount(tabItem.id) }}</span>
-                  </button>
+                  <button type="button" class="tab" role="tab" aria-selected="true">背包</button>
                 </div>
                 <div class="gridWrap">
                   <div class="grid" role="listbox" aria-label="背包格">
@@ -2639,8 +2403,8 @@ onUnmounted(() => {
                 </div>
               </div>
 
-              <!-- 左下：世界坐标（点主世界回主世界场景，点小世界进小世界场景） -->
-              <section class="sector-wrap">
+              <!-- 左下：小世界解锁后才出现；未解锁时不占版面（与 bag3 的空左下角一致） -->
+              <section v-if="bagVisibleWorlds().length > 1" class="sector-wrap">
                 <div class="sector__body">
                   <header class="sector__head">
                     <span class="secHead__dot"></span>
@@ -2701,11 +2465,6 @@ onUnmounted(() => {
               <div>
                 <span>收纳空间利用率：</span>
                 <b>{{ bagFootInfo.capText }}</b>
-              </div>
-              <div class="hints">
-                <span>单击选择检视</span>
-                <span><kbd>双击 / 装配</kbd> 极速换装</span>
-                <span><kbd>Esc</kbd> 退出终端</span>
               </div>
             </footer>
 

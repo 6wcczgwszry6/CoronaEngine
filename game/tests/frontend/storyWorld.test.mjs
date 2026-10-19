@@ -871,7 +871,7 @@ test('Space cannot start during an acknowledged save; a late save never leaves t
   assert.equal(page.instance.camera.snapshotPlayer().grounded, true);
   assert.equal(page.instance.camera.snapshotPlayer().position[1], f.actors.get(MAIN)[0].geometry.position[1]);
 });
-test('HUD pins the boss plate top-center, vitals bottom-left and skills bottom-right, with Space listed in the left tip', async t => {
+test('HUD pins the boss plate top-center, vitals top-left and skills bottom-right without the old tip strip', async t => {
   const f = await fixture(t); const page = f.mount(); await page.mount();
   // Mounted state so the whole HUD renders before its anchors are inspected.
   page.instance.gameplayState.value = { role: 'main', config: gameplayConfig,
@@ -883,9 +883,9 @@ test('HUD pins the boss plate top-center, vitals bottom-left and skills bottom-r
   const bottom = findNode(tree, node => node.props?.class === 'story-bottom-stack');
   assert.deepEqual(bottom.children.filter(node => node.type !== vue.Comment).map(node => node.props?.class),
     ['gameplay-error', 'story-feedback']);
-  const controls = findNode(tree, node => node.props?.class === 'action-tips');
-  assert.match(JSON.stringify(controls, (key, value) => key === 'ctx' ? undefined : value), /Space/);
-  // ui2.html 的四个 HUD 锚点：首领血条 / 生命栏 / 操作提示 / 战技群
+  assert.equal(findNode(tree, node => node.props?.class === 'action-tips'), null,
+    '左下角的按键提示条已删除');
+  // hud (1).html 的三个 HUD 锚点：首领血条 / 生命栏 / 战技群
   const vitals = findNode(tree, node => node.props?.class === 'vitals-container');
   const cluster = findNode(tree, node => node.props?.class === 'action-cluster');
   const spells = findNode(tree, node => node.props?.class === 'spells-group');
@@ -1028,9 +1028,11 @@ test('the bottom-centre channel is owned by one column, not two hand-tuned offse
   page.instance.feedback.value = '获得 世界碎片 ×1';
   page.instance.gameplayError.value = '保存失败，请重试';
   const tree = renderStory(proxyRefs(p()), []);
-  for (const panel of ['subworld-notice', 'world-indicator', 'action-tips', 'story-bottom-column'])
+  for (const panel of ['subworld-notice', 'world-indicator', 'story-bottom-column'])
     assert.ok(findNode(tree, item => item.props?.class === panel),
       `${panel} 应当渲染出来才能参与这项检查`);
+  assert.equal(findNode(tree, item => item.props?.class === 'action-tips'), null,
+    '左下角的按键提示条已删除');
   // 底部两个子项在同一个 flex 列里，不参加「谁都贴底」的竞争：都不能有自己的绝对锚点。
   const stack = styleDeclarations('.story-bottom-stack');
   for (const orphan of ['position', 'left', 'right', 'top', 'bottom', 'transform'])
@@ -1181,9 +1183,8 @@ test('the item bar sits above the bottom row instead of inside it', async t => {
   assert.equal(p().roleRef.value, 'child', '这道检查针对小世界：物品栏只在这里存在');
   const childTree = renderStory(proxyRefs(p()), []);
   assert.ok(has(childTree, 'hotbar'), '小世界里物品栏应当渲染出来');
-  assert.ok(has(childTree, 'action-tips'), '小世界里左下角的操作提示应当渲染出来');
-  // 物品栏（只在小世界）与战技群（只在主世界）互斥，所以这两块永远不会同屏；
-  // 真正会同屏的是物品栏与左下角的操作提示。
+  assert.equal(has(childTree, 'action-tips'), false, '左下角的按键提示条已删除');
+  // 物品栏（只在小世界）与战技群（只在主世界）互斥，所以这两块永远不会同屏。
   assert.equal(has(childTree, 'action-cluster'), false, '小世界不渲染战技群');
   assert.equal(p().roleRef.value === 'child' && has(mainTree, 'hotbar'), false, '主世界不渲染物品栏');
   // 单一通道：物品栏自己不得再长出一条贴底锚点，它只能坐在列的底边上。
@@ -2260,20 +2261,20 @@ test('小世界的 V 在自由视角与俯视视角之间切换，并且熬得�
 
   page = await enterChild(f, page);
   assert.equal(p().camera.viewMode(), 'free', '进入小世界从自由视角开始');
-  assert.match(renderedText(p()), /视角 · 自由视角/);
+  assert.equal(p().viewLabel(), '自由视角');
   p().onKeyDown(event({ code: 'KeyV', key: 'v' }));
   assert.equal(p().camera.viewMode(), 'top');
   assert.deepEqual(p().camera.snapshotPose().camera.forward, [0, -1, 0], '俯视就是正下方');
-  assert.match(renderedText(p()), /视角 · 俯视视角/);
-  // 「重新渲染」：真的再渲染一次组件，提示与相机都不能回到自由视角。
+  assert.equal(p().viewLabel(), '俯视视角');
+  // 「重新渲染」：真的再渲染一次组件，相机不能回到自由视角。
   await nextTick();
-  assert.match(renderedText(p()), /视角 · 俯视视角/);
+  assert.equal(p().viewLabel(), '俯视视角');
   assert.equal(p().camera.viewMode(), 'top');
   assert.equal(p().camera.snapshotPose().camera.forward[1], -1);
   // 再按一次 V 回到自由视角：小世界只有这两档，没有第三人称/降临。
   p().onKeyDown(event({ code: 'KeyV', key: 'v' }));
   assert.equal(p().camera.viewMode(), 'free');
-  assert.match(renderedText(p()), /视角 · 自由视角/);
+  assert.equal(p().viewLabel(), '自由视角');
   assert.doesNotMatch(renderedText(p()), /第三人称/);
 });
 

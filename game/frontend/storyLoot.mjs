@@ -3,7 +3,7 @@
  *
  * The backend (`game/runtime/story_gameplay.py`) owns the drop roll and stores the chosen
  * id in the save; this module is the shared catalogue the page renders. The ids must match
- * `MONSTER_EQUIPMENT` there, and the shape is the same as the bag's `BAG_ITEMS` entries so
+ * `MONSTER_EQUIPMENT` there, and the shape is the same as the bag's item definitions so
  * dropped gear uses the existing icon/rarity/detail paths without a second definition.
  */
 export const MONSTER_EQUIPMENT = Object.freeze([
