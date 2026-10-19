@@ -10,7 +10,7 @@ import { PROPHET_PLACEMENT } from './storyDialogue.mjs';
  *
  * Its value is a property of the model, so it changed with the art:
  *   - `Maria WProp J J Ong.dae` faces local -Z → `Math.PI`
- *   - `player_walk.glb` / `waik.glb` (Max Biped) faces local +X → `-Math.PI / 2`
+ *   - `E3D-Assassin.glb` (Max Biped) faces local +X → `-Math.PI / 2`
  *
  * How each value was established, in order, because the two 90-degree candidates are easy to
  * confuse: with `Math.PI` the character walked *sideways* toward its own left; with `Math.PI/2`
@@ -35,10 +35,23 @@ export const PROPHET_MODEL_REF = 'story.prophet.placement.v1';
  *                               instead of the 3.367 s one. Same AABB and same joint list, so
  *                               the facing convention is unchanged: `-Math.PI / 2` holds for
  *                               both, which is why only the asset changed here.
+ *   `story.player.walk.v2`   -> the same mesh re-exported with seven motion clips **embedded**
+ *                               (`IdleA`, `Walk`, `Run`, `AttackA`, `AttackB`, `JumpA`, `Dead`).
+ *                               The clips come from the E3D-Archer package, whose rig shares all
+ *                               65 `Bip001` deformation bones with this mesh by name — which is
+ *                               what `AnimationPlayer` binds on — so the character is unchanged
+ *                               and only its motion is new. The marker still has to be bumped:
+ *                               the route keeps the same file name, and `create_actor` never
+ *                               rewrites `actor.route`, so an old world would otherwise keep the
+ *                               clip-less import cached under that name.
+ *   `story.player.archer.v1` -> `E3D-Archer.glb`: the archer package's own mesh (107 bones,
+ *                               12 991 triangles, bow included) with the same seven clips. The
+ *                               clips were authored for this body — driving the previous mesh with
+ *                               them raised its left arm into the package's bow-holding idle.
  *
  * **Bump this whenever the player's `asset` changes**, the same rule as `BOSS_MODEL_REF`.
  */
-export const PLAYER_MODEL_REF = 'story.player.walk.v1';
+export const PLAYER_MODEL_REF = 'story.player.assassin.v6';
 /**
  * The boss's **asset generation** — the migration key for its model.
  *
@@ -52,7 +65,7 @@ export const PLAYER_MODEL_REF = 'story.player.walk.v1';
  * **Any future swap of the boss's `asset` MUST bump this string**, or every existing world
  * silently keeps the previous model.
  */
-export const BOSS_MODEL_REF = 'story.boss.em001.v1';
+export const BOSS_MODEL_REF = 'story.boss.em001_00.v1';
 // ---------------------------------------------------------------------------
 // 主世界怪物 (main-world creatures)
 //
@@ -88,25 +101,33 @@ export const BOSS_MODEL_REF = 'story.boss.em001.v1';
 //
 // `em001_04` is absent by construction: it is the main world's boss, not an inhabitant.
 const MONSTERS = Object.freeze([
-  { role: 'monster-em135', name: '骸龙', guid: 'f9f5c8b0-7324-4b6c-a011-000000000014',
-    asset: 'monster/em135_03.glb', x: -30, z: 42, size: 5, rotation: [0, 0, 0] },
-  { role: 'monster-em001-a', name: '羽翼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000017',
-    asset: 'monster/em001_01.glb', x: 30, z: 42, size: 6, rotation: [0, 0, 0] },
-  { role: 'monster-em001-b', name: '铁翼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000018',
-    asset: 'monster/em001_03.glb', x: 0, z: -42, size: 6, rotation: [0, 0, 0] },
-  { role: 'monster-em001-c', name: '灰翼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000019',
-    asset: 'monster/em001_05.glb', x: 0, z: 36, size: 6, rotation: [0, 0, 0] },
-  { role: 'monster-em3', name: '石魔', guid: 'f9f5c8b0-7324-4b6c-a011-000000000013',
-    asset: 'monster/em3.glb', x: -30, z: -42, size: 4, rotation: [0, 0, 0] },
-  { role: 'monster-em1', name: '小兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000016',
-    asset: 'monster/em1.glb', x: -30, z: 12, size: 3, rotation: [0, 0, 0] },
-  { role: 'monster-em2', name: '幼兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000015',
-    asset: 'monster/em2.glb', x: 27, z: -42, size: 3, rotation: [0, 0, 0] },
+  // 从模型包（AN_NPC_MOB_*）转换而来：每个文件内嵌 Idle / Walk / Run / Attack1 / Die 五条动作，
+  // 且 **Idle 排在第一条**——引擎默认循环第一条 clip，所以放上去就会自己待机。
+  //
+  // **不旋转**：这六只的高度本来就在 Y 轴上。此前按"Z 包围盒比 Y 大就是 Z-up"去判断是错的——
+  // 蜥蜴和幼虫在 Z 方向更"长"（体长），不是更"高"；实测带 -90° 的那两只正是躺着的那两只。
+  //
+  // **已剔除动作里的缩放通道**：那些 squash/stretch 曲线是按源骨架比例制作的，
+  // 套到本网格的绑定姿态上会在动起来时把模型拉伸（刀螳那个问题）。
+  //
+  // size = 目标身高 ÷ 该模型的 Y 归一化占比，因此渲染高度可控。
+  { role: 'monster-wyvern', name: '地龙', guid: 'f9f5c8b0-7324-4b6c-a011-000000000021',
+    asset: 'monster/landwyvern.fbx', x: -9, z: -5, size: 3.0, rotation: [0, 0, 0] },   // 高 3.0 m
+  { role: 'monster-lizardf', name: '蜥蜴女猎手', guid: 'f9f5c8b0-7324-4b6c-a011-000000000023',
+    asset: 'monster/lizardf.fbx', x: -7, z: 8, size: 3.5, rotation: [0, 0, 0] },   // 高 2.2 m
+  { role: 'monster-lizardm', name: '蜥蜴战士', guid: 'f9f5c8b0-7324-4b6c-a011-000000000024',
+    asset: 'monster/lizardm.fbx', x: 10, z: 6, size: 3.1, rotation: [0, 0, 0] },   // 高 2.0 m
+  { role: 'monster-lion', name: '荒原狮兽', guid: 'f9f5c8b0-7324-4b6c-a011-000000000025',
+    asset: 'monster/lion.fbx', x: 0, z: -12, size: 3.7, rotation: [0, 0, 0] },   // 高 1.6 m
+  { role: 'monster-mantis', name: '刀螳', guid: 'f9f5c8b0-7324-4b6c-a011-000000000026',
+    asset: 'monster/mantis.fbx', x: -12, z: 2, size: 2.3, rotation: [0, 0, 0] },   // 高 2.2 m
+  { role: 'monster-larva', name: '沙原幼虫', guid: 'f9f5c8b0-7324-4b6c-a011-000000000027',
+    asset: 'monster/larva.fbx', x: 6, z: -11, size: 2.4, rotation: [0, 0, 0] },   // 高 0.8 m
 ]);
 
 export const STORY_CHARACTERS = Object.freeze([
   { role: 'player', name: '玩家', guid: 'f9f5c8b0-7324-4b6c-a011-000000000001',
-    asset: 'player/player_walk.glb', x: 0, z: 0, height: 1.8, rotation: [0, PLAYER_MODEL_YAW_OFFSET, 0] },
+    asset: 'player/E3D-Assassin.glb', x: 0, z: 0, height: 1.8, rotation: [0, PLAYER_MODEL_YAW_OFFSET, 0] },
   // The forecourt pocket in front of the temple's main hall. Authored at (0, 12) the original
   // dragon stood *inside* the hall's front bay: the shipped map has geometry 3.088 m high
   // within 4 m of that point (`test_no_map_geometry_stands_over_the_boss_spawn_site`
@@ -135,8 +156,17 @@ export const STORY_CHARACTERS = Object.freeze([
   // The GLB carries exactly one action (`Root`, 4.883 s), which is what the engine loops; see
   // BOSS_MODEL_REF for why the actor is replaced rather than repaired when this asset changes.
   { role: 'boss', name: 'Boss', guid: 'f9f5c8b0-7324-4b6c-a011-000000000002',
-    asset: 'boss/Em001_04.glb', model_ref: BOSS_MODEL_REF,
-    x: 2, z: 5.5, size: 8, rotation: [0, 0, 0] },
+    asset: 'boss/Em001_00.glb', model_ref: BOSS_MODEL_REF,
+    // 模型自带的轴向是"高度落在 Z 上"（3ds Max 的 Z-up 未被导入器转换），
+    // 所以用角色旋转把它立起来：绕 X 轴 -90° 把 +Z 映射到 +Y。
+    // `characterTransform` 用 rotatedBounds(local_aabb, rotation) 算缩放和落地，
+    // 因此旋转后 size 不变即可维持 8.00 x 5.26 x 1.83 m，寺庙前庭的净空约束仍然成立。
+    // 落点由资产测试的净空约束保证：4 m 内最高点 0.10 m（上限 0.35 m），
+    // 5 m 处寺檐 1.96 m、6 m 处 2.59 m、10 m 处大殿 3.09 m —— 8 m 翅膀不会埋进建筑。
+    // 寺庙那一侧（+z）的空地：全图 9–20 m 范围内只有 4 处满足净空，这是唯一贴近寺庙的一处。
+    // 距出生点 19.4 m，4 m 内最高点 0.33 m（上限 0.35），10 m 处大殿 6.4 m —— 既在庙旁又不埋进建筑。
+    // 离最近的怪物 10.0 m，不会和它们挤在一起。
+    x: 11, z: 16, size: 8, rotation: [-Math.PI / 2, 0, 0] },
   { role: 'merchant', name: '商人', guid: 'f9f5c8b0-7324-4b6c-a011-000000000003',
     asset: 'merchant/Maw J Laygo.dae', x: -30, z: -15, height: 1.8, rotation: [0, Math.PI, 0] },
   { role: 'prophet', name: '先知', guid: 'f9f5c8b0-7324-4b6c-a011-000000000004',
