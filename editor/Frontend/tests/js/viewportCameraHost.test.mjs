@@ -323,7 +323,24 @@ async function mountStory(t, { pendingInit = null, sceneSnapshot = { data: snaps
   if (!pendingInit) await mounting;
   const cleanup = async () => { for (const fn of unmounted) fn(); await flushWorldSessionSaves(); assert.equal(listeners.size, 0); assert.equal(frames.size, 0); };
   t.after(cleanup);
-  return { page, calls, routes, frames, document, worldModeState, mounting, sceneActors, placementExhibit,
+  /**
+   * 真机链路：浏览器把 keydown 交给**页面自己注册的那个监听器**
+   * （`onMounted` 里的 `document.addEventListener('keydown', onKeyDown)`），而不是测试直接
+   * 调用 `page.onKeyDown`。事件对象照浏览器给的形状造：`code`/`key`/`repeat`/`target`，并且
+   * `preventDefault` / `stopPropagation` 会真的留下痕迹，于是「相机有没有吃掉这个键」可以断言。
+   */
+  const dispatch = (type, init = {}) => {
+    const event = { type, repeat: false, ctrlKey: false, altKey: false, metaKey: false, shiftKey: false,
+      isComposing: false, defaultPrevented: false, cancelBubble: false, keyCode: 0,
+      preventDefault() { this.defaultPrevented = true; },
+      stopPropagation() { this.cancelBubble = true; },
+      stopImmediatePropagation() { this.cancelBubble = true; },
+      target: { tagName: 'DIV', isContentEditable: false, closest: () => null },
+      ...init };
+    for (const [callback, name] of listeners) if (name === type) callback(event);
+    return event;
+  };
+  return { page, calls, routes, frames, document, dispatch, worldModeState, mounting, sceneActors, placementExhibit,
     get gameplayOptions() { return gameplayOptions; },
     step(next) { time = next; const callbacks = [...frames.values()]; frames.clear(); for (const cb of callbacks) cb(time); } };
 }
@@ -518,4 +535,44 @@ test('小世界里空格经过页面根到达自由相机并上升，动作进�
     { current: true, adjustMode: false, dialogueOpen: false, inSubworld: false,
       inventoryOpen: false, actionBusy: true, busy: false, needsSave: false });
   assert.equal(mainRoute, 'space-busy', '主世界忙碌时空格仍属于跳跃闸门');
+});
+
+test('小世界的空格经页面注册的真实 keydown 监听器上升（Q/E 同一条路，去掉 space 映射即红）', async t => {
+  // 与真机同一条链路：`onMounted` 注册的 `document.addEventListener('keydown', onKeyDown)`
+  // 是唯一入口，事件对象带 code/key/target，preventDefault 会留下痕迹。**不直接调用
+  // `page.onKeyDown`** —— 上一版测试就是在这里把「页面根有没有把键交到相机手上」跳过去了。
+  const h = await mountStory(t, { role: 'child' });
+  const p = h.page;
+  assert.equal(p.roleRef.value, 'child');
+  assert.equal(p.camera.viewMode(), 'free', '小世界挂载即自由视角');
+  const height = () => p.camera.snapshotPose().camera.position[1];
+  // 主世界的跳跃闸门在同一页面根上开着；小世界的空格是相机升降，不能经过它。
+  p.actionBusy.value = true;
+
+  // Chromium 给空格的就是这两个值：`code: 'Space'`、`key: ' '`。
+  const start = height();
+  const down = h.dispatch('keydown', { code: 'Space', key: ' ' });
+  h.step(50);
+  const rose = height() - start;
+  assert.ok(Math.abs(rose - 0.6) < 1e-9, `空格抬 0.6 m / 50 ms，实际 ${rose}`);
+  assert.equal(down.defaultPrevented, true, '相机必须吃掉空格：页面不滚动、聚焦按钮不被激活');
+  h.dispatch('keyup', { code: 'Space', key: ' ' });
+
+  // 同一颗键从「只有 key/keyCode、没有 code」的宿主合成事件里进来也必须认：路由层
+  // （storyKeyRouter 的 isSpace）三种写法都认，控制器不能只认 `code` 推出来的那一种。
+  const beforeSynthetic = height();
+  h.dispatch('keydown', { code: '', key: ' ', keyCode: 32 });
+  h.step(100);
+  const syntheticRise = height() - beforeSynthetic;
+  assert.ok(Math.abs(syntheticRise - 0.6) < 1e-9, `没有 code 的空格同样抬 0.6 m，实际 ${syntheticRise}`);
+  h.dispatch('keyup', { code: '', key: ' ', keyCode: 32 });
+
+  // 对照：E 是 `down`，同一条页面根、同一台控制器、同一档速度。
+  const beforeE = height();
+  h.dispatch('keydown', { code: 'KeyE', key: 'e' });
+  h.step(150);
+  const dropped = height() - beforeE;
+  assert.ok(Math.abs(dropped + 0.6) < 1e-9, `E 降 0.6 m，实际 ${dropped}`);
+  h.dispatch('keyup', { code: 'KeyE', key: 'e' });
+  assert.equal(p.camera.isInputActive(), false, '松开按键后没有键留在按下状态');
 });
